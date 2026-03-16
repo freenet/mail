@@ -1,0 +1,54 @@
+[package]
+name = "freenet-email-ui"
+version = "0.0.1"
+edition = "2021"
+publish = false
+default-run = "app"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "app"
+
+[dependencies]
+bs58 = { workspace = true }
+arc-swap = "1.6"
+rand_chacha = "0.3"
+chrono = { workspace = true, features = ["wasmbind"] }
+dioxus = { workspace = true, features = ["web"] }
+futures = "0.3"
+rsa = { workspace = true }
+chacha20poly1305 = "0.10"
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+wasm-bindgen = { workspace = true }
+wasm-bindgen-futures = "0.4"
+rand = { version = "0.8", features = ["std"] }
+
+freenet-email-inbox = { workspace = true, features = ["wasmbind"] }
+freenet-stdlib = { workspace = true, features = ["net"] }
+freenet-aft-interface = { workspace = true }
+identity-management = { workspace = true }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+getrandom = { version = "*", features = ["js"] }
+serde-wasm-bindgen = "0.5"
+
+[target.'cfg(target_family = "wasm")'.dependencies.web-sys]
+version = "0.3"
+features = [
+    "BinaryType",
+    "Blob",
+    "console",
+    "ErrorEvent",
+    "WebSocket",
+    "Window"
+]
+
+[features]
+default = ["use-node"]
+ui-testing = []
+use-node = []

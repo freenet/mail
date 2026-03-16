@@ -1,0 +1,9 @@
+[package]
+name = "freenet-email-core"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }

@@ -1,0 +1,7 @@
+[contract]
+type = "webapp"
+lang = "rust"
+
+[webapp]
+lang = "rust"
+state-sources = { source_dirs = ["../../target/dx/freenet-email-ui/release/web/public"] }

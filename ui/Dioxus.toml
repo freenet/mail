@@ -1,0 +1,31 @@
+[application]
+
+# dioxus project name
+name = "freenet-email-app"
+
+# default platform
+default_platform = "web"
+
+# Web build & serve dist path
+out_dir = "dist"
+
+# resource (static) file folder
+asset_dir = "public"
+
+[web.app]
+
+# HTML title tag content
+title = "Freenet Email"
+
+[web.watcher]
+
+index_on_404 = true
+
+watch_path = ["src"]
+
+[web.resource]
+style = []
+script = []
+
+[web.resource.dev]
+script = []

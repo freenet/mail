@@ -1,0 +1,68 @@
+[config]
+skip_core_tasks = true
+default_to_workspace = false
+
+[env]
+CONTRACT_TARGET = "wasm32-unknown-unknown"
+BUILD_PROFILE = "release"
+
+[tasks.clean]
+description = "Clean build artifacts"
+command = "cargo"
+args = ["clean"]
+
+[tasks.build-inbox]
+description = "Build the inbox contract WASM"
+command = "cargo"
+args = ["build", "--profile", "${BUILD_PROFILE}", "--target", "${CONTRACT_TARGET}", "-p", "freenet-email-inbox", "--features", "contract"]
+
+[tasks.build-web-container]
+description = "Build the web container contract WASM"
+command = "cargo"
+args = ["build", "--profile", "${BUILD_PROFILE}", "--target", "${CONTRACT_TARGET}", "-p", "freenet-email-app-web"]
+
+[tasks.build-ui]
+description = "Build the Dioxus UI"
+dependencies = ["build-inbox"]
+command = "dx"
+args = ["build", "--${BUILD_PROFILE}", "--features", "use-node"]
+cwd = "./ui"
+
+[tasks.build]
+description = "Full release build (UI + contracts + web container)"
+dependencies = ["build-ui", "build-web-container"]
+
+[tasks.dev]
+description = "Local Dioxus dev server"
+command = "dx"
+args = ["serve", "--features", "use-node"]
+cwd = "./ui"
+
+[tasks.dev-ui-testing]
+description = "Local dev server with UI testing mode"
+command = "dx"
+args = ["serve", "--features", "ui-testing", "--no-default-features"]
+cwd = "./ui"
+
+[tasks.publish]
+description = "Publish webapp to Freenet"
+dependencies = ["build"]
+script = '''
+cd ui && fdev publish --code build/freenet/freenet_email_app_web contract --state build/freenet/contract-state
+'''
+
+[tasks.run-node]
+description = "Run Freenet local node"
+script = '''
+RUST_BACKTRACE=1 RUST_LOG=freenet=debug,freenet_core=debug,info freenet local
+'''
+
+[tasks.test]
+description = "Run all tests"
+command = "cargo"
+args = ["test", "--workspace"]
+
+[tasks.clippy]
+description = "Run clippy on all packages"
+command = "cargo"
+args = ["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"]

@@ -1,0 +1,25 @@
+[package]
+name = "identity-management"
+version = "0.0.1"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+p384 = { version = "0.13", default-features = false, features = ["serde", "pem", "pkcs8", "arithmetic"] }
+freenet-stdlib = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+p384 = { version = "0.13", default-features = true }
+ecdsa = "0.16"
+pico-args = "0.5"
+rand = "0.8"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+contract = ["freenet-stdlib/contract"]
+freenet-main-delegate = []

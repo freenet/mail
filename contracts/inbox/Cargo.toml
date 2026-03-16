@@ -1,0 +1,23 @@
+[package]
+name = "freenet-email-inbox"
+version = "0.0.1"
+edition = "2021"
+publish = false
+
+[dependencies]
+chrono = { version = "0.4.23", default-features = false, features = ["alloc", "serde"] }
+freenet-stdlib = { workspace = true }
+rsa = { workspace = true }
+freenet-aft-interface = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["freenet-main-contract"]
+contract = ["freenet-stdlib/contract"]
+freenet-main-contract = []
+wasmbind = ["chrono/wasmbind"]
