@@ -375,11 +375,11 @@ impl ContractInterface for Inbox {
         let mut allocation_records = HashMap::new();
         for (contract_id, state) in related.states() {
             let Some(state) = state else {
-                missing_related.push(contract_id);
+                missing_related.push(*contract_id);
                 continue;
             };
-            let token_record = TokenAllocationRecord::try_from(state)?;
-            allocation_records.insert(contract_id, token_record);
+            let token_record = TokenAllocationRecord::try_from(state.clone())?;
+            allocation_records.insert(*contract_id, token_record);
         }
 
         if !missing_related.is_empty() {
