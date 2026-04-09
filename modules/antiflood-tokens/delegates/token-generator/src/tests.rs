@@ -26,8 +26,8 @@ mod token_assignment {
 
     static ID: LazyLock<ContractInstanceId> = LazyLock::new(|| {
         let rnd = [1; 32];
-        let mut gen = arbitrary::Unstructured::new(&rnd);
-        gen.arbitrary().unwrap()
+        let mut gen_ = arbitrary::Unstructured::new(&rnd);
+        gen_.arbitrary().unwrap()
     });
 
     #[test]
