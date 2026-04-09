@@ -1,0 +1,24 @@
+[package]
+name = "web-container-sign"
+version.workspace = true
+edition.workspace = true
+publish = false
+description = "Sign a compressed webapp for the freenet-email web-container contract"
+
+[[bin]]
+name = "web-container-sign"
+path = "src/main.rs"
+
+[dependencies]
+freenet-email-core = { workspace = true }
+ed25519-dalek = { workspace = true, default-features = false, features = ["alloc", "serde", "rand_core", "pem", "std"] }
+ciborium = { workspace = true }
+rand = { version = "0.8.5", features = ["std", "std_rng"] }
+clap = { version = "4.5", features = ["derive"] }
+bs58 = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+toml = "0.8"
+anyhow = "1"
+
+[dev-dependencies]
+tempfile = "3"

@@ -5,3 +5,7 @@ dist/
 **/*.rs.bk
 .env
 node_modules/
+# Playwright MCP scratch directory
+.playwright-mcp/
+# Stray screenshot from earlier investigation sessions
+/makefile.png

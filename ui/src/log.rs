@@ -9,6 +9,18 @@ pub(crate) fn _log(msg: impl AsRef<str>) {
     let _ = msg;
 }
 
+/// Info-level log that goes to the browser console (wasm) and to
+/// `tracing` on native builds. Use for one-shot startup banners or
+/// build-time diagnostics that should always appear.
+pub(crate) fn info(msg: impl AsRef<str>) {
+    let msg = msg.as_ref();
+    tracing::info!(%msg);
+    #[cfg(target_family = "wasm")]
+    {
+        web_sys::console::info_1(&serde_wasm_bindgen::to_value(&msg).unwrap());
+    }
+}
+
 macro_rules! debug {
     ($($msg:tt)*) => {{
         #[cfg(debug_assertions)]

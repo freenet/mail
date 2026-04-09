@@ -10,12 +10,20 @@ WASM contracts for inbox storage, and Anti-Flood Tokens (AFT) for rate limiting.
 ### Commands
 
 ```bash
-cargo make build          # Full release build (UI + contracts)
-cargo make dev            # Local Dioxus dev server
-cargo make test           # Run all tests
-cargo make clippy         # Lint
-cargo make publish        # Publish webapp to Freenet
-cargo make run-node       # Start local Freenet node
+cargo make build                 # Full release build (UI + contracts)
+cargo make dev                   # Local Dioxus dev server
+cargo make dev-example           # Offline dev server (mock data, no node)
+cargo make test                  # Run all tests
+cargo make test-inbox            # Run inbox contract integration tests
+cargo make clippy                # Lint
+cargo make run-node              # Start local Freenet node
+
+# Publishing pipeline (see "Publishing" section below)
+cargo make publish-email-test    # Sandbox publish with committed test key
+cargo make publish-email         # Production publish with uncommitted key
+cargo make update-published-contract  # Refresh published-contract/ snapshot
+cargo make publish-all           # End-to-end test publish (build → sign → publish)
+cargo make publish               # Alias for publish-email-test
 ```
 
 ### Repository Structure
@@ -28,7 +36,7 @@ freenet-email/
 │   └── web-container/       # Web container contract (WASM)
 ├── ui/                      # Dioxus web UI
 │   └── src/
-│       ├── lib.rs           # Entry point
+│       ├── lib.rs           # Entry point, WEB_CONTAINER_CONTRACT_ID embed
 │       ├── app.rs           # Main component, inbox UI
 │       ├── app/login.rs     # Identity management UI
 │       ├── api.rs           # WebSocket communication with Freenet node
@@ -40,6 +48,10 @@ freenet-email/
 │   ├── antiflood-tokens/
 │   │   └── interfaces/      # freenet-aft-interface
 │   └── identity-management/ # Identity delegate
+├── tools/
+│   └── web-container-sign/  # ed25519 signer binary (our web-container-tool)
+├── test-contract/           # Committed test keys (identity + web-container)
+├── published-contract/      # Committed signed-webapp snapshot
 ├── Cargo.toml               # Workspace root
 └── Makefile.toml            # cargo-make build system
 ```
@@ -76,4 +88,115 @@ cargo test -p freenet-email-inbox   # Inbox contract tests only
 ### Build Targets
 
 - `wasm32-unknown-unknown`: Contracts (inbox, web-container) and UI
-- Native: Development tools (identity-management key generator)
+- Native: Development tools (`identity-management` key generator,
+  `web-container-sign` signer)
+
+## Publishing
+
+Freenet-email follows `freenet-river`'s signed-and-committed publishing
+pattern: every release is a pair of `(ed25519 signature, webapp bytes)`
+under a contract ID that is deterministic given the committed source.
+
+### Directory layout
+
+```
+freenet-email/
+├── published-contract/          # ← committed snapshot (W4 of #6)
+│   ├── contract-id.txt          # base58 ContractInstanceId
+│   ├── web_container_contract.wasm
+│   ├── webapp.parameters        # 32 bytes: ed25519 verifying key
+│   └── README.md
+├── test-contract/
+│   ├── README.md                # security notes on committed test keys
+│   ├── web-container-keys.toml  # committed ed25519 test keypair
+│   └── identity/                # (pre-existing) P-384 delegate test key
+└── tools/
+    └── web-container-sign/      # the signer binary (our web-container-tool)
+```
+
+### Sandbox publish (test)
+
+1. Start a local Freenet node in another shell:
+   ```bash
+   cargo make run-node
+   ```
+2. From a fresh checkout, run the end-to-end flow:
+   ```bash
+   cargo make publish-all
+   ```
+   This chains `build` → `update-published-contract` →
+   `publish-email-test`. The committed test key at
+   `test-contract/web-container-keys.toml` is used for signing, and the
+   derived contract ID must match
+   `published-contract/contract-id.txt` — if it doesn't, the
+   committed snapshot has drifted and you should commit the diff.
+
+3. To refresh the committed snapshot without publishing:
+   ```bash
+   cargo make update-published-contract
+   git add published-contract/ && git commit -m "chore: refresh published-contract snapshot"
+   ```
+
+### Production publish
+
+Production uses an **uncommitted** ed25519 keypair at
+`~/.config/freenet-email/web-container-keys.toml` (override with
+`WEB_CONTAINER_KEY_FILE=/path/to/keys.toml`). Generate it out of band
+on the release manager's machine:
+
+```bash
+mkdir -p ~/.config/freenet-email
+cargo run -p web-container-sign -- generate \
+  --output ~/.config/freenet-email/web-container-keys.toml
+```
+
+**Never commit this file.** Back it up offline; losing it means
+rotating the production contract ID.
+
+Then:
+
+```bash
+cargo make build
+cargo make publish-email
+```
+
+The production key produces a **different** contract ID than the test
+key, because the ID is `hash(wasm, parameters)` and the 32-byte
+`webapp.parameters` blob is the verifying key itself. Keep production
+`published-contract/` snapshots on a separate branch or tag if you
+need them reproducible.
+
+### Reproducibility caveats
+
+Two developers building from the same commit will produce the
+**same** `published-contract/contract-id.txt` only when all of these
+match:
+
+- **rustc version.** The release-profile WASM is not bit-for-bit
+  stable across rustc versions. Pin via `rust-toolchain.toml` if this
+  matters in your CI.
+- **Cargo release profile.** Already pinned in the workspace
+  `Cargo.toml` (`lto=true, codegen-units=1, strip=true, panic=abort`).
+- **GNU tar.** `compress-webapp` uses
+  `tar --sort=name --mtime='2024-01-01 00:00:00 UTC' --owner=0 --group=0`
+  for a reproducible archive. BSD tar (macOS default) **does not**
+  support these flags. Install `gnu-tar`:
+  ```bash
+  brew install gnu-tar   # provides `gtar`
+  ```
+  Without GNU tar the pipeline still works — the archive signs and
+  publishes correctly — but the resulting contract ID will not match
+  across machines and cannot be committed to
+  `published-contract/contract-id.txt` as a source of truth.
+
+The `cargo make compress-webapp` target detects `gtar` / GNU `tar`
+automatically and emits a loud warning when falling back to BSD tar.
+
+### Security — committed test key
+
+The ed25519 keypair at `test-contract/web-container-keys.toml` is
+**committed on purpose** so the test contract ID is reproducible
+across clones. Anyone with read access to this repository can sign
+webapps under the test contract ID, but the key grants no access to
+any user data and must never be reused for production. See
+`test-contract/README.md` for the full threat model.
