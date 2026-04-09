@@ -8,6 +8,7 @@ members = [
     "modules/antiflood-tokens/contracts/token-allocation-record",
     "modules/antiflood-tokens/delegates/token-generator",
     "modules/identity-management",
+    "tools/web-container-sign",
 ]
 
 [workspace.package]

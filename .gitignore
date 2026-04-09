@@ -5,3 +5,5 @@ dist/
 **/*.rs.bk
 .env
 node_modules/
+# Playwright MCP scratch directory
+.playwright-mcp/
