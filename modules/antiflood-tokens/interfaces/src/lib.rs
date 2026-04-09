@@ -892,3 +892,66 @@ mod tier_tests {
         assert_eq!(day15_normalized, get_date(2023, 2, 14));
     }
 }
+
+#[cfg(test)]
+mod boundary_tests {
+    //! Regression tests for the deserialization boundaries on this crate.
+    //!
+    //! The Phase 1 audit (#5) initially flagged ~50 chrono `.unwrap()`
+    //! calls in this file, but on inspection they all sit on hardcoded
+    //! constants or post-check arithmetic — none touch network input. The
+    //! only network-facing entry points are the `TryFrom<&[u8]>` /
+    //! `TryFrom<Parameters>` / `TryFrom<StateDelta>` impls below, all of
+    //! which already return `Result`. These tests pin that fact so any
+    //! future regression that swaps a `?` for an `unwrap` trips them.
+
+    use super::*;
+
+    #[test]
+    fn malformed_token_delegate_message_returns_err() {
+        let garbage = [0xffu8; 64];
+        let result = TokenDelegateMessage::try_from(&garbage[..]);
+        assert!(result.is_err(), "expected Err, got {result:?}");
+    }
+
+    #[test]
+    fn empty_token_delegate_message_returns_err() {
+        let result = TokenDelegateMessage::try_from(&[][..]);
+        assert!(result.is_err(), "expected Err, got {result:?}");
+    }
+
+    #[test]
+    fn malformed_token_assignment_state_delta_returns_err() {
+        let garbage = StateDelta::from(vec![0xffu8; 64]);
+        let result = TokenAssignment::try_from(garbage);
+        assert!(result.is_err(), "expected Err, got {result:?}");
+    }
+
+    #[test]
+    fn truncated_token_assignment_json_returns_err() {
+        let truncated = StateDelta::from(br#"{"tier":"min1","#.to_vec());
+        let result = TokenAssignment::try_from(truncated);
+        assert!(result.is_err(), "expected Err, got {result:?}");
+    }
+
+    #[test]
+    fn malformed_token_delegate_parameters_returns_err() {
+        let garbage = Parameters::from(vec![0xffu8; 64]);
+        let result = TokenDelegateParameters::try_from(garbage).map(|_| ());
+        assert!(result.is_err(), "expected Err, got {result:?}");
+    }
+
+    #[test]
+    fn malformed_delegate_parameters_returns_err() {
+        let garbage = Parameters::from(vec![0xffu8; 64]);
+        let result = DelegateParameters::try_from(garbage).map(|_| ());
+        assert!(result.is_err(), "expected Err, got {result:?}");
+    }
+
+    #[test]
+    fn malformed_token_allocation_record_state_returns_err() {
+        let garbage = State::from(vec![0xffu8; 64]);
+        let result = TokenAllocationRecord::try_from(garbage);
+        assert!(result.is_err(), "expected Err, got {result:?}");
+    }
+}

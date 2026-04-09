@@ -11,6 +11,21 @@
 use std::path::{Path, PathBuf};
 
 fn main() {
+    // Re-run if features change.
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_USE_NODE");
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_NO_SYNC");
+
+    // The artifact checks below only matter for builds that actually embed
+    // contract WASM via `include_bytes!` (i.e. `use-node` is on and `no-sync`
+    // is off). Offline builds — `--no-default-features --features
+    // example-data,no-sync` — must work on a clean clone with no `build/`
+    // directories present, so we skip the check entirely there.
+    let use_node = std::env::var_os("CARGO_FEATURE_USE_NODE").is_some();
+    let no_sync = std::env::var_os("CARGO_FEATURE_NO_SYNC").is_some();
+    if !use_node || no_sync {
+        return;
+    }
+
     let ui_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let root = ui_dir.parent().expect("workspace root");
 

@@ -105,8 +105,7 @@ impl TryFrom<&[u8]> for IdentityManagement {
     type Error = DelegateError;
 
     fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
-        let deser: Self = serde_json::from_slice(value).unwrap();
-        Ok(deser)
+        serde_json::from_slice(value).map_err(|e| DelegateError::Deser(format!("{e}")))
     }
 }
 
@@ -206,8 +205,7 @@ impl TryFrom<&[u8]> for IdentityMsg {
     type Error = DelegateError;
 
     fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
-        let msg = serde_json::from_slice(value).unwrap();
-        Ok(msg)
+        serde_json::from_slice(value).map_err(|e| DelegateError::Deser(format!("{e}")))
     }
 }
 
@@ -217,5 +215,57 @@ impl TryFrom<&IdentityMsg> for Vec<u8> {
     fn try_from(value: &IdentityMsg) -> Result<Self, Self::Error> {
         let msg = serde_json::to_vec(&value).unwrap();
         Ok(msg)
+    }
+}
+
+#[cfg(test)]
+mod boundary_tests {
+    //! Regression tests for the deserialization boundaries on this crate.
+    //!
+    //! `IdentityManagement` and `IdentityMsg` are reachable from network
+    //! input via the `DelegateInterface::process` path. Both used to call
+    //! `serde_json::from_slice(...).unwrap()`, which would panic the
+    //! delegate on a malformed payload. These tests pin the
+    //! `Result`-returning behavior so any future regression trips them.
+
+    use super::*;
+
+    #[test]
+    fn malformed_identity_management_bytes_returns_err() {
+        let garbage = [0xffu8; 64];
+        let result = IdentityManagement::try_from(&garbage[..]);
+        assert!(
+            matches!(result, Err(DelegateError::Deser(_))),
+            "expected Err(DelegateError::Deser), got {result:?}"
+        );
+    }
+
+    #[test]
+    fn truncated_identity_management_json_returns_err() {
+        let truncated = br#"{"identities": {"alice":"#;
+        let result = IdentityManagement::try_from(&truncated[..]);
+        assert!(
+            matches!(result, Err(DelegateError::Deser(_))),
+            "expected Err(DelegateError::Deser), got {result:?}"
+        );
+    }
+
+    #[test]
+    fn malformed_identity_msg_bytes_returns_err() {
+        let garbage = [0xffu8; 64];
+        let result = IdentityMsg::try_from(&garbage[..]).map(|_| ());
+        assert!(
+            matches!(result, Err(DelegateError::Deser(_))),
+            "expected Err(DelegateError::Deser), got {result:?}"
+        );
+    }
+
+    #[test]
+    fn empty_identity_msg_bytes_returns_err() {
+        let result = IdentityMsg::try_from(&[][..]).map(|_| ());
+        assert!(
+            matches!(result, Err(DelegateError::Deser(_))),
+            "expected Err(DelegateError::Deser), got {result:?}"
+        );
     }
 }

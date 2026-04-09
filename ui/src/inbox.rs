@@ -40,7 +40,16 @@ use crate::{
 
 type InboxContract = ContractKey;
 
+// `inbox_code_hash` is produced by `cargo make build-inbox-contract`. Under
+// `--no-default-features --features example-data,no-sync` it isn't needed
+// (no contract calls happen) and the build artifact may not exist, so we
+// fall back to an empty placeholder. Any attempt to use it offline would
+// fail at `ContractKey::from_params` time, but those code paths are dead
+// when `use-node` is disabled.
+#[cfg(feature = "use-node")]
 pub(crate) const INBOX_CODE_HASH: &str = include_str!("../../build/inbox_code_hash");
+#[cfg(not(feature = "use-node"))]
+pub(crate) const INBOX_CODE_HASH: &str = "";
 
 thread_local! {
     static PENDING_INBOXES_UPDATE: RefCell<HashMap<InboxContract, Vec<DecryptedMessage>>> = RefCell::new(HashMap::new());
