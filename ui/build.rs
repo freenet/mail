@@ -72,6 +72,11 @@ fn main() {
             "identity-manager parameters (serialized)",
             "cargo make generate-identity-params",
         ),
+        (
+            "published-contract/contract-id.txt",
+            "committed web-container contract id",
+            "cargo make update-published-contract",
+        ),
     ];
 
     let mut missing: Vec<(&str, &str, &str)> = Vec::new();

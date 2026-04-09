@@ -22,6 +22,25 @@ pub(crate) mod test_util;
 #[allow(dead_code)] // TODO: wire into the Dioxus mount point
 const MAIN_ELEMENT_ID: &str = "freenet-email-main";
 
+/// The base58-encoded `ContractInstanceId` of the signed webapp contract
+/// produced by `cargo make update-published-contract`.
+///
+/// This is the source of truth for "which web-container contract does the
+/// UI target" at compile time. Any change to the web-container WASM or to
+/// `test-contract/web-container-keys.toml` shifts this ID, and
+/// `update-published-contract` must be re-run and the resulting diff
+/// committed.
+///
+/// Under `--no-default-features --features example-data,no-sync` the
+/// committed snapshot may be stale or absent, so we fall back to an empty
+/// string in offline builds (mirroring how the other contract hashes are
+/// handled in `ui/src/inbox.rs` and `ui/src/aft.rs`).
+#[cfg(feature = "use-node")]
+pub(crate) const WEB_CONTAINER_CONTRACT_ID: &str =
+    include_str!("../../published-contract/contract-id.txt");
+#[cfg(not(feature = "use-node"))]
+pub(crate) const WEB_CONTAINER_CONTRACT_ID: &str = "";
+
 type DynError = Box<dyn std::error::Error + Send + Sync>;
 
 pub fn main() {
@@ -35,6 +54,17 @@ pub fn main() {
                     .from_env_lossy(),
             )
             .try_init();
+    }
+
+    // Log which committed contract ID this UI was built against so that
+    // a developer looking at devtools can instantly tell whether
+    // `published-contract/contract-id.txt` is up to date relative to the
+    // source they're staring at. Only meaningful under `use-node`; the
+    // offline build's constant is an empty string, see lib.rs:25-33.
+    #[cfg(feature = "use-node")]
+    {
+        let id = WEB_CONTAINER_CONTRACT_ID.trim();
+        log::info(format!("web-container contract id (build-embedded): {id}"));
     }
 
     dioxus::launch(app::app);

@@ -202,22 +202,42 @@ dependencies = ["build-ui"]
 script = '''
 set -euo pipefail
 ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
-DX_OUT="$ROOT/target/dx/freenet-email-ui/release/web/public"
+# `dx` keys its output dir on the binary name (ui/Cargo.toml has
+# `default-run = "app"`), not the package name.
+DX_OUT="$ROOT/target/dx/app/release/web/public"
 if [ ! -d "$DX_OUT" ]; then
     echo "error: dx build output not found at $DX_OUT" >&2
     echo "       (did \`cargo make build-ui\` succeed?)" >&2
     exit 1
 fi
 mkdir -p "$ROOT/target/webapp"
-# --sort=name + --mtime + --owner/--group make the archive reproducible
-# across machines. Without these flags the tar header captures the
-# filesystem mtime and uid, which would break the "same commit → same
-# contract ID" guarantee.
-tar --sort=name \
-    --mtime='2024-01-01 00:00:00 UTC' \
-    --owner=0 --group=0 --numeric-owner \
-    -C "$DX_OUT" \
-    -cJf "$ROOT/target/webapp/webapp.tar.xz" .
+# Reproducibility: --sort=name, fixed --mtime, and --owner/--group=0
+# are required for byte-identical archives across machines. GNU tar
+# supports these flags; BSD tar (macOS default) does not. On macOS,
+# install `gnu-tar` (`brew install gnu-tar`) to get a `gtar` binary.
+# Without GNU tar the archive still signs and publishes, but two
+# developers on two machines will derive different contract IDs,
+# which defeats the committed-published-contract reproducibility
+# goal. We warn loudly in that case.
+if command -v gtar >/dev/null 2>&1; then
+    TAR=gtar
+elif tar --version 2>/dev/null | grep -qi 'gnu tar'; then
+    TAR=tar
+else
+    echo "warning: GNU tar not found — the resulting archive will NOT be" >&2
+    echo "         byte-identical across machines. Install gnu-tar for" >&2
+    echo "         reproducible builds (macOS: \`brew install gnu-tar\`)." >&2
+    TAR=""
+fi
+if [ -n "$TAR" ]; then
+    "$TAR" --sort=name \
+        --mtime='2024-01-01 00:00:00 UTC' \
+        --owner=0 --group=0 --numeric-owner \
+        -C "$DX_OUT" \
+        -cJf "$ROOT/target/webapp/webapp.tar.xz" .
+else
+    tar -C "$DX_OUT" -cJf "$ROOT/target/webapp/webapp.tar.xz" .
+fi
 echo "wrote $ROOT/target/webapp/webapp.tar.xz ($(wc -c < "$ROOT/target/webapp/webapp.tar.xz") bytes)"
 '''
 
@@ -233,13 +253,18 @@ if [ ! -f "$KEY_FILE" ]; then
     echo "       run \`cargo make generate-web-container-keys\` first" >&2
     exit 1
 fi
-# Deterministic version: use the short commit hash hashed into a u32.
+# Deterministic version: short commit hash converted from hex to u32.
 # Two developers on the same commit pick the same version, so the
 # signed payload (version || webapp) is identical and the contract ID
-# is reproducible.
-version=$(git -C "$ROOT" rev-parse --short=8 HEAD | awk '{ printf "%d", strtonum("0x" $1) % 2147483647 }')
+# is reproducible. We use `printf %d 0x…` (portable across BSD and
+# GNU) rather than GNU-awk `strtonum`.
+short=$(git -C "$ROOT" rev-parse --short=8 HEAD)
+# Mask to the low 31 bits so we stay under i32::MAX (the contract
+# accepts u32 but staying positive keeps the value friendly to any
+# signed-int consumer downstream).
+version=$(( $(printf '%d' "0x$short") & 0x7fffffff ))
 if [ "$version" -eq 0 ]; then version=1; fi
-echo "signing with version $version"
+echo "signing with version $version (from commit $short)"
 cargo run --quiet -p web-container-sign -- sign \
     --input "$ROOT/target/webapp/webapp.tar.xz" \
     --output "$ROOT/target/webapp/webapp.metadata" \
