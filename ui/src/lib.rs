@@ -1,3 +1,14 @@
+// Under `--no-default-features --features example-data,no-sync` the
+// `use-node` flag is off, which makes large swathes of the WebSocket /
+// contract-bridge code unreachable. Rather than gate hundreds of items
+// individually, we suppress dead-code / unused-import warnings for the
+// whole crate when running in offline mode. The default `use-node` build
+// is still warning-clean and remains the source of truth for clippy.
+#![cfg_attr(
+    not(feature = "use-node"),
+    allow(dead_code, unused_imports, unused_variables, unused_mut)
+)]
+
 extern crate core;
 
 pub(crate) mod aft;

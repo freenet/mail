@@ -44,7 +44,7 @@ impl WebApi {
 
     #[cfg(all(target_family = "wasm", feature = "use-node"))]
     fn new() -> Result<Self, String> {
-        use futures::{SinkExt, StreamExt};
+        use futures::SinkExt;
         let conn = web_sys::WebSocket::new(
             "ws://localhost:7509/v1/contract/command?encodingProtocol=native",
         )
@@ -66,7 +66,7 @@ impl WebApi {
             let _ = tx.send(());
             crate::log::debug!("connected to websocket");
         };
-        let mut api = freenet_stdlib::client_api::WebApi::start(
+        let api = freenet_stdlib::client_api::WebApi::start(
             conn,
             result_handler,
             |err| {

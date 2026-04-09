@@ -69,7 +69,7 @@ pub(crate) fn app() -> Element {
     use_context_provider(InboxesData::new);
     let inbox_data = use_context::<InboxesData>();
 
-    #[cfg(feature = "use-node")]
+    #[cfg(all(feature = "use-node", not(feature = "no-sync")))]
     {
         let _sync: Coroutine<NodeAction> = use_coroutine(move |rx| {
             let inbox_controller = inbox_controller;
@@ -88,10 +88,14 @@ pub(crate) fn app() -> Element {
             async {}.boxed_local()
         });
     }
-    #[cfg(not(feature = "use-node"))]
+    #[cfg(any(not(feature = "use-node"), feature = "no-sync"))]
     {
-        let _sync = use_coroutine::<NodeAction, _>(move |rx| async {});
+        let _ = inbox_controller;
+        let _ = login_controller;
+        let _ = inbox_data;
+        let _sync: Coroutine<NodeAction> = use_coroutine(move |_rx: UnboundedReceiver<NodeAction>| async {});
     }
+    #[allow(unused_variables)]
     let actions = use_coroutine_handle::<NodeAction>();
 
     // Render login page if user not identified, otherwise render the inbox or identifiers list based on user's logged in state
@@ -100,16 +104,16 @@ pub(crate) fn app() -> Element {
             login::GetOrCreateIdentity {}
         }
     } else if let Some(id) = user.read().logged_id() {
-        #[cfg(feature = "use-node")]
+        #[cfg(all(feature = "use-node", not(feature = "no-sync")))]
         {
             inbox
                 .read()
                 .load_messages(id, &actions)
                 .expect("load messages");
         }
-        #[cfg(all(feature = "ui-testing", not(feature = "use-node")))]
+        #[cfg(feature = "example-data")]
         {
-            inbox_controller.load_messages(id).unwrap();
+            inbox.read().load_example_messages(id).expect("load mock messages");
         }
         rsx! {
            UserInbox {}
@@ -272,58 +276,59 @@ impl InboxView {
         self.remove_messages(client, ids, inbox_data)
     }
 
-    #[cfg(all(feature = "ui-testing", not(feature = "use-node")))]
-    fn load_messages(&self, id: &Identity) -> Result<(), DynError> {
-        let emails = {
-            if id.id == UserId(0) {
-                vec![
-                    Message {
-                        id: 0,
-                        from: "Ian's Other Account".into(),
-                        title: "Email from Ian's Other Account".into(),
-                        content: "Lorem ipsum dolor sit amet, consectetur adipiscing elit..."
-                            .repeat(10)
-                            .into(),
-                        read: false,
-                    },
-                    Message {
-                        id: 1,
-                        from: "Mary".to_string().into(),
-                        title: "Email from Mary".to_string().into(),
-                        content: "Lorem ipsum dolor sit amet, consectetur adipiscing elit..."
-                            .repeat(10)
-                            .into(),
-                        read: false,
-                    },
-                ]
-            } else {
-                vec![
-                    Message {
-                        id: 0,
-                        from: "Ian Clarke".into(),
-                        title: "Email from Ian".into(),
-                        content: "Lorem ipsum dolor sit amet, consectetur adipiscing elit..."
-                            .repeat(10)
-                            .into(),
-                        read: false,
-                    },
-                    Message {
-                        id: 1,
-                        from: "Jane".to_string().into(),
-                        title: "Email from Jane".to_string().into(),
-                        content: "Lorem ipsum dolor sit amet, consectetur adipiscing elit..."
-                            .repeat(10)
-                            .into(),
-                        read: false,
-                    },
-                ]
-            }
+    #[cfg(feature = "example-data")]
+    fn load_example_messages(&self, id: &Identity) -> Result<(), DynError> {
+        let body: Cow<'static, str> =
+            "Lorem ipsum dolor sit amet, consectetur adipiscing elit. \
+             Sed do eiusmod tempor incidunt ut labore et dolore magna aliqua."
+                .into();
+        let emails = if id.id == UserId(0) {
+            vec![
+                Message {
+                    id: 0,
+                    from: "Ian's Other Account".into(),
+                    title: "Welcome to the offline preview".into(),
+                    content: body.clone(),
+                    read: false,
+                },
+                Message {
+                    id: 1,
+                    from: "Mary".into(),
+                    title: "Lunch tomorrow?".into(),
+                    content: body.clone(),
+                    read: false,
+                },
+                Message {
+                    id: 2,
+                    from: "freenet-bot".into(),
+                    title: "Your weekly digest".into(),
+                    content: body,
+                    read: true,
+                },
+            ]
+        } else {
+            vec![
+                Message {
+                    id: 0,
+                    from: "Ian Clarke".into(),
+                    title: "Welcome to the offline preview".into(),
+                    content: body.clone(),
+                    read: false,
+                },
+                Message {
+                    id: 1,
+                    from: "Jane".into(),
+                    title: "Re: design review".into(),
+                    content: body,
+                    read: false,
+                },
+            ]
         };
         self.messages.replace(emails);
         Ok(())
     }
 
-    #[cfg(feature = "use-node")]
+    #[cfg(all(feature = "use-node", not(feature = "no-sync")))]
     fn load_messages(
         &self,
         id: &Identity,
@@ -342,32 +347,35 @@ pub(crate) struct User {
 }
 
 impl User {
-    #[cfg(all(feature = "ui-testing", not(feature = "use-node")))]
+    #[cfg(feature = "example-data")]
     fn new() -> Self {
         use rand_chacha::rand_core::OsRng;
-        let key0 = RsaPrivateKey::new(&mut OsRng, 4096).unwrap();
-        let key1 = RsaPrivateKey::new(&mut OsRng, 4096).unwrap();
-        let identified = true;
+        // 2048-bit keeps the offline preview snappy in debug builds; the keys
+        // never leave the browser and are regenerated on every page load.
+        let key0 = RsaPrivateKey::new(&mut OsRng, 2048).expect("rsa keygen");
+        let key1 = RsaPrivateKey::new(&mut OsRng, 2048).expect("rsa keygen");
         User {
             logged: false,
-            identified,
+            identified: true,
             active_id: None,
             identities: vec![
                 Identity {
                     alias: "address1".into(),
                     id: UserId(0),
+                    description: "Mock identity (example-data)".into(),
                     key: key0,
                 },
                 Identity {
                     alias: "address2".into(),
                     id: UserId(1),
+                    description: "Mock identity (example-data)".into(),
                     key: key1,
                 },
             ],
         }
     }
 
-    #[cfg(feature = "use-node")]
+    #[cfg(not(feature = "example-data"))]
     fn new() -> Self {
         User {
             logged: false,

@@ -50,5 +50,12 @@ features = [
 
 [features]
 default = ["use-node"]
-ui-testing = []
+# Seed the UI with mock identities and mock messages so it renders without
+# any real Freenet state. Combine with `no-sync` for a fully offline build:
+#   cargo make dev-example
+example-data = []
+# Skip the local-node WebSocket entirely. Orthogonal to `example-data` —
+# enabling `no-sync` alone produces an empty UI; pair with `example-data`
+# (and `--no-default-features`) for the offline dev loop.
+no-sync = []
 use-node = []

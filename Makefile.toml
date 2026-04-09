@@ -148,11 +148,23 @@ command = "dx"
 args = ["serve", "--features", "use-node"]
 cwd = "./ui"
 
-[tasks.dev-ui-testing]
-description = "Local dev server with UI testing mode"
-dependencies = ["build-contracts"]
+[tasks.dev-example]
+description = "Local dev server with example data, no node sync (offline)"
+# Intentionally no `build-contracts` dependency: the whole point of this
+# target is that it works on a clean clone with zero contract artifacts.
 command = "dx"
-args = ["serve", "--features", "ui-testing", "--no-default-features"]
+args = ["serve", "--features", "example-data,no-sync", "--no-default-features"]
+cwd = "./ui"
+
+[tasks.build-ui-example-no-sync]
+description = "Release build of the UI in offline mode (for CI/Playwright)"
+command = "dx"
+args = [
+    "build",
+    "--${BUILD_PROFILE}",
+    "--features", "example-data,no-sync",
+    "--no-default-features",
+]
 cwd = "./ui"
 
 [tasks.publish]
