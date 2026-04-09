@@ -5,16 +5,18 @@ members = [
     "ui",
     "contracts/*",
     "modules/antiflood-tokens/interfaces",
+    "modules/antiflood-tokens/contracts/token-allocation-record",
+    "modules/antiflood-tokens/delegates/token-generator",
     "modules/identity-management",
 ]
 
 [workspace.package]
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [workspace.dependencies]
 # Freenet
-freenet-stdlib = "0.3.2"
+freenet-stdlib = "0.3.5"
 # Internal
 freenet-email-core = { path = "common" }
 freenet-aft-interface = { path = "modules/antiflood-tokens/interfaces" }
@@ -31,6 +33,11 @@ strum = { version = "0.24", features = ["derive"] }
 thiserror = "1"
 wasm-bindgen = "0.2"
 dioxus = "0.7.3"
+# Web-container deps (ported from freenet-river)
+byteorder = "1.5.0"
+ciborium = "0.2.2"
+ed25519-dalek = { version = "2.1.1", default-features = false, features = ["alloc", "serde"] }
+rand = { version = "0.8.5", default-features = false }
 
 [profile.dev.package."*"]
 opt-level = 3

@@ -53,19 +53,23 @@ struct InternalSettings {
     /// This id is used for internal handling of the inbox and is not persistent
     /// or unique across sessions.
     next_msg_id: u64,
+    #[allow(dead_code)] // TODO: surfaced via settings UI (not yet wired)
     minimum_tier: Tier,
     /// Used for signing modifications to the state that are to be persisted.
     /// The public key must be the same as the one used for the inbox contract.
     private_key: RsaPrivateKey,
 }
 
+#[allow(dead_code)] // TODO: placeholder for decrypted settings persistence
 #[derive(Debug, Serialize, Deserialize)]
 struct StoredDecryptedSettings {}
 
+#[allow(dead_code)] // TODO: emitted by summarize_state once contract sync lands
 #[derive(Serialize, Deserialize)]
 struct InboxSummary(HashSet<TokenAssignmentHash>);
 
 impl InboxSummary {
+    #[allow(dead_code)]
     pub fn new(messages: HashSet<TokenAssignmentHash>) -> Self {
         Self(messages)
     }
@@ -84,6 +88,7 @@ impl InternalSettings {
         })
     }
 
+    #[allow(dead_code)] // TODO: invoked from update_settings_at_store
     fn to_stored(&self) -> Result<StoredSettings, DynError> {
         Ok(StoredSettings {
             minimum_tier: self.minimum_tier,
@@ -127,11 +132,10 @@ impl MessageModel {
                     None
                 }
             });
-            if let Some(messages) = map.get(&inbox_contract) {
-                if messages.is_empty() {
+            if let Some(messages) = map.get(&inbox_contract)
+                && messages.is_empty() {
                     map.remove(&inbox_contract);
                 }
-            }
             update
         });
 
@@ -181,7 +185,7 @@ impl DecryptedMessage {
         .try_into()
         .map_err(|e| format!("{e}"))?;
         let inbox_key = ContractKey::from_params(INBOX_CODE_HASH, params).map_err(|e| format!("{e}"))?;
-        AftRecords::pending_assignment(delegate_key, inbox_key.clone());
+        AftRecords::pending_assignment(delegate_key, inbox_key);
 
         PENDING_INBOXES_UPDATE.with(|map| {
             let map = &mut *map.borrow_mut();
@@ -244,7 +248,7 @@ impl DecryptedMessage {
             .unwrap();
 
         // Encrypt the XChaCha20Poly1305 key using RSA
-        let receiver_pub_key = self.to.get(0).ok_or("receiver key not found")?;
+        let receiver_pub_key = self.to.first().ok_or("receiver key not found")?;
         let encrypted_key = receiver_pub_key
             .encrypt(&mut rng, Pkcs1v15Encrypt, chacha_key.as_slice())
             .map_err(|e| format!("{e}"))?;
@@ -285,12 +289,12 @@ impl InboxModel {
             let alias = identity.alias();
             INBOX_TO_ID.with(|map| {
                 map.borrow_mut()
-                    .insert(contract_key.clone(), identity.clone());
+                    .insert(*contract_key, identity.clone());
             });
             crate::log::debug!(
                 "subscribing to inbox updates for `{contract_key}`, belonging to alias `{alias}`"
             );
-            InboxModel::subscribe(client, contract_key.clone()).await?;
+            InboxModel::subscribe(client, *contract_key).await?;
             Ok(())
         }
 
@@ -322,11 +326,10 @@ impl InboxModel {
                 node_response_error_handling(client.clone().into(), res, TryNodeAction::LoadInbox)
                     .await;
             }
-            let res = InboxModel::load(&mut client, identity).await.map(|key| {
+            let res = InboxModel::load(&mut client, identity).await.inspect(|key| {
                 contract_to_id
-                    .entry(key.clone())
+                    .entry(*key)
                     .or_insert(identity.clone());
-                key
             });
             node_response_error_handling(client.into(), res.map(|_| ()), TryNodeAction::LoadInbox)
                 .await;
@@ -344,7 +347,7 @@ impl InboxModel {
         .map_err(|e| format!("{e}"))?;
         let contract_key =
             ContractKey::from_params(INBOX_CODE_HASH, params).map_err(|e| format!("{e}"))?;
-        InboxModel::get_state(client, contract_key.clone()).await?;
+        InboxModel::get_state(client, contract_key).await?;
         Ok(contract_key)
     }
 
@@ -392,7 +395,7 @@ impl InboxModel {
                 ids: to_rm_message_id,
             };
             let request = ContractRequest::Update {
-                key: self.key.clone(),
+                key: self.key,
                 data: UpdateData::Delta(serde_json::to_vec(&delta)?.into()),
             };
             let f = async move {
@@ -425,6 +428,7 @@ impl InboxModel {
     }
 
     // TODO: only used when an inbox is created first time when putting the contract
+    #[allow(dead_code)]
     fn to_state(&self) -> Result<State<'static>, DynError> {
         let settings = self.settings.to_stored()?;
         let messages = self
@@ -494,6 +498,7 @@ impl InboxModel {
         }
     }
 
+    #[allow(dead_code)] // TODO: wire into settings UI
     async fn update_settings_at_store(
         &mut self,
         client: &mut WebApiRequestClient,
@@ -507,7 +512,7 @@ impl InboxModel {
             settings,
         };
         let request = ContractRequest::Update {
-            key: self.key.clone(),
+            key: self.key,
             data: UpdateData::Delta(serde_json::to_vec(&delta)?.into()),
         };
         client.send(request.into()).await?;

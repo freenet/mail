@@ -8,6 +8,7 @@ pub(crate) mod log;
 #[cfg(test)]
 pub(crate) mod test_util;
 
+#[allow(dead_code)] // TODO: wire into the Dioxus mount point
 const MAIN_ELEMENT_ID: &str = "freenet-email-main";
 
 type DynError = Box<dyn std::error::Error + Send + Sync>;

@@ -5,16 +5,125 @@ default_to_workspace = false
 [env]
 CONTRACT_TARGET = "wasm32-unknown-unknown"
 BUILD_PROFILE = "release"
+# Note: fdev's `get_workspace_target_dir()` walks up from its compile-time
+# CARGO_MANIFEST_DIR looking for a [workspace] Cargo.toml and panics with
+# "Could not find workspace root" when fdev was installed from a different
+# tree that no longer exists. Each build task below sets CARGO_TARGET_DIR
+# explicitly to bypass that walk.
 
 [tasks.clean]
 description = "Clean build artifacts"
 command = "cargo"
 args = ["clean"]
 
-[tasks.build-inbox]
-description = "Build the inbox contract WASM"
-command = "cargo"
-args = ["build", "--profile", "${BUILD_PROFILE}", "--target", "${CONTRACT_TARGET}", "-p", "freenet-email-inbox", "--features", "contract"]
+# ─── Contract / delegate WASM builds via fdev ─────────────────────────────────
+
+[tasks.build-inbox-contract]
+description = "Build the inbox contract WASM + code hash"
+script = '''
+set -euo pipefail
+cd "${CARGO_MAKE_WORKING_DIRECTORY}/contracts/inbox"
+CARGO_TARGET_DIR="${CARGO_MAKE_WORKING_DIRECTORY}/target" fdev build --features contract
+'''
+
+[tasks.build-token-allocation-record]
+description = "Build token-allocation-record contract WASM + code hash"
+script = '''
+set -euo pipefail
+CRATE_DIR="${CARGO_MAKE_WORKING_DIRECTORY}/modules/antiflood-tokens/contracts/token-allocation-record"
+cd "$CRATE_DIR"
+CARGO_TARGET_DIR="${CARGO_MAKE_WORKING_DIRECTORY}/target" fdev build --features freenet-main-contract
+# fdev logs the hash but doesn't write the `*_code_hash` file the UI
+# expects — use `fdev inspect` to extract it.
+hash=$(CARGO_TARGET_DIR="${CARGO_MAKE_WORKING_DIRECTORY}/target" fdev inspect \
+    build/freenet/freenet_token_allocation_record code | \
+    grep 'code hash:' | cut -d' ' -f3)
+mkdir -p build
+printf '%s' "$hash" > build/token_allocation_record_code_hash
+echo "wrote build/token_allocation_record_code_hash: $hash"
+'''
+
+[tasks.build-token-generator]
+description = "Build token-generator delegate WASM + code hash"
+script = '''
+set -euo pipefail
+CRATE_DIR="${CARGO_MAKE_WORKING_DIRECTORY}/modules/antiflood-tokens/delegates/token-generator"
+cd "$CRATE_DIR"
+CARGO_TARGET_DIR="${CARGO_MAKE_WORKING_DIRECTORY}/target" fdev build \
+    --package-type delegate --features freenet-main-delegate
+hash=$(CARGO_TARGET_DIR="${CARGO_MAKE_WORKING_DIRECTORY}/target" fdev inspect \
+    build/freenet/freenet_token_generator delegate | \
+    grep 'code hash:' | cut -d' ' -f3)
+mkdir -p build
+printf '%s' "$hash" > build/token_generator_code_hash
+echo "wrote build/token_generator_code_hash: $hash"
+'''
+
+[tasks.build-identity-management-delegate]
+description = "Build identity-management delegate WASM + code hash"
+script = '''
+set -euo pipefail
+CRATE_DIR="${CARGO_MAKE_WORKING_DIRECTORY}/modules/identity-management"
+cd "$CRATE_DIR"
+# identity-management needs both `contract` (to pull in freenet-stdlib's
+# wasm-compatible memory helpers) and `freenet-main-delegate` (to emit the
+# #[delegate] macro's extern "C" FFI wrapper).
+CARGO_TARGET_DIR="${CARGO_MAKE_WORKING_DIRECTORY}/target" fdev build \
+    --package-type delegate --features freenet-main-delegate,contract
+hash=$(CARGO_TARGET_DIR="${CARGO_MAKE_WORKING_DIRECTORY}/target" fdev inspect \
+    build/freenet/identity_management delegate | \
+    grep 'code hash:' | cut -d' ' -f3)
+mkdir -p build
+printf '%s' "$hash" > build/identity_management_code_hash
+echo "wrote build/identity_management_code_hash: $hash"
+'''
+
+[tasks.generate-identity-params]
+description = "Generate the test identity-manager keypair and serialized params"
+script = '''
+set -euo pipefail
+CRATE_DIR="${CARGO_MAKE_WORKING_DIRECTORY}/modules/identity-management"
+OUT_DIR="$CRATE_DIR/build"
+KEY_DIR="${CARGO_MAKE_WORKING_DIRECTORY}/test-contract/identity"
+mkdir -p "$OUT_DIR" "$KEY_DIR"
+
+# Treat a PLACEHOLDER stub (left over from the monorepo extraction)
+# as missing so we regenerate. A real serialized Parameters file is
+# ~100 bytes or more.
+if [ -f "$OUT_DIR/identity-manager-params" ] && \
+   [ "$(wc -c < "$OUT_DIR/identity-manager-params")" -gt 20 ] && \
+   ! grep -q PLACEHOLDER "$OUT_DIR/identity-manager-params" 2>/dev/null; then
+    echo "identity-manager-params already present, skipping generation"
+    exit 0
+fi
+
+if [ -f "$KEY_DIR/identity-manager-key.private.pem" ]; then
+    echo "reusing existing test key at $KEY_DIR"
+    cargo run --quiet --manifest-path "$CRATE_DIR/Cargo.toml" --bin tool -- \
+        --path "$OUT_DIR" --key "$KEY_DIR/identity-manager-key.private.pem"
+else
+    echo "generating fresh test key at $KEY_DIR"
+    cargo run --quiet --manifest-path "$CRATE_DIR/Cargo.toml" --bin tool -- \
+        --path "$OUT_DIR"
+    # Move generated keypair into test-contract/identity so the params
+    # file stays in build/ but the keys live next to other test fixtures.
+    mv "$OUT_DIR/identity-manager-key.private.pem" "$KEY_DIR/"
+    mv "$OUT_DIR/identity-manager-key.public.pem"  "$KEY_DIR/"
+fi
+echo "wrote $OUT_DIR/identity-manager-params"
+'''
+
+[tasks.build-contracts]
+description = "Build all contracts/delegates WASM and code hash files"
+dependencies = [
+    "build-inbox-contract",
+    "build-token-allocation-record",
+    "build-token-generator",
+    "build-identity-management-delegate",
+    "generate-identity-params",
+]
+
+# ─── Web container, UI, dev ────────────────────────────────────────────────────
 
 [tasks.build-web-container]
 description = "Build the web container contract WASM"
@@ -23,7 +132,7 @@ args = ["build", "--profile", "${BUILD_PROFILE}", "--target", "${CONTRACT_TARGET
 
 [tasks.build-ui]
 description = "Build the Dioxus UI"
-dependencies = ["build-inbox"]
+dependencies = ["build-contracts"]
 command = "dx"
 args = ["build", "--${BUILD_PROFILE}", "--features", "use-node"]
 cwd = "./ui"
@@ -34,12 +143,14 @@ dependencies = ["build-ui", "build-web-container"]
 
 [tasks.dev]
 description = "Local Dioxus dev server"
+dependencies = ["build-contracts"]
 command = "dx"
 args = ["serve", "--features", "use-node"]
 cwd = "./ui"
 
 [tasks.dev-ui-testing]
 description = "Local dev server with UI testing mode"
+dependencies = ["build-contracts"]
 command = "dx"
 args = ["serve", "--features", "ui-testing", "--no-default-features"]
 cwd = "./ui"
