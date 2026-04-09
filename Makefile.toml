@@ -113,6 +113,18 @@ fi
 echo "wrote $OUT_DIR/identity-manager-params"
 '''
 
+[tasks.generate-web-container-keys]
+description = "Generate a fresh ed25519 keypair for the web-container publish pipeline"
+script = '''
+set -euo pipefail
+KEY_FILE="${CARGO_MAKE_WORKING_DIRECTORY}/test-contract/web-container-keys.toml"
+if [ -f "$KEY_FILE" ]; then
+    echo "$KEY_FILE already exists; remove it first to rotate the test key"
+    exit 1
+fi
+cargo run --quiet -p web-container-sign -- generate --output "$KEY_FILE"
+'''
+
 [tasks.build-contracts]
 description = "Build all contracts/delegates WASM and code hash files"
 dependencies = [
