@@ -58,23 +58,23 @@ impl Display for ContractType {
 
 pub(crate) fn app() -> Element {
     use_context_provider(|| Signal::new(login::LoginController::new()));
-    let mut login_controller = use_context::<Signal<login::LoginController>>();
+    let login_controller = use_context::<Signal<login::LoginController>>();
     // Initialize and fetch shared state for User, InboxController, and InboxView
     use_context_provider(|| Signal::new(User::new()));
-    let mut user = use_context::<Signal<User>>();
+    let user = use_context::<Signal<User>>();
     use_context_provider(|| Signal::new(InboxController::new()));
-    let mut inbox_controller = use_context::<Signal<InboxController>>();
+    let inbox_controller = use_context::<Signal<InboxController>>();
     use_context_provider(|| Signal::new(InboxView::new()));
-    let mut inbox = use_context::<Signal<InboxView>>();
+    let inbox = use_context::<Signal<InboxView>>();
     use_context_provider(InboxesData::new);
     let inbox_data = use_context::<InboxesData>();
 
     #[cfg(feature = "use-node")]
     {
         let _sync: Coroutine<NodeAction> = use_coroutine(move |rx| {
-            let inbox_controller = inbox_controller.clone();
-            let login_controller = login_controller.clone();
-            let user = user.clone();
+            let inbox_controller = inbox_controller;
+            let login_controller = login_controller;
+            let user = user;
             let inbox_data = inbox_data.clone();
             let fut = crate::api::node_comms(
                 rx,
@@ -122,9 +122,14 @@ pub(crate) fn app() -> Element {
 }
 
 #[derive(Clone)]
+// `Arc<ArcSwap<..>>` over `Rc<RefCell<InboxModel>>` is intentional: the UI is
+// single-threaded (wasm) and `ArcSwap` requires `Arc`, so the non-Send inner
+// type is load-bearing and can't be swapped for an `Rc`.
+#[allow(clippy::arc_with_non_send_sync)]
 pub(crate) struct InboxesData(Arc<ArcSwap<Vec<Rc<RefCell<InboxModel>>>>>);
 
 impl InboxesData {
+    #[allow(clippy::arc_with_non_send_sync)]
     pub fn new() -> Self {
         Self(Arc::new(ArcSwap::from_pointee(vec![])))
     }
@@ -535,10 +540,10 @@ fn UserMenuComponent() -> Element {
 
 #[allow(non_snake_case)]
 fn InboxComponent() -> Element {
-    let mut inbox = use_context::<Signal<InboxView>>();
+    let inbox = use_context::<Signal<InboxView>>();
     let mut controller = use_context::<Signal<InboxController>>();
     let inbox_data = use_context::<InboxesData>();
-    let mut menu_selection = use_context::<Signal<menu::MenuSelection>>();
+    let menu_selection = use_context::<Signal<menu::MenuSelection>>();
     let user = use_context::<Signal<User>>();
 
     #[component]
@@ -549,9 +554,7 @@ fn InboxComponent() -> Element {
         id: u64,
     ) -> Element {
         let mut open_mail = use_context::<Signal<menu::MenuSelection>>();
-        let icon_style = read
-            .then(|| "fa-regular fa-envelope")
-            .unwrap_or("fa-solid fa-envelope");
+        let icon_style = if read { "fa-regular fa-envelope" } else { "fa-solid fa-envelope" };
         rsx!(
             a {
                 class: "panel-block",

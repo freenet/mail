@@ -144,11 +144,11 @@ impl Tier {
     }
 
     fn check_is_correct_minute(dt: DateTime<Utc>, base_min: u32) -> bool {
-        dt.second() == 0 && dt.nanosecond() == 0 && dt.minute() % base_min == 0
+        dt.second() == 0 && dt.nanosecond() == 0 && dt.minute().is_multiple_of(base_min)
     }
 
     fn check_is_correct_hour(dt: DateTime<Utc>, base_hour: u32) -> bool {
-        dt.minute() == 0 && dt.second() == 0 && dt.nanosecond() == 0 && dt.hour() % base_hour == 0
+        dt.minute() == 0 && dt.second() == 0 && dt.nanosecond() == 0 && dt.hour().is_multiple_of(base_hour)
     }
 
     fn check_is_correct_day(dt: DateTime<Utc>, base_day: i64) -> bool {
@@ -246,7 +246,7 @@ impl Tier {
 
     fn normalize_to_next_minute(&self, mut time: DateTime<Utc>, base_minute: u32) -> DateTime<Utc> {
         let is_rounded =
-            time.minute() % base_minute == 0 && time.second() == 0 && time.nanosecond() == 0;
+            time.minute().is_multiple_of(base_minute) && time.second() == 0 && time.nanosecond() == 0;
         if !is_rounded {
             time = time.with_second(0).unwrap();
             time = time.trunc_subsecs(0);
@@ -262,7 +262,7 @@ impl Tier {
     }
 
     fn normalize_to_next_hour(&self, mut time: DateTime<Utc>, base_hour: u32) -> DateTime<Utc> {
-        let is_rounded = time.hour() % base_hour == 0
+        let is_rounded = time.hour().is_multiple_of(base_hour)
             && time.minute() == 0
             && time.second() == 0
             && time.nanosecond() == 0;

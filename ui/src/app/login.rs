@@ -52,6 +52,7 @@ pub(crate) struct Identity {
 
 impl Identity {
     #[must_use]
+    #[allow(dead_code)] // TODO: reinstate via Phase 1 identities delegate path
     pub(crate) fn set_aliases(
         mut new_aliases: IdentityManagement,
         mut user: Signal<crate::app::User>,
@@ -277,10 +278,9 @@ pub(super) fn CreateAliasForm() -> Element {
     let mut generate = use_signal(|| true);
     let mut address = use_signal(String::new);
     let mut description = use_signal(String::new);
-    let mut key_path = use_signal(|| {
-        std::iter::repeat('\u{80}')
-            .take(100)
-            .chain(std::iter::repeat('.').take(300))
+    let key_path = use_signal(|| {
+        std::iter::repeat_n('\u{80}', 100)
+            .chain(std::iter::repeat_n('.', 300))
             .collect::<String>()
     });
 
@@ -490,9 +490,8 @@ fn ImportForm() -> Element {
     let mut address = use_signal(String::new);
     let mut key = use_signal(String::new);
     let key_path = use_signal(|| {
-        std::iter::repeat('\u{80}')
-            .take(100)
-            .chain(std::iter::repeat('.').take(300))
+        std::iter::repeat_n('\u{80}', 100)
+            .chain(std::iter::repeat_n('.', 300))
             .collect::<String>()
     });
 

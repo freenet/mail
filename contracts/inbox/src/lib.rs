@@ -1,3 +1,13 @@
+// The items in this crate are split across two build configurations:
+//   * the workspace-default build (used by `cargo check --workspace`) compiles
+//     only the shared types and flags the `ContractInterface`-side helpers as
+//     dead code;
+//   * `cargo make build-inbox` / `cargo test --features contract` activates
+//     the `contract` feature and brings those helpers to life.
+// Rather than gate every helper with `#[cfg(feature = "contract")]` we silence
+// the false-positive dead-code lints when the feature is off.
+#![cfg_attr(not(feature = "contract"), allow(dead_code))]
+
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 
@@ -493,7 +503,7 @@ mod tests {
 
     #[test]
     fn validate_test() -> Result<(), Box<dyn std::error::Error>> {
-        let private_key = RsaPrivateKey::new(&mut OsRng, 32).unwrap();
+        let private_key = RsaPrivateKey::new(&mut OsRng, 2048).unwrap();
         let public_key = private_key.to_public_key();
 
         let params: Parameters = InboxParams {

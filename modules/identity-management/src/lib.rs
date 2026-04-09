@@ -1,3 +1,8 @@
+// The `#[delegate]` macro from freenet-stdlib expands to
+// `#[cfg(feature = "trace")]` internally; this crate doesn't declare a
+// `trace` feature, so rustc flags the cfg as unexpected. Silence it here.
+#![allow(unexpected_cfgs)]
+
 use std::collections::HashMap;
 
 use freenet_stdlib::prelude::*;

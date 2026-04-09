@@ -1,2 +1,2 @@
-// Shared types for freenet-email
-// Currently empty; types will be extracted here as the codebase evolves.
+// Shared types for freenet-email.
+pub mod web_container;

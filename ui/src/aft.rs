@@ -43,7 +43,7 @@ thread_local! {
     static PENDING_CONFIRMED_ASSIGNMENTS: RefCell<HashMap<AftRecordId, Vec<PendingAssignmentRegister>>> = RefCell::new(HashMap::new());
     /// A token which has been confirmed as valid by a contract update.
     static VALID_TOKEN: RefCell<HashMap<AftDelegate, Vec<TokenAssignment>>> = RefCell::new(HashMap::new());
-    static PENDING_INBOXES_UPDATES: RefCell<Vec<(InboxContract, AssignmentHash)>> = RefCell::new(Vec::new());
+    static PENDING_INBOXES_UPDATES: RefCell<Vec<(InboxContract, AssignmentHash)>> = const { RefCell::new(Vec::new()) };
 }
 
 // FIXME: we should check time to time in the API coroutine if any of the pending assignments
@@ -51,6 +51,7 @@ thread_local! {
 // that a message has been delivered
 struct PendingAssignmentRegister {
     /// time at which the request started
+    #[allow(dead_code)] // TODO: used by the timeout/retry path (see FIXME above)
     start: DateTime<Utc>,
     // time_slot: DateTime<Utc>,
     // tier: freenet_aft_interface::Tier,
@@ -67,7 +68,7 @@ impl AftRecords {
         for identity in contracts {
             let r = Self::load_contract(client, identity, contract_to_id).await;
             if let Ok(key) = &r {
-                contract_to_id.insert(key.clone(), identity.clone());
+                contract_to_id.insert(*key, identity.clone());
             }
             node_response_error_handling(
                 client.clone().into(),
@@ -88,13 +89,13 @@ impl AftRecords {
             .map_err(|e| format!("{e}"))?;
         let contract_key =
             ContractKey::from_params(TOKEN_RECORD_CODE_HASH, params).map_err(|e| format!("{e}"))?;
-        Self::get_state(client, contract_key.clone()).await?;
+        Self::get_state(client, contract_key).await?;
         let alias = identity.alias();
         crate::log::debug!(
             "subscribing to AFT updates for `{contract_key}`, belonging to alias `{alias}`"
         );
         if !contract_to_id.contains_key(&contract_key) {
-            Self::subscribe(client, contract_key.clone()).await?;
+            Self::subscribe(client, contract_key).await?;
         }
         Ok(contract_key)
     }
@@ -138,7 +139,7 @@ impl AftRecords {
         let Some(inbox) = PENDING_INBOXES_UPDATES.with(|queue| {
             queue.borrow().iter().find_map(|(inbox, hash)| {
                 if &record.assignment_hash == hash {
-                    Some(inbox.clone())
+                    Some(*inbox)
                 } else {
                     None
                 }

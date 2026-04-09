@@ -1,15 +1,29 @@
 [package]
 name = "freenet-email-app-web"
 version = "0.0.1"
-edition = "2021"
+edition = "2024"
 publish = false
 
 [dependencies]
+byteorder = { workspace = true }
+ciborium = { workspace = true }
+freenet-email-core = { workspace = true }
 freenet-stdlib = { workspace = true, features = ["contract"] }
+# Fully remove `rand_core` from `ed25519-dalek` for wasm builds
+ed25519-dalek = { workspace = true, default-features = false, features = ["alloc", "serde"] }
+
+[dev-dependencies]
+ed25519-dalek = { workspace = true, features = ["rand_core"] }
+rand = { workspace = true, features = ["std_rng", "getrandom"] }
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 
 [features]
 default = ["freenet-main-contract"]
+contract = ["freenet-stdlib/contract"]
 freenet-main-contract = []
+trace = ["freenet-stdlib/trace"]
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rand = { workspace = true }
