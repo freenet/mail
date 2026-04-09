@@ -1,0 +1,24 @@
+[package]
+name = "freenet-token-allocation-record"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bincode = { workspace = true }
+chrono = { workspace = true }
+freenet-stdlib = { workspace = true, features = ["contract"] }
+rsa = { workspace = true, features = ["sha2"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+freenet-aft-interface = { path = "../../interfaces" }
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# `freenet-main-contract` emits the extern "C" FFI wrapper via the
+# #[contract] macro. Only valid when targeting wasm; enable explicitly via
+# `fdev build` / cargo-make build-token-allocation-record target.
+default = []
+freenet-main-contract = []
