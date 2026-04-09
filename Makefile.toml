@@ -179,12 +179,198 @@ args = [
 ]
 cwd = "./ui"
 
-[tasks.publish]
-description = "Publish webapp to Freenet"
-dependencies = ["build"]
+# ─── Publish pipeline (see AGENTS.md §Publishing) ─────────────────────────────
+#
+# The flow, in order:
+#
+#   build-ui  →  compress-webapp  →  sign-webapp{,-test}  →  \
+#                update-published-contract  →  publish-email{,-test}
+#
+# `publish-all` wires the test variant end-to-end for local validation.
+#
+# `publish-email-test` uses the committed key at
+# `test-contract/web-container-keys.toml` so two developers building from
+# the same commit derive a byte-identical contract ID.
+#
+# `publish-email` (production) uses an uncommitted key at
+# `~/.config/freenet-email/web-container-keys.toml`. Override with
+# `WEB_CONTAINER_KEY_FILE=/path/to/keys.toml cargo make publish-email`.
+
+[tasks.compress-webapp]
+description = "Compress the built webapp into target/webapp/webapp.tar.xz"
+dependencies = ["build-ui"]
 script = '''
-cd ui && fdev publish --code build/freenet/freenet_email_app_web contract --state build/freenet/contract-state
+set -euo pipefail
+ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
+DX_OUT="$ROOT/target/dx/freenet-email-ui/release/web/public"
+if [ ! -d "$DX_OUT" ]; then
+    echo "error: dx build output not found at $DX_OUT" >&2
+    echo "       (did \`cargo make build-ui\` succeed?)" >&2
+    exit 1
+fi
+mkdir -p "$ROOT/target/webapp"
+# --sort=name + --mtime + --owner/--group make the archive reproducible
+# across machines. Without these flags the tar header captures the
+# filesystem mtime and uid, which would break the "same commit → same
+# contract ID" guarantee.
+tar --sort=name \
+    --mtime='2024-01-01 00:00:00 UTC' \
+    --owner=0 --group=0 --numeric-owner \
+    -C "$DX_OUT" \
+    -cJf "$ROOT/target/webapp/webapp.tar.xz" .
+echo "wrote $ROOT/target/webapp/webapp.tar.xz ($(wc -c < "$ROOT/target/webapp/webapp.tar.xz") bytes)"
 '''
+
+[tasks.sign-webapp-test]
+description = "Sign the compressed webapp with the committed test keypair"
+dependencies = ["compress-webapp"]
+script = '''
+set -euo pipefail
+ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
+KEY_FILE="$ROOT/test-contract/web-container-keys.toml"
+if [ ! -f "$KEY_FILE" ]; then
+    echo "error: $KEY_FILE not found" >&2
+    echo "       run \`cargo make generate-web-container-keys\` first" >&2
+    exit 1
+fi
+# Deterministic version: use the short commit hash hashed into a u32.
+# Two developers on the same commit pick the same version, so the
+# signed payload (version || webapp) is identical and the contract ID
+# is reproducible.
+version=$(git -C "$ROOT" rev-parse --short=8 HEAD | awk '{ printf "%d", strtonum("0x" $1) % 2147483647 }')
+if [ "$version" -eq 0 ]; then version=1; fi
+echo "signing with version $version"
+cargo run --quiet -p web-container-sign -- sign \
+    --input "$ROOT/target/webapp/webapp.tar.xz" \
+    --output "$ROOT/target/webapp/webapp.metadata" \
+    --parameters "$ROOT/target/webapp/webapp.parameters" \
+    --version "$version" \
+    --key-file "$KEY_FILE"
+'''
+
+[tasks.sign-webapp]
+description = "Sign the compressed webapp with the production keypair"
+dependencies = ["compress-webapp"]
+script = '''
+set -euo pipefail
+ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
+KEY_FILE="${WEB_CONTAINER_KEY_FILE:-$HOME/.config/freenet-email/web-container-keys.toml}"
+if [ ! -f "$KEY_FILE" ]; then
+    echo "error: production key file not found at $KEY_FILE" >&2
+    echo "" >&2
+    echo "generate one out of band with:" >&2
+    echo "  cargo run -p web-container-sign -- generate --output $KEY_FILE" >&2
+    echo "" >&2
+    echo "or override the location:" >&2
+    echo "  WEB_CONTAINER_KEY_FILE=/path/to/keys.toml cargo make publish-email" >&2
+    exit 1
+fi
+version=$(git -C "$ROOT" rev-parse --short=8 HEAD | awk '{ printf "%d", strtonum("0x" $1) % 2147483647 }')
+if [ "$version" -eq 0 ]; then version=1; fi
+echo "signing with production key at $KEY_FILE, version $version"
+cargo run --quiet -p web-container-sign -- sign \
+    --input "$ROOT/target/webapp/webapp.tar.xz" \
+    --output "$ROOT/target/webapp/webapp.metadata" \
+    --parameters "$ROOT/target/webapp/webapp.parameters" \
+    --version "$version" \
+    --key-file "$KEY_FILE"
+'''
+
+[tasks.update-published-contract]
+description = "Copy the signed test artifacts into published-contract/ and record the contract ID"
+dependencies = ["sign-webapp-test", "build-web-container"]
+script = '''
+set -euo pipefail
+ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
+WASM="$ROOT/target/wasm32-unknown-unknown/release/freenet_email_app_web.wasm"
+PARAMS="$ROOT/target/webapp/webapp.parameters"
+if [ ! -f "$WASM" ]; then
+    echo "error: $WASM not found (did cargo make build-web-container run?)" >&2
+    exit 1
+fi
+if [ ! -f "$PARAMS" ]; then
+    echo "error: $PARAMS not found (did sign-webapp-test run?)" >&2
+    exit 1
+fi
+
+# Ask fdev for the derived contract ID. This is hash(wasm, parameters)
+# and is fully deterministic given byte-identical inputs.
+contract_id=$(CARGO_TARGET_DIR="$ROOT/target" fdev get-contract-id \
+    --code "$WASM" --parameters "$PARAMS")
+if [ -z "$contract_id" ]; then
+    echo "error: fdev get-contract-id returned an empty ID" >&2
+    echo "       fdev version: $(fdev --version 2>&1 || echo unknown)" >&2
+    exit 1
+fi
+
+mkdir -p "$ROOT/published-contract"
+cp "$WASM"   "$ROOT/published-contract/web_container_contract.wasm"
+cp "$PARAMS" "$ROOT/published-contract/webapp.parameters"
+printf '%s\n' "$contract_id" > "$ROOT/published-contract/contract-id.txt"
+
+echo "published-contract/ updated:"
+echo "  contract-id.txt             = $contract_id"
+echo "  web_container_contract.wasm = $(wc -c < "$ROOT/published-contract/web_container_contract.wasm") bytes"
+echo "  webapp.parameters           = $(wc -c < "$ROOT/published-contract/webapp.parameters") bytes"
+echo ""
+echo "commit these changes with a message referencing the release in #6 / #9."
+'''
+
+[tasks.publish-email-test]
+description = "Publish the test build of the webapp to a local Freenet node"
+dependencies = ["sign-webapp-test", "build-web-container"]
+script = '''
+set -euo pipefail
+ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
+if [ ! -f "$ROOT/published-contract/contract-id.txt" ]; then
+    echo "error: published-contract/contract-id.txt missing" >&2
+    echo "       run \`cargo make update-published-contract\` first" >&2
+    exit 1
+fi
+contract_id=$(cat "$ROOT/published-contract/contract-id.txt")
+echo "publishing with test contract id $contract_id"
+# Publish against the committed artifacts, not the freshly built ones,
+# so we fail loudly if the committed published-contract/ is stale
+# relative to HEAD.
+fdev publish \
+    --code "$ROOT/published-contract/web_container_contract.wasm" \
+    --parameters "$ROOT/published-contract/webapp.parameters" \
+    contract \
+    --webapp-archive "$ROOT/target/webapp/webapp.tar.xz" \
+    --webapp-metadata "$ROOT/target/webapp/webapp.metadata"
+'''
+
+[tasks.publish-email]
+description = "Publish the production build of the webapp to Freenet"
+dependencies = ["sign-webapp", "build-web-container"]
+script = '''
+set -euo pipefail
+ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
+if [ ! -f "$ROOT/published-contract/contract-id.txt" ]; then
+    echo "error: published-contract/contract-id.txt missing" >&2
+    exit 1
+fi
+contract_id=$(cat "$ROOT/published-contract/contract-id.txt")
+echo "publishing with production contract id $contract_id"
+fdev publish \
+    --code "$ROOT/published-contract/web_container_contract.wasm" \
+    --parameters "$ROOT/published-contract/webapp.parameters" \
+    contract \
+    --webapp-archive "$ROOT/target/webapp/webapp.tar.xz" \
+    --webapp-metadata "$ROOT/target/webapp/webapp.metadata"
+'''
+
+[tasks.publish-all]
+description = "End-to-end test publish: build → sign → update-published-contract → publish-email-test"
+dependencies = [
+    "build",
+    "update-published-contract",
+    "publish-email-test",
+]
+
+[tasks.publish]
+description = "Alias for publish-email-test (the old broken stub has been replaced)"
+dependencies = ["publish-email-test"]
 
 [tasks.run-node]
 description = "Run Freenet local node"
