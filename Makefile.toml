@@ -185,6 +185,16 @@ description = "Run all tests"
 command = "cargo"
 args = ["test", "--workspace"]
 
+[tasks.test-inbox]
+description = "Run inbox contract integration tests (host build)"
+command = "cargo"
+args = [
+    "test",
+    "-p", "freenet-email-inbox",
+    "--features", "contract",
+    "--test", "integration",
+]
+
 [tasks.clippy]
 description = "Run clippy on all packages"
 command = "cargo"
