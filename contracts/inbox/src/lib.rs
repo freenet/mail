@@ -17,21 +17,56 @@ use freenet_aft_interface::{
     TokenAssignmentHash,
 };
 use freenet_stdlib::prelude::*;
-use rsa::{
-    pkcs1v15::{SigningKey, VerifyingKey},
-    sha2::Sha256,
-    signature::{Signer, Verifier},
-    RsaPrivateKey, RsaPublicKey,
+// ML-DSA-65 (FIPS 204, NIST level 3) is used for inbox-owner signatures
+// on state deltas. RSA remains only for message *encryption* (Stage 2 of
+// #18 will rip that out too) and for the AFT token system's own crypto,
+// which is a separate concern from this epic.
+//
+// Note on trait naming: `ml_dsa` re-exports `signature::{Signer, Verifier,
+// Keypair}`, and so does the `rsa` crate. We import the ml-dsa aliases
+// under prefixed names and keep the rsa `Verifier` under an alias so the
+// two don't collide at method-resolution time for `.verify()` /
+// `.sign()`.
+use ml_dsa::{
+    signature::{Signer as MlDsaSigner, Verifier as MlDsaVerifier},
+    EncodedVerifyingKey, MlDsa65, SigningKey as MlDsaSigningKey,
+    VerifyingKey as MlDsaVerifyingKey,
 };
+use rsa::{pkcs1v15::VerifyingKey as RsaVerifyingKey, sha2::Sha256};
 use serde::{Deserialize, Serialize};
 
-/// Sign this byte array and include the signature in the `inbox_signature` so this inbox can be verified on updates.
+/// Sign this byte array and include the signature in the `inbox_signature` so
+/// this inbox can be verified on updates. Value is arbitrary but must stay
+/// constant across versions — it's part of the signed-payload convention, so
+/// changing it would invalidate every existing inbox signature.
 const STATE_UPDATE: &[u8; 8] = &[168, 7, 13, 64, 168, 123, 142, 215];
 
-#[derive(Serialize, Deserialize)]
+/// The owner's ML-DSA-65 verifying key. Stored on-wire as the FIPS 204
+/// encoded byte array (1952 bytes for ML-DSA-65) to avoid a custom serde
+/// impl on the typed key. `pub_key_decoded()` reconstructs the typed
+/// `VerifyingKey<MlDsa65>` on demand.
+///
+/// This field is part of the contract parameters, so it participates in
+/// `hash(code, params)` and every bit change rotates the contract id.
+#[derive(Serialize, Deserialize, Clone)]
 pub struct InboxParams {
-    // The public key of the inbox owner message.
-    pub pub_key: RsaPublicKey,
+    pub pub_key: Vec<u8>,
+}
+
+impl InboxParams {
+    /// Convenience constructor from a typed ML-DSA verifying key.
+    pub fn from_verifying_key(vk: &MlDsaVerifyingKey<MlDsa65>) -> Self {
+        Self {
+            pub_key: vk.encode().to_vec(),
+        }
+    }
+
+    /// Decode `pub_key` back into the typed ML-DSA verifying key. Returns
+    /// `None` if the byte array isn't the right length for ML-DSA-65.
+    pub fn pub_key_decoded(&self) -> Option<MlDsaVerifyingKey<MlDsa65>> {
+        let encoded: EncodedVerifyingKey<MlDsa65> = (&*self.pub_key).try_into().ok()?;
+        Some(MlDsaVerifyingKey::<MlDsa65>::decode(&encoded))
+    }
 }
 
 impl TryFrom<InboxParams> for Parameters<'_> {
@@ -150,7 +185,11 @@ impl Display for VerificationError {
 
 impl Inbox {
     #[cfg(feature = "wasmbind")]
-    pub fn new(key: &RsaPrivateKey, settings: InboxSettings, messages: Vec<Message>) -> Self {
+    pub fn new(
+        key: &MlDsaSigningKey<MlDsa65>,
+        settings: InboxSettings,
+        messages: Vec<Message>,
+    ) -> Self {
         let inbox_signature = Self::sign(key);
         Self {
             settings,
@@ -164,18 +203,21 @@ impl Inbox {
         serde_json::to_vec(self).map_err(|err| ContractError::Deser(format!("{err}")))
     }
 
-    pub fn sign(key: &RsaPrivateKey) -> Signature {
-        let signing_key = SigningKey::<Sha256>::new(key.clone());
-        signing_key.sign(STATE_UPDATE).into()
+    /// Sign the fixed `STATE_UPDATE` salt with the inbox owner's ML-DSA-65
+    /// signing key. The resulting signature is stored in
+    /// `Inbox::inbox_signature` and verified on every state update.
+    pub fn sign(key: &MlDsaSigningKey<MlDsa65>) -> Signature {
+        let sig: ml_dsa::Signature<MlDsa65> = MlDsaSigner::sign(key, STATE_UPDATE);
+        sig.encode().to_vec().into_boxed_slice()
     }
 
     fn verify(&self, params: &InboxParams) -> Result<(), VerificationError> {
-        let verifying_key = VerifyingKey::<Sha256>::new(params.pub_key.clone());
-        verifying_key
-            .verify(
-                STATE_UPDATE,
-                &rsa::pkcs1v15::Signature::try_from(&*self.inbox_signature).unwrap(),
-            )
+        let verifying_key = params
+            .pub_key_decoded()
+            .ok_or(VerificationError::WrongSignature)?;
+        let sig = decode_ml_dsa_signature(&self.inbox_signature)
+            .map_err(|_| VerificationError::WrongSignature)?;
+        MlDsaVerifier::verify(&verifying_key, STATE_UPDATE, &sig)
             .map_err(|_e| VerificationError::WrongSignature)?;
         Ok(())
     }
@@ -221,7 +263,7 @@ impl Inbox {
                 return Err(VerificationError::TokenAssignmentMismatch);
             }
             let verifying_key =
-                VerifyingKey::<Sha256>::new(message.token_assignment.generator.clone());
+                RsaVerifyingKey::<Sha256>::new(message.token_assignment.generator.clone());
             message
                 .token_assignment
                 .is_valid(&verifying_key)
@@ -234,7 +276,8 @@ impl Inbox {
     }
 
     fn add_message(&mut self, message: Message) -> Result<(), VerificationError> {
-        let verifying_key = VerifyingKey::<Sha256>::new(message.token_assignment.generator.clone());
+        let verifying_key =
+            RsaVerifyingKey::<Sha256>::new(message.token_assignment.generator.clone());
         message
             .token_assignment
             .is_valid(&verifying_key)
@@ -313,7 +356,19 @@ impl TryFrom<StateSummary<'static>> for InboxSummary {
     }
 }
 
-/// Whether this messages can be added/removed from the inbox.
+/// Helper: decode a stored `Signature` byte blob into a typed ML-DSA-65
+/// signature. Returns `ContractError::InvalidUpdate` on any decode failure
+/// so the caller can propagate cleanly.
+fn decode_ml_dsa_signature(signature: &Signature) -> Result<ml_dsa::Signature<MlDsa65>, ContractError> {
+    let encoded: ml_dsa::EncodedSignature<MlDsa65> = (&**signature)
+        .try_into()
+        .map_err(|_| ContractError::InvalidUpdate)?;
+    ml_dsa::Signature::<MlDsa65>::decode(&encoded).ok_or(ContractError::InvalidUpdate)
+}
+
+/// Whether the given `signature` authorises removal of the given token
+/// assignment hashes from the inbox. The signed payload is the
+/// concatenation of those hashes.
 fn can_reemove_messages<'a>(
     params: &InboxParams,
     signature: &Signature,
@@ -323,12 +378,11 @@ fn can_reemove_messages<'a>(
     for hash in hashes {
         signed.extend(hash);
     }
-    let verifying_key = VerifyingKey::<Sha256>::new(params.pub_key.clone());
-    verifying_key
-        .verify(
-            signed.as_ref(),
-            &rsa::pkcs1v15::Signature::try_from(&**signature).unwrap(),
-        )
+    let verifying_key = params
+        .pub_key_decoded()
+        .ok_or(ContractError::InvalidUpdate)?;
+    let sig = decode_ml_dsa_signature(signature)?;
+    MlDsaVerifier::verify(&verifying_key, signed.as_ref(), &sig)
         .map_err(|_err| ContractError::InvalidUpdate)?;
     Ok(())
 }
@@ -340,12 +394,11 @@ fn can_update_settings(
 ) -> Result<(), ContractError> {
     let serialized =
         serde_json::to_vec(settings).map_err(|e| ContractError::Deser(format!("{e}")))?;
-    let verifying_key = VerifyingKey::<Sha256>::from(params.pub_key.clone());
-    verifying_key
-        .verify(
-            &serialized,
-            &rsa::pkcs1v15::Signature::try_from(&**signature).unwrap(),
-        )
+    let verifying_key = params
+        .pub_key_decoded()
+        .ok_or(ContractError::InvalidUpdate)?;
+    let sig = decode_ml_dsa_signature(signature)?;
+    MlDsaVerifier::verify(&verifying_key, &serialized, &sig)
         .map_err(|_err| ContractError::InvalidUpdate)?;
     Ok(())
 }
@@ -480,26 +533,45 @@ impl ContractInterface for Inbox {
 #[cfg(all(feature = "contract", test))]
 mod tests {
     use super::*;
-    use rsa::{rand_core::OsRng, Pkcs1v15Sign, RsaPrivateKey};
+    use getrandom::SysRng;
+    use ml_dsa::{
+        signature::{rand_core::UnwrapErr, Keypair as MlDsaKeypair},
+        KeyGen,
+    };
 
     #[test]
     fn validate_test() -> Result<(), Box<dyn std::error::Error>> {
-        let private_key = RsaPrivateKey::new(&mut OsRng, 2048).unwrap();
-        let public_key = private_key.to_public_key();
+        // Generate a fresh ML-DSA-65 keypair for the inbox owner.
+        // `MlDsa65::key_gen` returns an `MlDsaSigningKey<MlDsa65>`, which
+        // is both the signer (via `Signer`) and the keypair (via
+        // `signature::Keypair` → `.verifying_key()`).
+        //
+        // `UnwrapErr<SysRng>` bridges getrandom's fallible `TryRng` API
+        // to rand_core's infallible `RngCore`, which is what
+        // `KeyGen::key_gen` takes.
+        let mut rng = UnwrapErr(SysRng);
+        let signing_key = MlDsa65::key_gen(&mut rng);
+        let verifying_key = MlDsaKeypair::verifying_key(&signing_key);
 
-        let params: Parameters = InboxParams {
-            pub_key: public_key.clone(),
-        }
-        .try_into()
-        .map_err(|e| format!("{e}"))
-        .unwrap();
-
-        use freenet_stdlib::prelude::blake3::traits::digest::Digest;
-        let digest = Sha256::digest(STATE_UPDATE).to_vec();
-        let signature = private_key
-            .sign(Pkcs1v15Sign::new::<Sha256>(), &digest)
+        let params: Parameters = InboxParams::from_verifying_key(&verifying_key)
+            .try_into()
+            .map_err(|e| format!("{e}"))
             .unwrap();
 
+        // Sign the fixed STATE_UPDATE salt — same payload the contract
+        // verifies on every state update.
+        let signature: ml_dsa::Signature<MlDsa65> =
+            MlDsaSigner::sign(&signing_key, STATE_UPDATE);
+        let signature_bytes = signature.encode().to_vec();
+
+        // Sanity-check the signature round-trips before we hand it to
+        // validate_state, so test failures point at the right layer.
+        MlDsaVerifier::verify(&verifying_key, STATE_UPDATE, &signature)
+            .expect("ML-DSA sanity check: sign/verify round trip");
+
+        // Construct a valid empty-inbox state, with the signature
+        // inlined as a JSON byte array (matching how `Signature =
+        // Box<[u8]>` serialises via serde_json).
         let state_bytes = format!(
             r#"{{
             "messages": [],
@@ -510,18 +582,10 @@ mod tests {
             }},
             "inbox_signature": {}
         }}"#,
-            serde_json::to_string(&signature).unwrap()
+            serde_json::to_string(&signature_bytes).unwrap()
         )
         .as_bytes()
         .to_vec();
-
-        let verifying_key = VerifyingKey::<Sha256>::new(public_key);
-        let sign = &rsa::pkcs1v15::Signature::try_from(signature.as_slice()).unwrap();
-
-        match verifying_key.verify(STATE_UPDATE, sign) {
-            Ok(_) => println!("successful verification"),
-            Err(e) => println!("verification error: {:?}", e),
-        };
 
         let is_valid = Inbox::validate_state(params, State::from(state_bytes), Default::default())?;
         assert!(is_valid == ValidateResult::Valid);

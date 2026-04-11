@@ -19,6 +19,7 @@ chrono = { workspace = true, features = ["wasmbind"] }
 dioxus = { workspace = true, features = ["web"] }
 futures = "0.3"
 rsa = { workspace = true }
+ml-dsa = { workspace = true }
 chacha20poly1305 = "0.10"
 serde = { workspace = true }
 serde_json = { workspace = true }

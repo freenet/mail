@@ -206,7 +206,7 @@ impl AftRecords {
         )?;
 
         let inbox_params: Parameters = InboxParams {
-            pub_key: recipient_key.clone(),
+            pub_key: crate::inbox::inbox_params_pub_key_bytes(&recipient_key),
         }
         .try_into()?;
         let inbox_key =
