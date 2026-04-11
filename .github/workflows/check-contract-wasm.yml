@@ -57,15 +57,15 @@ jobs:
 
       - name: Install cargo-make
         if: steps.cache-bins.outputs.cache-hit != 'true'
-        run: cargo binstall -y cargo-make
+        run: cargo binstall -y --force cargo-make
 
       - name: Install Dioxus CLI
         if: steps.cache-bins.outputs.cache-hit != 'true'
-        run: cargo binstall -y --version 0.7.3 dioxus-cli
+        run: cargo binstall -y --force --version 0.7.3 dioxus-cli
 
       - name: Install fdev
         if: steps.cache-bins.outputs.cache-hit != 'true'
-        run: cargo install fdev
+        run: cargo install --force fdev
 
       - name: Rebuild published contract from source
         run: cargo make update-published-contract
