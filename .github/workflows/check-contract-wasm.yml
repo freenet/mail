@@ -1,0 +1,75 @@
+name: Check Published Contract Drift
+
+on:
+  pull_request:
+    paths:
+      - 'contracts/web-container/**'
+      - 'common/**'
+      - 'ui/**'
+      - 'published-contract/**'
+      - 'test-contract/web-container-keys.toml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+  push:
+    branches: [main]
+    paths:
+      - 'contracts/web-container/**'
+      - 'common/**'
+      - 'ui/**'
+      - 'published-contract/**'
+      - 'test-contract/web-container-keys.toml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+
+jobs:
+  check-drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 2
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install GNU tar
+        run: sudo apt-get update && sudo apt-get install -y tar
+
+      - name: Install cargo-binstall
+        uses: cargo-bins/cargo-binstall@main
+
+      - name: Install cargo-make and dioxus-cli
+        run: |
+          cargo binstall -y cargo-make
+          cargo binstall -y dioxus-cli
+
+      - name: Install fdev
+        run: cargo install fdev
+
+      - name: Rebuild published contract from source
+        run: cargo make update-published-contract
+
+      - name: Compare rebuilt snapshot against committed
+        run: |
+          if ! git diff --exit-code -- published-contract/contract-id.txt; then
+            echo "❌ ERROR: published-contract/contract-id.txt drifted from source."
+            echo ""
+            echo "Contract sources (contracts/web-container, ui/, common/) or"
+            echo "the committed test key changed, but published-contract/ was"
+            echo "not refreshed. Run locally:"
+            echo ""
+            echo "  cargo make update-published-contract"
+            echo "  git add published-contract/"
+            echo "  git commit --amend --no-edit   # or a fresh commit"
+            echo ""
+            exit 1
+          fi
+          echo "✅ published-contract/ is in sync with source."
