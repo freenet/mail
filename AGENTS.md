@@ -31,9 +31,16 @@ cargo make run-node              # Start local Freenet node
 # Publishing pipeline (see "Publishing" section below)
 cargo make publish-email-test    # Sandbox publish with committed test key
 cargo make publish-email         # Production publish with uncommitted key
-cargo make update-published-contract  # Refresh published-contract/ snapshot
+cargo make update-published-contract       # Refresh test snapshot
+cargo make update-published-contract-prod  # Refresh production snapshot
 cargo make publish-all           # End-to-end test publish (build → sign → publish)
+cargo make publish-production    # End-to-end production publish
 cargo make publish               # Alias for publish-email-test
+
+# Release automation (see RELEASING.md)
+scripts/generate-production-key.sh       # One-time: generate prod ed25519 key
+scripts/release.sh <version>             # Full release: build → sign → publish → tag → push
+scripts/smoke-test-production.sh <url>   # Playwright suite against deployed webapp
 ```
 
 ### Repository Structure
@@ -87,6 +94,52 @@ freenet-email/
   Handles identity creation, message composition, encryption, and inbox display.
 - **AFT Integration**: Each sent message requires a token from the Anti-Flood
   Token system, preventing spam while preserving sender privacy.
+
+### Feature flag matrix
+
+The UI crate at `ui/Cargo.toml` exposes four features that compose to
+produce different builds. The cell shows whether that combination is a
+supported build target and what it's used for.
+
+| Flag          | Purpose                                                                                  |
+|---------------|------------------------------------------------------------------------------------------|
+| `use-node`    | Default. Enables the WebSocket bridge to a local Freenet node and all contract calls.    |
+| `example-data`| Seeds the UI with two mock identities (`address1`, `address2`) and mock inboxes.          |
+| `no-sync`     | Disables the WebSocket bridge entirely. Must be combined with `example-data` to be useful.|
+| `contract`    | (inbox crate, not ui) Enables the inbox contract's `ContractInterface` impl.             |
+
+**Supported combinations:**
+
+| Build                                                        | What it's for                                |
+|--------------------------------------------------------------|----------------------------------------------|
+| `cargo make build` (default: `use-node`)                     | Production release, talks to a real node    |
+| `cargo make dev-example` (`example-data,no-sync`)            | Offline dev loop, no node required           |
+| `cargo make build-ui-example-no-sync`                        | CI Playwright builds (same flags as above)   |
+| `cargo test -p freenet-email-inbox --features contract`      | Inbox contract integration tests (host)     |
+
+`example-data + use-node` is technically buildable but has no user —
+the app always reaches for the node when `use-node` is set. Use
+`no-sync` whenever you want offline mode.
+
+### Running a Freenet node
+
+There are two modes depending on what you're doing:
+
+| Mode                 | Command               | When to use                                                   |
+|----------------------|-----------------------|---------------------------------------------------------------|
+| **Local sandbox**    | `freenet local` (or `cargo make run-node`) | Developing contracts, running integration tests, publishing the test contract |
+| **Network-connected**| `freenet network`     | Production publish, smoke-testing the live webapp             |
+
+The local sandbox is entirely self-contained — it spins up a single-node
+network with no peers, so publishing to it doesn't propagate anywhere
+and can't be observed from other machines. It's the right target for
+`publish-email-test`, `publish-all`, and every Phase 3 / Phase 4
+automated test.
+
+The network-connected mode joins the real Freenet network and is the
+target for production publishes: `publish-email`, `publish-production`,
+and `scripts/release.sh`. The first publish takes ~30s to propagate
+before the gateway URL resolves.
 
 ### Testing
 
@@ -153,30 +206,37 @@ freenet-email/
 
 Production uses an **uncommitted** ed25519 keypair at
 `~/.config/freenet-email/web-container-keys.toml` (override with
-`WEB_CONTAINER_KEY_FILE=/path/to/keys.toml`). Generate it out of band
-on the release manager's machine:
+`WEB_CONTAINER_KEY_FILE=/path/to/keys.toml`).
+
+**One-time setup** — generate the key via the release script:
 
 ```bash
-mkdir -p ~/.config/freenet-email
-cargo run -p web-container-sign -- generate \
-  --output ~/.config/freenet-email/web-container-keys.toml
+scripts/generate-production-key.sh
 ```
 
-**Never commit this file.** Back it up offline; losing it means
-rotating the production contract ID.
+This writes the keypair with `chmod 600` and prints a reminder to back
+it up offline. **Never commit this file.** Losing it means rotating the
+production contract ID and every user losing access to the previous
+deployment.
 
-Then:
+**End-to-end release** — use the release driver:
 
 ```bash
-cargo make build
-cargo make publish-email
+scripts/release.sh 0.1.0
 ```
+
+See `RELEASING.md` for the full runbook, preconditions, and recovery
+procedures. Under the hood this runs `cargo make publish-production`,
+which chains `build` → `update-published-contract-prod` →
+`publish-email`.
 
 The production key produces a **different** contract ID than the test
 key, because the ID is `hash(wasm, parameters)` and the 32-byte
-`webapp.parameters` blob is the verifying key itself. Keep production
-`published-contract/` snapshots on a separate branch or tag if you
-need them reproducible.
+`webapp.parameters` blob is the verifying key itself. The committed
+`published-contract/contract-id.txt` is the one signed by the
+*production* key; the test snapshot lives in git history but gets
+overwritten by `cargo make update-published-contract-prod` on every
+real release.
 
 ### Reproducibility caveats
 
@@ -184,11 +244,11 @@ Two developers building from the same commit will produce the
 **same** `published-contract/contract-id.txt` only when all of these
 match:
 
-- **rustc version.** The release-profile WASM is not bit-for-bit
-  stable across rustc versions. Pin via `rust-toolchain.toml` if this
-  matters in your CI.
-- **Cargo release profile.** Already pinned in the workspace
-  `Cargo.toml` (`lto=true, codegen-units=1, strip=true, panic=abort`).
+- **rustc version.** Pinned in `rust-toolchain.toml` (stable channel).
+  CI uses the same pin; contributors on stable-latest will match CI
+  automatically.
+- **Cargo release profile.** Pinned in the workspace `Cargo.toml`
+  (`lto=true, codegen-units=1, strip=true, panic=abort`).
 - **GNU tar.** `compress-webapp` uses
   `tar --sort=name --mtime='2024-01-01 00:00:00 UTC' --owner=0 --group=0`
   for a reproducible archive. BSD tar (macOS default) **does not**
@@ -203,6 +263,7 @@ match:
 
 The `cargo make compress-webapp` target detects `gtar` / GNU `tar`
 automatically and emits a loud warning when falling back to BSD tar.
+`scripts/release.sh` errors out at preflight if GNU tar is missing.
 
 ### Security — committed test key
 
@@ -212,6 +273,37 @@ across clones. Anyone with read access to this repository can sign
 webapps under the test contract ID, but the key grants no access to
 any user data and must never be reused for production. See
 `test-contract/README.md` for the full threat model.
+
+### Regenerating test keys
+
+Two committed test keys live under `test-contract/`:
+
+1. **Web container signer** (`test-contract/web-container-keys.toml`) —
+   ed25519, used to sign test webapps. Produces the test
+   `published-contract/contract-id.txt`.
+2. **Identity delegate** (`test-contract/identity/identity-manager-key.*.pem`) —
+   P-384, used by the `identity-management` delegate. Stable across
+   test runs so generated `identity-manager-params` is reproducible.
+
+**To rotate the web-container test key:**
+
+```bash
+rm test-contract/web-container-keys.toml
+cargo make generate-web-container-keys
+cargo make update-published-contract   # regenerates contract-id.txt
+git add test-contract/web-container-keys.toml published-contract/
+git commit -m "chore: rotate committed web-container test key"
+```
+
+The test contract ID will change. CI `check-contract-wasm.yml` and any
+Phase 3 Playwright tests that embed the contract ID will pick up the
+new value automatically on next run.
+
+**To rotate the identity delegate key:** delete the files under
+`test-contract/identity/` and `modules/identity-management/build/identity-manager-params`,
+then re-run `cargo make generate-identity-params`. This changes the
+identity delegate's on-chain key, which is usually not what you want
+unless you're reproducing a specific upstream change.
 
 ## End-to-end testing
 
