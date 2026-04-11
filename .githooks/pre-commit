@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# Pre-commit hook: block stray WASM commits outside published-contract/.
+#
+# The only committed WASMs in this repo live at
+# `published-contract/web_container_contract.wasm`, and they should only
+# change alongside `published-contract/contract-id.txt`. Any other .wasm
+# file showing up in a commit is almost certainly an accidental `target/`
+# or `build/` artifact that slipped past .gitignore.
+
+set -euo pipefail
+
+# All staged .wasm files.
+WASM_FILES=$(git diff --cached --name-only --diff-filter=ACMR -- '*.wasm' 2>/dev/null || true)
+
+if [ -z "$WASM_FILES" ]; then
+    exit 0
+fi
+
+# Filter out the one file we allow: published-contract/web_container_contract.wasm.
+STRAY=$(echo "$WASM_FILES" | grep -v '^published-contract/web_container_contract\.wasm$' || true)
+
+if [ -z "$STRAY" ]; then
+    # Only the allowlisted WASM is staged. Require contract-id.txt to be
+    # staged alongside — otherwise we'd commit a new WASM without refreshing
+    # the contract ID, leaving the snapshot inconsistent.
+    CONTRACT_ID_STAGED=$(git diff --cached --name-only -- published-contract/contract-id.txt 2>/dev/null || true)
+    if [ -z "$CONTRACT_ID_STAGED" ]; then
+        echo ""
+        echo "🚫 BLOCKED: published-contract/web_container_contract.wasm is staged"
+        echo "   without published-contract/contract-id.txt."
+        echo ""
+        echo "The contract ID is hash(wasm, parameters); updating the WASM"
+        echo "without refreshing contract-id.txt leaves the snapshot in a"
+        echo "state where the committed ID no longer matches the committed WASM."
+        echo ""
+        echo "To fix:"
+        echo "  cargo make update-published-contract"
+        echo "  git add published-contract/"
+        echo ""
+        exit 1
+    fi
+    exit 0
+fi
+
+echo ""
+echo "🚫 BLOCKED: stray .wasm files are staged for commit outside published-contract/."
+echo ""
+echo "Staged stray WASM files:"
+echo "$STRAY" | sed 's/^/  /'
+echo ""
+echo "The only WASM file checked into this repo is"
+echo "published-contract/web_container_contract.wasm. Everything else is a"
+echo "build artifact that should stay in target/ or build/ (ignored by git)."
+echo ""
+echo "To unstage:"
+echo "  git restore --staged <file>"
+echo ""
+exit 1
