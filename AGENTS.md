@@ -341,6 +341,13 @@ between them — no Freenet node required. The Playwright tests
 exercise multi-turn cross-inbox messaging (compose → send → switch
 identity → verify delivery → reply).
 
+There's also `ui/tests/production-liveness.spec.ts`, a minimal
+browser-loads-and-mounts check used by
+`scripts/smoke-test-production.sh` against a deployed `use-node`
+webapp. It deliberately doesn't exercise identity creation or
+messaging — see `RELEASING.md` §"Post-release smoke test" for the
+scope and the rationale.
+
 ### Manual E2E checklist (against a local node)
 
 This checklist validates the pieces that unit tests and Playwright
