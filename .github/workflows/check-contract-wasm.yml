@@ -37,18 +37,34 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
 
+      - name: Cache cargo-installed binaries
+        id: cache-bins
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/cargo-make
+            ~/.cargo/bin/cargo-binstall
+            ~/.cargo/bin/fdev
+            ~/.cargo/bin/dx
+          key: ${{ runner.os }}-cargo-bins-fdev-0.3.201-dx-0.7.3-v3
+
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
       - name: Install cargo-binstall
+        if: steps.cache-bins.outputs.cache-hit != 'true'
         uses: taiki-e/install-action@cargo-binstall
 
-      - name: Install cargo-make and dioxus-cli
-        run: |
-          cargo binstall -y cargo-make
-          cargo binstall -y --version 0.7.3 dioxus-cli
+      - name: Install cargo-make
+        if: steps.cache-bins.outputs.cache-hit != 'true'
+        run: cargo binstall -y cargo-make
+
+      - name: Install Dioxus CLI
+        if: steps.cache-bins.outputs.cache-hit != 'true'
+        run: cargo binstall -y --version 0.7.3 dioxus-cli
 
       - name: Install fdev
+        if: steps.cache-bins.outputs.cache-hit != 'true'
         run: cargo install fdev
 
       - name: Rebuild published contract from source
