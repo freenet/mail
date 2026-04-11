@@ -26,6 +26,12 @@ on:
 jobs:
   check-drift:
     runs-on: ubuntu-latest
+    # Informational-only for now: the committed `published-contract/`
+    # snapshot was built on macOS; CI on Ubuntu will produce different
+    # WASM bytes until Phase 5 (#9) rebuilds the snapshot from CI and
+    # commits it. Until then, we want the diagnostic (did sources drift
+    # relative to the snapshot?) without blocking PRs.
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
         with:
@@ -46,7 +52,7 @@ jobs:
       - name: Install cargo-make and dioxus-cli
         run: |
           cargo binstall -y cargo-make
-          cargo binstall -y dioxus-cli
+          cargo binstall -y --version 0.7.3 dioxus-cli
 
       - name: Install fdev
         run: cargo install fdev

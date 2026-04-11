@@ -36,7 +36,7 @@ jobs:
         run: cargo install fdev
 
       - name: Install Dioxus CLI
-        run: cargo binstall -y dioxus-cli
+        run: cargo binstall -y --version 0.7.3 dioxus-cli
 
       - name: Build all contracts and UI
         run: cargo make build
@@ -73,7 +73,7 @@ jobs:
         run: cargo binstall -y cargo-make
 
       - name: Install Dioxus CLI
-        run: cargo binstall -y dioxus-cli
+        run: cargo binstall -y --version 0.7.3 dioxus-cli
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
