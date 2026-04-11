@@ -1,4 +1,6 @@
 use std::fmt::Display;
+#[cfg(feature = "example-data")]
+use std::collections::HashMap;
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use std::{borrow::Cow, cell::RefCell, rc::Rc};
@@ -21,6 +23,16 @@ use crate::{
 };
 
 mod login;
+
+// In-memory mailbox for offline (`example-data`, `!use-node`) mode.
+// Messages composed via `send_message` are stored here keyed by
+// recipient alias and picked up by `load_example_messages` when
+// the recipient logs in.
+#[cfg(feature = "example-data")]
+thread_local! {
+    static MOCK_SENT_MESSAGES: RefCell<HashMap<String, Vec<Message>>> =
+        RefCell::new(HashMap::new());
+}
 
 #[derive(Clone, Debug)]
 pub(crate) enum NodeAction {
@@ -237,6 +249,28 @@ impl InboxView {
                 futs.push(f.boxed_local());
             }
         }
+        #[cfg(all(feature = "example-data", not(feature = "use-node")))]
+        {
+            // In offline mode, deliver the message to an in-memory mailbox
+            // keyed by recipient alias so that switching identities reveals it.
+            if let Some(recipient_key) = content.to.first() {
+                if let Some(to_alias) = Identity::alias_for_public_key(recipient_key) {
+                    let msg = Message {
+                        id: 0, // reassigned on load
+                        from: content.from.clone().into(),
+                        title: content.title.clone().into(),
+                        content: content.content.clone().into(),
+                        read: false,
+                    };
+                    MOCK_SENT_MESSAGES.with(|map| {
+                        map.borrow_mut()
+                            .entry(to_alias.to_string())
+                            .or_default()
+                            .push(msg);
+                    });
+                }
+            }
+        }
         let _ = client;
         Ok(futs)
     }
@@ -248,10 +282,22 @@ impl InboxView {
         inbox_data: InboxesData,
     ) -> Result<LocalBoxFuture<'static, ()>, DynError> {
         tracing::debug!("removing messages: {ids:?}");
-        // FIXME: indexing by id fails cause all not aliases inboxes has been loaded initially
-        let inbox_data = inbox_data.load_full();
-        let mut inbox = inbox_data[**self.active_id.borrow()].borrow_mut();
-        inbox.remove_messages(client, ids)
+        // In offline mode the real `InboxesData` store is never populated,
+        // so skip the contract-state mutation and just return a no-op.
+        #[cfg(all(feature = "example-data", not(feature = "use-node")))]
+        {
+            let _ = client;
+            let _ = ids;
+            let _ = inbox_data;
+            return Ok(async {}.boxed_local());
+        }
+        #[cfg(not(all(feature = "example-data", not(feature = "use-node"))))]
+        {
+            // FIXME: indexing by id fails cause all not aliases inboxes has been loaded initially
+            let inbox_data = inbox_data.load_full();
+            let mut inbox = inbox_data[**self.active_id.borrow()].borrow_mut();
+            inbox.remove_messages(client, ids)
+        }
     }
 
     // Remove the messages from the inbox contract, and move them to local storage
@@ -282,7 +328,7 @@ impl InboxView {
             "Lorem ipsum dolor sit amet, consectetur adipiscing elit. \
              Sed do eiusmod tempor incidunt ut labore et dolore magna aliqua."
                 .into();
-        let emails = if id.id == UserId(0) {
+        let mut emails = if id.id == UserId(0) {
             vec![
                 Message {
                     id: 0,
@@ -324,6 +370,19 @@ impl InboxView {
                 },
             ]
         };
+        // Append any messages sent to this identity via the mock in-memory
+        // mailbox (composed in a previous session by another identity).
+        let alias = id.alias.to_string();
+        MOCK_SENT_MESSAGES.with(|map| {
+            if let Some(sent) = map.borrow_mut().remove(&alias) {
+                let base_id = emails.len() as u64;
+                for (i, mut msg) in sent.into_iter().enumerate() {
+                    msg.id = base_id + i as u64;
+                    emails.push(msg);
+                }
+            }
+        });
+
         self.messages.replace(emails);
         Ok(())
     }
@@ -354,24 +413,30 @@ impl User {
         // never leave the browser and are regenerated on every page load.
         let key0 = RsaPrivateKey::new(&mut OsRng, 2048).expect("rsa keygen");
         let key1 = RsaPrivateKey::new(&mut OsRng, 2048).expect("rsa keygen");
+        let identities = vec![
+            Identity {
+                alias: "address1".into(),
+                id: UserId(0),
+                description: "Mock identity (example-data)".into(),
+                key: key0,
+            },
+            Identity {
+                alias: "address2".into(),
+                id: UserId(1),
+                description: "Mock identity (example-data)".into(),
+                key: key1,
+            },
+        ];
+        // Register with the shared ALIASES store so IdentifiersList
+        // (which reads from ALIASES, not User.identities) sees them.
+        for id in &identities {
+            Identity::register_example(id.clone());
+        }
         User {
             logged: false,
             identified: true,
             active_id: None,
-            identities: vec![
-                Identity {
-                    alias: "address1".into(),
-                    id: UserId(0),
-                    description: "Mock identity (example-data)".into(),
-                    key: key0,
-                },
-                Identity {
-                    alias: "address2".into(),
-                    id: UserId(1),
-                    description: "Mock identity (example-data)".into(),
-                    key: key1,
-                },
-            ],
+            identities,
         }
     }
 

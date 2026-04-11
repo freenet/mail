@@ -83,6 +83,8 @@ freenet-email/
 ```bash
 cargo test --workspace              # All tests
 cargo test -p freenet-email-inbox   # Inbox contract tests only
+cargo make test-ui-playwright       # Playwright E2E tests (build + serve + test)
+cargo make test-ui-playwright-setup # One-time: install Playwright browsers
 ```
 
 ### Build Targets
@@ -200,3 +202,53 @@ across clones. Anyone with read access to this repository can sign
 webapps under the test contract ID, but the key grants no access to
 any user data and must never be reused for production. See
 `test-contract/README.md` for the full threat model.
+
+## End-to-end testing
+
+### Automated (Playwright)
+
+The Playwright suite at `ui/tests/` tests the UI in offline mode
+(`--features example-data,no-sync`) across 5 browser/viewport
+profiles: Desktop Chrome, Firefox, Safari, Pixel 5, iPhone 13.
+
+One-time setup:
+
+```bash
+cargo make test-ui-playwright-setup
+```
+
+Run the full suite (builds UI, starts dev server, runs tests, tears down):
+
+```bash
+cargo make test-ui-playwright
+```
+
+Or manually:
+
+```bash
+# Terminal 1: start the dev server
+cd ui && dx serve --port 8082 --features example-data,no-sync --no-default-features
+
+# Terminal 2: run tests
+cd ui/tests && npx playwright test
+```
+
+The `example-data` feature seeds two identities (`address1`,
+`address2`) with mock inboxes and supports in-memory message delivery
+between them — no Freenet node required. The Playwright tests
+exercise multi-turn cross-inbox messaging (compose → send → switch
+identity → verify delivery → reply).
+
+### Manual E2E checklist (against a local node)
+
+This checklist validates the pieces that unit tests and Playwright
+can't cover: real WebSocket framing, real AFT token mint/burn, real
+RSA encrypt/decrypt round trip through the inbox contract state.
+
+1. `cargo make run-node` in one terminal
+2. `cargo make publish-email-test` in another
+3. Open the published webapp URL in the browser
+4. Create identity A and identity B
+5. A sends a message to B (burns an AFT token)
+6. B receives, decrypts, and reads the message
+7. Token accounting check: A's remaining tokens decremented
