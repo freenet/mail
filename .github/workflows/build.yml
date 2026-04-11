@@ -27,18 +27,16 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Install cargo-binstall
-        uses: cargo-bins/cargo-binstall@main
+        uses: taiki-e/install-action@cargo-binstall
 
-      - name: Install cargo-make and fdev
-        run: |
-          cargo binstall -y cargo-make
-          cargo binstall -y --force freenet-fdev || cargo install fdev
+      - name: Install cargo-make
+        run: cargo binstall -y cargo-make
+
+      - name: Install fdev
+        run: cargo install fdev
 
       - name: Install Dioxus CLI
         run: cargo binstall -y dioxus-cli
-
-      - name: Install GNU tar (for reproducible webapp archive)
-        run: sudo apt-get update && sudo apt-get install -y tar
 
       - name: Build all contracts and UI
         run: cargo make build
@@ -69,7 +67,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Install cargo-binstall
-        uses: cargo-bins/cargo-binstall@main
+        uses: taiki-e/install-action@cargo-binstall
 
       - name: Install cargo-make
         run: cargo binstall -y cargo-make

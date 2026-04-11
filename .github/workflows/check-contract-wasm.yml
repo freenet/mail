@@ -40,11 +40,8 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      - name: Install GNU tar
-        run: sudo apt-get update && sudo apt-get install -y tar
-
       - name: Install cargo-binstall
-        uses: cargo-bins/cargo-binstall@main
+        uses: taiki-e/install-action@cargo-binstall
 
       - name: Install cargo-make and dioxus-cli
         run: |
@@ -59,8 +56,8 @@ jobs:
 
       - name: Compare rebuilt snapshot against committed
         run: |
-          if ! git diff --exit-code -- published-contract/contract-id.txt; then
-            echo "❌ ERROR: published-contract/contract-id.txt drifted from source."
+          if ! git diff --exit-code -- published-contract/; then
+            echo "❌ ERROR: published-contract/ drifted from source."
             echo ""
             echo "Contract sources (contracts/web-container, ui/, common/) or"
             echo "the committed test key changed, but published-contract/ was"
