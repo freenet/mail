@@ -20,14 +20,27 @@ args = ["clean"]
 
 [tasks.build-inbox-contract]
 description = "Build the inbox contract WASM + code hash"
+script_runner = "bash"
 script = '''
 set -euo pipefail
 cd "${CARGO_MAKE_WORKING_DIRECTORY}/contracts/inbox"
 CARGO_TARGET_DIR="${CARGO_MAKE_WORKING_DIRECTORY}/target" fdev build --features contract
+# Extract the code hash and write it to <repo>/build/inbox_code_hash
+# where `ui/src/inbox.rs:50` includes it via `include_str!("../../build/inbox_code_hash")`.
+# fdev's `build` command writes the WASM but not the `*_code_hash`
+# text file, so we call `fdev inspect` separately (same pattern as
+# the token-allocation-record / token-generator tasks below).
+hash=$(CARGO_TARGET_DIR="${CARGO_MAKE_WORKING_DIRECTORY}/target" fdev inspect \
+    build/freenet/freenet_email_inbox code | \
+    grep 'code hash:' | cut -d' ' -f3)
+mkdir -p "${CARGO_MAKE_WORKING_DIRECTORY}/build"
+printf '%s' "$hash" > "${CARGO_MAKE_WORKING_DIRECTORY}/build/inbox_code_hash"
+echo "wrote build/inbox_code_hash: $hash"
 '''
 
 [tasks.build-token-allocation-record]
 description = "Build token-allocation-record contract WASM + code hash"
+script_runner = "bash"
 script = '''
 set -euo pipefail
 CRATE_DIR="${CARGO_MAKE_WORKING_DIRECTORY}/modules/antiflood-tokens/contracts/token-allocation-record"
@@ -45,6 +58,7 @@ echo "wrote build/token_allocation_record_code_hash: $hash"
 
 [tasks.build-token-generator]
 description = "Build token-generator delegate WASM + code hash"
+script_runner = "bash"
 script = '''
 set -euo pipefail
 CRATE_DIR="${CARGO_MAKE_WORKING_DIRECTORY}/modules/antiflood-tokens/delegates/token-generator"
@@ -61,6 +75,7 @@ echo "wrote build/token_generator_code_hash: $hash"
 
 [tasks.build-identity-management-delegate]
 description = "Build identity-management delegate WASM + code hash"
+script_runner = "bash"
 script = '''
 set -euo pipefail
 CRATE_DIR="${CARGO_MAKE_WORKING_DIRECTORY}/modules/identity-management"
@@ -80,6 +95,7 @@ echo "wrote build/identity_management_code_hash: $hash"
 
 [tasks.generate-identity-params]
 description = "Generate the test identity-manager keypair and serialized params"
+script_runner = "bash"
 script = '''
 set -euo pipefail
 CRATE_DIR="${CARGO_MAKE_WORKING_DIRECTORY}/modules/identity-management"
@@ -115,6 +131,7 @@ echo "wrote $OUT_DIR/identity-manager-params"
 
 [tasks.generate-web-container-keys]
 description = "Generate a fresh ed25519 keypair for the web-container publish pipeline"
+script_runner = "bash"
 script = '''
 set -euo pipefail
 KEY_FILE="${CARGO_MAKE_WORKING_DIRECTORY}/test-contract/web-container-keys.toml"
@@ -199,6 +216,7 @@ cwd = "./ui"
 [tasks.compress-webapp]
 description = "Compress the built webapp into target/webapp/webapp.tar.xz"
 dependencies = ["build-ui"]
+script_runner = "bash"
 script = '''
 set -euo pipefail
 ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
@@ -244,6 +262,7 @@ echo "wrote $ROOT/target/webapp/webapp.tar.xz ($(wc -c < "$ROOT/target/webapp/we
 [tasks.sign-webapp-test]
 description = "Sign the compressed webapp with the committed test keypair"
 dependencies = ["compress-webapp"]
+script_runner = "bash"
 script = '''
 set -euo pipefail
 ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
@@ -276,6 +295,7 @@ cargo run --quiet -p web-container-sign -- sign \
 [tasks.sign-webapp]
 description = "Sign the compressed webapp with the production keypair"
 dependencies = ["compress-webapp"]
+script_runner = "bash"
 script = '''
 set -euo pipefail
 ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
@@ -304,6 +324,7 @@ cargo run --quiet -p web-container-sign -- sign \
 [tasks.update-published-contract]
 description = "Copy the signed test artifacts into published-contract/ and record the contract ID"
 dependencies = ["sign-webapp-test", "build-web-container"]
+script_runner = "bash"
 script = '''
 set -euo pipefail
 ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
@@ -344,6 +365,7 @@ echo "commit these changes with a message referencing the release in #6 / #9."
 [tasks.publish-email-test]
 description = "Publish the test build of the webapp to a local Freenet node"
 dependencies = ["sign-webapp-test", "build-web-container"]
+script_runner = "bash"
 script = '''
 set -euo pipefail
 ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
@@ -368,6 +390,7 @@ fdev publish \
 [tasks.publish-email]
 description = "Publish the production build of the webapp to Freenet"
 dependencies = ["sign-webapp", "build-web-container"]
+script_runner = "bash"
 script = '''
 set -euo pipefail
 ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
@@ -399,6 +422,7 @@ dependencies = ["publish-email-test"]
 
 [tasks.run-node]
 description = "Run Freenet local node"
+script_runner = "bash"
 script = '''
 RUST_BACKTRACE=1 RUST_LOG=freenet=debug,freenet_core=debug,info freenet local
 '''
@@ -427,6 +451,7 @@ args = ["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"]
 
 [tasks.test-ui-playwright-setup]
 description = "Install Playwright browsers and dependencies (one-time setup)"
+script_runner = "bash"
 script = '''
 cd "${CARGO_MAKE_WORKING_DIRECTORY}/ui/tests" && npm install && npx playwright install --with-deps chromium firefox webkit
 '''
@@ -434,6 +459,7 @@ cd "${CARGO_MAKE_WORKING_DIRECTORY}/ui/tests" && npm install && npx playwright i
 [tasks.test-ui-playwright]
 description = "Build offline UI, start dev server, run Playwright tests, tear down"
 dependencies = ["build-ui-example-no-sync"]
+script_runner = "bash"
 script = '''
 set -euo pipefail
 ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"

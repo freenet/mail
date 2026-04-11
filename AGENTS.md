@@ -5,6 +5,16 @@
 Decentralized email application built on Freenet. Uses Dioxus for the web UI,
 WASM contracts for inbox storage, and Anti-Flood Tokens (AFT) for rate limiting.
 
+## One-time setup
+
+```bash
+git config core.hooksPath .githooks   # Enable repo-local git hooks
+```
+
+The pre-commit hook blocks stray `.wasm` commits outside
+`published-contract/` and requires `contract-id.txt` to be staged
+alongside any WASM change.
+
 ## Quick Reference
 
 ### Commands

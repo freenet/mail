@@ -1,0 +1,96 @@
+name: Check Published Contract Drift
+
+on:
+  pull_request:
+    paths:
+      - 'contracts/web-container/**'
+      - 'common/**'
+      - 'ui/**'
+      - 'published-contract/**'
+      - 'test-contract/web-container-keys.toml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+  push:
+    branches: [main]
+    paths:
+      - 'contracts/web-container/**'
+      - 'common/**'
+      - 'ui/**'
+      - 'published-contract/**'
+      - 'test-contract/web-container-keys.toml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+
+jobs:
+  check-drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 2
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo-installed binaries
+        id: cache-bins
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/cargo-make
+            ~/.cargo/bin/cargo-binstall
+            ~/.cargo/bin/fdev
+            ~/.cargo/bin/dx
+          key: ${{ runner.os }}-cargo-bins-fdev-0.3.201-dx-0.7.3-v3
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-binstall
+        if: steps.cache-bins.outputs.cache-hit != 'true'
+        uses: taiki-e/install-action@cargo-binstall
+
+      - name: Install cargo-make
+        if: steps.cache-bins.outputs.cache-hit != 'true'
+        run: cargo binstall -y --force cargo-make
+
+      - name: Install Dioxus CLI
+        if: steps.cache-bins.outputs.cache-hit != 'true'
+        run: cargo binstall -y --force --version 0.7.3 dioxus-cli
+
+      - name: Install fdev
+        if: steps.cache-bins.outputs.cache-hit != 'true'
+        run: cargo install --force fdev
+
+      - name: Rebuild published contract from source
+        run: cargo make update-published-contract
+
+      - name: Compare rebuilt snapshot against committed
+        run: |
+          # NOTE: this step is informational-only until Phase 5 (#9)
+          # rebuilds the `published-contract/` snapshot from CI. The
+          # committed snapshot was produced on macOS; Ubuntu-produced
+          # WASM will differ byte-for-byte from it until the snapshot
+          # is rebuilt on Linux and committed. We print the diff as a
+          # warning and exit 0 so the job reports green.
+          if ! git diff --exit-code -- published-contract/; then
+            echo "::warning::published-contract/ drifted from source."
+            echo ""
+            echo "This is expected until Phase 5 (#9) rebuilds the"
+            echo "committed snapshot on Linux CI. The diagnostic below"
+            echo "will become actionable once that lands:"
+            echo ""
+            git diff -- published-contract/ || true
+            echo ""
+            echo "To refresh manually:"
+            echo "  cargo make update-published-contract"
+            echo "  git add published-contract/"
+            echo ""
+            exit 0
+          fi
+          echo "✅ published-contract/ is in sync with source."
