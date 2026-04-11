@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run the Playwright E2E suite against a deployed freenet-email webapp.
+# Production liveness check for a deployed freenet-email webapp.
 #
 # Usage:
 #     scripts/smoke-test-production.sh <gateway-url>
@@ -7,21 +7,35 @@
 # Example:
 #     scripts/smoke-test-production.sh http://127.0.0.1:50509/contract/web/<contract-id>/
 #
-# Defaults the gateway URL to the local `freenet network` node serving
-# the contract id from `published-contract/contract-id.txt` if no argument
-# is provided.
+# With no argument, defaults to the local `freenet network` gateway
+# serving the contract id from `published-contract/contract-id.txt`.
 #
-# What this exercises:
-#   • The Playwright spec at ui/tests/email-app.spec.ts (same 7 scenarios
-#     that run against the local dev server in offline mode), pointed at
-#     the real gateway instead of a dx serve on localhost:8082.
-#   • Rendering, identity seeding, compose, and in-memory cross-inbox
-#     messaging — i.e., the full offline UI contract, as served by the
-#     real webapp contract. Does NOT exercise real AFT token mint/burn or
-#     real inbox contract state (that's the manual live-node checklist in
-#     AGENTS.md §End-to-end testing).
+# ─── Scope ─────────────────────────────────────────────────────────────────
 #
-# Exit code: non-zero if any Playwright test fails.
+# This runs `ui/tests/production-liveness.spec.ts` against the deployed
+# webapp. The spec is intentionally MINIMAL:
+#
+#   • Proves the publish pipeline didn't corrupt bytes (gateway serves
+#     the webapp, WASM loads, Dioxus mounts, login screen renders).
+#   • Runs in ~15s across all five browser profiles.
+#
+# What it explicitly does NOT cover:
+#
+#   • Real identity creation (RSA keygen + inbox contract put)
+#   • Real AFT token mint/burn
+#   • Real message send/receive round trip
+#
+# The production webapp is a `use-node` build — it expects a running
+# Freenet node to do anything user-facing — so a Playwright test that
+# loads it from a gateway and clicks "Create new identity" would need
+# to also spin up a disposable `freenet local` node, publish the test
+# contract to it, and wait through RSA-4096 keygen + contract-put
+# propagation. That's what `ui/tests/live-node.spec.ts` + `cargo make
+# test-ui-live` do (see Phase 5 PR B).
+#
+# The manual 7-step checklist in AGENTS.md §"End-to-end testing" is
+# the human-driven equivalent of the live-node test and is still the
+# canonical acceptance gate for a real release.
 
 set -euo pipefail
 
@@ -42,7 +56,7 @@ if [ -z "$GATEWAY_URL" ]; then
     echo "  $GATEWAY_URL"
 fi
 
-# Sanity check: the gateway should return SOMETHING.
+# Sanity check: the gateway should return something.
 if ! curl -sf -o /dev/null "$GATEWAY_URL" 2>/dev/null; then
     echo "error: $GATEWAY_URL is not responding" >&2
     echo "" >&2
@@ -61,12 +75,18 @@ if [ ! -d "ui/tests/node_modules" ]; then
 fi
 
 echo ""
-echo "═══ Running Playwright smoke tests against production ═════════════"
+echo "═══ Production liveness check ═════════════════════════════════════"
 echo "  baseURL: $GATEWAY_URL"
+echo "  spec:    ui/tests/production-liveness.spec.ts"
 echo ""
 
 cd "$REPO_ROOT/ui/tests"
-FREENET_EMAIL_BASE_URL="$GATEWAY_URL" npx playwright test
+FREENET_EMAIL_BASE_URL="$GATEWAY_URL" npx playwright test production-liveness.spec.ts
 
 echo ""
-echo "✅ smoke test passed against $GATEWAY_URL"
+echo "✅ liveness check passed against $GATEWAY_URL"
+echo ""
+echo "For the full end-to-end round trip (create identities, send,"
+echo "receive, burn AFT tokens), run the manual checklist in"
+echo "AGENTS.md §\"End-to-end testing\" or wait for the automated"
+echo "live-node test landing in Phase 5 PR B."

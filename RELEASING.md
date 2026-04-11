@@ -150,14 +150,45 @@ Pass an explicit gateway URL to test against a remote peer:
 scripts/smoke-test-production.sh http://some-peer.example:50509/contract/web/<id>/
 ```
 
-The script runs the full Playwright spec at `ui/tests/email-app.spec.ts`
-against the deployed webapp, exercising identity rendering, inbox
-display, multi-turn cross-inbox messaging, and sandboxed iframe
-embedding. This is NOT a live-node contract-state test — real AFT
-token mint/burn and real inbox contract round trips are covered by the
-manual checklist in AGENTS.md §"End-to-end testing".
+### What the smoke test covers
 
-Post the result as a comment on the release tracking issue.
+`smoke-test-production.sh` runs
+`ui/tests/production-liveness.spec.ts` against the deployed webapp
+across all five browser profiles. The spec is intentionally minimal:
+
+- The gateway serves the webapp
+- The WASM bundle loads
+- Dioxus mounts and renders the "Freenet Email" header
+- The login screen shows the "Create new identity" link
+
+What it catches: every failure mode in the publish pipeline that
+results in a webapp that won't boot — corrupted tar archive, wrong
+signature, stale contract id, routing misconfiguration.
+
+### What the smoke test does NOT cover
+
+The production webapp is a `use-node` build and can only do
+user-facing work (create an identity, send a message, receive a
+message) when attached to a real Freenet node that has the inbox,
+AFT, and identity-management contracts published. Exercising that
+flow requires spinning up a disposable `freenet local` node alongside
+the test, which is out of scope for `smoke-test-production.sh`.
+
+There are two ways to cover the real round trip:
+
+1. **Automated**: `cargo make test-ui-live` runs
+   `ui/tests/live-node.spec.ts` against a fresh `freenet local` node
+   with a disposable data directory. This exercises real RSA keygen,
+   real inbox contract puts, real AFT token burn, and real decrypted
+   message delivery between two identities in a single browser
+   session. Safe to run on every CI build because it's fully
+   isolated from the real network.
+2. **Manual**: the 7-step checklist in AGENTS.md §"End-to-end
+   testing", run against a real `freenet network` node. This is the
+   canonical acceptance gate for a real release.
+
+Post the liveness result and whichever of (1) or (2) you ran as a
+comment on the release tracking issue.
 
 ## Recovery
 
