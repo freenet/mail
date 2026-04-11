@@ -25,6 +25,17 @@ script = '''
 set -euo pipefail
 cd "${CARGO_MAKE_WORKING_DIRECTORY}/contracts/inbox"
 CARGO_TARGET_DIR="${CARGO_MAKE_WORKING_DIRECTORY}/target" fdev build --features contract
+# Extract the code hash and write it to <repo>/build/inbox_code_hash
+# where `ui/src/inbox.rs:50` includes it via `include_str!("../../build/inbox_code_hash")`.
+# fdev's `build` command writes the WASM but not the `*_code_hash`
+# text file, so we call `fdev inspect` separately (same pattern as
+# the token-allocation-record / token-generator tasks below).
+hash=$(CARGO_TARGET_DIR="${CARGO_MAKE_WORKING_DIRECTORY}/target" fdev inspect \
+    build/freenet/freenet_email_inbox code | \
+    grep 'code hash:' | cut -d' ' -f3)
+mkdir -p "${CARGO_MAKE_WORKING_DIRECTORY}/build"
+printf '%s' "$hash" > "${CARGO_MAKE_WORKING_DIRECTORY}/build/inbox_code_hash"
+echo "wrote build/inbox_code_hash: $hash"
 '''
 
 [tasks.build-token-allocation-record]
