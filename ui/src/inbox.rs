@@ -20,16 +20,74 @@ use freenet_stdlib::{
 };
 use futures::future::LocalBoxFuture;
 use futures::FutureExt;
-use rsa::{
-    pkcs1v15::SigningKey, sha2::Sha256, signature::Signer, Pkcs1v15Encrypt, RsaPrivateKey,
-    RsaPublicKey,
+use ml_dsa::{
+    signature::{Keypair as MlDsaKeypair, Signer as MlDsaSigner},
+    KeyGen, MlDsa65, SigningKey as MlDsaSigningKey,
 };
+use rsa::{Pkcs1v15Encrypt, RsaPrivateKey, RsaPublicKey};
 use serde::{Deserialize, Serialize};
 
 use freenet_email_inbox::{
     Inbox as StoredInbox, InboxParams, InboxSettings as StoredSettings, Message as StoredMessage,
     UpdateInbox,
 };
+
+/// Derive an ML-DSA-65 seed deterministically from the RSA *public* key.
+///
+/// The seed is `BLAKE3(DER(RsaPublicKey))`. Using the public key (not the
+/// private key) means both the inbox owner (who holds the private key,
+/// extracts the public half, derives) and anyone sending to them (who
+/// only knows the public key) compute the **same** seed, which means the
+/// **same** ML-DSA verifying key, which means the **same** inbox contract
+/// id via `hash(wasm, params)`.
+///
+/// This is a **Stage 1 bridge** (#18). Stage 2 rewrites identity
+/// provisioning to generate a real dual keypair (ML-KEM + ML-DSA) at
+/// identity-creation time and stores both in the identity-management
+/// delegate, retiring this derivation. The goal of Stage 1 is to migrate
+/// the on-chain signature scheme without touching the identity storage
+/// layer or the UI identity-creation flow.
+///
+/// Security note: an RSA public key has far more than 32 bytes of
+/// entropy, so BLAKE3 produces a random-oracle-quality seed. The
+/// derivation is not "one-way" in any useful sense — anyone who knows
+/// the RSA public key can compute the ML-DSA verifying key — but that's
+/// fine: the verifying key is public by construction.
+pub(crate) fn ml_dsa_seed_from_rsa_pub(rsa_pub: &RsaPublicKey) -> [u8; 32] {
+    use rsa::pkcs1::EncodeRsaPublicKey;
+    let der = rsa_pub
+        .to_pkcs1_der()
+        .expect("RSA public key → PKCS#1 DER round-trip should never fail");
+    // `freenet_stdlib::prelude::blake3` produces a `GenericArray<u8, U32>`
+    // with an `as_slice()` → `&[u8]` view rather than an `as_bytes() →
+    // &[u8; 32]` method. Take the first 32 bytes explicitly.
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(der.as_bytes());
+    let out = hasher.finalize();
+    let slice = out.as_slice();
+    let mut seed = [0u8; 32];
+    seed.copy_from_slice(&slice[..32]);
+    seed
+}
+
+/// The owner-side derivation: compute the ML-DSA signing key for the
+/// inbox whose RSA private key is `rsa_key`. Extracts the public half
+/// and uses the shared seed derivation.
+pub(crate) fn ml_dsa_signing_key_from_rsa(rsa_key: &RsaPrivateKey) -> MlDsaSigningKey<MlDsa65> {
+    let seed = ml_dsa_seed_from_rsa_pub(&rsa_key.to_public_key());
+    <MlDsa65 as KeyGen>::from_seed(&seed.into())
+}
+
+/// The encoded `InboxParams.pub_key` bytes for the inbox owned by an
+/// identity whose RSA public key is `rsa_pub`. Used by both senders
+/// (who only have the recipient's public key) and the owner (who
+/// passes in `self.private_key.to_public_key()`).
+pub(crate) fn inbox_params_pub_key_bytes(rsa_pub: &RsaPublicKey) -> Vec<u8> {
+    let seed = ml_dsa_seed_from_rsa_pub(rsa_pub);
+    let signing_key: MlDsaSigningKey<MlDsa65> = <MlDsa65 as KeyGen>::from_seed(&seed.into());
+    let verifying_key = MlDsaKeypair::verifying_key(&signing_key);
+    verifying_key.encode().to_vec()
+}
 
 use crate::{
     aft::AftRecords,
@@ -189,7 +247,7 @@ impl DecryptedMessage {
         let delegate_key =
             AftRecords::assign_token(client, recipient_key.clone(), from, hash).await?;
         let params = InboxParams {
-            pub_key: recipient_key,
+            pub_key: inbox_params_pub_key_bytes(&recipient_key),
         }
         .try_into()
         .map_err(|e| format!("{e}"))?;
@@ -308,7 +366,7 @@ impl InboxModel {
         }
 
         fn get_key(identity: &Identity) -> Result<ContractKey, DynError> {
-            let pub_key = identity.key.to_public_key();
+            let pub_key = inbox_params_pub_key_bytes(&identity.key.to_public_key());
             let params = freenet_email_inbox::InboxParams { pub_key }
                 .try_into()
                 .map_err(|e| format!("{e}"))?;
@@ -350,7 +408,7 @@ impl InboxModel {
         id: &Identity,
     ) -> Result<ContractKey, DynError> {
         let params = InboxParams {
-            pub_key: id.key.to_public_key(),
+            pub_key: inbox_params_pub_key_bytes(&id.key.to_public_key()),
         }
         .try_into()
         .map_err(|e| format!("{e}"))?;
@@ -397,8 +455,9 @@ impl InboxModel {
         self.remove_received_message(ids);
         #[cfg(feature = "use-node")]
         {
-            let signing_key = SigningKey::<Sha256>::new(self.settings.private_key.clone());
-            let signature: Box<[u8]> = signing_key.sign(&signed).into();
+            let signing_key = ml_dsa_signing_key_from_rsa(&self.settings.private_key);
+            let ml_sig: ml_dsa::Signature<MlDsa65> = MlDsaSigner::sign(&signing_key, &signed);
+            let signature: Box<[u8]> = ml_sig.encode().to_vec().into_boxed_slice();
             let delta: UpdateInbox = UpdateInbox::RemoveMessages {
                 signature,
                 ids: to_rm_message_id,
@@ -445,7 +504,8 @@ impl InboxModel {
             .iter()
             .map(|m| m.to_stored(&self.settings.private_key))
             .collect::<Result<Vec<_>, _>>()?;
-        let inbox = StoredInbox::new(&self.settings.private_key, settings, messages);
+        let ml_dsa_key = ml_dsa_signing_key_from_rsa(&self.settings.private_key);
+        let inbox = StoredInbox::new(&ml_dsa_key, settings, messages);
         let serialized = serde_json::to_vec(&inbox)?;
         Ok(serialized.into())
     }
@@ -514,8 +574,9 @@ impl InboxModel {
     ) -> Result<(), DynError> {
         let settings = self.settings.to_stored()?;
         let serialized = serde_json::to_vec(&settings)?;
-        let signing_key = SigningKey::<Sha256>::new(self.settings.private_key.clone());
-        let signature = signing_key.sign(&serialized).into();
+        let signing_key = ml_dsa_signing_key_from_rsa(&self.settings.private_key);
+        let ml_sig: ml_dsa::Signature<MlDsa65> = MlDsaSigner::sign(&signing_key, &serialized);
+        let signature: Box<[u8]> = ml_sig.encode().to_vec().into_boxed_slice();
         let delta = UpdateInbox::ModifySettings {
             signature,
             settings,
@@ -563,7 +624,7 @@ mod tests {
     impl InboxModel {
         fn new(private_key: RsaPrivateKey) -> Result<Self, DynError> {
             let params = InboxParams {
-                pub_key: private_key.to_public_key(),
+                pub_key: inbox_params_pub_key_bytes(&private_key.to_public_key()),
             };
             Ok(Self {
                 messages: vec![],

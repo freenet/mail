@@ -12,9 +12,10 @@ mod common;
 
 use chrono::{Duration, Utc};
 use common::{
-    add_messages_delta, assignment_hash_for, fixed_valid_slot, make_inbox_state,
-    make_inbox_value, make_keypair, make_message, make_params, make_token_assignment,
-    make_token_record, related_state_update, token_record_id_for,
+    add_messages_delta, assignment_hash_for, fixed_valid_slot, inbox_verifying_key,
+    make_inbox_keypair, make_inbox_state, make_inbox_value, make_message, make_params,
+    make_token_assignment, make_token_generator_keypair, make_token_record,
+    related_state_update, token_record_id_for,
 };
 use freenet_aft_interface::Tier;
 use freenet_email_inbox::{Inbox, InboxSettings};
@@ -26,8 +27,9 @@ use freenet_stdlib::prelude::{
 
 #[test]
 fn validate_accepts_signed_empty_inbox() {
-    let (owner_sk, owner_pk) = make_keypair();
-    let params = make_params(owner_pk);
+    let owner_sk = make_inbox_keypair();
+    let owner_vk = inbox_verifying_key(&owner_sk);
+    let params = make_params(&owner_vk);
     let state = make_inbox_state(
         &owner_sk,
         vec![],
@@ -46,8 +48,9 @@ fn validate_accepts_signed_empty_inbox() {
 
 #[test]
 fn validate_rejects_tampered_last_update() {
-    let (owner_sk, owner_pk) = make_keypair();
-    let params = make_params(owner_pk);
+    let owner_sk = make_inbox_keypair();
+    let owner_vk = inbox_verifying_key(&owner_sk);
+    let params = make_params(&owner_vk);
 
     // Build a signed inbox, then mutate `last_update` post-signing. The
     // signature itself doesn't cover `last_update` (it covers a fixed salt),
@@ -76,11 +79,12 @@ fn validate_rejects_tampered_last_update() {
 
 #[test]
 fn validate_rejects_wrong_owner_signature() {
-    // Sign with `attacker_sk` but advertise `owner_pk` in the parameters —
-    // the verifier should reject.
-    let (_owner_sk, owner_pk) = make_keypair();
-    let (attacker_sk, _attacker_pk) = make_keypair();
-    let params = make_params(owner_pk);
+    // Sign with `attacker_sk` but advertise the real owner's verifying
+    // key in the parameters — the verifier should reject.
+    let owner_sk = make_inbox_keypair();
+    let owner_vk = inbox_verifying_key(&owner_sk);
+    let attacker_sk = make_inbox_keypair();
+    let params = make_params(&owner_vk);
     let state = make_inbox_state(
         &attacker_sk,
         vec![],
@@ -102,9 +106,10 @@ fn validate_rejects_wrong_owner_signature() {
 
 #[test]
 fn update_accepts_add_message_with_valid_token() {
-    let (owner_sk, owner_pk) = make_keypair();
-    let (gen_sk, _gen_pk) = make_keypair();
-    let params = make_params(owner_pk);
+    let owner_sk = make_inbox_keypair();
+    let owner_vk = inbox_verifying_key(&owner_sk);
+    let (gen_sk, _gen_pk) = make_token_generator_keypair();
+    let params = make_params(&owner_vk);
 
     let token_record_id = token_record_id_for(b"valid-token-record");
     let assignment = make_token_assignment(
@@ -148,9 +153,10 @@ fn update_rejects_message_with_unknown_token_record() {
     // AddMessages without a corresponding RelatedState carrying the token
     // allocation record: `update_state` should report the missing record
     // via `requires(...)` rather than persisting the message.
-    let (owner_sk, owner_pk) = make_keypair();
-    let (gen_sk, _) = make_keypair();
-    let params = make_params(owner_pk);
+    let owner_sk = make_inbox_keypair();
+    let owner_vk = inbox_verifying_key(&owner_sk);
+    let (gen_sk, _) = make_token_generator_keypair();
+    let params = make_params(&owner_vk);
 
     let token_record_id = token_record_id_for(b"unknown-record");
     let assignment = make_token_assignment(
@@ -182,9 +188,10 @@ fn update_rejects_message_with_unknown_token_record() {
 fn update_rejects_token_with_invalid_slot() {
     // `Tier::Min1` requires the time slot to land on `:00.000`. Use a slot
     // with a non-zero second to trip `is_valid_slot` inside `add_message`.
-    let (owner_sk, owner_pk) = make_keypair();
-    let (gen_sk, _) = make_keypair();
-    let params = make_params(owner_pk);
+    let owner_sk = make_inbox_keypair();
+    let owner_vk = inbox_verifying_key(&owner_sk);
+    let (gen_sk, _) = make_token_generator_keypair();
+    let params = make_params(&owner_vk);
 
     let token_record_id = token_record_id_for(b"bad-slot-record");
     let bad_slot = fixed_valid_slot() + Duration::seconds(13);
@@ -222,9 +229,10 @@ fn update_rejects_token_with_invalid_slot() {
 
 #[test]
 fn summarize_then_delta_yields_only_new_messages() {
-    let (owner_sk, owner_pk) = make_keypair();
-    let (gen_sk, _) = make_keypair();
-    let params = make_params(owner_pk.clone());
+    let owner_sk = make_inbox_keypair();
+    let owner_vk = inbox_verifying_key(&owner_sk);
+    let (gen_sk, _) = make_token_generator_keypair();
+    let params = make_params(&owner_vk);
 
     let token_record_id = token_record_id_for(b"round-trip-record");
     let assignment_old = make_token_assignment(
@@ -251,13 +259,13 @@ fn summarize_then_delta_yields_only_new_messages() {
     // Summarize: returns the set of `assignment_hash` values currently in
     // the inbox.
     let summary =
-        Inbox::summarize_state(make_params(owner_pk.clone()), state.clone())
+        Inbox::summarize_state(make_params(&owner_vk), state.clone())
             .expect("summarize_state");
 
     // Delta against an empty summary: every message in the state should
     // appear in the delta.
     let empty_summary =
-        Inbox::summarize_state(make_params(owner_pk.clone()), make_inbox_state(
+        Inbox::summarize_state(make_params(&owner_vk), make_inbox_state(
             &owner_sk,
             vec![],
             Utc::now(),

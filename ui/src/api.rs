@@ -224,10 +224,19 @@ mod inbox_management {
         private_key: RsaPrivateKey,
     ) -> Result<ContractKey, DynError> {
         let pub_key = private_key.to_public_key();
-        let params: Parameters = InboxParams { pub_key }.try_into()?;
+        // Stage 1 (#18) bridge: derive an ML-DSA-65 signing key from the
+        // RSA public key via BLAKE3 so the contract id (`hash(wasm,
+        // params)`) is stable for this identity without touching the
+        // identity-management delegate's RSA-only schema. See the helpers
+        // in `crate::inbox`.
+        let params: Parameters = InboxParams {
+            pub_key: crate::inbox::inbox_params_pub_key_bytes(&pub_key),
+        }
+        .try_into()?;
+        let ml_dsa_key = crate::inbox::ml_dsa_signing_key_from_rsa(&private_key);
         let state = {
             let inbox =
-                freenet_email_inbox::Inbox::new(&private_key, InboxSettings::default(), Vec::new());
+                freenet_email_inbox::Inbox::new(&ml_dsa_key, InboxSettings::default(), Vec::new());
             inbox.serialize()?
         };
         let contract_key =

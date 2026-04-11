@@ -5,6 +5,13 @@
 //! Each test that needs a freshly-signed inbox / token / message reaches in
 //! through this module so the round-trip / validation / token-gating tests
 //! stay focused on the assertion they care about.
+//!
+//! Crypto note: this module uses **two** signature schemes side by side:
+//! - **ML-DSA-65** (FIPS 204, NIST level 3) for inbox-owner signatures.
+//!   This is what the contract verifies on every state update. See #18.
+//! - **RSA-PKCS#1 v1.5** for AFT token generator signatures. The
+//!   anti-flood-token system has its own crypto that's orthogonal to the
+//!   inbox migration and stays on RSA for now.
 #![allow(dead_code)] // helpers are picked up à la carte by individual test files
 
 use std::collections::HashMap;
@@ -15,27 +22,53 @@ use freenet_email_inbox::{InboxParams, InboxSettings, Message, UpdateInbox};
 use freenet_stdlib::prelude::{
     ContractInstanceId, Parameters, RelatedContracts, State, StateDelta, UpdateData,
 };
+use getrandom::SysRng;
+use ml_dsa::{
+    signature::{
+        rand_core::UnwrapErr, Keypair as MlDsaKeypair, Signer as MlDsaSigner,
+    },
+    KeyGen, MlDsa65, SigningKey as MlDsaSigningKey, VerifyingKey as MlDsaVerifyingKey,
+};
 use rsa::{
-    pkcs1v15::SigningKey,
-    rand_core::OsRng,
+    pkcs1v15::SigningKey as RsaSigningKey,
+    rand_core::OsRng as RsaOsRng,
     sha2::{Digest, Sha256},
-    signature::Signer,
+    signature::Signer as RsaSigner,
     RsaPrivateKey, RsaPublicKey,
 };
 use serde_json::{json, Value};
 
-/// Generate a fresh 2048-bit RSA keypair for use as either an inbox owner or
-/// an AFT token generator. 2048 keeps host-test wall time bearable.
-pub fn make_keypair() -> (RsaPrivateKey, RsaPublicKey) {
-    let sk = RsaPrivateKey::new(&mut OsRng, 2048).expect("rsa keygen");
+/// The fixed 8-byte salt the inbox contract signs at construction time.
+/// Must match the `STATE_UPDATE` constant in `contracts/inbox/src/lib.rs`.
+const STATE_UPDATE: &[u8; 8] = &[168, 7, 13, 64, 168, 123, 142, 215];
+
+/// Generate a fresh ML-DSA-65 keypair for use as an inbox owner. Keygen is
+/// <10ms for ML-DSA-65, so tests can afford to generate one per test without
+/// the wall-time pain RSA-4096 used to impose.
+pub fn make_inbox_keypair() -> MlDsaSigningKey<MlDsa65> {
+    let mut rng = UnwrapErr(SysRng);
+    MlDsa65::key_gen(&mut rng)
+}
+
+/// Extract the verifying key from an inbox signing key. Small helper so
+/// individual tests don't have to pull in the `Keypair` trait.
+pub fn inbox_verifying_key(sk: &MlDsaSigningKey<MlDsa65>) -> MlDsaVerifyingKey<MlDsa65> {
+    MlDsaKeypair::verifying_key(sk)
+}
+
+/// Generate a fresh 2048-bit RSA keypair for use as an AFT token generator.
+/// 2048 keeps host-test wall time bearable. Inbox owners do NOT use RSA any
+/// more — call `make_inbox_keypair()` for those.
+pub fn make_token_generator_keypair() -> (RsaPrivateKey, RsaPublicKey) {
+    let sk = RsaPrivateKey::new(&mut RsaOsRng, 2048).expect("rsa keygen");
     let pk = sk.to_public_key();
     (sk, pk)
 }
 
 /// Build the serialized [`InboxParams`] (a JSON-encoded `Parameters` blob)
-/// for the given owner public key.
-pub fn make_params(owner_pub: RsaPublicKey) -> Parameters<'static> {
-    InboxParams { pub_key: owner_pub }
+/// for the given inbox owner's ML-DSA verifying key.
+pub fn make_params(owner_vk: &MlDsaVerifyingKey<MlDsa65>) -> Parameters<'static> {
+    InboxParams::from_verifying_key(owner_vk)
         .try_into()
         .expect("inbox params -> parameters")
 }
@@ -49,9 +82,9 @@ pub fn fixed_valid_slot() -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap()
 }
 
-/// Build a token assignment signed by `generator_sk`. The signed payload is
-/// `(tier_byte, time_slot.timestamp_le_bytes, assignment_hash)` per the
-/// contract documented on [`TokenAssignment::signature_content`].
+/// Build a token assignment signed by `generator_sk` (RSA). The signed
+/// payload is `(tier_byte, time_slot.timestamp_le_bytes, assignment_hash)`
+/// per the contract documented on [`TokenAssignment::signature_content`].
 ///
 /// `token_record` is the contract-instance ID that
 /// [`TokenAllocationRecord`] entries are keyed by — pick any stable value
@@ -63,10 +96,9 @@ pub fn make_token_assignment(
     assignment_hash: [u8; 32],
     token_record: ContractInstanceId,
 ) -> TokenAssignment {
-    let to_sign =
-        TokenAssignment::signature_content(&time_slot, tier, &assignment_hash);
-    let signing_key = SigningKey::<Sha256>::new(generator_sk.clone());
-    let signature = signing_key.sign(&to_sign);
+    let to_sign = TokenAssignment::signature_content(&time_slot, tier, &assignment_hash);
+    let signing_key = RsaSigningKey::<Sha256>::new(generator_sk.clone());
+    let signature = RsaSigner::sign(&signing_key, &to_sign);
     TokenAssignment {
         tier,
         time_slot,
@@ -87,7 +119,8 @@ pub fn make_message(content: Vec<u8>, token: TokenAssignment) -> Message {
     }
 }
 
-/// Build an [`Inbox`] signed by `owner_sk` and serialize it as a `State`.
+/// Build an [`Inbox`] signed by `owner_sk` (ML-DSA-65) and serialize it as
+/// a `State`.
 ///
 /// We hand-roll the JSON wire format here because `Inbox::new` and
 /// `inbox_signature` are private to the inbox crate; the integration test
@@ -95,25 +128,19 @@ pub fn make_message(content: Vec<u8>, token: TokenAssignment) -> Message {
 /// the format produced by `Inbox::serialize` (verified by the existing
 /// `validate_test` unit test in `src/lib.rs`).
 pub fn make_inbox_state(
-    owner_sk: &RsaPrivateKey,
+    owner_sk: &MlDsaSigningKey<MlDsa65>,
     messages: Vec<Message>,
     last_update: DateTime<Utc>,
     settings: InboxSettings,
 ) -> State<'static> {
-    // The inbox signs `STATE_UPDATE` (a fixed 8-byte salt) at construction
-    // time. The exact bytes don't need to round-trip because `verify` only
-    // checks the signature, not equality with any stored payload.
-    const STATE_UPDATE: &[u8; 8] = &[168, 7, 13, 64, 168, 123, 142, 215];
-    let signing_key = SigningKey::<Sha256>::new(owner_sk.clone());
-    let signature = signing_key.sign(STATE_UPDATE);
-    let signature_bytes: Box<[u8]> =
-        rsa::signature::SignatureEncoding::to_bytes(&signature);
+    let signature: ml_dsa::Signature<MlDsa65> = MlDsaSigner::sign(owner_sk, STATE_UPDATE);
+    let signature_bytes: Vec<u8> = signature.encode().to_vec();
 
     let inbox_json: Value = json!({
         "messages": messages,
         "last_update": last_update,
         "settings": settings,
-        "inbox_signature": signature_bytes.as_ref(),
+        "inbox_signature": signature_bytes,
     });
     let bytes = serde_json::to_vec(&inbox_json).expect("serialize inbox");
     State::from(bytes)
@@ -123,21 +150,18 @@ pub fn make_inbox_state(
 /// caller can flip a single field (e.g. tamper with `last_update`) before
 /// re-serializing. Used by the signature-rejection test.
 pub fn make_inbox_value(
-    owner_sk: &RsaPrivateKey,
+    owner_sk: &MlDsaSigningKey<MlDsa65>,
     messages: Vec<Message>,
     last_update: DateTime<Utc>,
     settings: InboxSettings,
 ) -> Value {
-    const STATE_UPDATE: &[u8; 8] = &[168, 7, 13, 64, 168, 123, 142, 215];
-    let signing_key = SigningKey::<Sha256>::new(owner_sk.clone());
-    let signature = signing_key.sign(STATE_UPDATE);
-    let signature_bytes: Box<[u8]> =
-        rsa::signature::SignatureEncoding::to_bytes(&signature);
+    let signature: ml_dsa::Signature<MlDsa65> = MlDsaSigner::sign(owner_sk, STATE_UPDATE);
+    let signature_bytes: Vec<u8> = signature.encode().to_vec();
     json!({
         "messages": messages,
         "last_update": last_update,
         "settings": settings,
-        "inbox_signature": signature_bytes.as_ref(),
+        "inbox_signature": signature_bytes,
     })
 }
 

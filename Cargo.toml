@@ -28,6 +28,12 @@ bincode = "1"
 bs58 = "0.5"
 chrono = "0.4"
 rsa = { version = "0.9.2", default-features = false, features = ["serde", "pem", "sha2"] }
+# ML-DSA (CRYSTALS-Dilithium), NIST FIPS 204, level-3 parameter set (ML-DSA-65).
+# Replacing RSA-PKCS#1 v1.5 signatures on inbox state deltas. See issue #18.
+# 0.1.0-rc is the latest RustCrypto release; pinned here pending a 1.0.
+# Uses rand_core 0.10 / signature 3.0 internally; do not add an older
+# `signature = "2"` workspace dep — the trait versions won't match.
+ml-dsa = { version = "0.1.0-rc.8", default-features = false, features = ["alloc", "rand_core"] }
 serde = "1"
 serde_json = "1"
 strum = { version = "0.24", features = ["derive"] }
