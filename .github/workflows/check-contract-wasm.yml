@@ -26,12 +26,6 @@ on:
 jobs:
   check-drift:
     runs-on: ubuntu-latest
-    # Informational-only for now: the committed `published-contract/`
-    # snapshot was built on macOS; CI on Ubuntu will produce different
-    # WASM bytes until Phase 5 (#9) rebuilds the snapshot from CI and
-    # commits it. Until then, we want the diagnostic (did sources drift
-    # relative to the snapshot?) without blocking PRs.
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
         with:
@@ -62,17 +56,25 @@ jobs:
 
       - name: Compare rebuilt snapshot against committed
         run: |
+          # NOTE: this step is informational-only until Phase 5 (#9)
+          # rebuilds the `published-contract/` snapshot from CI. The
+          # committed snapshot was produced on macOS; Ubuntu-produced
+          # WASM will differ byte-for-byte from it until the snapshot
+          # is rebuilt on Linux and committed. We print the diff as a
+          # warning and exit 0 so the job reports green.
           if ! git diff --exit-code -- published-contract/; then
-            echo "❌ ERROR: published-contract/ drifted from source."
+            echo "::warning::published-contract/ drifted from source."
             echo ""
-            echo "Contract sources (contracts/web-container, ui/, common/) or"
-            echo "the committed test key changed, but published-contract/ was"
-            echo "not refreshed. Run locally:"
+            echo "This is expected until Phase 5 (#9) rebuilds the"
+            echo "committed snapshot on Linux CI. The diagnostic below"
+            echo "will become actionable once that lands:"
             echo ""
+            git diff -- published-contract/ || true
+            echo ""
+            echo "To refresh manually:"
             echo "  cargo make update-published-contract"
             echo "  git add published-contract/"
-            echo "  git commit --amend --no-edit   # or a fresh commit"
             echo ""
-            exit 1
+            exit 0
           fi
           echo "✅ published-contract/ is in sync with source."
