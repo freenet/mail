@@ -9,6 +9,8 @@ use freenet_stdlib::prelude::ContractKey;
 use identity_management::IdentityManagement;
 use rand::rngs::OsRng;
 use rsa::{pkcs1::DecodeRsaPrivateKey, RsaPrivateKey};
+#[cfg(feature = "example-data")]
+use rsa::RsaPublicKey;
 
 use crate::app::{ContractType, User, UserId};
 use crate::DynError;
@@ -141,6 +143,31 @@ impl Identity {
 
     pub fn alias(&self) -> &str {
         &self.alias
+    }
+
+    /// Reverse-lookup: find the alias that owns a given RSA public key.
+    #[cfg(feature = "example-data")]
+    pub(crate) fn alias_for_public_key(key: &RsaPublicKey) -> Option<Rc<str>> {
+        ALIASES.with(|aliases| {
+            let aliases = &*aliases.borrow();
+            aliases
+                .iter()
+                .find(|a| a.key.to_public_key() == *key)
+                .map(|a| a.alias.clone())
+        })
+    }
+
+    /// Register an identity in the shared `ALIASES` store.
+    /// Used by `example-data` mode to seed the identity list without
+    /// going through the real delegate flow.
+    #[cfg(feature = "example-data")]
+    pub(crate) fn register_example(identity: Identity) {
+        ALIASES.with(|aliases| {
+            let aliases = &mut *aliases.borrow_mut();
+            if !aliases.iter().any(|a| a.alias == identity.alias) {
+                aliases.push(identity);
+            }
+        });
     }
 }
 

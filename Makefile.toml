@@ -422,3 +422,45 @@ args = [
 description = "Run clippy on all packages"
 command = "cargo"
 args = ["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"]
+
+# ─── Playwright E2E tests ────────────────────────────────────────────────────
+
+[tasks.test-ui-playwright-setup]
+description = "Install Playwright browsers and dependencies (one-time setup)"
+script = '''
+cd "${CARGO_MAKE_WORKING_DIRECTORY}/ui/tests" && npm install && npx playwright install --with-deps chromium firefox webkit
+'''
+
+[tasks.test-ui-playwright]
+description = "Build offline UI, start dev server, run Playwright tests, tear down"
+dependencies = ["build-ui-example-no-sync"]
+script = '''
+set -euo pipefail
+ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
+PORT=8082
+
+# Start dev server in background.
+cd "$ROOT/ui" && dx serve --port "$PORT" --features example-data,no-sync --no-default-features &
+DX_PID=$!
+trap "kill $DX_PID 2>/dev/null || true" EXIT
+
+# Poll for readiness.
+echo "Waiting for dev server on port $PORT..."
+SERVER_READY=false
+for i in $(seq 1 90); do
+    if curl -s "http://localhost:$PORT" 2>/dev/null | grep -q "freenet-email-app"; then
+        echo "Server ready after $((i * 3))s"
+        sleep 3
+        SERVER_READY=true
+        break
+    fi
+    sleep 3
+done
+if [ "$SERVER_READY" != "true" ]; then
+    echo "ERROR: Dev server failed to start within 270s"
+    exit 1
+fi
+
+# Run Playwright.
+cd "$ROOT/ui/tests" && npx playwright test
+'''

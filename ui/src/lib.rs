@@ -67,5 +67,14 @@ pub fn main() {
         log::info(format!("web-container contract id (build-embedded): {id}"));
     }
 
+    // In offline mode (`no-sync` / `!use-node`), the WebSocket bridge never
+    // runs, so WEB_API_SENDER is never populated. Initialize it with the
+    // stub so that components like NewMessageWindow and OpenMessage don't
+    // panic on `.get().unwrap()`.
+    #[cfg(not(feature = "use-node"))]
+    {
+        let _ = api::WEB_API_SENDER.set(api::WebApiRequestClient);
+    }
+
     dioxus::launch(app::app);
 }
