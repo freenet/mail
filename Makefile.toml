@@ -304,15 +304,19 @@ if [ ! -f "$KEY_FILE" ]; then
     echo "error: production key file not found at $KEY_FILE" >&2
     echo "" >&2
     echo "generate one out of band with:" >&2
-    echo "  cargo run -p web-container-sign -- generate --output $KEY_FILE" >&2
+    echo "  scripts/generate-production-key.sh" >&2
     echo "" >&2
     echo "or override the location:" >&2
     echo "  WEB_CONTAINER_KEY_FILE=/path/to/keys.toml cargo make publish-email" >&2
     exit 1
 fi
-version=$(git -C "$ROOT" rev-parse --short=8 HEAD | awk '{ printf "%d", strtonum("0x" $1) % 2147483647 }')
+# Deterministic version from the commit hash (same derivation as
+# sign-webapp-test). Uses `printf %d 0x…` instead of GNU-awk strtonum
+# for portability across BSD/macOS.
+short=$(git -C "$ROOT" rev-parse --short=8 HEAD)
+version=$(( $(printf '%d' "0x$short") & 0x7fffffff ))
 if [ "$version" -eq 0 ]; then version=1; fi
-echo "signing with production key at $KEY_FILE, version $version"
+echo "signing with production key at $KEY_FILE, version $version (from commit $short)"
 cargo run --quiet -p web-container-sign -- sign \
     --input "$ROOT/target/webapp/webapp.tar.xz" \
     --output "$ROOT/target/webapp/webapp.metadata" \
@@ -360,6 +364,42 @@ echo "  web_container_contract.wasm = $(wc -c < "$ROOT/published-contract/web_co
 echo "  webapp.parameters           = $(wc -c < "$ROOT/published-contract/webapp.parameters") bytes"
 echo ""
 echo "commit these changes with a message referencing the release in #6 / #9."
+'''
+
+[tasks.update-published-contract-prod]
+description = "Copy the signed PRODUCTION artifacts into published-contract/ and record the contract ID"
+dependencies = ["sign-webapp", "build-web-container"]
+script_runner = "bash"
+script = '''
+set -euo pipefail
+ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
+WASM="$ROOT/target/wasm32-unknown-unknown/release/freenet_email_app_web.wasm"
+PARAMS="$ROOT/target/webapp/webapp.parameters"
+if [ ! -f "$WASM" ]; then
+    echo "error: $WASM not found (did cargo make build-web-container run?)" >&2
+    exit 1
+fi
+if [ ! -f "$PARAMS" ]; then
+    echo "error: $PARAMS not found (did sign-webapp run?)" >&2
+    exit 1
+fi
+
+contract_id=$(CARGO_TARGET_DIR="$ROOT/target" fdev get-contract-id \
+    --code "$WASM" --parameters "$PARAMS")
+if [ -z "$contract_id" ]; then
+    echo "error: fdev get-contract-id returned an empty ID" >&2
+    exit 1
+fi
+
+mkdir -p "$ROOT/published-contract"
+cp "$WASM"   "$ROOT/published-contract/web_container_contract.wasm"
+cp "$PARAMS" "$ROOT/published-contract/webapp.parameters"
+printf '%s\n' "$contract_id" > "$ROOT/published-contract/contract-id.txt"
+
+echo "published-contract/ updated (PRODUCTION):"
+echo "  contract-id.txt             = $contract_id"
+echo "  web_container_contract.wasm = $(wc -c < "$ROOT/published-contract/web_container_contract.wasm") bytes"
+echo "  webapp.parameters           = $(wc -c < "$ROOT/published-contract/webapp.parameters") bytes"
 '''
 
 [tasks.publish-email-test]
@@ -414,6 +454,14 @@ dependencies = [
     "build",
     "update-published-contract",
     "publish-email-test",
+]
+
+[tasks.publish-production]
+description = "End-to-end PRODUCTION publish: build → sign with prod key → update-published-contract → publish-email"
+dependencies = [
+    "build",
+    "update-published-contract-prod",
+    "publish-email",
 ]
 
 [tasks.publish]

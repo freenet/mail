@@ -6,7 +6,10 @@ export default defineConfig({
   timeout: 120_000,
   retries: 2,
   use: {
-    baseURL: "http://127.0.0.1:8082",
+    // Override with FREENET_EMAIL_BASE_URL to run against a deployed
+    // webapp (e.g., scripts/smoke-test-production.sh points this at the
+    // Freenet gateway URL for the published contract id).
+    baseURL: process.env.FREENET_EMAIL_BASE_URL || "http://127.0.0.1:8082",
     navigationTimeout: 30_000,
     actionTimeout: 10_000,
   },
