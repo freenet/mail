@@ -331,7 +331,6 @@ fn ml_kem_encrypt(
     use chacha20poly1305::aead::generic_array::GenericArray;
 
     // Use Rand08Rng (rand 0.8 ThreadRng) to avoid getrandom 0.4's wasm_js requirement.
-    use ml_kem::kem::Encapsulate as _;
     let (ct, shared_secret) = ek.encapsulate_with_rng(&mut Rand08Rng(rand::thread_rng()));
     let ct_bytes: &[u8] = ct.as_ref();
 
