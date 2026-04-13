@@ -421,7 +421,6 @@ impl User {
     #[cfg(feature = "example-data")]
     fn new() -> Self {
         use ml_dsa::KeyGen;
-        use ml_kem::{Kem, kem::Generate};
         use rand_chacha::rand_core::OsRng;
 
         let mut rng = OsRng;
@@ -431,8 +430,20 @@ impl User {
         let rsa1 = RsaPrivateKey::new(&mut rng, 2048).expect("rsa keygen");
         let ml_dsa0 = Arc::new(MlDsa65::from_seed(&rand::random::<[u8; 32]>().into()));
         let ml_dsa1 = Arc::new(MlDsa65::from_seed(&rand::random::<[u8; 32]>().into()));
-        let (ml_kem_dk0, _) = MlKem768::generate_keypair();
-        let (ml_kem_dk1, _) = MlKem768::generate_keypair();
+        // Use rand::random (getrandom 0.2 + js feature) rather than ml-kem's
+        // generate_keypair() which needs getrandom 0.4 + wasm_js on WASM.
+        let ml_kem_dk0 = DecapsulationKey::<MlKem768>::from_seed({
+            use rand::RngCore;
+            let mut seed = [0u8; 64];
+            rand::thread_rng().fill_bytes(&mut seed);
+            seed.into()
+        });
+        let ml_kem_dk1 = DecapsulationKey::<MlKem768>::from_seed({
+            use rand::RngCore;
+            let mut seed = [0u8; 64];
+            rand::thread_rng().fill_bytes(&mut seed);
+            seed.into()
+        });
 
         let identities = vec![
             Identity {

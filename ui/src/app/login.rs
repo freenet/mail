@@ -10,7 +10,7 @@ use dioxus::prelude::*;
 use freenet_stdlib::prelude::ContractKey;
 use identity_management::IdentityManagement;
 use ml_dsa::{KeyGen, MlDsa65, SigningKey as MlDsaSigningKey, VerifyingKey as MlDsaVerifyingKey};
-use ml_kem::{DecapsulationKey, EncapsulationKey, Kem, MlKem768};
+use ml_kem::{DecapsulationKey, EncapsulationKey, MlKem768};
 use rand::rngs::OsRng;
 use rsa::{pkcs1::DecodeRsaPrivateKey, RsaPrivateKey};
 
@@ -624,8 +624,14 @@ fn get_keys(
     let ml_dsa_seed: [u8; 32] = rand::random();
     let ml_dsa_key = Arc::new(MlDsa65::from_seed(&ml_dsa_seed.into()));
 
-    // ML-KEM-768: generate from random 64-byte seed.
-    let (ml_kem_dk, _) = MlKem768::generate_keypair();
+    // ML-KEM-768: derive from random 64-byte seed via rand::random (getrandom 0.2 + js)
+    // rather than ml-kem's generate_keypair() which needs getrandom 0.4 + wasm_js on WASM.
+    let ml_kem_dk = DecapsulationKey::<MlKem768>::from_seed({
+        use rand::RngCore;
+        let mut seed = [0u8; 64];
+        rand::thread_rng().fill_bytes(&mut seed);
+        seed.into()
+    });
 
     Ok((ml_dsa_key, ml_kem_dk, rsa_key))
 }

@@ -715,7 +715,6 @@ version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77727bb15fa921304124b128af125e7e3b968275d1b108b379190264f4423710"
 dependencies = [
- "getrandom 0.4.2",
  "hybrid-array",
  "rand_core 0.10.0",
 ]
@@ -1635,6 +1634,7 @@ dependencies = [
  "ml-kem",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
+ "rand_core 0.10.0",
  "rsa",
  "serde",
  "serde-wasm-bindgen 0.5.0",

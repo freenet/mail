@@ -278,6 +278,32 @@ impl DecryptedMessage {
     }
 }
 
+/// Thin adapter: wraps rand 0.8's `ThreadRng` and implements rand_core 0.10's `TryRng` +
+/// `TryCryptoRng` traits so we can pass it to `encapsulate_with_rng`. This avoids pulling
+/// in getrandom 0.4 (which needs the separate `wasm_js` feature on WASM), relying instead
+/// on rand 0.8's existing WASM support via getrandom 0.2 + `js` feature.
+///
+/// `Rng` and `CryptoRng` are provided automatically via blanket impls in rand_core 0.10.
+struct Rand08Rng(rand::rngs::ThreadRng);
+
+impl rand_core::TryRng for Rand08Rng {
+    type Error = core::convert::Infallible;
+    fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+        use rand::RngCore as _;
+        Ok(self.0.next_u32())
+    }
+    fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+        use rand::RngCore as _;
+        Ok(self.0.next_u64())
+    }
+    fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
+        use rand::RngCore as _;
+        self.0.fill_bytes(dst);
+        Ok(())
+    }
+}
+impl rand_core::TryCryptoRng for Rand08Rng {}
+
 /// Derive a 32-byte XChaCha20-Poly1305 key from an ML-KEM shared secret using HKDF-SHA256.
 ///
 /// The context label `b"freenet-email-v1 message-key"` domain-separates this
@@ -304,8 +330,9 @@ fn ml_kem_encrypt(
     use chacha20poly1305::aead::KeyInit;
     use chacha20poly1305::aead::generic_array::GenericArray;
 
-    // `encapsulate()` uses system RNG internally (requires `getrandom` feature).
-    let (ct, shared_secret) = ek.encapsulate();
+    // Use Rand08Rng (rand 0.8 ThreadRng) to avoid getrandom 0.4's wasm_js requirement.
+    use ml_kem::kem::Encapsulate as _;
+    let (ct, shared_secret) = ek.encapsulate_with_rng(&mut Rand08Rng(rand::thread_rng()));
     let ct_bytes: &[u8] = ct.as_ref();
 
     let key_bytes = hkdf_derive_key(shared_secret.as_slice());
@@ -657,7 +684,6 @@ impl InboxModel {
 #[cfg(test)]
 mod tests {
     use ml_dsa::KeyGen;
-    use ml_kem::Kem;
 
     use freenet_stdlib::prelude::ContractCode;
 
@@ -690,7 +716,12 @@ mod tests {
     #[test]
     fn remove_msg() {
         let ml_dsa_key = Arc::new(MlDsa65::from_seed(&rand::random::<[u8; 32]>().into()));
-        let (ml_kem_dk, _) = MlKem768::generate_keypair();
+        let ml_kem_dk = DecapsulationKey::<MlKem768>::from_seed({
+            use rand::RngCore;
+            let mut seed = [0u8; 64];
+            rand::thread_rng().fill_bytes(&mut seed);
+            seed.into()
+        });
         let mut inbox = InboxModel::new(ml_dsa_key, ml_kem_dk).unwrap();
         for id in 0..10000 {
             inbox.messages.push(MessageModel {
