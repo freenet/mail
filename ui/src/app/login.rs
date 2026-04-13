@@ -563,7 +563,7 @@ pub(super) fn CreateAliasForm() -> Element {
                         actions.send(NodeAction::CreateIdentity {
                             alias,
                             ml_dsa_key,
-                            ml_kem_dk,
+                            ml_kem_dk: Box::new(ml_kem_dk),
                             rsa_key,
                             description: description_val,
                         });
@@ -589,6 +589,10 @@ pub(super) fn CreateAliasForm() -> Element {
     }
 }
 
+/// Bundle of keypairs generated together at identity creation time.
+/// ML-DSA-65 + ML-KEM-768 are the PQ keys; RSA is retained for AFT (Stage 4).
+type IdentityKeyBundle = (Arc<MlDsaSigningKey<MlDsa65>>, DecapsulationKey<MlKem768>, RsaPrivateKey);
+
 /// Generate a fresh identity keypair bundle:
 /// - ML-DSA-65 signing key (for inbox contract ownership)
 /// - ML-KEM-768 decapsulation key (for message encryption)
@@ -600,7 +604,7 @@ pub(super) fn CreateAliasForm() -> Element {
 fn get_keys(
     generate: &Signal<bool>,
     key_path: &Signal<String>,
-) -> Result<(Arc<MlDsaSigningKey<MlDsa65>>, DecapsulationKey<MlKem768>, RsaPrivateKey), DynError> {
+) -> Result<IdentityKeyBundle, DynError> {
     let mut rng = OsRng;
 
     let rsa_key = if *generate.read() {

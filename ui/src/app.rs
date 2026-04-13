@@ -42,7 +42,7 @@ pub(crate) enum NodeAction {
     CreateIdentity {
         alias: Rc<str>,
         ml_dsa_key: Arc<MlDsaSigningKey<MlDsa65>>,
-        ml_kem_dk: DecapsulationKey<MlKem768>,
+        ml_kem_dk: Box<DecapsulationKey<MlKem768>>,
         /// RSA key retained for AFT token subsystem only. Removed in Stage 4 (#18).
         rsa_key: RsaPrivateKey,
         description: String,

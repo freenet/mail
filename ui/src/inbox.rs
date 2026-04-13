@@ -133,6 +133,7 @@ pub(crate) struct MessageModel {
 }
 
 impl MessageModel {
+    #[allow(dead_code)] // used by the to_state path (not yet implemented)
     fn to_stored(&self, dk: &DecapsulationKey<MlKem768>) -> Result<StoredMessage, DynError> {
         let ek = dk.encapsulation_key();
         let decrypted_content = serde_json::to_vec(&self.content)?;
@@ -656,7 +657,7 @@ impl InboxModel {
 #[cfg(test)]
 mod tests {
     use ml_dsa::KeyGen;
-    use ml_kem::{Kem, kem::Generate};
+    use ml_kem::Kem;
 
     use freenet_stdlib::prelude::ContractCode;
 
@@ -665,7 +666,7 @@ mod tests {
     impl InboxModel {
         fn new(
             ml_dsa_signing_key: Arc<MlDsaSigningKey<MlDsa65>>,
-            ml_kem_dk: DecapsulationKey<MlKem768>,
+            _ml_kem_dk: DecapsulationKey<MlKem768>,
         ) -> Result<Self, DynError> {
             let vk = MlDsaKeypair::verifying_key(ml_dsa_signing_key.as_ref());
             let params = InboxParams {

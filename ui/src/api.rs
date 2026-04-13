@@ -610,7 +610,7 @@ pub(crate) async fn node_comms(
                     pend.alias = Some(alias.clone());
                     pend.description = description.clone();
                     pend.ml_dsa_key = Some(ml_dsa_key.clone());
-                    pend.ml_kem_dk = Some(ml_kem_dk.clone());
+                    pend.ml_kem_dk = Some(*ml_kem_dk);
                     pend.rsa_key = Some(rsa_key.clone());
                     pend.created()
                 });
