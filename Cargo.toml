@@ -34,6 +34,9 @@ rsa = { version = "0.9.2", default-features = false, features = ["serde", "pem",
 # Uses rand_core 0.10 / signature 3.0 internally; do not add an older
 # `signature = "2"` workspace dep — the trait versions won't match.
 ml-dsa = { version = "0.1.0-rc.8", default-features = false, features = ["alloc", "rand_core"] }
+# ML-KEM-768 (CRYSTALS-Kyber), NIST FIPS 203, level-3 parameter set.
+# Replacing RSA-PKCS#1 v1.5 key encapsulation for message content encryption. See issue #18.
+ml-kem = { version = "0.3.0-rc.2", default-features = false, features = ["getrandom"] }
 serde = "1"
 serde_json = "1"
 strum = { version = "0.24", features = ["derive"] }

@@ -205,7 +205,10 @@ mod delegate_api {
 
 #[cfg(feature = "use-node")]
 mod inbox_management {
+    use std::sync::Arc;
+
     use freenet_stdlib::prelude::*;
+    use ml_dsa::{MlDsa65, SigningKey as MlDsaSigningKey, signature::Keypair};
     use rsa::RsaPrivateKey;
 
     use freenet_email_inbox::{InboxParams, InboxSettings};
@@ -221,29 +224,24 @@ mod inbox_management {
 
     pub(super) async fn create_contract(
         client: &mut WebApiRequestClient,
-        private_key: RsaPrivateKey,
+        ml_dsa_key: Arc<MlDsaSigningKey<MlDsa65>>,
+        rsa_key: RsaPrivateKey,
     ) -> Result<ContractKey, DynError> {
-        let pub_key = private_key.to_public_key();
-        // Stage 1 (#18) bridge: derive an ML-DSA-65 signing key from the
-        // RSA public key via BLAKE3 so the contract id (`hash(wasm,
-        // params)`) is stable for this identity without touching the
-        // identity-management delegate's RSA-only schema. See the helpers
-        // in `crate::inbox`.
+        let vk = Keypair::verifying_key(ml_dsa_key.as_ref());
         let params: Parameters = InboxParams {
-            pub_key: crate::inbox::inbox_params_pub_key_bytes(&pub_key),
+            pub_key: crate::inbox::inbox_params_pub_key_bytes(&vk),
         }
         .try_into()?;
-        let ml_dsa_key = crate::inbox::ml_dsa_signing_key_from_rsa(&private_key);
         let state = {
             let inbox =
-                freenet_email_inbox::Inbox::new(&ml_dsa_key, InboxSettings::default(), Vec::new());
+                freenet_email_inbox::Inbox::new(ml_dsa_key.as_ref(), InboxSettings::default(), Vec::new());
             inbox.serialize()?
         };
         let contract_key =
             contract_api::create_contract(client, INBOX_CODE, state, &params).await?;
         super::identity_management::PENDING_CONFIRMATION.with(|pend| {
             let pend = &mut *pend.borrow_mut();
-            let pend = pend.entry(private_key).or_default();
+            let pend = pend.entry(rsa_key).or_default();
             pend.inbox_key = Some(contract_key);
         });
         Ok(contract_key)
@@ -326,10 +324,15 @@ mod identity_management {
 
     use ::identity_management::*;
     use freenet_stdlib::{client_api::DelegateRequest, prelude::*};
+    use std::sync::Arc;
+
+    use ml_dsa::{MlDsa65, SigningKey as MlDsaSigningKey};
+    use ml_kem::{DecapsulationKey, MlKem768};
     use rsa::RsaPrivateKey;
 
     use crate::aft::AftRecords;
     use crate::app::Identity;
+    use crate::app::login::StoredIdentityKeys;
     use crate::inbox::InboxModel;
 
     use super::*;
@@ -385,34 +388,40 @@ mod identity_management {
 
     pub(super) async fn alias_creation(
         client: &mut WebApiRequestClient,
-        private_key: &RsaPrivateKey,
+        rsa_key: &RsaPrivateKey,
         inbox_to_id: &mut HashMap<ContractKey, Identity>,
         token_rec_to_id: &mut HashMap<ContractKey, Identity>,
         user: Signal<crate::app::User>,
     ) {
         let id = identity_management::PENDING_CONFIRMATION
-            .with(|pend| pend.borrow_mut().remove(private_key));
+            .with(|pend| pend.borrow_mut().remove(rsa_key));
         let NewIdentity {
             alias,
             description,
-            key,
+            ml_dsa_key,
+            ml_kem_dk,
+            rsa_key,
             inbox_key,
             aft_rec,
             ..
         } = id.unwrap();
 
-        let alias = alias.clone().unwrap();
+        let alias = alias.unwrap();
         let inbox_key = inbox_key.unwrap();
-        let private_key = key.clone().unwrap();
+        let ml_dsa_key = ml_dsa_key.unwrap();
+        let ml_kem_dk = ml_kem_dk.unwrap();
+        let rsa_key = rsa_key.unwrap();
 
         // TODO: in reality we should wait to confirm the identity manager delegate has been properly updated
         // before adding the identity
         {
-            // update alias state where appropiate
+            // update alias state where appropriate
             let identity = Identity::set_alias(
                 alias.clone(),
                 description.clone(),
-                private_key.clone(),
+                ml_dsa_key.clone(),
+                ml_kem_dk.clone(),
+                rsa_key.clone(),
                 inbox_key,
                 user,
             );
@@ -432,7 +441,9 @@ mod identity_management {
             client,
             alias.clone(),
             description,
-            private_key.clone(),
+            ml_dsa_key,
+            ml_kem_dk,
+            rsa_key,
         )
         .await
         {
@@ -450,15 +461,20 @@ mod identity_management {
         client: &mut WebApiRequestClient,
         alias: Rc<str>,
         description: String,
-        key: RsaPrivateKey,
+        ml_dsa_key: Arc<MlDsaSigningKey<MlDsa65>>,
+        ml_kem_dk: DecapsulationKey<MlKem768>,
+        rsa_key: RsaPrivateKey,
     ) -> Result<(), DynError> {
         crate::log::debug!("creating {alias}");
         let params = IdentityParams::try_from(ID_MANAGER_KEY)?;
         let params = params.try_into()?;
         let delegate_key = DelegateKey::from_params(ID_MANAGER_CODE_HASH, &params)?;
+        // Serialise the full keypair bundle (ML-DSA + ML-KEM + RSA-for-AFT) into
+        // the opaque `Vec<u8>` slot that the identity-management delegate stores.
+        let stored = StoredIdentityKeys::new(&ml_dsa_key, &ml_kem_dk, &rsa_key);
         let msg = IdentityMsg::CreateIdentity {
             alias: alias.to_string(),
-            key: serde_json::to_vec(&key)?,
+            key: serde_json::to_vec(&stored)?,
             extra: Some(description),
         };
         let request = DelegateRequest::ApplicationMessages {
@@ -476,7 +492,10 @@ mod identity_management {
     pub(super) struct NewIdentity {
         pub alias: Option<Rc<str>>,
         pub description: String,
-        pub key: Option<RsaPrivateKey>,
+        pub ml_dsa_key: Option<Arc<MlDsaSigningKey<MlDsa65>>>,
+        pub ml_kem_dk: Option<DecapsulationKey<MlKem768>>,
+        /// RSA key retained for AFT token subsystem. Removed in Stage 4 (#18).
+        pub rsa_key: Option<RsaPrivateKey>,
         pub created_inbox: bool,
         pub inbox_key: Option<ContractKey>,
         pub created_aft_rec: bool,
@@ -491,11 +510,13 @@ mod identity_management {
                 && self.created_aft_gen
                 && self.created_aft_rec
                 && self.alias.is_some()
-                && self.key.is_some()
+                && self.rsa_key.is_some()
         }
     }
 
     thread_local! {
+        /// Keyed by RSA private key (used for AFT token subsystem). The RSA key
+        /// serves as a stable unique identifier until Stage 4 replaces it.
         pub(super) static PENDING_CONFIRMATION: RefCell<HashMap<RsaPrivateKey, NewIdentity>> = RefCell::new(HashMap::new());
     }
 }
@@ -577,22 +598,26 @@ pub(crate) async fn node_comms(
             }
             NodeAction::CreateIdentity {
                 alias,
-                key,
+                ml_dsa_key,
+                ml_kem_dk,
+                rsa_key,
                 description,
             } => {
                 let created = identity_management::PENDING_CONFIRMATION.with(|pend| {
                     let pend = &mut *pend.borrow_mut();
-                    let pend = pend.entry(key.clone()).or_default();
+                    let pend = pend.entry(rsa_key.clone()).or_default();
                     crate::log::debug!("waiting for confirmation for identity {alias}");
                     pend.alias = Some(alias.clone());
                     pend.description = description.clone();
-                    pend.key = Some(key.clone());
+                    pend.ml_dsa_key = Some(ml_dsa_key.clone());
+                    pend.ml_kem_dk = Some(ml_kem_dk.clone());
+                    pend.rsa_key = Some(rsa_key.clone());
                     pend.created()
                 });
                 if created {
                     identity_management::alias_creation(
                         &mut client,
-                        &key,
+                        &rsa_key,
                         inbox_to_id,
                         token_rec_to_id,
                         user,
@@ -601,13 +626,14 @@ pub(crate) async fn node_comms(
                 }
             }
             NodeAction::CreateContract {
-                key,
+                ml_dsa_key,
+                rsa_key,
                 contract_type,
                 alias,
             } => match contract_type {
                 ContractType::InboxContract => {
                     crate::log::debug!("creating inbox contract for {alias}");
-                    match inbox_management::create_contract(&mut client, key).await {
+                    match inbox_management::create_contract(&mut client, ml_dsa_key, rsa_key).await {
                         Ok(key) => {
                             inbox_management::CREATED_INBOX.with(|k| {
                                 crate::log::debug!("waiting inbox contract for {alias}");
@@ -622,7 +648,7 @@ pub(crate) async fn node_comms(
                 }
                 ContractType::AFTContract => {
                     crate::log::debug!("creating AFT record contract for {alias}");
-                    match token_record_management::create_contract(&mut client, key).await {
+                    match token_record_management::create_contract(&mut client, rsa_key).await {
                         Ok(key) => {
                             token_record_management::CREATED_AFT_RECORD.with(|k| {
                                 crate::log::debug!("waiting AFT record contract for {alias}");
@@ -636,9 +662,9 @@ pub(crate) async fn node_comms(
                     }
                 }
             },
-            NodeAction::CreateDelegate { key, alias } => {
+            NodeAction::CreateDelegate { rsa_key, alias } => {
                 crate::log::debug!("creating AFT gen delegate for {alias}");
-                match token_generator_management::create_delegate(&mut client, key).await {
+                match token_generator_management::create_delegate(&mut client, rsa_key).await {
                     Ok(key) => {
                         token_generator_management::CREATED_AFT_GEN.with(|k| {
                             crate::log::debug!("waiting AFT gen delegate for {alias}");
@@ -727,7 +753,7 @@ pub(crate) async fn node_comms(
                     // is an inbox contract
                     let state: StoredInbox = serde_json::from_slice(state.as_ref()).unwrap();
                     let updated_model =
-                        InboxModel::from_state(identity.key.clone(), state, key).unwrap();
+                        InboxModel::from_state(Arc::clone(&identity.ml_dsa_signing_key), identity.ml_kem_dk.clone(), state, key).unwrap();
                     let loaded_models = inboxes.load();
                     if let Some(pos) = loaded_models.iter().position(|e| {
                         let x = e.borrow();
@@ -784,7 +810,7 @@ pub(crate) async fn node_comms(
                             let delta: StoredInbox =
                                 serde_json::from_slice(delta.as_ref()).unwrap();
                             let updated_model =
-                                InboxModel::from_state(identity.key.clone(), delta, key)
+                                InboxModel::from_state(Arc::clone(&identity.ml_dsa_signing_key), identity.ml_kem_dk.clone(), delta, key)
                                     .unwrap();
                             let loaded_models = inboxes.load();
                             let mut found = false;
@@ -809,7 +835,7 @@ pub(crate) async fn node_comms(
                             let delta: StoredInbox =
                                 serde_json::from_slice(state.as_ref()).unwrap();
                             let updated_model =
-                                InboxModel::from_state(identity.key.clone(), delta, key)
+                                InboxModel::from_state(Arc::clone(&identity.ml_dsa_signing_key), identity.ml_kem_dk.clone(), delta, key)
                                     .unwrap();
                             let loaded_models = inboxes.load();
                             let mut found = false;
@@ -875,7 +901,7 @@ pub(crate) async fn node_comms(
                             .find(|id| id.inbox_key.as_ref() == Some(&contract_key))
                         {
                             id.created_inbox = true;
-                            id.created().then(|| id.key.clone().unwrap())
+                            id.created().then(|| id.rsa_key.clone().unwrap())
                         } else {
                             None
                         }
@@ -909,7 +935,7 @@ pub(crate) async fn node_comms(
                             .find(|id| id.aft_rec.as_ref() == Some(&contract_key))
                         {
                             id.created_aft_rec = true;
-                            id.created().then(|| id.key.clone().unwrap())
+                            id.created().then(|| id.rsa_key.clone().unwrap())
                         } else {
                             None
                         }
@@ -950,7 +976,7 @@ pub(crate) async fn node_comms(
                                 .find(|id| id.aft_gen.as_ref() == Some(&key))
                             {
                                 id.created_aft_gen = true;
-                                id.created().then(|| id.key.clone().unwrap())
+                                id.created().then(|| id.rsa_key.clone().unwrap())
                             } else {
                                 None
                             }

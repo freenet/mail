@@ -12,7 +12,7 @@ use freenet_stdlib::prelude::{
     ApplicationMessage, CodeHash, ContractInstanceId, ContractKey, DelegateKey, InboundDelegateMsg,
     Parameters, State, UpdateData,
 };
-use rsa::RsaPublicKey;
+
 
 use freenet_email_inbox::InboxParams;
 
@@ -93,7 +93,7 @@ impl AftRecords {
         identity: &Identity,
         contract_to_id: &HashMap<AftRecord, Identity>,
     ) -> Result<AftRecord, DynError> {
-        let params = TokenDelegateParameters::new(identity.key.to_public_key())
+        let params = TokenDelegateParameters::new(identity.rsa_key.to_public_key())
             .try_into()
             .map_err(|e| format!("{e}"))?;
         let contract_key =
@@ -188,15 +188,18 @@ impl AftRecords {
         Ok(())
     }
 
+    // `recipient_inbox_pub_key`: encoded `InboxParams.pub_key` bytes for the
+    // recipient's inbox contract (ML-DSA-65 verifying key bytes, caller-computed).
     pub async fn assign_token(
         client: &mut WebApiRequestClient,
-        recipient_key: RsaPublicKey,
+        recipient_inbox_pub_key: Vec<u8>,
         generator_id: &Identity,
         assignment_hash: [u8; 32],
     ) -> Result<DelegateKey, DynError> {
         static REQUEST_ID: AtomicU32 = AtomicU32::new(0);
-        let sender_key = generator_id.key.to_public_key();
-        let token_params: Parameters = DelegateParameters::new(generator_id.clone().key)
+        // AFT token system is still RSA-bound (migrated in Stage 4 of #18).
+        let sender_rsa_key = generator_id.rsa_key.to_public_key();
+        let token_params: Parameters = DelegateParameters::new(generator_id.rsa_key.clone())
             .try_into()
             .map_err(|e| format!("{e}"))
             .unwrap();
@@ -206,15 +209,15 @@ impl AftRecords {
         )?;
 
         let inbox_params: Parameters = InboxParams {
-            pub_key: crate::inbox::inbox_params_pub_key_bytes(&recipient_key),
+            pub_key: recipient_inbox_pub_key,
         }
         .try_into()?;
         let inbox_key =
             ContractKey::from_params(crate::inbox::INBOX_CODE_HASH, inbox_params.clone())?;
         let delegate_params =
-            freenet_aft_interface::DelegateParameters::new(generator_id.key.clone());
+            freenet_aft_interface::DelegateParameters::new(generator_id.rsa_key.clone());
 
-        let record_params = TokenDelegateParameters::new(sender_key.clone());
+        let record_params = TokenDelegateParameters::new(sender_rsa_key.clone());
         let token_record: ContractInstanceId = ContractKey::from_params(
             crate::aft::TOKEN_RECORD_CODE_HASH,
             record_params.try_into()?,
