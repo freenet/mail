@@ -277,11 +277,25 @@ impl DecryptedMessage {
     }
 }
 
+/// Derive a 32-byte XChaCha20-Poly1305 key from an ML-KEM shared secret using HKDF-SHA256.
+///
+/// The context label `b"freenet-email-v1 message-key"` domain-separates this
+/// key from any other use of the same shared secret (NIST SP 800-56C recommendation).
+fn hkdf_derive_key(shared_secret: &[u8]) -> [u8; 32] {
+    use hkdf::Hkdf;
+    use sha2::Sha256;
+    let hk = Hkdf::<Sha256>::new(None, shared_secret);
+    let mut okm = [0u8; 32];
+    hk.expand(b"freenet-email-v1 message-key", &mut okm)
+        .expect("HKDF expand: output length is valid");
+    okm
+}
+
 /// Encrypt `plaintext` to `ek` using ML-KEM-768 + XChaCha20-Poly1305.
 ///
-/// Wire format: `[ 24-byte ChaCha nonce | 1088-byte ML-KEM ciphertext | variable XChaCha20 ciphertext ]`
+/// Wire format: `[ 24-byte nonce | 1088-byte ML-KEM ciphertext | variable XChaCha20-Poly1305 ciphertext ]`
 ///
-/// The ML-KEM shared secret (32 bytes) is used directly as the XChaCha20-Poly1305 key.
+/// The symmetric key is HKDF-SHA256(ML-KEM shared secret, info="freenet-email-v1 message-key").
 fn ml_kem_encrypt(
     ek: &EncapsulationKey<MlKem768>,
     plaintext: &[u8],
@@ -293,10 +307,12 @@ fn ml_kem_encrypt(
     let (ct, shared_secret) = ek.encapsulate();
     let ct_bytes: &[u8] = ct.as_ref();
 
+    let key_bytes = hkdf_derive_key(shared_secret.as_slice());
+
     // Generate a random 192-bit nonce using rand::random (compatible with all rand versions).
     let nonce_bytes: [u8; 24] = rand::random();
     let chacha_nonce = GenericArray::from(nonce_bytes);
-    let cipher = XChaCha20Poly1305::new(GenericArray::from_slice(shared_secret.as_slice()));
+    let cipher = XChaCha20Poly1305::new(GenericArray::from_slice(&key_bytes));
     let encrypted_data = cipher
         .encrypt(&chacha_nonce, plaintext)
         .map_err(|e| format!("XChaCha20 encrypt failed: {e}"))?;
@@ -339,7 +355,8 @@ fn ml_kem_decrypt(
         .decapsulate_slice(&kem_ct_bytes)
         .map_err(|_| "ML-KEM ciphertext wrong length")?;
 
-    let cipher = XChaCha20Poly1305::new(GenericArray::from_slice(shared_secret.as_slice()));
+    let key_bytes = hkdf_derive_key(shared_secret.as_slice());
+    let cipher = XChaCha20Poly1305::new(GenericArray::from_slice(&key_bytes));
     let nonce = GenericArray::from_slice(&nonce_bytes);
     cipher
         .decrypt(nonce, encrypted_data.as_ref())
