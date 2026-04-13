@@ -10,7 +10,9 @@ use chrono::Utc;
 use dioxus::prelude::*;
 use futures::future::LocalBoxFuture;
 use futures::FutureExt;
-use rsa::{RsaPrivateKey, RsaPublicKey};
+use ml_dsa::{MlDsa65, SigningKey as MlDsaSigningKey};
+use ml_kem::{DecapsulationKey, EncapsulationKey, MlKem768};
+use rsa::RsaPrivateKey;
 use wasm_bindgen::JsValue;
 
 pub(crate) use login::{Identity, LoginController};
@@ -22,7 +24,7 @@ use crate::{
     DynError,
 };
 
-mod login;
+pub(crate) mod login;
 
 // In-memory mailbox for offline (`example-data`, `!use-node`) mode.
 // Messages composed via `send_message` are stored here keyed by
@@ -39,17 +41,24 @@ pub(crate) enum NodeAction {
     LoadMessages(Box<Identity>),
     CreateIdentity {
         alias: Rc<str>,
-        key: RsaPrivateKey,
+        ml_dsa_key: Arc<MlDsaSigningKey<MlDsa65>>,
+        ml_kem_dk: Box<DecapsulationKey<MlKem768>>,
+        /// RSA key retained for AFT token subsystem only. Removed in Stage 4 (#18).
+        rsa_key: RsaPrivateKey,
         description: String,
     },
     CreateContract {
         alias: Rc<str>,
         contract_type: ContractType,
-        key: RsaPrivateKey,
+        /// ML-DSA-65 signing key for inbox contract creation.
+        ml_dsa_key: Arc<MlDsaSigningKey<MlDsa65>>,
+        /// RSA key for AFT contract creation. Removed in Stage 4 (#18).
+        rsa_key: RsaPrivateKey,
     },
     CreateDelegate {
         alias: Rc<str>,
-        key: RsaPrivateKey,
+        /// RSA key for AFT token delegate. Removed in Stage 4 (#18).
+        rsa_key: RsaPrivateKey,
     },
 }
 
@@ -213,16 +222,18 @@ impl InboxView {
         &mut self,
         client: WebApiRequestClient,
         from: &str,
-        to: RsaPublicKey,
+        recipient_ek: EncapsulationKey<MlKem768>,
+        recipient_ml_dsa_vk: ml_dsa::VerifyingKey<MlDsa65>,
         title: &str,
         content: &str,
     ) -> Result<Vec<LocalBoxFuture<'static, ()>>, DynError> {
+        use crate::inbox::MlKemEncapsKey;
         tracing::debug!("sending message from {from}");
         let content = DecryptedMessage {
             title: title.to_owned(),
             content: content.to_owned(),
             from: from.to_owned(),
-            to: vec![to],
+            to: vec![MlKemEncapsKey::from_key(&recipient_ek)],
             cc: vec![],
             time: Utc::now(),
         };
@@ -230,31 +241,32 @@ impl InboxView {
         #[cfg(feature = "use-node")]
         {
             crate::log::debug!("sending message from {from}");
-            for recipient_encoded_key in content.to.iter() {
-                let content = content.clone();
-                let mut client = client.clone();
-                let Some(id) = crate::inbox::InboxModel::id_for_alias(from) else {
-                    crate::log::error(
-                        format!("alias `{from}` not stored"),
-                        Some(TryNodeAction::SendMessage),
-                    );
-                    continue;
-                };
-                let to = recipient_encoded_key.clone();
-                let f = async move {
-                    let res = content.start_sending(&mut client, to, &id).await;
-                    node_response_error_handling(client.into(), res, TryNodeAction::SendMessage)
-                        .await;
-                };
-                futs.push(f.boxed_local());
-            }
+            let content_clone = content.clone();
+            let mut client = client.clone();
+            let Some(id) = crate::inbox::InboxModel::id_for_alias(from) else {
+                crate::log::error(
+                    format!("alias `{from}` not stored"),
+                    Some(TryNodeAction::SendMessage),
+                );
+                return Ok(futs);
+            };
+            let f = async move {
+                let res = content_clone
+                    .start_sending(&mut client, recipient_ek, recipient_ml_dsa_vk, &id)
+                    .await;
+                node_response_error_handling(client.into(), res, TryNodeAction::SendMessage).await;
+            };
+            futs.push(f.boxed_local());
         }
         #[cfg(all(feature = "example-data", not(feature = "use-node")))]
         {
             // In offline mode, deliver the message to an in-memory mailbox
             // keyed by recipient alias so that switching identities reveals it.
-            if let Some(recipient_key) = content.to.first() {
-                if let Some(to_alias) = Identity::alias_for_public_key(recipient_key) {
+            use ml_kem::kem::KeyExport;
+            if let Some(ek_key) = content.to.first() {
+                if let Some(to_alias) =
+                    Identity::alias_for_encaps_key(ek_key.0.as_slice())
+                {
                     let msg = Message {
                         id: 0, // reassigned on load
                         from: content.from.clone().into(),
@@ -408,23 +420,47 @@ pub(crate) struct User {
 impl User {
     #[cfg(feature = "example-data")]
     fn new() -> Self {
+        use ml_dsa::KeyGen;
         use rand_chacha::rand_core::OsRng;
-        // 2048-bit keeps the offline preview snappy in debug builds; the keys
-        // never leave the browser and are regenerated on every page load.
-        let key0 = RsaPrivateKey::new(&mut OsRng, 2048).expect("rsa keygen");
-        let key1 = RsaPrivateKey::new(&mut OsRng, 2048).expect("rsa keygen");
+
+        let mut rng = OsRng;
+        // RSA keys for AFT only — 2048-bit keeps the offline preview snappy in
+        // debug builds. The real keygen path uses 4096-bit.
+        let rsa0 = RsaPrivateKey::new(&mut rng, 2048).expect("rsa keygen");
+        let rsa1 = RsaPrivateKey::new(&mut rng, 2048).expect("rsa keygen");
+        let ml_dsa0 = Arc::new(MlDsa65::from_seed(&rand::random::<[u8; 32]>().into()));
+        let ml_dsa1 = Arc::new(MlDsa65::from_seed(&rand::random::<[u8; 32]>().into()));
+        // Use rand::random (getrandom 0.2 + js feature) rather than ml-kem's
+        // generate_keypair() which needs getrandom 0.4 + wasm_js on WASM.
+        let ml_kem_dk0 = DecapsulationKey::<MlKem768>::from_seed({
+            use rand::RngCore;
+            let mut seed = [0u8; 64];
+            rand::thread_rng().fill_bytes(&mut seed);
+            seed.into()
+        });
+        let ml_kem_dk1 = DecapsulationKey::<MlKem768>::from_seed({
+            use rand::RngCore;
+            let mut seed = [0u8; 64];
+            rand::thread_rng().fill_bytes(&mut seed);
+            seed.into()
+        });
+
         let identities = vec![
             Identity {
                 alias: "address1".into(),
                 id: UserId(0),
                 description: "Mock identity (example-data)".into(),
-                key: key0,
+                ml_dsa_signing_key: ml_dsa0,
+                ml_kem_dk: ml_kem_dk0,
+                rsa_key: rsa0,
             },
             Identity {
                 alias: "address2".into(),
                 id: UserId(1),
                 description: "Mock identity (example-data)".into(),
-                key: key1,
+                ml_dsa_signing_key: ml_dsa1,
+                ml_kem_dk: ml_kem_dk1,
+                rsa_key: rsa1,
             },
         ];
         // Register with the shared ALIASES store so IdentifiersList
@@ -813,8 +849,8 @@ fn NewMessageWindow() -> Element {
     let send_msg = move |_| {
         let to_val = to.read().clone();
         // fixme: this will have to come from the address book in the future
-        let receiver_public_key = match Identity::get_alias(&to_val) {
-            Some(v) => v.key.to_public_key(),
+        let (recipient_ek, recipient_vk) = match Identity::get_alias(&to_val) {
+            Some(v) => (v.ml_kem_ek(), v.ml_dsa_vk()),
             None => {
                 crate::log::error(
                     format!("couldn't find key for `{to_val}`"),
@@ -828,7 +864,8 @@ fn NewMessageWindow() -> Element {
         match inbox.write().send_message(
             client.clone(),
             &alias,
-            receiver_public_key,
+            recipient_ek,
+            recipient_vk,
             &title_val,
             &content_val,
         ) {

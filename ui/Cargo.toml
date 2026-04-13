@@ -20,7 +20,11 @@ dioxus = { workspace = true, features = ["web"] }
 futures = "0.3"
 rsa = { workspace = true }
 ml-dsa = { workspace = true }
+ml-kem = { workspace = true }
+rand_core = { workspace = true }  # rand_core 0.10 for encapsulate_with_rng
 chacha20poly1305 = "0.10"
+hkdf = { workspace = true }
+sha2 = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = "0.1"
@@ -35,7 +39,7 @@ freenet-aft-interface = { workspace = true }
 identity-management = { workspace = true }
 
 [target.'cfg(target_family = "wasm")'.dependencies]
-getrandom = { version = "*", features = ["js"] }
+getrandom = { version = "0.2", features = ["js"] }
 serde-wasm-bindgen = "0.5"
 
 [target.'cfg(target_family = "wasm")'.dependencies.web-sys]
