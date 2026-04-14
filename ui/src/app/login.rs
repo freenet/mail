@@ -357,9 +357,8 @@ impl IdentityBackup {
 /// `<a download>` element, clicks it, then revokes the URL.
 #[cfg(target_family = "wasm")]
 fn trigger_browser_download(filename: &str, json_bytes: &[u8]) {
-    use js_sys::Uint8Array;
     use wasm_bindgen::JsCast;
-    use web_sys::{Blob, BlobPropertyBag, HtmlAnchorElement, Url};
+    use web_sys::{Blob, BlobPropertyBag, HtmlAnchorElement, Url, js_sys};
 
     let window = match web_sys::window() {
         Some(w) => w,
@@ -370,7 +369,7 @@ fn trigger_browser_download(filename: &str, json_bytes: &[u8]) {
         None => return,
     };
 
-    let uint8 = Uint8Array::from(json_bytes);
+    let uint8 = js_sys::Uint8Array::from(json_bytes);
     let array = js_sys::Array::new();
     array.push(&uint8);
     let mut opts = BlobPropertyBag::new();
@@ -862,8 +861,6 @@ fn ImportForm() -> Element {
                                             addr.set(b.alias.clone());
                                             desc.set(b.description.clone());
                                             pb.set(Some(b));
-                                        } else {
-                                            crate::log::error("backup file parse failed".into(), None);
                                         }
                                     }
                                 }) as Box<dyn FnOnce()>);
