@@ -47,10 +47,18 @@ version = "0.3"
 features = [
     "BinaryType",
     "Blob",
+    "BlobPropertyBag",
     "console",
+    "Document",
     "ErrorEvent",
+    "File",
+    "FileList",
+    "FileReader",
+    "HtmlAnchorElement",
+    "HtmlInputElement",
+    "Url",
     "WebSocket",
-    "Window"
+    "Window",
 ]
 
 [features]
