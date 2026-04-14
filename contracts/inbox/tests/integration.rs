@@ -296,6 +296,56 @@ fn summarize_then_delta_yields_only_new_messages() {
     );
 }
 
+// ─── backup / restore round-trip ─────────────────────────────────────────
+
+/// Verify that an ML-DSA-65 signing key survives a seed-serialise → deserialise
+/// round-trip and can still produce inbox state that passes `validate_state`.
+///
+/// This mirrors what `StoredIdentityKeys` does in the UI crate: the 32-byte
+/// seed is the only thing persisted; the full key is always reconstructed from
+/// it.  If `from_seed(seed) ≠ from_seed(restored_seed)` the contract would
+/// reject the re-registered inbox because the verifying key in `InboxParams`
+/// would differ from the one that signed the state.
+#[test]
+fn backup_restore_keypair_round_trip() {
+    use ml_dsa::{KeyGen, MlDsa65, Seed};
+
+    // Generate a keypair using key_gen (equivalent to the UI's get_keys() path).
+    let original_sk = make_inbox_keypair();
+    let original_vk = inbox_verifying_key(&original_sk);
+
+    // Extract the 32-byte seed — this is what StoredIdentityKeys serialises.
+    let seed: Seed = original_sk.to_seed();
+
+    // Simulate a JSON round-trip: encode seed bytes to a JSON array of u8,
+    // then decode back.  serde_json serialises Vec<u8> as an array of
+    // integers, which is what StoredIdentityKeys uses for ml_dsa_seed.
+    let seed_json = serde_json::to_vec(seed.as_slice()).expect("seed serialise");
+    let restored_bytes: Vec<u8> = serde_json::from_slice(&seed_json).expect("seed deserialise");
+    let restored_seed = Seed::try_from(restored_bytes.as_slice())
+        .expect("seed must be 32 bytes");
+
+    // Reconstruct signing key from restored seed.
+    let restored_sk = MlDsa65::from_seed(&restored_seed);
+    let restored_vk = inbox_verifying_key(&restored_sk);
+
+    // The verifying key must be bit-for-bit identical.
+    assert_eq!(
+        original_vk.encode(),
+        restored_vk.encode(),
+        "restored verifying key must match original"
+    );
+
+    // Build a fresh inbox signed with the restored key and validate it.
+    // This is the end-to-end check: the contract accepts the restored key.
+    let params = make_params(&restored_vk);
+    let state = make_inbox_state(&restored_sk, vec![], Utc::now(), InboxSettings::default());
+
+    let result = Inbox::validate_state(params, state, RelatedContracts::new())
+        .expect("validate_state failed");
+    assert_eq!(result, ValidateResult::Valid, "restored key must produce valid inbox state");
+}
+
 // ─── helpers ─────────────────────────────────────────────────────────────
 
 fn unwrap_valid(modification: UpdateModification<'static>) -> State<'static> {

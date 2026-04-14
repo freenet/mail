@@ -262,29 +262,29 @@ impl std::fmt::Display for Identity {
 
 /// Serialised form of an identity's keypair bundle stored in the identity-management delegate.
 ///
-/// Layout (serde_json):
+/// Layout (serde_json) — all byte fields serialise as JSON arrays of integers:
 /// ```json
-/// { "ml_dsa_seed": "<base64-64-bytes>",
-///   "ml_kem_seed": "<base64-64-bytes>",
-///   "rsa_key":     "<JSON-serde of RsaPrivateKey>" }
+/// { "ml_dsa_seed":  [<32 u8 values>],
+///   "ml_kem_seed":  [<64 u8 values>],
+///   "rsa_key_bytes": [<variable u8 values>] }
 /// ```
 ///
 /// The RSA key is retained for the AFT token subsystem only; it is removed in
 /// Stage 4 (#18) when AFT is migrated to PQ primitives.
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct StoredIdentityKeys {
-    /// BLAKE3 seed for ML-DSA-65 (32 bytes, base64-encoded in JSON).
+    /// 32-byte random seed for ML-DSA-65 signing key reconstruction.
     pub ml_dsa_seed: Vec<u8>,
-    /// 64-byte seed for ML-KEM-768 decapsulation key (base64-encoded in JSON).
+    /// 64-byte seed for ML-KEM-768 decapsulation key reconstruction.
     pub ml_kem_seed: Vec<u8>,
-    /// RSA private key for AFT token subsystem (serde_json of `RsaPrivateKey`).
+    /// RSA private key bytes for AFT token subsystem (serde_json of `RsaPrivateKey`).
     pub rsa_key_bytes: Vec<u8>,
 }
 
 use serde::{Deserialize, Serialize};
 
 impl StoredIdentityKeys {
-    pub fn new(
+    pub(crate) fn new(
         ml_dsa_signing_key: &Arc<MlDsaSigningKey<MlDsa65>>,
         ml_kem_dk: &DecapsulationKey<MlKem768>,
         rsa_key: &RsaPrivateKey,
@@ -304,7 +304,7 @@ impl StoredIdentityKeys {
         }
     }
 
-    pub fn ml_dsa_signing_key(&self) -> Arc<MlDsaSigningKey<MlDsa65>> {
+    pub(crate) fn ml_dsa_signing_key(&self) -> Arc<MlDsaSigningKey<MlDsa65>> {
         // Reconstruct from the stored 32-byte seed.
         use ml_dsa::Seed;
         let seed = Seed::try_from(self.ml_dsa_seed.as_slice())
@@ -312,17 +312,99 @@ impl StoredIdentityKeys {
         Arc::new(MlDsa65::from_seed(&seed))
     }
 
-    pub fn ml_kem_dk(&self) -> DecapsulationKey<MlKem768> {
+    pub(crate) fn ml_kem_dk(&self) -> DecapsulationKey<MlKem768> {
         use ml_kem::{Seed, kem::KeyInit};
         let arr = Seed::try_from(self.ml_kem_seed.as_slice())
             .expect("ML-KEM seed wrong length");
         DecapsulationKey::<MlKem768>::new(&arr)
     }
 
-    pub fn rsa_key(&self) -> RsaPrivateKey {
+    pub(crate) fn rsa_key(&self) -> RsaPrivateKey {
         serde_json::from_slice(&self.rsa_key_bytes).expect("RSA key deserialisation")
     }
 }
+
+/// On-disk backup format for a single identity (version 1).
+///
+/// The file is plaintext JSON — the user must store it securely, as it
+/// contains raw private key material.
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct IdentityBackup {
+    pub version: u32,
+    pub alias: String,
+    pub description: String,
+    pub keys: StoredIdentityKeys,
+}
+
+impl IdentityBackup {
+    pub(crate) fn from_identity(identity: &Identity) -> Self {
+        Self {
+            version: 1,
+            alias: identity.alias.to_string(),
+            description: identity.description.clone(),
+            keys: StoredIdentityKeys::new(
+                &identity.ml_dsa_signing_key,
+                &identity.ml_kem_dk,
+                &identity.rsa_key,
+            ),
+        }
+    }
+}
+
+/// Trigger a browser file-download of `json_bytes` as `filename`.
+///
+/// Creates a `Blob`, wraps it in an object URL, synthesises a temporary
+/// `<a download>` element, clicks it, then revokes the URL.
+#[cfg(target_family = "wasm")]
+fn trigger_browser_download(filename: &str, json_bytes: &[u8]) {
+    use wasm_bindgen::JsCast;
+    use web_sys::{Blob, BlobPropertyBag, HtmlAnchorElement, Url, js_sys};
+
+    let window = match web_sys::window() {
+        Some(w) => w,
+        None => return,
+    };
+    let document = match window.document() {
+        Some(d) => d,
+        None => return,
+    };
+
+    let uint8 = js_sys::Uint8Array::from(json_bytes);
+    let array = js_sys::Array::new();
+    array.push(&uint8);
+    let mut opts = BlobPropertyBag::new();
+    opts.type_("application/json");
+    let blob = match Blob::new_with_u8_array_sequence_and_options(&array, &opts) {
+        Ok(b) => b,
+        Err(_) => return,
+    };
+    let url = match Url::create_object_url_with_blob(&blob) {
+        Ok(u) => u,
+        Err(_) => return,
+    };
+    if let Some(anchor) = document
+        .create_element("a")
+        .ok()
+        .and_then(|el| el.dyn_into::<HtmlAnchorElement>().ok())
+    {
+        anchor.set_href(&url);
+        anchor.set_download(filename);
+        // Append to body before clicking — Safari ignores clicks on detached anchors.
+        if let Some(body) = document.body() {
+            let _ = body.append_child(&anchor);
+            anchor.click();
+            let _ = body.remove_child(&anchor);
+        } else {
+            anchor.click();
+        }
+    }
+    let _ = Url::revoke_object_url(&url);
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn trigger_browser_download(_filename: &str, _json_bytes: &[u8]) {}
+
+struct ImportBackup(bool);
 
 #[derive(Debug, Clone)]
 pub struct LoginController {
@@ -338,7 +420,9 @@ impl LoginController {
 #[allow(non_snake_case)]
 pub(super) fn IdentifiersList() -> Element {
     use_context_provider(|| Signal::new(CreateAlias(false)));
+    use_context_provider(|| Signal::new(ImportBackup(false)));
     let create_alias_form = use_context::<Signal<CreateAlias>>();
+    let import_backup_form = use_context::<Signal<ImportBackup>>();
 
     rsx! {
         LoginHeader {}
@@ -353,6 +437,9 @@ pub(super) fn IdentifiersList() -> Element {
                     if create_alias_form.read().0 {
                         CreateAliasForm {}
                     }
+                    if import_backup_form.read().0 {
+                        ImportForm {}
+                    }
                 }
             }
         }
@@ -364,6 +451,7 @@ pub(super) fn Identities() -> Element {
     let aliases = Identity::get_aliases();
     let aliases_list = aliases.borrow();
     let mut create_alias_form = use_context::<Signal<CreateAlias>>();
+    let mut import_backup_form = use_context::<Signal<ImportBackup>>();
     let mut login_controller = use_context::<Signal<LoginController>>();
 
     if login_controller.read().updated {
@@ -371,9 +459,12 @@ pub(super) fn Identities() -> Element {
     }
 
     #[component]
-    fn IdentityEntry(alias: Rc<str>, description: String, id: UserId) -> Element {
+    fn IdentityEntry(identity: Identity) -> Element {
         let mut user = use_context::<Signal<User>>();
         let mut inbox = use_context::<Signal<InboxView>>();
+        let id = identity.id;
+        let alias = identity.alias.clone();
+        let description = identity.description.clone();
 
         rsx! {
             div {
@@ -398,6 +489,23 @@ pub(super) fn Identities() -> Element {
                             }
                         },
                         p { class: "subtitle is-6", "{description}" }
+                        button {
+                            class: "button is-small is-light mt-1",
+                            title: "Export / backup this identity",
+                            onclick: {
+                                let identity = identity.clone();
+                                move |_| {
+                                    let backup = IdentityBackup::from_identity(&identity);
+                                    if let Ok(json) = serde_json::to_vec_pretty(&backup) {
+                                        let fname = format!("freenet-identity-{}.json", &*identity.alias);
+                                        trigger_browser_download(&fname, &json);
+                                    }
+                                }
+                            },
+                            span { class: "icon is-small", i { class: "fas fa-download" } }
+                            span { "Backup" }
+                        }
+                        p { class: "help is-warning", "Backup files contain raw private keys — store securely." }
                     }
                 }
             }
@@ -405,16 +513,12 @@ pub(super) fn Identities() -> Element {
     }
 
     let identities = aliases_list.iter().map(|alias| {
-        rsx!(IdentityEntry {
-            alias: alias.alias.clone(),
-            description: alias.description.clone(),
-            id: alias.id
-        })
+        rsx!(IdentityEntry { identity: alias.clone() })
     });
 
     rsx! {
         div {
-            hidden: "{create_alias_form.read().0}",
+            hidden: "{create_alias_form.read().0 || import_backup_form.read().0}",
             {identities}
             div {
                 class: "card-content columns",
@@ -425,6 +529,17 @@ pub(super) fn Identities() -> Element {
                         create_alias_form.write().0 = true;
                     },
                     "Create new identity"
+                }
+            }
+            div {
+                class: "card-content columns",
+                div { class: "column is-4" }
+                a {
+                    class: "column is-4 is-link",
+                    onclick: move |_| {
+                        import_backup_form.write().0 = true;
+                    },
+                    "Restore identity from backup"
                 }
             }
         }
@@ -686,67 +801,154 @@ fn CreateLinks() -> Element {
 
 #[allow(non_snake_case)]
 fn ImportForm() -> Element {
-    let mut user = use_context::<Signal<User>>();
-    let mut create_id_form = use_context::<Signal<ImportId>>();
+    let mut import_backup_form = use_context::<Signal<ImportBackup>>();
+    let actions = use_coroutine_handle::<NodeAction>();
+    let parsed_backup: Signal<Option<IdentityBackup>> = use_signal(|| None);
     let mut address = use_signal(String::new);
-    let mut key = use_signal(String::new);
-    let key_path = use_signal(|| {
-        std::iter::repeat_n('\u{80}', 100)
-            .chain(std::iter::repeat_n('.', 300))
-            .collect::<String>()
-    });
+    let mut description = use_signal(String::new);
 
     rsx! {
         div {
             class: "box has-background-primary is-small mt-2",
             div {
-                class: "field",
-                label { "Address" }
-                div {
-                class: "control has-icons-left",
-                input {
-                    class: "input",
-                    placeholder: "Address",
-                    value: "{address}",
-                    oninput: move |evt| address.set(evt.value().clone())
-                }
-                span { class: "icon is-small is-left", i { class: "fas fa-envelope" } }
-                }
-            }
-            div {
-                class: "field",
-                label { "Key" }
-                div {
-                class: "control has-icons-left",
-                input {
-                    class: "input",
-                    placeholder: "Key",
-                    value: "{key}",
-                    oninput: move |evt| key.set(evt.value().clone())
-                }
-                span { class: "icon is-small is-left", i { class: "fas fa-key" } }
-                }
-            }
-            div {
-                class: "file is-small has-name mb-2 mt-2",
+                class: "file is-small mb-2",
                 label {
-                class: "file-label",
-                input { class: "file-input", r#type: "file", name: "keypair-file" }
-                span {
-                    class: "file-cta",
-                    span { class: "file-icon", i { class: "fas fa-upload" } }
-                    span { class: "file-label", "Or import key file" }
-                }
-                span { class: "file-name has-background-white", "{key_path}" }
+                    class: "file-label",
+                    input {
+                        class: "file-input",
+                        r#type: "file",
+                        accept: ".json",
+                        id: "restore-file-input",
+                        onchange: move |_| {
+                            #[cfg(target_family = "wasm")]
+                            {
+                                use wasm_bindgen::{JsCast, closure::Closure};
+                                use web_sys::{FileReader, HtmlInputElement};
+                                let document = match web_sys::window()
+                                    .and_then(|w| w.document())
+                                {
+                                    Some(d) => d,
+                                    None => return,
+                                };
+                                let input = match document
+                                    .get_element_by_id("restore-file-input")
+                                    .and_then(|el| el.dyn_into::<HtmlInputElement>().ok())
+                                {
+                                    Some(el) => el,
+                                    None => return,
+                                };
+                                let files = match input.files() {
+                                    Some(f) => f,
+                                    None => return,
+                                };
+                                let file = match files.item(0) {
+                                    Some(f) => f,
+                                    None => return,
+                                };
+                                let reader = match FileReader::new() {
+                                    Ok(r) => r,
+                                    Err(_) => return,
+                                };
+                                let reader_c = reader.clone();
+                                let mut pb = parsed_backup.clone();
+                                let mut addr = address.clone();
+                                let mut desc = description.clone();
+                                let cb = Closure::once(Box::new(move || {
+                                    let result = reader_c.result().ok()
+                                        .and_then(|v| v.as_string());
+                                    if let Some(text) = result {
+                                        if let Ok(b) = serde_json::from_str::<IdentityBackup>(&text) {
+                                            addr.set(b.alias.clone());
+                                            desc.set(b.description.clone());
+                                            pb.set(Some(b));
+                                        }
+                                    }
+                                }) as Box<dyn FnOnce()>);
+                                reader.set_onloadend(Some(cb.as_ref().unchecked_ref()));
+                                let _ = reader.read_as_text(&file);
+                                cb.forget();
+                            }
+                        }
+                    }
+                    span {
+                        class: "file-cta",
+                        span { class: "file-icon", i { class: "fas fa-upload" } }
+                        span { class: "file-label", "Choose backup file (.json)" }
+                    }
                 }
             }
-            a {
-                class: "is-link",
-                onclick: move |_|  {
-                    create_id_form.write().0 = false;
-                    user.write().identified = true;
+            div {
+                class: "field",
+                label { "Alias" }
+                div {
+                    class: "control has-icons-left",
+                    input {
+                        class: "input",
+                        placeholder: "pre-filled from backup file",
+                        value: "{address}",
+                        oninput: move |evt| address.set(evt.value().clone())
+                    }
+                    span { class: "icon is-small is-left", i { class: "fas fa-envelope" } }
+                }
+            }
+            div {
+                class: "field",
+                label { "Description" }
+                div {
+                    class: "control",
+                    input {
+                        class: "input",
+                        placeholder: "pre-filled from backup file",
+                        value: "{description}",
+                        oninput: move |evt| description.set(evt.value().clone())
+                    }
+                }
+            }
+            p { class: "help is-warning mb-2",
+                "Backup files contain raw private keys — store them securely."
+            }
+            button {
+                class: if parsed_backup.read().is_some() { "button is-primary mr-2" } else { "button is-primary mr-2 is-static" },
+                disabled: parsed_backup.read().is_none(),
+                onclick: move |_| {
+                    if let Some(backup) = parsed_backup.read().clone() {
+                        let alias: Rc<str> = address.read().to_owned().into();
+                        let desc_val = description.read().clone();
+                        let ml_dsa = backup.keys.ml_dsa_signing_key();
+                        let ml_kem = backup.keys.ml_kem_dk();
+                        let rsa = backup.keys.rsa_key();
+                        actions.send(NodeAction::CreateContract {
+                            alias: alias.clone(),
+                            ml_dsa_key: ml_dsa.clone(),
+                            rsa_key: rsa.clone(),
+                            contract_type: ContractType::InboxContract,
+                        });
+                        actions.send(NodeAction::CreateDelegate {
+                            alias: alias.clone(),
+                            rsa_key: rsa.clone(),
+                        });
+                        actions.send(NodeAction::CreateContract {
+                            alias: alias.clone(),
+                            ml_dsa_key: ml_dsa.clone(),
+                            rsa_key: rsa.clone(),
+                            contract_type: ContractType::AFTContract,
+                        });
+                        actions.send(NodeAction::CreateIdentity {
+                            alias,
+                            ml_dsa_key: ml_dsa,
+                            ml_kem_dk: Box::new(ml_kem),
+                            rsa_key: rsa,
+                            description: desc_val,
+                        });
+                        import_backup_form.write().0 = false;
+                    }
                 },
-                "Sign up"
+                "Restore"
+            }
+            button {
+                class: "button is-light",
+                onclick: move |_| { import_backup_form.write().0 = false; },
+                "Cancel"
             }
         }
     }
