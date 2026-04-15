@@ -14,28 +14,17 @@ export default defineConfig({
     actionTimeout: 10_000,
   },
   projects: [
-    // Desktop browsers
     {
       name: "chromium",
       use: { ...devices["Desktop Chrome"] },
     },
-    {
-      name: "firefox",
-      use: { ...devices["Desktop Firefox"] },
-    },
-    {
-      name: "webkit",
-      use: { ...devices["Desktop Safari"] },
-    },
-    // Mobile viewports (Chromium engine)
+    // Mobile viewport reuses the chromium engine — no extra download.
     {
       name: "mobile-chrome",
       use: { ...devices["Pixel 5"] },
     },
-    {
-      name: "mobile-safari",
-      use: { ...devices["iPhone 13"] },
-    },
+    // Firefox and webkit omitted from CI to keep browser install fast.
+    // Run locally with: npx playwright test --project=firefox --project=webkit
   ],
   // The dev server must already be running:
   // cd ui && dx serve --port 8082 --features example-data,no-sync --no-default-features

@@ -115,8 +115,21 @@ jobs:
         run: npm install
         working-directory: ./ui/tests
 
+      - name: Cache Playwright browsers
+        id: cache-playwright
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-1.59.1-chromium
+
       - name: Install Playwright browsers
-        run: npx playwright install --with-deps chromium firefox webkit
+        if: steps.cache-playwright.outputs.cache-hit != 'true'
+        run: npx playwright install --with-deps chromium
+        working-directory: ./ui/tests
+
+      - name: Install Playwright browser system deps (cached hit)
+        if: steps.cache-playwright.outputs.cache-hit == 'true'
+        run: npx playwright install-deps chromium
         working-directory: ./ui/tests
 
       - name: Build UI in offline mode
