@@ -1,7 +1,4 @@
-use std::{
-    path::PathBuf,
-    fs,
-};
+use std::{fs, path::PathBuf};
 
 use freenet_stdlib::prelude::Parameters;
 use identity_management::IdentityParams;

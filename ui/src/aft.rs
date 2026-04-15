@@ -13,25 +13,26 @@ use freenet_stdlib::prelude::{
     Parameters, State, UpdateData,
 };
 
-
 use freenet_email_inbox::InboxParams;
 
-use crate::api::{node_response_error_handling, TryNodeAction};
+use crate::api::{TryNodeAction, node_response_error_handling};
 use crate::inbox::MessageModel;
-use crate::{api::WebApiRequestClient, app::Identity, DynError};
+use crate::{DynError, api::WebApiRequestClient, app::Identity};
 
 // AFT code hashes are produced by `cargo make build-token-*` and are only
 // dereferenced from `use-node` flows. Under offline builds we fall back to
 // empty placeholders so the artifacts aren't required at compile time.
 #[cfg(feature = "use-node")]
-pub(crate) const TOKEN_RECORD_CODE_HASH: &str =
-    include_str!("../../modules/antiflood-tokens/contracts/token-allocation-record/build/token_allocation_record_code_hash");
+pub(crate) const TOKEN_RECORD_CODE_HASH: &str = include_str!(
+    "../../modules/antiflood-tokens/contracts/token-allocation-record/build/token_allocation_record_code_hash"
+);
 #[cfg(not(feature = "use-node"))]
 pub(crate) const TOKEN_RECORD_CODE_HASH: &str = "";
 
 #[cfg(feature = "use-node")]
-pub(crate) const TOKEN_GENERATOR_DELEGATE_CODE_HASH: &str =
-    include_str!("../../modules/antiflood-tokens/delegates/token-generator/build/token_generator_code_hash");
+pub(crate) const TOKEN_GENERATOR_DELEGATE_CODE_HASH: &str = include_str!(
+    "../../modules/antiflood-tokens/delegates/token-generator/build/token_generator_code_hash"
+);
 #[cfg(not(feature = "use-node"))]
 pub(crate) const TOKEN_GENERATOR_DELEGATE_CODE_HASH: &str = "";
 
@@ -93,7 +94,9 @@ impl AftRecords {
         identity: &Identity,
         contract_to_id: &HashMap<AftRecord, Identity>,
     ) -> Result<AftRecord, DynError> {
-        let params = TokenDelegateParameters::new(identity.rsa_key.to_public_key())
+        use ml_dsa::signature::Keypair;
+        let vk = identity.ml_dsa_signing_key.as_ref().verifying_key();
+        let params = TokenDelegateParameters::new(&vk)
             .try_into()
             .map_err(|e| format!("{e}"))?;
         let contract_key =
@@ -135,7 +138,9 @@ impl AftRecords {
                     })
                     .map(|idx| registers.remove(idx))
             })
-        }) else { return Ok(()); };
+        }) else {
+            return Ok(());
+        };
         // we have a valid token now, so we can update the inbox contract
         MessageModel::finish_sending(client, confirmed.record, confirmed.inbox).await?;
         Ok(())
@@ -196,10 +201,21 @@ impl AftRecords {
         generator_id: &Identity,
         assignment_hash: [u8; 32],
     ) -> Result<DelegateKey, DynError> {
+        use ml_dsa::signature::Keypair;
+
         static REQUEST_ID: AtomicU32 = AtomicU32::new(0);
-        // AFT token system is still RSA-bound (migrated in Stage 4 of #18).
-        let sender_rsa_key = generator_id.rsa_key.to_public_key();
-        let token_params: Parameters = DelegateParameters::new(generator_id.rsa_key.clone())
+
+        // AFT token signing now reuses the identity's ML-DSA-65 key. The
+        // delegate stores the 32-byte seed; the generator-identity in
+        // TokenAssignment is the encoded verifying key bytes.
+        let sender_vk = generator_id.ml_dsa_signing_key.as_ref().verifying_key();
+        let seed_bytes = {
+            let s = generator_id.ml_dsa_signing_key.as_ref().to_seed();
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(s.as_slice());
+            arr
+        };
+        let token_params: Parameters = DelegateParameters::new(seed_bytes)
             .try_into()
             .map_err(|e| format!("{e}"))
             .unwrap();
@@ -214,10 +230,9 @@ impl AftRecords {
         .try_into()?;
         let inbox_key =
             ContractKey::from_params(crate::inbox::INBOX_CODE_HASH, inbox_params.clone())?;
-        let delegate_params =
-            freenet_aft_interface::DelegateParameters::new(generator_id.rsa_key.clone());
+        let delegate_params = DelegateParameters::new(seed_bytes);
 
-        let record_params = TokenDelegateParameters::new(sender_rsa_key.clone());
+        let record_params = TokenDelegateParameters::new(&sender_vk);
         let token_record: ContractInstanceId = ContractKey::from_params(
             crate::aft::TOKEN_RECORD_CODE_HASH,
             record_params.try_into()?,
@@ -233,11 +248,12 @@ impl AftRecords {
         // todo: optimize so we don't clone the whole record and instead use a smart pointer
         let Some(records) = RECORDS.with(|recs| recs.borrow().get(generator_id).cloned()) else {
             // todo: somehow propagate this to the UI so the user retries /or we retry automatically/ later
-            return Err(
-                format!("failed to get token record for alias `{alias}` ({key})",
-                        alias = generator_id.alias(),
-                        key = token_record).into()
-            );
+            return Err(format!(
+                "failed to get token record for alias `{alias}` ({key})",
+                alias = generator_id.alias(),
+                key = token_record
+            )
+            .into());
         };
         let token_request = TokenDelegateMessage::RequestNewToken(RequestNewToken {
             request_id: REQUEST_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
@@ -319,7 +335,10 @@ impl AftRecords {
         key: AftRecord,
     ) -> Result<(), DynError> {
         // todo: send the proper summary from the current state
-        let request = ContractRequest::Subscribe { key: key.into(), summary: None };
+        let request = ContractRequest::Subscribe {
+            key: key.into(),
+            summary: None,
+        };
         client.send(request.into()).await?;
         Ok(())
     }

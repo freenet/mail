@@ -7,7 +7,6 @@ publish = false
 [dependencies]
 chrono = { version = "0.4.23", default-features = false, features = ["alloc", "serde"] }
 freenet-stdlib = { workspace = true }
-rsa = { workspace = true }
 ml-dsa = { workspace = true }
 freenet-aft-interface = { workspace = true }
 serde = { workspace = true }
@@ -15,15 +14,13 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
-# Enable `std` (and transitively `getrandom` on `rand_core`) for host tests
-# so `rsa::rand_core::OsRng` resolves. The library build keeps
-# `default-features = false` because the wasm32 target has no `OsRng`.
-rsa = { version = "0.9.2", features = ["std"] }
 # ML-DSA keygen needs a `rand_core 0.10`-compatible `CryptoRng`. The
 # easiest source is `getrandom::SysRng` wrapped in `UnwrapErr` to turn
 # the fallible `TryRng` into an infallible `RngCore`. This is also the
 # form ml-dsa's own docs use. `sys_rng` is behind a feature flag.
 getrandom = { version = "0.4", features = ["sys_rng"] }
+# Used by the test-helper module for deterministic 32-byte assignment hashes.
+sha2 = { workspace = true }
 
 [lib]
 crate-type = ["cdylib", "rlib"]

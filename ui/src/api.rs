@@ -2,13 +2,13 @@ use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::OnceLock};
 
 #[cfg(feature = "use-node")]
 use dioxus::prelude::{ReadableExt, Signal, WritableExt};
-use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender};
 use freenet_aft_interface::{TokenAllocationSummary, TokenDelegateMessage};
 use freenet_stdlib::client_api::{ClientError, ClientRequest, HostResponse};
 use futures::SinkExt;
+use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender};
 
-use crate::app::{ContractType, InboxController};
 use crate::DynError;
+use crate::app::{ContractType, InboxController};
 
 type ClientRequester = UnboundedSender<ClientRequest<'static>>;
 type HostResponses = UnboundedReceiver<Result<HostResponse, ClientError>>;
@@ -209,7 +209,6 @@ mod inbox_management {
 
     use freenet_stdlib::prelude::*;
     use ml_dsa::{MlDsa65, SigningKey as MlDsaSigningKey, signature::Keypair};
-    use rsa::RsaPrivateKey;
 
     use freenet_email_inbox::{InboxParams, InboxSettings};
 
@@ -225,23 +224,26 @@ mod inbox_management {
     pub(super) async fn create_contract(
         client: &mut WebApiRequestClient,
         ml_dsa_key: Arc<MlDsaSigningKey<MlDsa65>>,
-        rsa_key: RsaPrivateKey,
     ) -> Result<ContractKey, DynError> {
         let vk = Keypair::verifying_key(ml_dsa_key.as_ref());
+        let identity_key = vk.encode().to_vec();
         let params: Parameters = InboxParams {
             pub_key: crate::inbox::inbox_params_pub_key_bytes(&vk),
         }
         .try_into()?;
         let state = {
-            let inbox =
-                freenet_email_inbox::Inbox::new(ml_dsa_key.as_ref(), InboxSettings::default(), Vec::new());
+            let inbox = freenet_email_inbox::Inbox::new(
+                ml_dsa_key.as_ref(),
+                InboxSettings::default(),
+                Vec::new(),
+            );
             inbox.serialize()?
         };
         let contract_key =
             contract_api::create_contract(client, INBOX_CODE, state, &params).await?;
         super::identity_management::PENDING_CONFIRMATION.with(|pend| {
             let pend = &mut *pend.borrow_mut();
-            let pend = pend.entry(rsa_key).or_default();
+            let pend = pend.entry(identity_key).or_default();
             pend.inbox_key = Some(contract_key);
         });
         Ok(contract_key)
@@ -250,13 +252,17 @@ mod inbox_management {
 
 #[cfg(feature = "use-node")]
 mod token_record_management {
+    use std::sync::Arc;
+
     use freenet_aft_interface::{TokenAllocationRecord, TokenDelegateParameters};
     use freenet_stdlib::prelude::*;
-    use rsa::RsaPrivateKey;
+    use ml_dsa::{MlDsa65, SigningKey as MlDsaSigningKey, signature::Keypair};
 
     use super::*;
 
-    const TOKEN_RECORD_CODE: &[u8] = include_bytes!("../../modules/antiflood-tokens/contracts/token-allocation-record/build/freenet/freenet_token_allocation_record");
+    const TOKEN_RECORD_CODE: &[u8] = include_bytes!(
+        "../../modules/antiflood-tokens/contracts/token-allocation-record/build/freenet/freenet_token_allocation_record"
+    );
 
     thread_local! {
         pub(super) static CREATED_AFT_RECORD: RefCell<Vec<(Rc<str>, ContractKey)>> = const { RefCell::new(Vec::new()) };
@@ -264,10 +270,11 @@ mod token_record_management {
 
     pub(super) async fn create_contract(
         client: &mut WebApiRequestClient,
-        private_key: RsaPrivateKey,
+        ml_dsa_key: Arc<MlDsaSigningKey<MlDsa65>>,
     ) -> Result<ContractKey, DynError> {
-        let pub_key = private_key.to_public_key();
-        let params: Parameters = TokenDelegateParameters::new(pub_key).try_into()?;
+        let vk = Keypair::verifying_key(ml_dsa_key.as_ref());
+        let identity_key = vk.encode().to_vec();
+        let params: Parameters = TokenDelegateParameters::new(&vk).try_into()?;
         let contract_key = contract_api::create_contract(
             client,
             TOKEN_RECORD_CODE,
@@ -277,7 +284,7 @@ mod token_record_management {
         .await?;
         super::identity_management::PENDING_CONFIRMATION.with(|pend| {
             let pend = &mut *pend.borrow_mut();
-            let pend = pend.entry(private_key).or_default();
+            let pend = pend.entry(identity_key).or_default();
             pend.aft_rec = Some(contract_key);
         });
         Ok(contract_key)
@@ -286,16 +293,20 @@ mod token_record_management {
 
 #[cfg(feature = "use-node")]
 mod token_generator_management {
+    use std::sync::Arc;
+
     use freenet_aft_interface::DelegateParameters;
     use freenet_stdlib::prelude::DelegateKey;
-    use rsa::RsaPrivateKey;
+    use ml_dsa::{MlDsa65, SigningKey as MlDsaSigningKey, signature::Keypair};
 
     use super::*;
 
-    const TOKEN_GEN_CODE_HASH: &str =
-        include_str!("../../modules/antiflood-tokens/delegates/token-generator/build/token_generator_code_hash");
-    const TOKEN_GEN_CODE: &[u8] =
-        include_bytes!("../../modules/antiflood-tokens/delegates/token-generator/build/freenet/freenet_token_generator");
+    const TOKEN_GEN_CODE_HASH: &str = include_str!(
+        "../../modules/antiflood-tokens/delegates/token-generator/build/token_generator_code_hash"
+    );
+    const TOKEN_GEN_CODE: &[u8] = include_bytes!(
+        "../../modules/antiflood-tokens/delegates/token-generator/build/freenet/freenet_token_generator"
+    );
 
     thread_local! {
         pub(super) static CREATED_AFT_GEN: RefCell<Vec<(Rc<str>, DelegateKey)>> = const { RefCell::new(Vec::new()) };
@@ -303,15 +314,25 @@ mod token_generator_management {
 
     pub(super) async fn create_delegate(
         client: &mut WebApiRequestClient,
-        private_key: RsaPrivateKey,
+        ml_dsa_key: Arc<MlDsaSigningKey<MlDsa65>>,
     ) -> Result<DelegateKey, DynError> {
-        let params = DelegateParameters::new(private_key.clone()).try_into()?;
+        let vk = Keypair::verifying_key(ml_dsa_key.as_ref());
+        let identity_key = vk.encode().to_vec();
+        // DelegateParameters stores the 32-byte ML-DSA-65 seed; the signing
+        // key is reconstructed from it inside the delegate on every invocation.
+        let seed = {
+            let seed_bytes = ml_dsa_key.as_ref().to_seed();
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(seed_bytes.as_slice());
+            arr
+        };
+        let params = DelegateParameters::new(seed).try_into()?;
         let delegate_key =
             delegate_api::create_delegate(client, TOKEN_GEN_CODE_HASH, TOKEN_GEN_CODE, &params)
                 .await?;
         super::identity_management::PENDING_CONFIRMATION.with(|pend| {
             let pend = &mut *pend.borrow_mut();
-            let pend = pend.entry(private_key).or_default();
+            let pend = pend.entry(identity_key).or_default();
             pend.aft_gen = Some(delegate_key.clone());
         });
         Ok(delegate_key)
@@ -328,7 +349,6 @@ mod identity_management {
 
     use ml_dsa::{MlDsa65, SigningKey as MlDsaSigningKey};
     use ml_kem::{DecapsulationKey, MlKem768};
-    use rsa::RsaPrivateKey;
 
     use crate::aft::AftRecords;
     use crate::app::Identity;
@@ -355,9 +375,7 @@ mod identity_management {
         let request = DelegateRequest::ApplicationMessages {
             params: params.clone(),
             inbound: vec![InboundDelegateMsg::ApplicationMessage(
-                ApplicationMessage::new(
-                    Vec::<u8>::try_from(&IdentityMsg::Init)?,
-                ),
+                ApplicationMessage::new(Vec::<u8>::try_from(&IdentityMsg::Init)?),
             )],
             key: key.clone(),
         };
@@ -376,9 +394,7 @@ mod identity_management {
         let request = DelegateRequest::ApplicationMessages {
             params: params.clone(),
             inbound: vec![InboundDelegateMsg::ApplicationMessage(
-                ApplicationMessage::new(
-                    Vec::<u8>::try_from(&IdentityMsg::GetIdentities)?,
-                ),
+                ApplicationMessage::new(Vec::<u8>::try_from(&IdentityMsg::GetIdentities)?),
             )],
             key: key.clone(),
         };
@@ -388,19 +404,18 @@ mod identity_management {
 
     pub(super) async fn alias_creation(
         client: &mut WebApiRequestClient,
-        rsa_key: &RsaPrivateKey,
+        identity_key: &[u8],
         inbox_to_id: &mut HashMap<ContractKey, Identity>,
         token_rec_to_id: &mut HashMap<ContractKey, Identity>,
         user: Signal<crate::app::User>,
     ) {
         let id = identity_management::PENDING_CONFIRMATION
-            .with(|pend| pend.borrow_mut().remove(rsa_key));
+            .with(|pend| pend.borrow_mut().remove(identity_key));
         let NewIdentity {
             alias,
             description,
             ml_dsa_key,
             ml_kem_dk,
-            rsa_key,
             inbox_key,
             aft_rec,
             ..
@@ -410,7 +425,6 @@ mod identity_management {
         let inbox_key = inbox_key.unwrap();
         let ml_dsa_key = ml_dsa_key.unwrap();
         let ml_kem_dk = ml_kem_dk.unwrap();
-        let rsa_key = rsa_key.unwrap();
 
         // TODO: in reality we should wait to confirm the identity manager delegate has been properly updated
         // before adding the identity
@@ -421,7 +435,6 @@ mod identity_management {
                 description.clone(),
                 ml_dsa_key.clone(),
                 ml_kem_dk.clone(),
-                rsa_key.clone(),
                 inbox_key,
                 user,
             );
@@ -443,7 +456,6 @@ mod identity_management {
             description,
             ml_dsa_key,
             ml_kem_dk,
-            rsa_key,
         )
         .await
         {
@@ -463,15 +475,14 @@ mod identity_management {
         description: String,
         ml_dsa_key: Arc<MlDsaSigningKey<MlDsa65>>,
         ml_kem_dk: DecapsulationKey<MlKem768>,
-        rsa_key: RsaPrivateKey,
     ) -> Result<(), DynError> {
         crate::log::debug!("creating {alias}");
         let params = IdentityParams::try_from(ID_MANAGER_KEY)?;
         let params = params.try_into()?;
         let delegate_key = DelegateKey::from_params(ID_MANAGER_CODE_HASH, &params)?;
-        // Serialise the full keypair bundle (ML-DSA + ML-KEM + RSA-for-AFT) into
-        // the opaque `Vec<u8>` slot that the identity-management delegate stores.
-        let stored = StoredIdentityKeys::new(&ml_dsa_key, &ml_kem_dk, &rsa_key);
+        // Serialise the keypair bundle (ML-DSA + ML-KEM seeds) into the opaque
+        // `Vec<u8>` slot that the identity-management delegate stores.
+        let stored = StoredIdentityKeys::new(&ml_dsa_key, &ml_kem_dk);
         let msg = IdentityMsg::CreateIdentity {
             alias: alias.to_string(),
             key: serde_json::to_vec(&stored)?,
@@ -494,8 +505,6 @@ mod identity_management {
         pub description: String,
         pub ml_dsa_key: Option<Arc<MlDsaSigningKey<MlDsa65>>>,
         pub ml_kem_dk: Option<DecapsulationKey<MlKem768>>,
-        /// RSA key retained for AFT token subsystem. Removed in Stage 4 (#18).
-        pub rsa_key: Option<RsaPrivateKey>,
         pub created_inbox: bool,
         pub inbox_key: Option<ContractKey>,
         pub created_aft_rec: bool,
@@ -510,14 +519,15 @@ mod identity_management {
                 && self.created_aft_gen
                 && self.created_aft_rec
                 && self.alias.is_some()
-                && self.rsa_key.is_some()
+                && self.ml_dsa_key.is_some()
         }
     }
 
     thread_local! {
-        /// Keyed by RSA private key (used for AFT token subsystem). The RSA key
-        /// serves as a stable unique identifier until Stage 4 replaces it.
-        pub(super) static PENDING_CONFIRMATION: RefCell<HashMap<RsaPrivateKey, NewIdentity>> = RefCell::new(HashMap::new());
+        /// Keyed by the encoded ML-DSA-65 verifying key bytes (1952 bytes).
+        /// That byte string is the per-identity stable correlator now that
+        /// RSA is gone from the user-identity code path.
+        pub(super) static PENDING_CONFIRMATION: RefCell<HashMap<Vec<u8>, NewIdentity>> = RefCell::new(HashMap::new());
     }
 }
 
@@ -546,6 +556,19 @@ pub(crate) async fn node_comms(
         app::{Identity, InboxesData, NodeAction},
         inbox::InboxModel,
     };
+
+    // Derive the encoded-VK correlator used as PENDING_CONFIRMATION's key
+    // from a pending identity record. Expects `id.ml_dsa_key.is_some()`.
+    fn identity_key_of(id: &identity_management::NewIdentity) -> Vec<u8> {
+        use ml_dsa::signature::Keypair;
+        id.ml_dsa_key
+            .as_ref()
+            .expect("pending identity must have ml_dsa_key before created() returns true")
+            .as_ref()
+            .verifying_key()
+            .encode()
+            .to_vec()
+    }
 
     let mut inbox_contract_to_id = HashMap::new();
     let mut token_contract_to_id = HashMap::new();
@@ -600,24 +623,24 @@ pub(crate) async fn node_comms(
                 alias,
                 ml_dsa_key,
                 ml_kem_dk,
-                rsa_key,
                 description,
             } => {
+                use ml_dsa::signature::Keypair;
+                let identity_key = ml_dsa_key.as_ref().verifying_key().encode().to_vec();
                 let created = identity_management::PENDING_CONFIRMATION.with(|pend| {
                     let pend = &mut *pend.borrow_mut();
-                    let pend = pend.entry(rsa_key.clone()).or_default();
+                    let pend = pend.entry(identity_key.clone()).or_default();
                     crate::log::debug!("waiting for confirmation for identity {alias}");
                     pend.alias = Some(alias.clone());
                     pend.description = description.clone();
                     pend.ml_dsa_key = Some(ml_dsa_key.clone());
                     pend.ml_kem_dk = Some(*ml_kem_dk);
-                    pend.rsa_key = Some(rsa_key.clone());
                     pend.created()
                 });
                 if created {
                     identity_management::alias_creation(
                         &mut client,
-                        &rsa_key,
+                        &identity_key,
                         inbox_to_id,
                         token_rec_to_id,
                         user,
@@ -627,13 +650,12 @@ pub(crate) async fn node_comms(
             }
             NodeAction::CreateContract {
                 ml_dsa_key,
-                rsa_key,
                 contract_type,
                 alias,
             } => match contract_type {
                 ContractType::InboxContract => {
                     crate::log::debug!("creating inbox contract for {alias}");
-                    match inbox_management::create_contract(&mut client, ml_dsa_key, rsa_key).await {
+                    match inbox_management::create_contract(&mut client, ml_dsa_key).await {
                         Ok(key) => {
                             inbox_management::CREATED_INBOX.with(|k| {
                                 crate::log::debug!("waiting inbox contract for {alias}");
@@ -648,7 +670,7 @@ pub(crate) async fn node_comms(
                 }
                 ContractType::AFTContract => {
                     crate::log::debug!("creating AFT record contract for {alias}");
-                    match token_record_management::create_contract(&mut client, rsa_key).await {
+                    match token_record_management::create_contract(&mut client, ml_dsa_key).await {
                         Ok(key) => {
                             token_record_management::CREATED_AFT_RECORD.with(|k| {
                                 crate::log::debug!("waiting AFT record contract for {alias}");
@@ -662,9 +684,9 @@ pub(crate) async fn node_comms(
                     }
                 }
             },
-            NodeAction::CreateDelegate { rsa_key, alias } => {
+            NodeAction::CreateDelegate { ml_dsa_key, alias } => {
                 crate::log::debug!("creating AFT gen delegate for {alias}");
-                match token_generator_management::create_delegate(&mut client, rsa_key).await {
+                match token_generator_management::create_delegate(&mut client, ml_dsa_key).await {
                     Ok(key) => {
                         token_generator_management::CREATED_AFT_GEN.with(|k| {
                             crate::log::debug!("waiting AFT gen delegate for {alias}");
@@ -703,13 +725,23 @@ pub(crate) async fn node_comms(
                                     // we should reject that pending assignment
                                     let id = token_rec_to_id.get(key).unwrap();
                                     let alias = id.alias();
-                                    crate::log::error(format!("the message for {alias} (aft contract: {key}) wasn't delivered successfully, so may need to try again and/or notify the user"), None);
+                                    crate::log::error(
+                                        format!(
+                                            "the message for {alias} (aft contract: {key}) wasn't delivered successfully, so may need to try again and/or notify the user"
+                                        ),
+                                        None,
+                                    );
                                 } else if inbox_to_id.get(key).is_some() {
                                     // FIXME: in case this is for an inbox contract we were trying to update, this means that
                                     // the message wasn't sent and should propgate that to the UI
                                     let id = inbox_to_id.get(key).unwrap();
                                     let alias = id.alias();
-                                    crate::log::error(format!("the message for {alias} (inbox contract: {key}) wasn't delievered succesffully, so may need to try again and/or notify the user"), None);
+                                    crate::log::error(
+                                        format!(
+                                            "the message for {alias} (inbox contract: {key}) wasn't delievered succesffully, so may need to try again and/or notify the user"
+                                        ),
+                                        None,
+                                    );
                                 }
                             }
                             RequestError::ContractError(err) => {
@@ -749,130 +781,162 @@ pub(crate) async fn node_comms(
             HostResponse::ContractResponse(ContractResponse::GetResponse {
                 key, state, ..
             }) => {
-                match inbox_to_id.remove(&key) { Some(identity) => {
-                    // is an inbox contract
-                    let state: StoredInbox = serde_json::from_slice(state.as_ref()).unwrap();
-                    let updated_model =
-                        InboxModel::from_state(Arc::clone(&identity.ml_dsa_signing_key), identity.ml_kem_dk.clone(), state, key).unwrap();
-                    let loaded_models = inboxes.load();
-                    if let Some(pos) = loaded_models.iter().position(|e| {
-                        let x = e.borrow();
-                        x.key == key
-                    }) {
-                        crate::log::debug!(
-                            "loaded inbox {key} with {} messages",
-                            updated_model.messages.len()
-                        );
-                        let mut current = (*loaded_models[pos]).borrow_mut();
-                        *current = updated_model;
-                    } else {
-                        crate::log::debug!("loaded inbox {key}");
-                        let mut with_new = (***loaded_models).to_vec();
-                        std::mem::drop(loaded_models);
-                        with_new.push(Rc::new(RefCell::new(updated_model)));
-                        crate::log::debug!(
-                            "loaded inboxes: {keys}",
-                            keys = {
-                                with_new
-                                    .iter()
-                                    .map(|i| format!("{}", i.borrow().key))
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
-                            }
-                        );
-                        #[allow(clippy::arc_with_non_send_sync)] // see InboxesData definition
-                        inboxes.store(Arc::new(with_new));
-                        crate::inbox::InboxModel::set_contract_identity(
+                match inbox_to_id.remove(&key) {
+                    Some(identity) => {
+                        // is an inbox contract
+                        let state: StoredInbox = serde_json::from_slice(state.as_ref()).unwrap();
+                        let updated_model = InboxModel::from_state(
+                            Arc::clone(&identity.ml_dsa_signing_key),
+                            identity.ml_kem_dk.clone(),
+                            state,
                             key,
-                            identity.clone(),
-                        );
+                        )
+                        .unwrap();
+                        let loaded_models = inboxes.load();
+                        if let Some(pos) = loaded_models.iter().position(|e| {
+                            let x = e.borrow();
+                            x.key == key
+                        }) {
+                            crate::log::debug!(
+                                "loaded inbox {key} with {} messages",
+                                updated_model.messages.len()
+                            );
+                            let mut current = (*loaded_models[pos]).borrow_mut();
+                            *current = updated_model;
+                        } else {
+                            crate::log::debug!("loaded inbox {key}");
+                            let mut with_new = (***loaded_models).to_vec();
+                            std::mem::drop(loaded_models);
+                            with_new.push(Rc::new(RefCell::new(updated_model)));
+                            crate::log::debug!(
+                                "loaded inboxes: {keys}",
+                                keys = {
+                                    with_new
+                                        .iter()
+                                        .map(|i| format!("{}", i.borrow().key))
+                                        .collect::<Vec<_>>()
+                                        .join(", ")
+                                }
+                            );
+                            #[allow(clippy::arc_with_non_send_sync)] // see InboxesData definition
+                            inboxes.store(Arc::new(with_new));
+                            crate::inbox::InboxModel::set_contract_identity(key, identity.clone());
+                        }
+                        inbox_to_id.insert(key, identity);
                     }
-                    inbox_to_id.insert(key, identity);
-                } _ => { match token_rec_to_id.remove(&key) { Some(identity) => {
-                    // is a AFT record contract
-                    if let Err(e) =
-                        AftRecords::set_identity_contract(identity.clone(), state.into(), &key)
-                    {
-                        crate::log::error(format!("error setting an AFT record: {e}"), None);
+                    _ => {
+                        match token_rec_to_id.remove(&key) {
+                            Some(identity) => {
+                                // is a AFT record contract
+                                if let Err(e) = AftRecords::set_identity_contract(
+                                    identity.clone(),
+                                    state.into(),
+                                    &key,
+                                ) {
+                                    crate::log::error(
+                                        format!("error setting an AFT record: {e}"),
+                                        None,
+                                    );
+                                }
+                                token_rec_to_id.insert(key, identity);
+                            }
+                            _ => {
+                                unreachable!("tried to get wrong contract key: {key}")
+                            }
+                        }
                     }
-                    token_rec_to_id.insert(key, identity);
-                } _ => {
-                    unreachable!("tried to get wrong contract key: {key}")
-                }}}}
+                }
             }
             HostResponse::ContractResponse(ContractResponse::UpdateNotification {
                 key,
                 update,
             }) => {
-                match inbox_to_id.remove(&key) { Some(identity) => {
-                    match update {
-                        UpdateData::Delta(delta) => {
-                            let delta: StoredInbox =
-                                serde_json::from_slice(delta.as_ref()).unwrap();
-                            let updated_model =
-                                InboxModel::from_state(Arc::clone(&identity.ml_dsa_signing_key), identity.ml_kem_dk.clone(), delta, key)
-                                    .unwrap();
-                            let loaded_models = inboxes.load();
-                            let mut found = false;
-                            for inbox in loaded_models.as_slice() {
-                                if inbox.clone().borrow().key == key {
-                                    let mut inbox = (**inbox).borrow_mut();
-                                    let controller = &mut *inbox_controller.write();
-                                    controller.updated = true;
-                                    inbox.merge(updated_model);
-                                    crate::log::debug!(
-                                        "updated inbox {key} with {} messages",
-                                        inbox.messages.len()
-                                    );
-                                    found = true;
-                                    break;
+                match inbox_to_id.remove(&key) {
+                    Some(identity) => {
+                        match update {
+                            UpdateData::Delta(delta) => {
+                                let delta: StoredInbox =
+                                    serde_json::from_slice(delta.as_ref()).unwrap();
+                                let updated_model = InboxModel::from_state(
+                                    Arc::clone(&identity.ml_dsa_signing_key),
+                                    identity.ml_kem_dk.clone(),
+                                    delta,
+                                    key,
+                                )
+                                .unwrap();
+                                let loaded_models = inboxes.load();
+                                let mut found = false;
+                                for inbox in loaded_models.as_slice() {
+                                    if inbox.clone().borrow().key == key {
+                                        let mut inbox = (**inbox).borrow_mut();
+                                        let controller = &mut *inbox_controller.write();
+                                        controller.updated = true;
+                                        inbox.merge(updated_model);
+                                        crate::log::debug!(
+                                            "updated inbox {key} with {} messages",
+                                            inbox.messages.len()
+                                        );
+                                        found = true;
+                                        break;
+                                    }
                                 }
+                                assert!(found);
+                                inbox_to_id.insert(key, identity);
                             }
-                            assert!(found);
-                            inbox_to_id.insert(key, identity);
-                        }
-                        UpdateData::State(state) => {
-                            let delta: StoredInbox =
-                                serde_json::from_slice(state.as_ref()).unwrap();
-                            let updated_model =
-                                InboxModel::from_state(Arc::clone(&identity.ml_dsa_signing_key), identity.ml_kem_dk.clone(), delta, key)
-                                    .unwrap();
-                            let loaded_models = inboxes.load();
-                            let mut found = false;
-                            for inbox in loaded_models.as_slice() {
-                                if inbox.clone().borrow().key == key {
-                                    let mut inbox = (**inbox).borrow_mut();
-                                    let controller = &mut *inbox_controller.write();
-                                    controller.updated = true;
-                                    *inbox = updated_model;
-                                    crate::log::debug!(
-                                        "updated inbox {key} (whole state) with {} messages",
-                                        inbox.messages.len()
-                                    );
-                                    found = true;
-                                    break;
+                            UpdateData::State(state) => {
+                                let delta: StoredInbox =
+                                    serde_json::from_slice(state.as_ref()).unwrap();
+                                let updated_model = InboxModel::from_state(
+                                    Arc::clone(&identity.ml_dsa_signing_key),
+                                    identity.ml_kem_dk.clone(),
+                                    delta,
+                                    key,
+                                )
+                                .unwrap();
+                                let loaded_models = inboxes.load();
+                                let mut found = false;
+                                for inbox in loaded_models.as_slice() {
+                                    if inbox.clone().borrow().key == key {
+                                        let mut inbox = (**inbox).borrow_mut();
+                                        let controller = &mut *inbox_controller.write();
+                                        controller.updated = true;
+                                        *inbox = updated_model;
+                                        crate::log::debug!(
+                                            "updated inbox {key} (whole state) with {} messages",
+                                            inbox.messages.len()
+                                        );
+                                        found = true;
+                                        break;
+                                    }
                                 }
+                                assert!(found);
+                                inbox_to_id.insert(key, identity);
                             }
-                            assert!(found);
-                            inbox_to_id.insert(key, identity);
+                            // UpdateData::StateAndDelta { .. } => {
+                            //     crate::log::error("recieved update state delta", None);
+                            // }
+                            _ => unreachable!(),
                         }
-                        // UpdateData::StateAndDelta { .. } => {
-                        //     crate::log::error("recieved update state delta", None);
-                        // }
-                        _ => unreachable!(),
                     }
-                } _ => { match token_rec_to_id.remove(&key) { Some(identity) => {
-                    // is a AFT record contract
-                    if let Err(e) = AftRecords::update_record(identity.clone(), update) {
-                        crate::log::error(
-                            format!("error updating an AFT record from delta: {e}"),
-                            None,
-                        );
+                    _ => {
+                        match token_rec_to_id.remove(&key) {
+                            Some(identity) => {
+                                // is a AFT record contract
+                                if let Err(e) = AftRecords::update_record(identity.clone(), update)
+                                {
+                                    crate::log::error(
+                                        format!("error updating an AFT record from delta: {e}"),
+                                        None,
+                                    );
+                                }
+                                token_rec_to_id.insert(key, identity);
+                            }
+                            _ => {
+                                unreachable!("tried to get wrong contract key: {key}")
+                            }
+                        }
                     }
-                    token_rec_to_id.insert(key, identity);
-                } _ => {
-                    unreachable!("tried to get wrong contract key: {key}")
-                }}}}
+                }
             }
             HostResponse::ContractResponse(ContractResponse::UpdateResponse { key, summary }) => {
                 if let Some(identity) = token_rec_to_id.remove(&key) {
@@ -901,7 +965,7 @@ pub(crate) async fn node_comms(
                             .find(|id| id.inbox_key.as_ref() == Some(&contract_key))
                         {
                             id.created_inbox = true;
-                            id.created().then(|| id.rsa_key.clone().unwrap())
+                            id.created().then(|| identity_key_of(id))
                         } else {
                             None
                         }
@@ -935,7 +999,7 @@ pub(crate) async fn node_comms(
                             .find(|id| id.aft_rec.as_ref() == Some(&contract_key))
                         {
                             id.created_aft_rec = true;
-                            id.created().then(|| id.rsa_key.clone().unwrap())
+                            id.created().then(|| identity_key_of(id))
                         } else {
                             None
                         }
@@ -976,7 +1040,7 @@ pub(crate) async fn node_comms(
                                 .find(|id| id.aft_gen.as_ref() == Some(&key))
                             {
                                 id.created_aft_gen = true;
-                                id.created().then(|| id.rsa_key.clone().unwrap())
+                                id.created().then(|| identity_key_of(id))
                             } else {
                                 None
                             }
@@ -1014,29 +1078,34 @@ pub(crate) async fn node_comms(
                                         .with_alphabet(bs58::Alphabet::BITCOIN)
                                         .onto(&mut code_hash_bytes)
                                         .unwrap();
-                                    let code_hash = freenet_stdlib::prelude::CodeHash::new(code_hash_bytes);
-                                    let token_contract_key =
-                                        ContractKey::from_id_and_code(assignment.token_record, code_hash);
-                                    match token_rec_to_id.remove(&token_contract_key)
-                                    { Some(identity) => {
-                                        if let Err(e) = AftRecords::allocated_assignment(
-                                            &mut client,
-                                            assignment,
-                                        )
-                                        .await
-                                        {
-                                            // todo: if a collision occurs, the operation should be retried until there are no more tokens available
-                                            crate::log::error(
-                                                format!(
-                                                    "error registering the token assignment: {e}"
-                                                ),
-                                                None,
-                                            );
+                                    let code_hash =
+                                        freenet_stdlib::prelude::CodeHash::new(code_hash_bytes);
+                                    let token_contract_key = ContractKey::from_id_and_code(
+                                        assignment.token_record,
+                                        code_hash,
+                                    );
+                                    match token_rec_to_id.remove(&token_contract_key) {
+                                        Some(identity) => {
+                                            if let Err(e) = AftRecords::allocated_assignment(
+                                                &mut client,
+                                                assignment,
+                                            )
+                                            .await
+                                            {
+                                                // todo: if a collision occurs, the operation should be retried until there are no more tokens available
+                                                crate::log::error(
+                                                    format!(
+                                                        "error registering the token assignment: {e}"
+                                                    ),
+                                                    None,
+                                                );
+                                            }
+                                            token_rec_to_id.insert(token_contract_key, identity);
                                         }
-                                        token_rec_to_id.insert(token_contract_key, identity);
-                                    } _ => {
-                                        unreachable!("tried to get wrong contract key: {key}")
-                                    }}
+                                        _ => {
+                                            unreachable!("tried to get wrong contract key: {key}")
+                                        }
+                                    }
                                 }
                                 TokenDelegateMessage::Failure(reason) => {
                                     // FIXME: this may mean a pending message waiting for a token has failed, and need to notify that in the UI

@@ -46,7 +46,7 @@ type DynError = Box<dyn std::error::Error + Send + Sync>;
 pub fn main() {
     #[cfg(not(target_family = "wasm"))]
     {
-        use tracing_subscriber::{filter::LevelFilter, EnvFilter};
+        use tracing_subscriber::{EnvFilter, filter::LevelFilter};
         let _e = tracing_subscriber::fmt()
             .with_env_filter(
                 EnvFilter::builder()

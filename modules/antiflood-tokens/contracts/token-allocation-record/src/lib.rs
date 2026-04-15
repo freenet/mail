@@ -2,9 +2,20 @@ use freenet_aft_interface::{
     AllocationError, TokenAllocationRecord, TokenAssignment, TokenDelegateParameters,
 };
 use freenet_stdlib::prelude::*;
-use rsa::{pkcs1v15::VerifyingKey, sha2::Sha256, RsaPublicKey};
+use ml_dsa::{MlDsa65, VerifyingKey as MlDsaVerifyingKey};
 
 pub struct TokenAllocContract;
+
+fn decode_vk(
+    params: &TokenDelegateParameters,
+) -> Result<MlDsaVerifyingKey<MlDsa65>, ContractError> {
+    params.generator_vk().ok_or_else(|| {
+        ContractError::Deser(
+            "TokenDelegateParameters.generator_public_key is not a valid ML-DSA-65 verifying key"
+                .into(),
+        )
+    })
+}
 
 #[contract]
 impl ContractInterface for TokenAllocContract {
@@ -15,8 +26,7 @@ impl ContractInterface for TokenAllocContract {
     ) -> Result<ValidateResult, ContractError> {
         let assigned_tokens = TokenAllocationRecord::try_from(state)?;
         let params = TokenDelegateParameters::try_from(parameters)?;
-        #[allow(clippy::redundant_clone)]
-        let verifying_key = VerifyingKey::<Sha256>::new(params.generator_public_key.clone());
+        let verifying_key = decode_vk(&params)?;
         for (_tier, assignments) in (&assigned_tokens).into_iter() {
             for assignment in assignments {
                 if assignment.is_valid(&verifying_key).is_err() {
@@ -35,7 +45,7 @@ impl ContractInterface for TokenAllocContract {
     ) -> Result<UpdateModification<'static>, ContractError> {
         let mut assigned_tokens = TokenAllocationRecord::try_from(state)?;
         let params = TokenDelegateParameters::try_from(parameters)?;
-        let verifying_key = VerifyingKey::<Sha256>::new(params.generator_public_key.clone());
+        let verifying_key = decode_vk(&params)?;
         for update in data {
             match update {
                 UpdateData::State(s) => {
@@ -131,46 +141,57 @@ impl ContractInterface for TokenAllocContract {
 }
 
 #[allow(unused)]
-fn log_succesful_ver(pub_key: &RsaPublicKey, target: &str) {
+fn log_succesful_ver(pub_key: &[u8], target: &str) {
     #[cfg(target_family = "wasm")]
     {
-        use rsa::pkcs8::EncodePublicKey;
-        let pk = pub_key
-            .to_public_key_pem(rsa::pkcs8::LineEnding::LF)
-            .unwrap()
-            .split_whitespace()
-            .collect::<String>();
+        let prefix_len = pub_key.len().min(16);
+        let _pk_prefix = hex_prefix(&pub_key[..prefix_len]);
         // freenet_stdlib::log::info(&format!(
-        //     "successful verification with key: {pk} @ {target}"
+        //     "successful verification with key prefix: {_pk_prefix} @ {target}"
         // ));
     }
 }
 
 #[allow(unused)]
-fn log_verification_err(pub_key: &RsaPublicKey, target: &str) {
+fn log_verification_err(pub_key: &[u8], target: &str) {
     #[cfg(target_family = "wasm")]
     {
-        use rsa::pkcs8::EncodePublicKey;
-        let pk = pub_key
-            .to_public_key_pem(rsa::pkcs8::LineEnding::LF)
-            .unwrap()
-            .split_whitespace()
-            .collect::<String>();
-        freenet_stdlib::log::info(&format!("erroneous verification with key: {pk} @ {target}"));
+        let prefix_len = pub_key.len().min(16);
+        let pk_prefix = hex_prefix(&pub_key[..prefix_len]);
+        freenet_stdlib::log::info(&format!(
+            "erroneous verification with key prefix: {pk_prefix} @ {target}"
+        ));
     }
 }
 
+#[cfg(target_family = "wasm")]
+fn hex_prefix(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push_str(&format!("{:02x}", b));
+    }
+    s
+}
+
 trait TokenAllocationRecordExt {
-    fn merge(&mut self, other: Self, key: &VerifyingKey<Sha256>) -> Result<(), AllocationError>;
+    fn merge(
+        &mut self,
+        other: Self,
+        key: &MlDsaVerifyingKey<MlDsa65>,
+    ) -> Result<(), AllocationError>;
     fn append(
         &mut self,
         assignment: TokenAssignment,
-        params: &VerifyingKey<Sha256>,
+        params: &MlDsaVerifyingKey<MlDsa65>,
     ) -> Result<(), AllocationError>;
 }
 
 impl TokenAllocationRecordExt for TokenAllocationRecord {
-    fn merge(&mut self, other: Self, key: &VerifyingKey<Sha256>) -> Result<(), AllocationError> {
+    fn merge(
+        &mut self,
+        other: Self,
+        key: &MlDsaVerifyingKey<MlDsa65>,
+    ) -> Result<(), AllocationError> {
         for (_, assignments) in other.into_iter() {
             for assignment in assignments {
                 self.append(assignment, key)?;
@@ -182,7 +203,7 @@ impl TokenAllocationRecordExt for TokenAllocationRecord {
     fn append(
         &mut self,
         assignment: TokenAssignment,
-        key: &VerifyingKey<Sha256>,
+        key: &MlDsaVerifyingKey<MlDsa65>,
     ) -> Result<(), AllocationError> {
         match self.get_mut_tier(&assignment.tier) {
             Some(list) => {

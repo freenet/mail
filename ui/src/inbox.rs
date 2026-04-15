@@ -4,27 +4,24 @@ use std::{
     io::{Cursor, Read},
 };
 
-use chacha20poly1305::{
-    aead::Aead,
-    XChaCha20Poly1305,
-};
+use chacha20poly1305::{XChaCha20Poly1305, aead::Aead};
 use chrono::{DateTime, Utc};
 use freenet_aft_interface::{Tier, TokenAssignment, TokenAssignmentHash};
 use freenet_stdlib::prelude::StateSummary;
 use freenet_stdlib::{
     client_api::ContractRequest,
     prelude::{
-        blake3::{self, traits::digest::Digest},
         ContractKey, State, UpdateData,
+        blake3::{self, traits::digest::Digest},
     },
 };
 use std::sync::Arc;
 
-use futures::future::LocalBoxFuture;
 use futures::FutureExt;
+use futures::future::LocalBoxFuture;
 use ml_dsa::{
-    signature::{Keypair as MlDsaKeypair, Signer as MlDsaSigner},
     MlDsa65, SigningKey as MlDsaSigningKey, VerifyingKey as MlDsaVerifyingKey,
+    signature::{Keypair as MlDsaKeypair, Signer as MlDsaSigner},
 };
 use ml_kem::{
     DecapsulationKey, EncapsulationKey, MlKem768,
@@ -38,10 +35,10 @@ use freenet_email_inbox::{
 };
 
 use crate::{
-    aft::AftRecords,
-    api::{node_response_error_handling, TryNodeAction, WebApiRequestClient},
-    app::Identity,
     DynError,
+    aft::AftRecords,
+    api::{TryNodeAction, WebApiRequestClient, node_response_error_handling},
+    app::Identity,
 };
 
 type InboxContract = ContractKey;
@@ -159,9 +156,10 @@ impl MessageModel {
                 }
             });
             if let Some(messages) = map.get(&inbox_contract)
-                && messages.is_empty() {
-                    map.remove(&inbox_contract);
-                }
+                && messages.is_empty()
+            {
+                map.remove(&inbox_contract);
+            }
             update
         });
 
@@ -237,7 +235,8 @@ impl DecryptedMessage {
         }
         .try_into()
         .map_err(|e| format!("{e}"))?;
-        let inbox_key = ContractKey::from_params(INBOX_CODE_HASH, params).map_err(|e| format!("{e}"))?;
+        let inbox_key =
+            ContractKey::from_params(INBOX_CODE_HASH, params).map_err(|e| format!("{e}"))?;
         AftRecords::pending_assignment(delegate_key, inbox_key);
 
         PENDING_INBOXES_UPDATE.with(|map| {
@@ -257,8 +256,7 @@ impl DecryptedMessage {
     }
 
     fn from_stored(dk: &DecapsulationKey<MlKem768>, msg_content: Vec<u8>) -> DecryptedMessage {
-        let plaintext = ml_kem_decrypt(dk, msg_content)
-            .expect("failed to decrypt message content");
+        let plaintext = ml_kem_decrypt(dk, msg_content).expect("failed to decrypt message content");
         serde_json::from_slice(&plaintext).expect("failed to deserialise decrypted message")
     }
 
@@ -323,10 +321,7 @@ fn hkdf_derive_key(shared_secret: &[u8]) -> [u8; 32] {
 /// Wire format: `[ 24-byte nonce | 1088-byte ML-KEM ciphertext | variable XChaCha20-Poly1305 ciphertext ]`
 ///
 /// The symmetric key is HKDF-SHA256(ML-KEM shared secret, info="freenet-email-v1 message-key").
-fn ml_kem_encrypt(
-    ek: &EncapsulationKey<MlKem768>,
-    plaintext: &[u8],
-) -> Result<Vec<u8>, DynError> {
+fn ml_kem_encrypt(ek: &EncapsulationKey<MlKem768>, plaintext: &[u8]) -> Result<Vec<u8>, DynError> {
     use chacha20poly1305::aead::KeyInit;
     use chacha20poly1305::aead::generic_array::GenericArray;
 
@@ -344,9 +339,7 @@ fn ml_kem_encrypt(
         .encrypt(&chacha_nonce, plaintext)
         .map_err(|e| format!("XChaCha20 encrypt failed: {e}"))?;
 
-    let mut content = Vec::with_capacity(
-        nonce_bytes.len() + ct_bytes.len() + encrypted_data.len(),
-    );
+    let mut content = Vec::with_capacity(nonce_bytes.len() + ct_bytes.len() + encrypted_data.len());
     content.extend_from_slice(&nonce_bytes);
     content.extend_from_slice(ct_bytes);
     content.extend_from_slice(&encrypted_data);
@@ -411,8 +404,7 @@ impl InboxModel {
         ) -> Result<(), DynError> {
             let alias = identity.alias();
             INBOX_TO_ID.with(|map| {
-                map.borrow_mut()
-                    .insert(*contract_key, identity.clone());
+                map.borrow_mut().insert(*contract_key, identity.clone());
             });
             crate::log::debug!(
                 "subscribing to inbox updates for `{contract_key}`, belonging to alias `{alias}`"
@@ -450,11 +442,11 @@ impl InboxModel {
                 node_response_error_handling(client.clone().into(), res, TryNodeAction::LoadInbox)
                     .await;
             }
-            let res = InboxModel::load(&mut client, identity).await.inspect(|key| {
-                contract_to_id
-                    .entry(*key)
-                    .or_insert(identity.clone());
-            });
+            let res = InboxModel::load(&mut client, identity)
+                .await
+                .inspect(|key| {
+                    contract_to_id.entry(*key).or_insert(identity.clone());
+                });
             node_response_error_handling(client.into(), res.map(|_| ()), TryNodeAction::LoadInbox)
                 .await;
         }
@@ -569,7 +561,11 @@ impl InboxModel {
                 Err::<StoredMessage, DynError>("to_state re-encryption not implemented".into())
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let inbox = StoredInbox::new(self.settings.ml_dsa_signing_key.as_ref(), settings, messages);
+        let inbox = StoredInbox::new(
+            self.settings.ml_dsa_signing_key.as_ref(),
+            settings,
+            messages,
+        );
         let serialized = serde_json::to_vec(&inbox)?;
         Ok(serialized.into())
     }

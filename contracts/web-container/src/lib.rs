@@ -59,8 +59,8 @@ impl ContractInterface for WebContainerContract {
             .read_exact(&mut metadata_bytes)
             .map_err(|e| ContractError::Other(format!("Failed to read metadata: {}", e)))?;
 
-        let metadata: WebContainerMetadata = from_reader(&metadata_bytes[..])
-            .map_err(|e| ContractError::Deser(e.to_string()))?;
+        let metadata: WebContainerMetadata =
+            from_reader(&metadata_bytes[..]).map_err(|e| ContractError::Deser(e.to_string()))?;
 
         if metadata.version == 0 {
             return Err(ContractError::InvalidState);
@@ -185,7 +185,11 @@ mod tests {
         (signing_key, verifying_key)
     }
 
-    fn create_test_state(version: u32, compressed_webapp: &[u8], signing_key: &SigningKey) -> Vec<u8> {
+    fn create_test_state(
+        version: u32,
+        compressed_webapp: &[u8],
+        signing_key: &SigningKey,
+    ) -> Vec<u8> {
         let mut message = version.to_be_bytes().to_vec();
         message.extend_from_slice(compressed_webapp);
         let signature = signing_key.sign(&message);

@@ -11,20 +11,13 @@ use freenet_stdlib::prelude::ContractKey;
 use identity_management::IdentityManagement;
 use ml_dsa::{KeyGen, MlDsa65, SigningKey as MlDsaSigningKey, VerifyingKey as MlDsaVerifyingKey};
 use ml_kem::{DecapsulationKey, EncapsulationKey, MlKem768};
-use rand::rngs::OsRng;
-use rsa::{pkcs1::DecodeRsaPrivateKey, RsaPrivateKey};
 
-use crate::app::{ContractType, User, UserId};
 use crate::DynError;
+use crate::app::{ContractType, User, UserId};
 
 use super::{InboxView, NodeAction};
 
 const DEFAULT_ID_ICON: &str = "data:image/x-icon;base64,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";
-
-/// RSA key size for the AFT token subsystem. The AFT protocol is still RSA-bound
-/// (separate epic, out of scope for Stage 2). This key is used solely for
-/// `DelegateParameters` / `TokenDelegateParameters` in `aft.rs` and `api.rs`.
-const AFT_RSA_KEY_SIZE: usize = 4096;
 
 struct ImportId(bool);
 
@@ -50,30 +43,39 @@ thread_local! {
     });
 }
 
-/// A user identity holding PQ keypairs for inbox operations and an RSA key
-/// retained for the AFT token subsystem (which is still RSA-bound pending
-/// a separate migration epic).
+/// A user identity holding ML-DSA-65 + ML-KEM-768 keypairs.
 ///
 /// - `ml_dsa_signing_key`: ML-DSA-65 signing key. The verifying key is embedded
-///   in `InboxParams` and determines the inbox contract ID. Wrapped in `Arc`
-///   because `MlDsaSigningKey` is intentionally not `Clone` (secret key hygiene);
+///   in `InboxParams` and determines the inbox contract ID. The same key is
+///   used by the AFT token subsystem to sign token assignments (reuse
+///   decision logged in Stage 4 of #18). Wrapped in `Arc` because
+///   `MlDsaSigningKey` is intentionally not `Clone` (secret key hygiene);
 ///   `Arc` gives us cheap logical clones without copying the key material.
 /// - `ml_kem_dk`: ML-KEM-768 decapsulation key. The encapsulation key is
 ///   published so senders can encrypt messages to this identity.
-/// - `rsa_key`: RSA-4096 key used **only** by the AFT token delegate. Removed
-///   in Stage 4 when the AFT subsystem is migrated to PQ.
 #[derive(Debug)]
 pub(crate) struct Identity {
     pub alias: Rc<str>,
     pub id: UserId,
     pub description: String,
-    /// ML-DSA-65 signing key for inbox state authorisation.
+    /// ML-DSA-65 signing key for inbox state authorisation and AFT token signing.
     pub ml_dsa_signing_key: Arc<MlDsaSigningKey<MlDsa65>>,
     /// ML-KEM-768 decapsulation key for message decryption.
     pub ml_kem_dk: DecapsulationKey<MlKem768>,
-    /// RSA-4096 private key retained for the AFT token subsystem only.
-    /// Remove in Stage 4 (#18) when AFT is migrated to PQ.
-    pub rsa_key: RsaPrivateKey,
+}
+
+impl Identity {
+    /// Encoded ML-DSA-65 verifying key bytes (1952 bytes). Stable, unique per
+    /// identity, and cheap-to-compute; used as the identity correlator in
+    /// `HashMap` / `PartialEq` contexts that previously keyed by RSA.
+    pub(crate) fn ml_dsa_vk_bytes(&self) -> Vec<u8> {
+        use ml_dsa::signature::Keypair;
+        self.ml_dsa_signing_key
+            .as_ref()
+            .verifying_key()
+            .encode()
+            .to_vec()
+    }
 }
 
 impl Clone for Identity {
@@ -84,15 +86,14 @@ impl Clone for Identity {
             description: self.description.clone(),
             ml_dsa_signing_key: Arc::clone(&self.ml_dsa_signing_key),
             ml_kem_dk: self.ml_kem_dk.clone(),
-            rsa_key: self.rsa_key.clone(),
         }
     }
 }
 
 impl PartialEq for Identity {
     fn eq(&self, other: &Self) -> bool {
-        // RSA key is the stable unique identifier for an identity until Stage 4.
-        self.rsa_key == other.rsa_key
+        // Encoded ML-DSA verifying key bytes are the stable identifier.
+        self.ml_dsa_vk_bytes() == other.ml_dsa_vk_bytes()
     }
 }
 
@@ -111,7 +112,11 @@ impl Identity {
             for alias in &*aliases {
                 // just modify and avoid creating a new id
                 if let Some(info) = new_aliases.remove(&alias.alias) {
-                    to_add.push(alias.clone().with_description(info.extra.unwrap_or_default()));
+                    to_add.push(
+                        alias
+                            .clone()
+                            .with_description(info.extra.unwrap_or_default()),
+                    );
                 }
             }
             let mut identities = Vec::new();
@@ -120,14 +125,12 @@ impl Identity {
                     serde_json::from_slice(&info.key).expect("failed to deserialise identity keys");
                 let ml_dsa_signing_key = stored.ml_dsa_signing_key();
                 let ml_kem_dk = stored.ml_kem_dk();
-                let rsa_key = stored.rsa_key();
                 let alias: Rc<str> = alias.into();
                 let id = UserId::new();
                 let identity = Identity {
                     id,
                     ml_dsa_signing_key: Arc::clone(&ml_dsa_signing_key),
                     ml_kem_dk: ml_kem_dk.clone(),
-                    rsa_key: rsa_key.clone(),
                     description: String::default(),
                     alias: alias.clone(),
                 };
@@ -138,7 +141,6 @@ impl Identity {
                     description: info.extra.unwrap_or_default(),
                     ml_dsa_signing_key,
                     ml_kem_dk,
-                    rsa_key,
                 });
                 identities.push(identity);
             });
@@ -157,7 +159,6 @@ impl Identity {
         description: String,
         ml_dsa_signing_key: Arc<MlDsaSigningKey<MlDsa65>>,
         ml_kem_dk: DecapsulationKey<MlKem768>,
-        rsa_key: RsaPrivateKey,
         inbox_key: ContractKey,
         mut user: Signal<crate::app::User>,
     ) -> Identity {
@@ -167,7 +168,6 @@ impl Identity {
             description: description.clone(),
             ml_dsa_signing_key: Arc::clone(&ml_dsa_signing_key),
             ml_kem_dk: ml_kem_dk.clone(),
-            rsa_key: rsa_key.clone(),
         };
         crate::inbox::InboxModel::set_contract_identity(inbox_key, identity.clone());
         user.write().identities.push(identity.clone());
@@ -179,7 +179,6 @@ impl Identity {
                 description,
                 ml_dsa_signing_key,
                 ml_kem_dk,
-                rsa_key,
             });
         });
         identity
@@ -249,8 +248,8 @@ impl Identity {
 
 impl std::hash::Hash for Identity {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        // Hash via the RSA key — stable unique identifier until Stage 4.
-        self.rsa_key.hash(state)
+        // Hash via the encoded ML-DSA-65 verifying key bytes — stable identifier.
+        self.ml_dsa_vk_bytes().hash(state)
     }
 }
 
@@ -264,21 +263,19 @@ impl std::fmt::Display for Identity {
 ///
 /// Layout (serde_json) — all byte fields serialise as JSON arrays of integers:
 /// ```json
-/// { "ml_dsa_seed":  [<32 u8 values>],
-///   "ml_kem_seed":  [<64 u8 values>],
-///   "rsa_key_bytes": [<variable u8 values>] }
+/// { "ml_dsa_seed": [<32 u8 values>],
+///   "ml_kem_seed": [<64 u8 values>] }
 /// ```
 ///
-/// The RSA key is retained for the AFT token subsystem only; it is removed in
-/// Stage 4 (#18) when AFT is migrated to PQ primitives.
+/// Stage 4 of #18 removed the `rsa_key_bytes` field. `StoredIdentityKeys`
+/// produced by pre-Stage-4 builds are no longer readable; see
+/// `IdentityBackup` for the version gate on restored backups.
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct StoredIdentityKeys {
     /// 32-byte random seed for ML-DSA-65 signing key reconstruction.
     pub ml_dsa_seed: Vec<u8>,
     /// 64-byte seed for ML-KEM-768 decapsulation key reconstruction.
     pub ml_kem_seed: Vec<u8>,
-    /// RSA private key bytes for AFT token subsystem (serde_json of `RsaPrivateKey`).
-    pub rsa_key_bytes: Vec<u8>,
 }
 
 use serde::{Deserialize, Serialize};
@@ -287,7 +284,6 @@ impl StoredIdentityKeys {
     pub(crate) fn new(
         ml_dsa_signing_key: &Arc<MlDsaSigningKey<MlDsa65>>,
         ml_kem_dk: &DecapsulationKey<MlKem768>,
-        rsa_key: &RsaPrivateKey,
     ) -> Self {
         // Store ML-DSA as the 32-byte seed via `SigningKey::to_seed()`.
         // Reconstruction: `MlDsa65::from_seed(&seed)`.
@@ -296,11 +292,9 @@ impl StoredIdentityKeys {
             .to_seed()
             .expect("ML-KEM DK must have been generated from seed")
             .to_vec();
-        let rsa_key_bytes = serde_json::to_vec(rsa_key).expect("RSA key serialisation");
         Self {
             ml_dsa_seed,
             ml_kem_seed,
-            rsa_key_bytes,
         }
     }
 
@@ -314,17 +308,17 @@ impl StoredIdentityKeys {
 
     pub(crate) fn ml_kem_dk(&self) -> DecapsulationKey<MlKem768> {
         use ml_kem::{Seed, kem::KeyInit};
-        let arr = Seed::try_from(self.ml_kem_seed.as_slice())
-            .expect("ML-KEM seed wrong length");
+        let arr = Seed::try_from(self.ml_kem_seed.as_slice()).expect("ML-KEM seed wrong length");
         DecapsulationKey::<MlKem768>::new(&arr)
-    }
-
-    pub(crate) fn rsa_key(&self) -> RsaPrivateKey {
-        serde_json::from_slice(&self.rsa_key_bytes).expect("RSA key deserialisation")
     }
 }
 
-/// On-disk backup format for a single identity (version 1).
+/// Current on-disk backup format version. v2 drops the `rsa_key_bytes`
+/// field from `StoredIdentityKeys` (Stage 4 of #18). v1 backups are not
+/// restorable; users on pre-release builds must re-create their identities.
+pub(crate) const IDENTITY_BACKUP_VERSION: u32 = 2;
+
+/// On-disk backup format for a single identity.
 ///
 /// The file is plaintext JSON — the user must store it securely, as it
 /// contains raw private key material.
@@ -339,14 +333,24 @@ pub(crate) struct IdentityBackup {
 impl IdentityBackup {
     pub(crate) fn from_identity(identity: &Identity) -> Self {
         Self {
-            version: 1,
+            version: IDENTITY_BACKUP_VERSION,
             alias: identity.alias.to_string(),
             description: identity.description.clone(),
-            keys: StoredIdentityKeys::new(
-                &identity.ml_dsa_signing_key,
-                &identity.ml_kem_dk,
-                &identity.rsa_key,
-            ),
+            keys: StoredIdentityKeys::new(&identity.ml_dsa_signing_key, &identity.ml_kem_dk),
+        }
+    }
+
+    /// Returns `Ok(())` if this backup is the current version, otherwise an
+    /// explanatory error. Call before using `self.keys`.
+    pub(crate) fn check_version(&self) -> Result<(), String> {
+        if self.version == IDENTITY_BACKUP_VERSION {
+            Ok(())
+        } else {
+            Err(format!(
+                "backup format v{} is from a pre-release version and is no longer supported \
+                 (expected v{}); please re-create the identity",
+                self.version, IDENTITY_BACKUP_VERSION
+            ))
         }
     }
 }
@@ -513,7 +517,9 @@ pub(super) fn Identities() -> Element {
     }
 
     let identities = aliases_list.iter().map(|alias| {
-        rsx!(IdentityEntry { identity: alias.clone() })
+        rsx!(IdentityEntry {
+            identity: alias.clone()
+        })
     });
 
     rsx! {
@@ -641,36 +647,33 @@ pub(super) fn CreateAliasForm() -> Element {
                 class: "button",
                 onclick: move |_|  {
                     let alias: Rc<str> = address.read().to_owned().into();
-                    // Generate or import keypair bundle
-                    let keys = match get_keys(&generate, &key_path) {
+                    let keys = match get_keys() {
                         Ok(k) => {
                             create_alias_form.write().0 = false;
                             Some(k)
                         },
                         Err(e) => {
-                            crate::log::debug!("Failed to generate or import keys: {:?}", e);
+                            crate::log::debug!("Failed to generate keys: {:?}", e);
                             show_error.set(true);
-                            login_error.set(format!("Failed to generate or import keys: {:?}", e));
+                            login_error.set(format!("Failed to generate keys: {:?}", e));
                             None
                         }
                     };
-                    if let Some((ml_dsa_key, ml_kem_dk, rsa_key)) = keys {
+                    if let Some((ml_dsa_key, ml_kem_dk)) = keys {
                         // - create inbox contract
                         actions.send(NodeAction::CreateContract {
                             alias: alias.clone(),
                             ml_dsa_key: ml_dsa_key.clone(),
-                            rsa_key: rsa_key.clone(),
                             contract_type: ContractType::InboxContract,
                         });
                         // - create AFT delegate && contract
                         actions.send(NodeAction::CreateDelegate {
                             alias: alias.clone(),
-                            rsa_key: rsa_key.clone(),
+                            ml_dsa_key: ml_dsa_key.clone(),
                         });
                         actions.send(NodeAction::CreateContract {
                             alias: alias.clone(),
                             ml_dsa_key: ml_dsa_key.clone(),
-                            rsa_key: rsa_key.clone(),
                             contract_type: ContractType::AFTContract,
                         });
 
@@ -679,7 +682,6 @@ pub(super) fn CreateAliasForm() -> Element {
                             alias,
                             ml_dsa_key,
                             ml_kem_dk: Box::new(ml_kem_dk),
-                            rsa_key,
                             description: description_val,
                         });
                     } else {
@@ -705,35 +707,17 @@ pub(super) fn CreateAliasForm() -> Element {
 }
 
 /// Bundle of keypairs generated together at identity creation time.
-/// ML-DSA-65 + ML-KEM-768 are the PQ keys; RSA is retained for AFT (Stage 4).
-type IdentityKeyBundle = (Arc<MlDsaSigningKey<MlDsa65>>, DecapsulationKey<MlKem768>, RsaPrivateKey);
+/// ML-DSA-65 + ML-KEM-768 are the two PQ primitives held by every identity.
+type IdentityKeyBundle = (Arc<MlDsaSigningKey<MlDsa65>>, DecapsulationKey<MlKem768>);
 
 /// Generate a fresh identity keypair bundle:
-/// - ML-DSA-65 signing key (for inbox contract ownership)
-/// - ML-KEM-768 decapsulation key (for message encryption)
-/// - RSA-4096 key (for AFT token subsystem — retained until Stage 4)
+/// - ML-DSA-65 signing key (inbox contract ownership + AFT token signing)
+/// - ML-KEM-768 decapsulation key (message encryption)
 ///
-/// Import mode reads an RSA PKCS#1 PEM file (legacy path, kept for
-/// compatibility) and derives the PQ keys afresh. In Stage 4 the import
-/// path will be updated to accept the full PQ bundle.
-fn get_keys(
-    generate: &Signal<bool>,
-    key_path: &Signal<String>,
-) -> Result<IdentityKeyBundle, DynError> {
-    let mut rng = OsRng;
-
-    let rsa_key = if *generate.read() {
-        crate::log::debug!("generating identity keypair bundle");
-        RsaPrivateKey::new(&mut rng, AFT_RSA_KEY_SIZE)
-            .map_err(|e| format!("RSA key generation failed: {e}"))?
-    } else {
-        crate::log::debug!("importing RSA key for identity");
-        let key_path = key_path.read().clone();
-        let key_str =
-            std::fs::read_to_string(key_path).map_err(|_| "Failed to read key file")?;
-        RsaPrivateKey::from_pkcs1_pem(key_str.as_str())
-            .map_err(|_| "Failed to parse PKCS#1 PEM key")?
-    };
+/// Importing an existing identity is handled by the separate `ImportForm`
+/// (`IdentityBackup` JSON round-trip), not this function.
+fn get_keys() -> Result<IdentityKeyBundle, DynError> {
+    crate::log::debug!("generating identity keypair bundle");
 
     // ML-DSA-65: generate from random 32-byte seed.
     let ml_dsa_seed: [u8; 32] = rand::random();
@@ -748,7 +732,7 @@ fn get_keys(
         seed.into()
     });
 
-    Ok((ml_dsa_key, ml_kem_dk, rsa_key))
+    Ok((ml_dsa_key, ml_kem_dk))
 }
 
 #[allow(non_snake_case)]
@@ -912,32 +896,32 @@ fn ImportForm() -> Element {
                 disabled: parsed_backup.read().is_none(),
                 onclick: move |_| {
                     if let Some(backup) = parsed_backup.read().clone() {
+                        if let Err(_msg) = backup.check_version() {
+                            crate::log::debug!("Rejected backup: {_msg}");
+                            return;
+                        }
                         let alias: Rc<str> = address.read().to_owned().into();
                         let desc_val = description.read().clone();
                         let ml_dsa = backup.keys.ml_dsa_signing_key();
                         let ml_kem = backup.keys.ml_kem_dk();
-                        let rsa = backup.keys.rsa_key();
                         actions.send(NodeAction::CreateContract {
                             alias: alias.clone(),
                             ml_dsa_key: ml_dsa.clone(),
-                            rsa_key: rsa.clone(),
                             contract_type: ContractType::InboxContract,
                         });
                         actions.send(NodeAction::CreateDelegate {
                             alias: alias.clone(),
-                            rsa_key: rsa.clone(),
+                            ml_dsa_key: ml_dsa.clone(),
                         });
                         actions.send(NodeAction::CreateContract {
                             alias: alias.clone(),
                             ml_dsa_key: ml_dsa.clone(),
-                            rsa_key: rsa.clone(),
                             contract_type: ContractType::AFTContract,
                         });
                         actions.send(NodeAction::CreateIdentity {
                             alias,
                             ml_dsa_key: ml_dsa,
                             ml_kem_dk: Box::new(ml_kem),
-                            rsa_key: rsa,
                             description: desc_val,
                         });
                         import_backup_form.write().0 = false;

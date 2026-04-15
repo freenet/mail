@@ -29,7 +29,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use freenet_email_core::web_container::WebContainerMetadata;
@@ -119,8 +119,7 @@ fn cmd_generate(output: &Path, no_clobber: bool) -> Result<()> {
     if let Some(parent) = output.parent()
         && !parent.as_os_str().is_empty()
     {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("creating {}", parent.display()))?;
+        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
     }
 
     let signing_key = SigningKey::generate(&mut OsRng);
@@ -181,11 +180,10 @@ fn cmd_sign(
     if let Some(parent) = output.parent()
         && !parent.as_os_str().is_empty()
     {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("creating {}", parent.display()))?;
+        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
     }
-    let mut out_file = fs::File::create(output)
-        .with_context(|| format!("creating {}", output.display()))?;
+    let mut out_file =
+        fs::File::create(output).with_context(|| format!("creating {}", output.display()))?;
     let mut cbor_bytes = Vec::new();
     ciborium::ser::into_writer(&metadata, &mut cbor_bytes)
         .map_err(|e| anyhow!("serialize metadata: {e}"))?;
@@ -197,8 +195,7 @@ fn cmd_sign(
     if let Some(parent) = parameters.parent()
         && !parent.as_os_str().is_empty()
     {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("creating {}", parent.display()))?;
+        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
     }
     fs::write(parameters, verifying_key.to_bytes())
         .with_context(|| format!("writing {}", parameters.display()))?;
@@ -217,10 +214,7 @@ fn cmd_sign(
 fn cmd_show_pub(key_file: &Path) -> Result<()> {
     let signing_key = load_signing_key(key_file)?;
     let verifying_key = signing_key.verifying_key();
-    println!(
-        "{}",
-        bs58::encode(verifying_key.to_bytes()).into_string()
-    );
+    println!("{}", bs58::encode(verifying_key.to_bytes()).into_string());
     Ok(())
 }
 
@@ -307,8 +301,7 @@ mod tests {
 
         // Metadata is CBOR-deserializable into WebContainerMetadata.
         let meta_bytes = fs::read(&metadata).unwrap();
-        let decoded: WebContainerMetadata =
-            ciborium::de::from_reader(&meta_bytes[..]).unwrap();
+        let decoded: WebContainerMetadata = ciborium::de::from_reader(&meta_bytes[..]).unwrap();
         assert_eq!(decoded.version, 42);
 
         // Signature over `version (u32 BE) || webapp_bytes` must verify
