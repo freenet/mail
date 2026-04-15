@@ -8,8 +8,19 @@ use std::collections::{HashMap, HashSet};
 use chrono::{DateTime, Duration, Utc};
 use freenet_aft_interface::*;
 use freenet_stdlib::prelude::*;
-use rsa::{pkcs8::EncodePublicKey, RsaPrivateKey};
+use ml_dsa::{
+    MlDsa65, SigningKey as MlDsaSigningKey,
+    signature::{Keypair, Signer},
+};
 use serde::{Deserialize, Serialize};
+
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push_str(&format!("{:02x}", b));
+    }
+    s
+}
 
 #[cfg(test)]
 mod tests;
@@ -72,11 +83,12 @@ impl DelegateInterface for TokenDelegate {
 const RESPONSES: &[&str] = &["true", "false"];
 
 fn user_input(criteria: &AllocationCriteria, assignee: &Assignee) -> NotificationMessage<'static> {
-    let assignee = assignee
-        .to_public_key_pem(rsa::pkcs8::LineEnding::LF)
-        .unwrap();
+    // `assignee` is the FIPS 204 encoded ML-DSA-65 verifying key (1952 bytes).
+    // Display just a short hex prefix in the user-facing notification.
+    let prefix = &assignee[..assignee.len().min(16)];
+    let assignee_hex = hex_encode(prefix);
     let notification_json = serde_json::json!({
-        "user": assignee,
+        "user": format!("ml-dsa-65:{}...", assignee_hex),
         "token": {
             "tier": criteria.frequency,
             "max_age": format!("{} seconds", criteria.max_age.as_secs())
@@ -96,6 +108,8 @@ fn allocate_token(
         assignment_hash,
     }: RequestNewToken,
 ) -> Result<Vec<OutboundDelegateMsg>, DelegateError> {
+    let signing_key = params.signing_key();
+    let verifying_key_bytes = signing_key.verifying_key().encode().to_vec();
     let request = context
         .waiting_for_user_input
         .iter()
@@ -107,7 +121,7 @@ fn allocate_token(
             // request user input and add to waiting queue
             context.waiting_for_user_input.insert(request_id);
             let context: DelegateContext = (&*context).try_into()?;
-            let message = user_input(&criteria, &params.generator_private_key.to_public_key());
+            let message = user_input(&criteria, &verifying_key_bytes);
             let req_allocation = {
                 let msg = TokenDelegateMessage::RequestNewToken(RequestNewToken {
                     request_id,
@@ -152,9 +166,12 @@ fn allocate_token(
             let application_response = match response {
                 Response::Allowed => {
                     let context: DelegateContext = (&*context).try_into()?;
-                    let Some(assignment) =
-                        records.assign(&criteria, &params.generator_private_key, assignment_hash)
-                    else {
+                    let Some(assignment) = records.assign(
+                        &criteria,
+                        &signing_key,
+                        &verifying_key_bytes,
+                        assignment_hash,
+                    ) else {
                         let msg = TokenDelegateMessage::Failure(FailureReason::NoFreeSlot {
                             delegate_id,
                             criteria,
@@ -228,7 +245,8 @@ trait TokenAssignmentInternal {
     fn assign(
         &mut self,
         criteria: &AllocationCriteria,
-        private_key: &RsaPrivateKey,
+        signing_key: &MlDsaSigningKey<MlDsa65>,
+        verifying_key_bytes: &[u8],
         assignment_hash: AssignmentHash,
     ) -> Option<TokenAssignment>;
 
@@ -248,12 +266,10 @@ impl TokenAssignmentInternal for TokenAllocationRecord {
     fn assign(
         &mut self,
         criteria: &AllocationCriteria,
-        generator_pk: &RsaPrivateKey,
+        signing_key: &MlDsaSigningKey<MlDsa65>,
+        verifying_key_bytes: &[u8],
         assignment_hash: AssignmentHash,
     ) -> Option<TokenAssignment> {
-        use rsa::pkcs1v15::SigningKey;
-        use rsa::sha2::Sha256;
-        use rsa::signature::Signer;
         #[cfg(target_family = "wasm")]
         #[inline(always)]
         fn current() -> DateTime<Utc> {
@@ -272,25 +288,13 @@ impl TokenAssignmentInternal for TokenAllocationRecord {
                 criteria.frequency,
                 &assignment_hash,
             );
-            let signing_key = SigningKey::<Sha256>::new(generator_pk.clone());
             let signature = signing_key.sign(&msg);
-            #[cfg(target_family = "wasm")]
-            {
-                let pk = generator_pk
-                    .to_public_key()
-                    .to_public_key_pem(rsa::pkcs8::LineEnding::LF)
-                    .unwrap()
-                    .split_whitespace()
-                    .collect::<String>();
-                // freenet_stdlib::log::info(&format!(
-                //     "signed message {msg:?} with pub key: `{pk}`, signature: {signature}"
-                // ));
-            }
+            let signature_bytes: Vec<u8> = signature.encode().to_vec();
             TokenAssignment {
                 tier: criteria.frequency,
                 time_slot,
-                generator: generator_pk.to_public_key(),
-                signature,
+                generator: verifying_key_bytes.to_vec(),
+                signature: signature_bytes,
                 assignment_hash,
                 token_record: criteria.contract,
             }

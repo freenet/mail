@@ -17,22 +17,13 @@ use freenet_aft_interface::{
     TokenAssignmentHash,
 };
 use freenet_stdlib::prelude::*;
-// ML-DSA-65 (FIPS 204, NIST level 3) is used for inbox-owner signatures
-// on state deltas. RSA remains only for message *encryption* (Stage 2 of
-// #18 will rip that out too) and for the AFT token system's own crypto,
-// which is a separate concern from this epic.
-//
-// Note on trait naming: `ml_dsa` re-exports `signature::{Signer, Verifier,
-// Keypair}`, and so does the `rsa` crate. We import the ml-dsa aliases
-// under prefixed names and keep the rsa `Verifier` under an alias so the
-// two don't collide at method-resolution time for `.verify()` /
-// `.sign()`.
+// ML-DSA-65 (FIPS 204, NIST level 3) is used for inbox-owner signatures on
+// state deltas and, as of Stage 4 of #18, also for AFT token-generator
+// signatures verified in this contract.
 use ml_dsa::{
+    EncodedVerifyingKey, MlDsa65, SigningKey as MlDsaSigningKey, VerifyingKey as MlDsaVerifyingKey,
     signature::{Signer as MlDsaSigner, Verifier as MlDsaVerifier},
-    EncodedVerifyingKey, MlDsa65, SigningKey as MlDsaSigningKey,
-    VerifyingKey as MlDsaVerifyingKey,
 };
-use rsa::{pkcs1v15::VerifyingKey as RsaVerifyingKey, sha2::Sha256};
 use serde::{Deserialize, Serialize};
 
 /// Sign this byte array and include the signature in the `inbox_signature` so
@@ -147,7 +138,13 @@ enum VerificationError {
     MissingContracts(Vec<ContractInstanceId>),
     TokenAssignmentMismatch,
     InvalidToken(TokenInvalidReason),
+    InvalidTokenGeneratorKey,
     WrongSignature,
+}
+
+fn decode_token_generator_vk(encoded: &[u8]) -> Option<MlDsaVerifyingKey<MlDsa65>> {
+    let fixed: EncodedVerifyingKey<MlDsa65> = encoded.try_into().ok()?;
+    Some(MlDsaVerifyingKey::<MlDsa65>::decode(&fixed))
 }
 
 impl From<VerificationError> for ContractError {
@@ -175,6 +172,12 @@ impl Display for VerificationError {
             }
             VerificationError::InvalidToken(reason) => {
                 write!(f, "Invalid token: {reason}")
+            }
+            VerificationError::InvalidTokenGeneratorKey => {
+                write!(
+                    f,
+                    "Token generator public key is not a valid ML-DSA-65 encoded verifying key"
+                )
             }
             VerificationError::WrongSignature => {
                 write!(f, "Wrong signature")
@@ -262,8 +265,8 @@ impl Inbox {
             if !records.assignment_exists(&message.token_assignment) {
                 return Err(VerificationError::TokenAssignmentMismatch);
             }
-            let verifying_key =
-                RsaVerifyingKey::<Sha256>::new(message.token_assignment.generator.clone());
+            let verifying_key = decode_token_generator_vk(&message.token_assignment.generator)
+                .ok_or(VerificationError::InvalidTokenGeneratorKey)?;
             message
                 .token_assignment
                 .is_valid(&verifying_key)
@@ -276,8 +279,8 @@ impl Inbox {
     }
 
     fn add_message(&mut self, message: Message) -> Result<(), VerificationError> {
-        let verifying_key =
-            RsaVerifyingKey::<Sha256>::new(message.token_assignment.generator.clone());
+        let verifying_key = decode_token_generator_vk(&message.token_assignment.generator)
+            .ok_or(VerificationError::InvalidTokenGeneratorKey)?;
         message
             .token_assignment
             .is_valid(&verifying_key)
@@ -359,7 +362,9 @@ impl TryFrom<StateSummary<'static>> for InboxSummary {
 /// Helper: decode a stored `Signature` byte blob into a typed ML-DSA-65
 /// signature. Returns `ContractError::InvalidUpdate` on any decode failure
 /// so the caller can propagate cleanly.
-fn decode_ml_dsa_signature(signature: &Signature) -> Result<ml_dsa::Signature<MlDsa65>, ContractError> {
+fn decode_ml_dsa_signature(
+    signature: &Signature,
+) -> Result<ml_dsa::Signature<MlDsa65>, ContractError> {
     let encoded: ml_dsa::EncodedSignature<MlDsa65> = (&**signature)
         .try_into()
         .map_err(|_| ContractError::InvalidUpdate)?;
@@ -535,8 +540,8 @@ mod tests {
     use super::*;
     use getrandom::SysRng;
     use ml_dsa::{
-        signature::{rand_core::UnwrapErr, Keypair as MlDsaKeypair},
         KeyGen,
+        signature::{Keypair as MlDsaKeypair, rand_core::UnwrapErr},
     };
 
     #[test]
@@ -560,8 +565,7 @@ mod tests {
 
         // Sign the fixed STATE_UPDATE salt — same payload the contract
         // verifies on every state update.
-        let signature: ml_dsa::Signature<MlDsa65> =
-            MlDsaSigner::sign(&signing_key, STATE_UPDATE);
+        let signature: ml_dsa::Signature<MlDsa65> = MlDsaSigner::sign(&signing_key, STATE_UPDATE);
         let signature_bytes = signature.encode().to_vec();
 
         // Sanity-check the signature round-trips before we hand it to

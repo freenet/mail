@@ -6,7 +6,6 @@ mod token_assignment {
     use super::*;
     use chrono::{NaiveDate, Timelike};
     use freenet_aft_interface::Tier;
-    use rsa::{pkcs1v15::Signature, RsaPublicKey};
 
     fn get_assignment_date(y: i32, m: u32, d: u32) -> DateTime<Utc> {
         let naive = NaiveDate::from_ymd_opt(y, m, d)
@@ -19,10 +18,16 @@ mod token_assignment {
     const TEST_TIER: Tier = Tier::Day1;
     const MAX_DURATION_1Y: std::time::Duration = std::time::Duration::from_secs(365 * 24 * 3600);
 
-    const RSA_4096_PUB_PEM: &str = include_str!("../../../interfaces/examples/rsa4096-pub.pem");
-    static PK: LazyLock<RsaPublicKey> = LazyLock::new(|| {
-        <RsaPublicKey as rsa::pkcs1::DecodeRsaPublicKey>::from_pkcs1_pem(RSA_4096_PUB_PEM).unwrap()
-    });
+    // These tests exercise only `next_free_assignment` slot-scheduling logic;
+    // the generator and signature fields on each `TokenAssignment` are never
+    // verified here, so we fill them with dummy placeholder bytes.
+    fn dummy_generator() -> Vec<u8> {
+        vec![0u8; 1952]
+    }
+
+    fn dummy_signature() -> Vec<u8> {
+        vec![1u8; 64]
+    }
 
     static ID: LazyLock<ContractInstanceId> = LazyLock::new(|| {
         let rnd = [1; 32];
@@ -37,8 +42,8 @@ mod token_assignment {
             vec![TokenAssignment {
                 tier: TEST_TIER,
                 time_slot: get_assignment_date(2023, 1, 25),
-                generator: PK.clone(),
-                signature: Signature::try_from([1u8; 64].as_slice()).unwrap(),
+                generator: dummy_generator(),
+                signature: dummy_signature(),
                 assignment_hash: [0; 32],
                 token_record: *ID,
             }],
@@ -58,16 +63,16 @@ mod token_assignment {
                 TokenAssignment {
                     tier: TEST_TIER,
                     time_slot: get_assignment_date(2022, 1, 27),
-                    generator: PK.clone(),
-                    signature: Signature::try_from([1u8; 64].as_slice()).unwrap(),
+                    generator: dummy_generator(),
+                    signature: dummy_signature(),
                     assignment_hash: [0; 32],
                     token_record: *ID,
                 },
                 TokenAssignment {
                     tier: TEST_TIER,
                     time_slot: get_assignment_date(2023, 1, 26),
-                    generator: PK.clone(),
-                    signature: Signature::try_from([1u8; 64].as_slice()).unwrap(),
+                    generator: dummy_generator(),
+                    signature: dummy_signature(),
                     assignment_hash: [0; 32],
                     token_record: *ID,
                 },
@@ -88,16 +93,16 @@ mod token_assignment {
                 TokenAssignment {
                     tier: TEST_TIER,
                     time_slot: get_assignment_date(2022, 1, 27),
-                    generator: PK.clone(),
-                    signature: Signature::try_from([1u8; 64].as_slice()).unwrap(),
+                    generator: dummy_generator(),
+                    signature: dummy_signature(),
                     assignment_hash: [0; 32],
                     token_record: *ID,
                 },
                 TokenAssignment {
                     tier: TEST_TIER,
                     time_slot: get_assignment_date(2022, 1, 29),
-                    generator: PK.clone(),
-                    signature: Signature::try_from([1u8; 64].as_slice()).unwrap(),
+                    generator: dummy_generator(),
+                    signature: dummy_signature(),
                     assignment_hash: [0; 32],
                     token_record: *ID,
                 },
@@ -115,24 +120,24 @@ mod token_assignment {
                 TokenAssignment {
                     tier: TEST_TIER,
                     time_slot: get_assignment_date(2022, 1, 27),
-                    generator: PK.clone(),
-                    signature: Signature::try_from([1u8; 64].as_slice()).unwrap(),
+                    generator: dummy_generator(),
+                    signature: dummy_signature(),
                     assignment_hash: [0; 32],
                     token_record: *ID,
                 },
                 TokenAssignment {
                     tier: TEST_TIER,
                     time_slot: get_assignment_date(2022, 1, 28),
-                    generator: PK.clone(),
-                    signature: Signature::try_from([1u8; 64].as_slice()).unwrap(),
+                    generator: dummy_generator(),
+                    signature: dummy_signature(),
                     assignment_hash: [0; 32],
                     token_record: *ID,
                 },
                 TokenAssignment {
                     tier: TEST_TIER,
                     time_slot: get_assignment_date(2022, 1, 30),
-                    generator: PK.clone(),
-                    signature: Signature::try_from([1u8; 64].as_slice()).unwrap(),
+                    generator: dummy_generator(),
+                    signature: dummy_signature(),
                     assignment_hash: [0; 32],
                     token_record: *ID,
                 },

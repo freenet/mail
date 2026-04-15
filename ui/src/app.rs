@@ -1,27 +1,26 @@
-use std::fmt::Display;
 #[cfg(feature = "example-data")]
 use std::collections::HashMap;
-use std::sync::atomic::AtomicUsize;
+use std::fmt::Display;
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
 use std::{borrow::Cow, cell::RefCell, rc::Rc};
 
 use arc_swap::ArcSwap;
 use chrono::Utc;
 use dioxus::prelude::*;
-use futures::future::LocalBoxFuture;
 use futures::FutureExt;
+use futures::future::LocalBoxFuture;
 use ml_dsa::{MlDsa65, SigningKey as MlDsaSigningKey};
 use ml_kem::{DecapsulationKey, EncapsulationKey, MlKem768};
-use rsa::RsaPrivateKey;
 use wasm_bindgen::JsValue;
 
 pub(crate) use login::{Identity, LoginController};
 
-use crate::api::{node_response_error_handling, TryNodeAction};
+use crate::api::{TryNodeAction, node_response_error_handling};
 use crate::{
+    DynError,
     api::WebApiRequestClient,
     inbox::{DecryptedMessage, InboxModel, MessageModel},
-    DynError,
 };
 
 pub(crate) mod login;
@@ -43,22 +42,19 @@ pub(crate) enum NodeAction {
         alias: Rc<str>,
         ml_dsa_key: Arc<MlDsaSigningKey<MlDsa65>>,
         ml_kem_dk: Box<DecapsulationKey<MlKem768>>,
-        /// RSA key retained for AFT token subsystem only. Removed in Stage 4 (#18).
-        rsa_key: RsaPrivateKey,
         description: String,
     },
     CreateContract {
         alias: Rc<str>,
         contract_type: ContractType,
-        /// ML-DSA-65 signing key for inbox contract creation.
+        /// ML-DSA-65 signing key used for both inbox ownership and AFT
+        /// token signing (same key serves both subsystems post-Stage-4).
         ml_dsa_key: Arc<MlDsaSigningKey<MlDsa65>>,
-        /// RSA key for AFT contract creation. Removed in Stage 4 (#18).
-        rsa_key: RsaPrivateKey,
     },
     CreateDelegate {
         alias: Rc<str>,
-        /// RSA key for AFT token delegate. Removed in Stage 4 (#18).
-        rsa_key: RsaPrivateKey,
+        /// ML-DSA-65 signing key used by the AFT token-generator delegate.
+        ml_dsa_key: Arc<MlDsaSigningKey<MlDsa65>>,
     },
 }
 
@@ -97,14 +93,9 @@ pub(crate) fn app() -> Element {
             let login_controller = login_controller;
             let user = user;
             let inbox_data = inbox_data.clone();
-            let fut = crate::api::node_comms(
-                rx,
-                inbox_controller,
-                login_controller,
-                user,
-                inbox_data,
-            )
-            .map(|_| Ok(JsValue::NULL));
+            let fut =
+                crate::api::node_comms(rx, inbox_controller, login_controller, user, inbox_data)
+                    .map(|_| Ok(JsValue::NULL));
             let _ = wasm_bindgen_futures::future_to_promise(fut);
             async {}.boxed_local()
         });
@@ -114,7 +105,8 @@ pub(crate) fn app() -> Element {
         let _ = inbox_controller;
         let _ = login_controller;
         let _ = inbox_data;
-        let _sync: Coroutine<NodeAction> = use_coroutine(move |_rx: UnboundedReceiver<NodeAction>| async {});
+        let _sync: Coroutine<NodeAction> =
+            use_coroutine(move |_rx: UnboundedReceiver<NodeAction>| async {});
     }
     #[allow(unused_variables)]
     let actions = use_coroutine_handle::<NodeAction>();
@@ -134,7 +126,10 @@ pub(crate) fn app() -> Element {
         }
         #[cfg(feature = "example-data")]
         {
-            inbox.read().load_example_messages(id).expect("load mock messages");
+            inbox
+                .read()
+                .load_example_messages(id)
+                .expect("load mock messages");
         }
         rsx! {
            UserInbox {}
@@ -264,9 +259,7 @@ impl InboxView {
             // keyed by recipient alias so that switching identities reveals it.
             use ml_kem::kem::KeyExport;
             if let Some(ek_key) = content.to.first() {
-                if let Some(to_alias) =
-                    Identity::alias_for_encaps_key(ek_key.0.as_slice())
-                {
+                if let Some(to_alias) = Identity::alias_for_encaps_key(ek_key.0.as_slice()) {
                     let msg = Message {
                         id: 0, // reassigned on load
                         from: content.from.clone().into(),
@@ -336,10 +329,9 @@ impl InboxView {
 
     #[cfg(feature = "example-data")]
     fn load_example_messages(&self, id: &Identity) -> Result<(), DynError> {
-        let body: Cow<'static, str> =
-            "Lorem ipsum dolor sit amet, consectetur adipiscing elit. \
+        let body: Cow<'static, str> = "Lorem ipsum dolor sit amet, consectetur adipiscing elit. \
              Sed do eiusmod tempor incidunt ut labore et dolore magna aliqua."
-                .into();
+            .into();
         let mut emails = if id.id == UserId(0) {
             vec![
                 Message {
@@ -421,13 +413,7 @@ impl User {
     #[cfg(feature = "example-data")]
     fn new() -> Self {
         use ml_dsa::KeyGen;
-        use rand_chacha::rand_core::OsRng;
 
-        let mut rng = OsRng;
-        // RSA keys for AFT only — 2048-bit keeps the offline preview snappy in
-        // debug builds. The real keygen path uses 4096-bit.
-        let rsa0 = RsaPrivateKey::new(&mut rng, 2048).expect("rsa keygen");
-        let rsa1 = RsaPrivateKey::new(&mut rng, 2048).expect("rsa keygen");
         let ml_dsa0 = Arc::new(MlDsa65::from_seed(&rand::random::<[u8; 32]>().into()));
         let ml_dsa1 = Arc::new(MlDsa65::from_seed(&rand::random::<[u8; 32]>().into()));
         // Use rand::random (getrandom 0.2 + js feature) rather than ml-kem's
@@ -452,7 +438,6 @@ impl User {
                 description: "Mock identity (example-data)".into(),
                 ml_dsa_signing_key: ml_dsa0,
                 ml_kem_dk: ml_kem_dk0,
-                rsa_key: rsa0,
             },
             Identity {
                 alias: "address2".into(),
@@ -460,7 +445,6 @@ impl User {
                 description: "Mock identity (example-data)".into(),
                 ml_dsa_signing_key: ml_dsa1,
                 ml_kem_dk: ml_kem_dk1,
-                rsa_key: rsa1,
             },
         ];
         // Register with the shared ALIASES store so IdentifiersList
@@ -663,7 +647,11 @@ fn InboxComponent() -> Element {
         id: u64,
     ) -> Element {
         let mut open_mail = use_context::<Signal<menu::MenuSelection>>();
-        let icon_style = if read { "fa-regular fa-envelope" } else { "fa-solid fa-envelope" };
+        let icon_style = if read {
+            "fa-regular fa-envelope"
+        } else {
+            "fa-solid fa-envelope"
+        };
         rsx!(
             a {
                 class: "panel-block",
@@ -870,7 +858,9 @@ fn NewMessageWindow() -> Element {
             &content_val,
         ) {
             Ok(futs) => {
-                futs.into_iter().for_each(|f| { let _ = spawn(f); });
+                futs.into_iter().for_each(|f| {
+                    let _ = spawn(f);
+                });
             }
             Err(e) => {
                 crate::log::error(format!("{e}"), Some(TryNodeAction::SendMessage));

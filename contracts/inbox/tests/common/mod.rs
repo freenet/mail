@@ -6,12 +6,8 @@
 //! through this module so the round-trip / validation / token-gating tests
 //! stay focused on the assertion they care about.
 //!
-//! Crypto note: this module uses **two** signature schemes side by side:
-//! - **ML-DSA-65** (FIPS 204, NIST level 3) for inbox-owner signatures.
-//!   This is what the contract verifies on every state update. See #18.
-//! - **RSA-PKCS#1 v1.5** for AFT token generator signatures. The
-//!   anti-flood-token system has its own crypto that's orthogonal to the
-//!   inbox migration and stays on RSA for now.
+//! Crypto note: as of Stage 4 of #18, this module uses ML-DSA-65 uniformly
+//! for both inbox-owner signatures and AFT token-generator signatures.
 #![allow(dead_code)] // helpers are picked up à la carte by individual test files
 
 use std::collections::HashMap;
@@ -24,19 +20,11 @@ use freenet_stdlib::prelude::{
 };
 use getrandom::SysRng;
 use ml_dsa::{
-    signature::{
-        rand_core::UnwrapErr, Keypair as MlDsaKeypair, Signer as MlDsaSigner,
-    },
     KeyGen, MlDsa65, SigningKey as MlDsaSigningKey, VerifyingKey as MlDsaVerifyingKey,
+    signature::{Keypair as MlDsaKeypair, Signer as MlDsaSigner, rand_core::UnwrapErr},
 };
-use rsa::{
-    pkcs1v15::SigningKey as RsaSigningKey,
-    rand_core::OsRng as RsaOsRng,
-    sha2::{Digest, Sha256},
-    signature::Signer as RsaSigner,
-    RsaPrivateKey, RsaPublicKey,
-};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 /// The fixed 8-byte salt the inbox contract signs at construction time.
 /// Must match the `STATE_UPDATE` constant in `contracts/inbox/src/lib.rs`.
@@ -56,13 +44,14 @@ pub fn inbox_verifying_key(sk: &MlDsaSigningKey<MlDsa65>) -> MlDsaVerifyingKey<M
     MlDsaKeypair::verifying_key(sk)
 }
 
-/// Generate a fresh 2048-bit RSA keypair for use as an AFT token generator.
-/// 2048 keeps host-test wall time bearable. Inbox owners do NOT use RSA any
-/// more — call `make_inbox_keypair()` for those.
-pub fn make_token_generator_keypair() -> (RsaPrivateKey, RsaPublicKey) {
-    let sk = RsaPrivateKey::new(&mut RsaOsRng, 2048).expect("rsa keygen");
-    let pk = sk.to_public_key();
-    (sk, pk)
+/// Generate a fresh ML-DSA-65 keypair for use as an AFT token generator.
+/// Returns the signing key plus the FIPS 204 encoded verifying key bytes
+/// (1952 bytes) that populate `TokenAssignment.generator`.
+pub fn make_token_generator_keypair() -> (MlDsaSigningKey<MlDsa65>, Vec<u8>) {
+    let mut rng = UnwrapErr(SysRng);
+    let sk = MlDsa65::key_gen(&mut rng);
+    let vk_bytes = MlDsaKeypair::verifying_key(&sk).encode().to_vec();
+    (sk, vk_bytes)
 }
 
 /// Build the serialized [`InboxParams`] (a JSON-encoded `Parameters` blob)
@@ -82,28 +71,32 @@ pub fn fixed_valid_slot() -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap()
 }
 
-/// Build a token assignment signed by `generator_sk` (RSA). The signed
+/// Build a token assignment signed by `generator_sk` (ML-DSA-65). The signed
 /// payload is `(tier_byte, time_slot.timestamp_le_bytes, assignment_hash)`
 /// per the contract documented on [`TokenAssignment::signature_content`].
+///
+/// `generator_vk_bytes` is the caller-supplied encoded VK that gets stored
+/// on-chain in `TokenAssignment.generator` — pass the second tuple element
+/// of [`make_token_generator_keypair`].
 ///
 /// `token_record` is the contract-instance ID that
 /// [`TokenAllocationRecord`] entries are keyed by — pick any stable value
 /// per test; the helper does not enforce uniqueness.
 pub fn make_token_assignment(
-    generator_sk: &RsaPrivateKey,
+    generator_sk: &MlDsaSigningKey<MlDsa65>,
+    generator_vk_bytes: Vec<u8>,
     tier: Tier,
     time_slot: DateTime<Utc>,
     assignment_hash: [u8; 32],
     token_record: ContractInstanceId,
 ) -> TokenAssignment {
     let to_sign = TokenAssignment::signature_content(&time_slot, tier, &assignment_hash);
-    let signing_key = RsaSigningKey::<Sha256>::new(generator_sk.clone());
-    let signature = RsaSigner::sign(&signing_key, &to_sign);
+    let signature: ml_dsa::Signature<MlDsa65> = MlDsaSigner::sign(generator_sk, &to_sign);
     TokenAssignment {
         tier,
         time_slot,
-        generator: generator_sk.to_public_key(),
-        signature,
+        generator: generator_vk_bytes,
+        signature: signature.encode().to_vec(),
         assignment_hash,
         token_record,
     }

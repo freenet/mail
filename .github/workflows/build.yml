@@ -62,6 +62,9 @@ jobs:
       - name: Run inbox integration tests
         run: cargo make test-inbox
 
+      - name: Rustfmt
+        run: cargo fmt --all -- --check
+
       - name: Clippy
         run: cargo make clippy
 
