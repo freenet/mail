@@ -56,11 +56,11 @@ jobs:
         if: steps.cache-bins.outputs.cache-hit != 'true'
         run: cargo binstall -y --force --version 0.7.3 dioxus-cli
 
-      - name: Clippy
-        run: cargo make clippy
-
       - name: Build all contracts and UI
         run: cargo make build
+
+      - name: Clippy
+        run: cargo make clippy
 
       - name: Run workspace tests
         run: cargo make test
