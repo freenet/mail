@@ -25,13 +25,14 @@ struct CreateAlias(bool);
 
 #[allow(non_snake_case)]
 fn LoginHeader() -> Element {
+    let app_name = crate::app_name();
     rsx! {
         div {
             class: "columns",
             div { class: "column is-4" }
             section {
                 class: "section is-small",
-                h1 { class: "title", "{crate::APP_NAME}" }
+                h1 { class: "title", "{app_name}" }
             }
         }
     }

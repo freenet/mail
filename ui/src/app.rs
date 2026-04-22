@@ -139,8 +139,9 @@ pub(crate) fn app() -> Element {
            login::IdentifiersList {}
         }
     };
+    let app_name = crate::app_name();
     rsx! {
-        document::Title { "{crate::APP_NAME}" }
+        document::Title { "{app_name}" }
         {body}
     }
 }
