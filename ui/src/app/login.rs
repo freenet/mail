@@ -31,7 +31,7 @@ fn LoginHeader() -> Element {
             div { class: "column is-4" }
             section {
                 class: "section is-small",
-                h1 { class: "title", "Mail" }
+                h1 { class: "title", "{crate::APP_NAME}" }
             }
         }
     }

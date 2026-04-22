@@ -22,6 +22,11 @@ pub(crate) mod test_util;
 #[allow(dead_code)] // TODO: wire into the Dioxus mount point
 const MAIN_ELEMENT_ID: &str = "freenet-email-main";
 
+/// Consumer-facing product name. Single source of truth for the rendered
+/// `<title>` (via `document::Title` in `app::app`) and the login screen
+/// heading. Change here to rebrand the app.
+pub(crate) const APP_NAME: &str = "Mail";
+
 /// The base58-encoded `ContractInstanceId` of the signed webapp contract
 /// produced by `cargo make update-published-contract`.
 ///
