@@ -15,7 +15,7 @@ asset_dir = "public"
 [web.app]
 
 # HTML title tag content
-title = "Freenet Email"
+title = "Mail"
 
 [web.watcher]
 

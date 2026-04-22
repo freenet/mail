@@ -7,7 +7,7 @@ import { test, expect, Page } from "@playwright/test";
 // for the mock identities, so we give it a generous 60s ceiling.
 async function waitForApp(page: Page) {
   await page.waitForSelector("h1", { timeout: 60_000 });
-  await expect(page.locator("h1")).toContainText("Freenet Email");
+  await expect(page.locator("h1")).toContainText("Mail");
 }
 
 // Helper: select an identity by clicking its alias link.
@@ -237,7 +237,7 @@ test.describe("Sandboxed iframe embedding", () => {
 
     const iframe = page.frameLocator("iframe");
     await iframe.locator("h1").waitFor({ timeout: 60_000 });
-    await expect(iframe.locator("h1")).toContainText("Freenet Email");
+    await expect(iframe.locator("h1")).toContainText("Mail");
   });
 });
 

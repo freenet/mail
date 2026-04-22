@@ -27,11 +27,11 @@ test.describe("Production liveness", () => {
   test("webapp loads and renders the login screen", async ({ page }) => {
     await page.goto("/");
 
-    // The Dioxus root mounts into <div id="main">. The "Freenet Email"
+    // The Dioxus root mounts into <div id="main">. The "Mail"
     // heading is part of the LoginHeader component and is the first
     // user-visible proof that the WASM loaded and the app's root
     // component mounted successfully.
-    await expect(page.locator("h1")).toContainText("Freenet Email", {
+    await expect(page.locator("h1")).toContainText("Mail", {
       timeout: 60_000,
     });
 
