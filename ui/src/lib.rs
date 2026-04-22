@@ -22,10 +22,13 @@ pub(crate) mod test_util;
 #[allow(dead_code)] // TODO: wire into the Dioxus mount point
 const MAIN_ELEMENT_ID: &str = "freenet-email-main";
 
-/// Consumer-facing product name. Single source of truth for the rendered
-/// `<title>` (via `document::Title` in `app::app`) and the login screen
-/// heading. Change here to rebrand the app.
-pub(crate) const APP_NAME: &str = "Mail";
+/// Consumer-facing product name. The text is stored in
+/// `ui/branding/app-name.txt` so it's shared verbatim with the
+/// Playwright suite (which reads the same file at test time).
+/// `trim_ascii` strips the trailing newline so editors can keep the
+/// file POSIX-clean. Consumed by `document::Title` in `app::app` and
+/// by the login screen heading.
+pub(crate) const APP_NAME: &str = include_str!("../branding/app-name.txt").trim_ascii();
 
 /// The base58-encoded `ContractInstanceId` of the signed webapp contract
 /// produced by `cargo make update-published-contract`.
