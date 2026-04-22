@@ -112,7 +112,7 @@ pub(crate) fn app() -> Element {
     let actions = use_coroutine_handle::<NodeAction>();
 
     // Render login page if user not identified, otherwise render the inbox or identifiers list based on user's logged in state
-    if !user.read().identified {
+    let body = if !user.read().identified {
         rsx! {
             login::GetOrCreateIdentity {}
         }
@@ -138,6 +138,11 @@ pub(crate) fn app() -> Element {
         rsx! {
            login::IdentifiersList {}
         }
+    };
+    let app_name = crate::app_name();
+    rsx! {
+        document::Title { "{app_name}" }
+        {body}
     }
 }
 

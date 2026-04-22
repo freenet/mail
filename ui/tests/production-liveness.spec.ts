@@ -1,4 +1,5 @@
 import { test, expect } from "@playwright/test";
+import { APP_NAME } from "./app-name";
 
 // Production liveness check.
 //
@@ -27,11 +28,11 @@ test.describe("Production liveness", () => {
   test("webapp loads and renders the login screen", async ({ page }) => {
     await page.goto("/");
 
-    // The Dioxus root mounts into <div id="main">. The "Freenet Email"
+    // The Dioxus root mounts into <div id="main">. The APP_NAME
     // heading is part of the LoginHeader component and is the first
     // user-visible proof that the WASM loaded and the app's root
     // component mounted successfully.
-    await expect(page.locator("h1")).toContainText("Freenet Email", {
+    await expect(page.locator("h1")).toContainText(APP_NAME, {
       timeout: 60_000,
     });
 

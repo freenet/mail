@@ -14,8 +14,10 @@ asset_dir = "public"
 
 [web.app]
 
-# HTML title tag content
-title = "Freenet Email"
+# HTML <title> is set at runtime by `document::Title` in ui/src/app.rs
+# using the `APP_NAME` constant in ui/src/lib.rs. Left blank here so
+# there's only one source of truth for the consumer-facing product name.
+title = ""
 
 [web.watcher]
 

@@ -22,6 +22,34 @@ pub(crate) mod test_util;
 #[allow(dead_code)] // TODO: wire into the Dioxus mount point
 const MAIN_ELEMENT_ID: &str = "freenet-email-main";
 
+/// Consumer-facing branding loaded once at init from
+/// `ui/branding/app.json`. The JSON is the single source of truth
+/// shared with the Playwright suite, which reads the same file at
+/// test time.
+mod branding {
+    use std::sync::LazyLock;
+
+    use serde::Deserialize;
+
+    #[derive(Deserialize)]
+    pub(crate) struct Branding {
+        pub(crate) name: String,
+    }
+
+    static BRANDING: LazyLock<Branding> = LazyLock::new(|| {
+        serde_json::from_str(include_str!("../branding/app.json"))
+            .expect("ui/branding/app.json failed to parse")
+    });
+
+    /// Consumer-facing product name. Consumed by `document::Title`
+    /// in `app::app` and by the login screen heading.
+    pub(crate) fn app_name() -> &'static str {
+        BRANDING.name.as_str()
+    }
+}
+
+pub(crate) use branding::app_name;
+
 /// The base58-encoded `ContractInstanceId` of the signed webapp contract
 /// produced by `cargo make update-published-contract`.
 ///
