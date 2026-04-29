@@ -24,7 +24,21 @@ import { APP_NAME } from "./app-name";
 // and pointed at the deployed gateway URL by
 // `scripts/smoke-test-production.sh`.
 
+// Skip the whole suite outside of `scripts/smoke-test-production.sh`.
+// The offline dev server used by CI (`dx serve` with example-data,no-sync
+// on :8082) does not wrap the webapp in the freenetBridge iframe shell,
+// so the iframe-targeted assertions below would always fail there. The
+// only intended runner is the smoke-test script, which sets
+// FREENET_EMAIL_BASE_URL to the deployed gateway URL.
 test.describe("Production liveness", () => {
+  test.skip(
+    !process.env.FREENET_EMAIL_BASE_URL ||
+      !process.env.FREENET_EMAIL_BASE_URL.includes("/v1/contract/web/"),
+    "production-liveness only runs against a deployed gateway URL " +
+      "(set FREENET_EMAIL_BASE_URL=http://<host>:7509/v1/contract/web/<id>/ " +
+      "or use scripts/smoke-test-production.sh)",
+  );
+
   test("webapp loads and renders the login screen", async ({ page }) => {
     // Use "" so the baseURL is used verbatim (including the
     // /v1/contract/web/<id>/ path). page.goto("/") would resolve
