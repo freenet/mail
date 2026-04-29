@@ -114,15 +114,18 @@ else
   linux: already default"
 fi
 
-# Freenet node — check the UI gateway port (50509 is the default for
-# `freenet network`; the exact check depends on your node's HTTP gateway).
-if ! curl -sf -o /dev/null "http://127.0.0.1:50509/contract/web/" 2>/dev/null; then
-    echo "  ⚠️  could not reach a Freenet node at http://127.0.0.1:50509"
+# Freenet node — probe the WS API / HTTP gateway port (7509 is the
+# default for current freenet builds; pre-0.2 builds used 50509).
+# Override with FREENET_PORT=... if your node binds elsewhere.
+FREENET_PORT="${FREENET_PORT:-7509}"
+if ! curl -sf -o /dev/null "http://127.0.0.1:${FREENET_PORT}/" 2>/dev/null; then
+    echo "  ⚠️  could not reach a Freenet node at http://127.0.0.1:${FREENET_PORT}"
     echo "     Make sure \`freenet network\` (NOT \`freenet local\`) is running"
     echo "     in another terminal and is connected to the network."
+    echo "     Override the probe port with FREENET_PORT=... if needed."
     confirm "Continue anyway?"
 else
-    echo "  ✓ Freenet node reachable on :50509"
+    echo "  ✓ Freenet node reachable on :${FREENET_PORT}"
 fi
 
 echo "  ✓ clean tree on main"

@@ -22,13 +22,14 @@ contract id.
 2. **Open the webapp** in a browser at the published contract id:
 
    ```
-   http://127.0.0.1:50509/contract/web/<contract-id>/
+   http://127.0.0.1:7509/v1/contract/web/<contract-id>/
    ```
 
    The latest committed contract id lives at
    [`published-contract/contract-id.txt`](published-contract/contract-id.txt)
-   in this repo. The `50509` port and `/contract/web/` path are the
-   defaults for the Freenet HTTP gateway — adjust for your setup.
+   in this repo. The `7509` port and `/v1/contract/web/` path are the
+   defaults for the Freenet HTTP/WebSocket gateway in current builds —
+   adjust for your setup.
 
 3. **Create an identity** in the app. Your private keys are held by the
    identity delegate inside the Freenet node sandbox, never in browser
