@@ -272,18 +272,20 @@ if [ ! -f "$KEY_FILE" ]; then
     echo "       run \`cargo make generate-web-container-keys\` first" >&2
     exit 1
 fi
-# Deterministic version: short commit hash converted from hex to u32.
-# Two developers on the same commit pick the same version, so the
-# signed payload (version || webapp) is identical and the contract ID
-# is reproducible. We use `printf %d 0x…` (portable across BSD and
-# GNU) rather than GNU-awk `strtonum`.
-short=$(git -C "$ROOT" rev-parse --short=8 HEAD)
-# Mask to the low 31 bits so we stay under i32::MAX (the contract
-# accepts u32 but staying positive keeps the value friendly to any
-# signed-int consumer downstream).
-version=$(( $(printf '%d' "0x$short") & 0x7fffffff ))
-if [ "$version" -eq 0 ]; then version=1; fi
-echo "signing with version $version (from commit $short)"
+# Monotonic version: unix timestamp (seconds). The on-chain
+# web-container update check requires strictly increasing versions;
+# the prior commit-hash-to-u32 scheme was not monotonic and broke at
+# v0.1.1 (a newer commit happened to hash lower than the deployed
+# state). Timestamp is the simplest source that's always monotonic
+# without coordination.
+#
+# Tradeoff: two developers signing at different times produce
+# different signed payloads and therefore different contract IDs.
+# `published-contract/contract-id.txt` is no longer reproducible from
+# source. The committed snapshot is now the authoritative ID, and
+# `update-published-contract*` rewrites it on every refresh.
+version=$(date -u +%s)
+echo "signing with version $version (unix timestamp)"
 cargo run --quiet -p web-container-sign -- sign \
     --input "$ROOT/target/webapp/webapp.tar.xz" \
     --output "$ROOT/target/webapp/webapp.metadata" \
@@ -310,13 +312,11 @@ if [ ! -f "$KEY_FILE" ]; then
     echo "  WEB_CONTAINER_KEY_FILE=/path/to/keys.toml cargo make publish-email" >&2
     exit 1
 fi
-# Deterministic version from the commit hash (same derivation as
-# sign-webapp-test). Uses `printf %d 0x…` instead of GNU-awk strtonum
-# for portability across BSD/macOS.
-short=$(git -C "$ROOT" rev-parse --short=8 HEAD)
-version=$(( $(printf '%d' "0x$short") & 0x7fffffff ))
-if [ "$version" -eq 0 ]; then version=1; fi
-echo "signing with production key at $KEY_FILE, version $version (from commit $short)"
+# Monotonic version: unix timestamp (seconds). See sign-webapp-test
+# for the rationale — short version: the on-chain update check needs
+# strict monotonicity, the prior commit-hash scheme didn't provide it.
+version=$(date -u +%s)
+echo "signing with production key at $KEY_FILE, version $version (unix timestamp)"
 cargo run --quiet -p web-container-sign -- sign \
     --input "$ROOT/target/webapp/webapp.tar.xz" \
     --output "$ROOT/target/webapp/webapp.metadata" \

@@ -241,26 +241,34 @@ real release.
 
 ### Reproducibility caveats
 
-Two developers building from the same commit will produce the
-**same** `published-contract/contract-id.txt` only when all of these
-match:
+The signed-payload version is the **unix timestamp at signing time**
+(see `sign-webapp` / `sign-webapp-test` in `Makefile.toml`). Two
+developers signing at different moments produce different payloads
+and therefore different contract IDs, so
+`published-contract/contract-id.txt` is **not** reproducible from
+source. The committed snapshot is the authoritative ID for the
+deployed contract; `cargo make update-published-contract*` rewrites
+it on every refresh.
 
-- **rustc version.** Pinned in `rust-toolchain.toml` (stable channel).
-  CI uses the same pin; contributors on stable-latest will match CI
-  automatically.
-- **Cargo release profile.** Pinned in the workspace `Cargo.toml`
-  (`lto=true, codegen-units=1, strip=true, panic=abort`).
-- **GNU tar.** `compress-webapp` uses
-  `tar --sort=name --mtime='2024-01-01 00:00:00 UTC' --owner=0 --group=0`
-  for a reproducible archive. BSD tar (macOS default) **does not**
-  support these flags. Install `gnu-tar`:
-  ```bash
-  brew install gnu-tar   # provides `gtar`
-  ```
-  Without GNU tar the pipeline still works — the archive signs and
-  publishes correctly — but the resulting contract ID will not match
-  across machines and cannot be committed to
-  `published-contract/contract-id.txt` as a source of truth.
+Why timestamp instead of a deterministic-from-source value: the
+on-chain web-container update check requires strictly monotonic
+versions. The previous scheme (commit-hash hex truncated to u32) was
+not monotonic — newer commits could hash lower than the deployed
+state — and broke the v0.1.1 publish. Commit count
+(`git rev-list --count HEAD`) is monotonic per branch but starts at
+~22, far below the version (~1.6e9) the chain already accepted under
+the broken scheme. Timestamp is the simplest source that's always
+above the deployed value.
+
+GNU tar is still required by `compress-webapp` for the
+`--sort=name --mtime=… --owner=0 --group=0` flags; the resulting
+archive is byte-identical across machines (rustc pin and release
+profile are also pinned), but the per-build timestamp injected at
+signing time means the final signed bytes differ. Install GNU tar:
+
+```bash
+brew install gnu-tar   # provides `gtar`
+```
 
 The `cargo make compress-webapp` target detects `gtar` / GNU `tar`
 automatically and emits a loud warning when falling back to BSD tar.
