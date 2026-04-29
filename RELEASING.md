@@ -67,8 +67,9 @@ freenet network
 ```
 
 Wait until it reports connected peers. The release script pings the
-node's HTTP gateway on `127.0.0.1:50509` at preflight and warns if it
-doesn't respond.
+node's HTTP gateway on `127.0.0.1:7509` at preflight and warns if it
+doesn't respond. Override with `FREENET_PORT=...` if your node binds
+elsewhere.
 
 See AGENTS.md §"Running a Freenet node" for the local-vs-network
 distinction.
@@ -142,12 +143,13 @@ scripts/smoke-test-production.sh
 ```
 
 With no argument, this defaults to
-`http://127.0.0.1:50509/contract/web/<committed-contract-id>/` (the
+`http://127.0.0.1:7509/v1/contract/web/<committed-contract-id>/` (the
 local network-connected node serving the just-published contract).
-Pass an explicit gateway URL to test against a remote peer:
+Override the port with `FREENET_PORT=...`. Pass an explicit gateway
+URL to test against a remote peer:
 
 ```bash
-scripts/smoke-test-production.sh http://some-peer.example:50509/contract/web/<id>/
+scripts/smoke-test-production.sh http://some-peer.example:7509/v1/contract/web/<id>/
 ```
 
 ### What the smoke test covers
