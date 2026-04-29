@@ -79,15 +79,16 @@ freenet-email/
 |-----------|---------|
 | `freenet-stdlib` | Freenet contract/delegate SDK |
 | `dioxus` | Web UI framework (WASM) |
-| `rsa` | RSA encryption for message security |
-| `chacha20poly1305` | Symmetric encryption for message content |
+| `ml-kem` | ML-KEM-768 (NIST FIPS 203) post-quantum key encapsulation for message encryption |
+| `ml-dsa` | ML-DSA-65 (NIST FIPS 204) post-quantum signatures for inbox state deltas and AFT |
+| `chacha20poly1305` | Symmetric encryption for message content (key from ML-KEM) |
 | `freenet-aft-interface` | Anti-Flood Token protocol |
 | `identity-management` | Identity delegate for alias management |
 
 ### Architecture
 
-- **Inbox Contract**: Stores encrypted messages on Freenet. Uses RSA signatures
-  to verify ownership. Messages are gated by AFT tokens to prevent spam.
+- **Inbox Contract**: Stores encrypted messages on Freenet. ML-DSA-65 signatures
+  verify ownership of state deltas. Messages are gated by AFT tokens to prevent spam.
 - **Web Container**: Minimal contract that hosts the compiled Dioxus UI as a
   Freenet webapp.
 - **UI**: Dioxus WASM app communicating with a local Freenet node via WebSocket.
@@ -352,7 +353,8 @@ scope and the rationale.
 
 This checklist validates the pieces that unit tests and Playwright
 can't cover: real WebSocket framing, real AFT token mint/burn, real
-RSA encrypt/decrypt round trip through the inbox contract state.
+ML-KEM encapsulation + ChaCha20-Poly1305 round trip through the inbox
+contract state.
 
 1. `cargo make run-node` in one terminal
 2. `cargo make publish-email-test` in another

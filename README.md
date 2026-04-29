@@ -1,13 +1,14 @@
-# Freenet Email
+# Mail
 
 A decentralized email client that runs on [Freenet](https://freenet.org) —
 no servers, no accounts, end-to-end encrypted, and rate-limited by
 Anti-Flood Tokens instead of a central authority.
 
 Messages are stored in per-user inbox contracts on the Freenet network,
-encrypted with the recipient's RSA public key. The UI is a Dioxus web
-app served from a signed web-container contract under a deterministic,
-reproducible contract id.
+encrypted with post-quantum ML-KEM-768 (NIST FIPS 203) and authenticated
+with ML-DSA-65 (NIST FIPS 204). The UI is a Dioxus web app served from
+a signed web-container contract under a deterministic, reproducible
+contract id.
 
 > **Status**: pre-alpha. The protocol and contract ids will change.
 > Don't use this for anything you'd mind losing.
@@ -29,8 +30,9 @@ reproducible contract id.
    in this repo. The `50509` port and `/contract/web/` path are the
    defaults for the Freenet HTTP gateway — adjust for your setup.
 
-3. **Create an identity** in the app. Your private keys never leave the
-   browser.
+3. **Create an identity** in the app. Your private keys are held by the
+   identity delegate inside the Freenet node sandbox, never in browser
+   storage.
 
 4. **Send a message.** The first send burns one Anti-Flood Token,
    minted automatically by your local node.
@@ -43,12 +45,13 @@ Three contracts and a delegate make up the full system:
   with an ed25519 key committed to
   [`test-contract/`](test-contract/) for sandbox builds, and with an
   offline-generated production key for real releases.
-- **Inbox contract** — one per user. Stores encrypted messages keyed by
-  an RSA public key, with signature verification for ownership.
+- **Inbox contract** — one per user. Stores ML-KEM-encapsulated,
+  ChaCha20-Poly1305-encrypted messages, with ML-DSA-65 signatures
+  on every state delta for ownership verification.
 - **Anti-Flood Token contracts** — mint/burn tokens that gate each
   message send, preventing spam without a central authority.
 - **Identity delegate** — holds the user's private keys inside the
-  Freenet delegate sandbox, never in the browser's localStorage.
+  Freenet delegate sandbox, never exposed to the webapp.
 
 ## Contributing
 
