@@ -737,8 +737,7 @@ pub(crate) async fn node_comms(
         token_rec_to_id: &mut HashMap<ContractKey, Identity>,
         inboxes: &mut InboxesData,
         mut inbox_controller: dioxus::prelude::Signal<InboxController>,
-        // Unused until the identities delegate arm is reinstated in Phase 1.
-        _login_controller: dioxus::prelude::Signal<crate::app::LoginController>,
+        mut login_controller: dioxus::prelude::Signal<crate::app::LoginController>,
         user: Signal<crate::app::User>,
     ) {
         let mut client = WEB_API_SENDER.get().unwrap().clone();
@@ -1106,6 +1105,10 @@ pub(crate) async fn node_comms(
                                 ) {
                                     Ok(im) => {
                                         let _ = crate::app::Identity::set_aliases(im, user);
+                                        // ALIASES is a thread_local Vec, not a
+                                        // Dioxus signal — bump login_controller
+                                        // so the Identities component re-renders.
+                                        login_controller.write().updated = true;
                                     }
                                     Err(e) => {
                                         crate::log::error(
