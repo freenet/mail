@@ -969,10 +969,42 @@ pub(crate) async fn node_comms(
             }
             HostResponse::ContractResponse(ContractResponse::UpdateResponse { key, summary }) => {
                 if let Some(identity) = token_rec_to_id.remove(&key) {
-                    let summary = TokenAllocationSummary::try_from(summary).unwrap();
-                    AftRecords::confirm_allocation(&mut client, *key.id(), summary)
-                        .await
-                        .unwrap();
+                    // The host's UpdateResponse `summary` field has, in
+                    // practice, sometimes carried the full
+                    // TokenAllocationRecord JSON (`{"tokens_by_tier":...}`)
+                    // instead of the contract's TokenAllocationSummary
+                    // (`{"Day1":[...]}`). Accept either: try Summary first,
+                    // then fall back to deserializing as Record and
+                    // summarizing locally. Bail with an error log instead
+                    // of panicking — the AFT allocation has already
+                    // committed at this point, the panic was just losing
+                    // the post-commit hook.
+                    let bytes = summary.as_ref();
+                    let summary = match TokenAllocationSummary::try_from(summary.clone()) {
+                        Ok(s) => Some(s),
+                        Err(_) => match serde_json::from_slice::<freenet_aft_interface::TokenAllocationRecord>(bytes) {
+                            Ok(record) => Some(record.summarize()),
+                            Err(e) => {
+                                crate::log::error(
+                                    format!(
+                                        "UpdateResponse summary deser failed as both Summary and Record: {e}"
+                                    ),
+                                    None,
+                                );
+                                None
+                            }
+                        },
+                    };
+                    if let Some(summary) = summary {
+                        if let Err(e) =
+                            AftRecords::confirm_allocation(&mut client, *key.id(), summary).await
+                        {
+                            crate::log::error(
+                                format!("confirm_allocation failed: {e}"),
+                                None,
+                            );
+                        }
+                    }
                     token_rec_to_id.insert(key, identity.clone());
                 }
             }
