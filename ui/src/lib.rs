@@ -90,9 +90,7 @@ pub fn main() {
         // context. Cheap and safe to install at startup.
         std::panic::set_hook(Box::new(|info| {
             let msg = format!("WASM PANIC: {info}");
-            web_sys::console::error_1(
-                &serde_wasm_bindgen::to_value(&msg).unwrap_or_default(),
-            );
+            web_sys::console::error_1(&serde_wasm_bindgen::to_value(&msg).unwrap_or_default());
         }));
     }
 
