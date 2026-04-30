@@ -116,6 +116,74 @@ test.describe("Compose and logout", () => {
   });
 });
 
+// Regression: send button → navigate-back-to-inbox path.
+//
+// PR #38 (freenet/mail) discovered that the send-message future was
+// silently cancelled on real-node deployments because Dioxus's `spawn`
+// is component-scoped — `at_new_msg()` unmounts NewMessageWindow
+// before the future polls, killing the task. The fix was to switch to
+// `spawn_forever`. We can't observe the AFT/network side here (offline
+// mode), but we CAN regression-test the user-visible symptom that
+// led to discovery: clicking Send should leave the compose view and
+// land back on the inbox view, not silently no-op.
+test.describe("Send returns to inbox view (regression: spawn_forever)", () => {
+  test("clicking Send navigates away from compose", async ({ page }) => {
+    await page.goto("/");
+    await waitForApp(page);
+    await selectIdentity(page, "address1");
+    await clickMenu(page, "Write message");
+    await expect(page.locator("h3")).toContainText("New message");
+
+    const toCell = page.locator("tr").filter({ hasText: "To" }).locator("td");
+    await toCell.click();
+    await toCell.fill("address2");
+
+    const subjectCell = page
+      .locator("tr")
+      .filter({ hasText: "Subject" })
+      .locator("td");
+    await subjectCell.click();
+    await subjectCell.fill("regression check");
+
+    const bodyDiv = page.locator(".box div[contenteditable]");
+    await bodyDiv.click();
+    await bodyDiv.fill("body");
+
+    await page.locator("button").filter({ hasText: "Send" }).click();
+
+    // After send, the compose heading must disappear — proving the
+    // event handler ran the spawn AND the navigation, not just paused.
+    await expect(page.locator("h3").filter({ hasText: "New message" })).toHaveCount(0, {
+      timeout: 5_000,
+    });
+  });
+});
+
+// Regression: identity persists across page reload.
+//
+// PR #37 (freenet/mail) restored runtime wiring (INBOX_TO_ID +
+// AFT-record subscriptions + AFT-gen delegate) on identity reload.
+// In offline (example-data) mode there are no real contracts, but
+// the identity-list / login-screen restore path must still work:
+// after a reload, the previously-seeded identities must be visible
+// without the user having to re-create them.
+test.describe("Identity list survives reload (regression: #36)", () => {
+  test("address1 + address2 are visible again after page reload", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await waitForApp(page);
+    await expect(page.getByText("address1")).toBeVisible();
+    await expect(page.getByText("address2")).toBeVisible();
+
+    await page.reload();
+    await waitForApp(page);
+
+    await expect(page.getByText("address1")).toBeVisible();
+    await expect(page.getByText("address2")).toBeVisible();
+  });
+});
+
 test.describe("Multi-turn cross-inbox messaging", () => {
   test("address1 sends to address2, address2 replies, both see messages", async ({
     page,
