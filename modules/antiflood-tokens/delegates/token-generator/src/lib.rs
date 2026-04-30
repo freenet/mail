@@ -27,10 +27,16 @@ mod tests;
 
 struct TokenDelegate;
 
+fn pending_secret_key(request_id: u32) -> Vec<u8> {
+    let mut key = b"pending_request_".to_vec();
+    key.extend_from_slice(&request_id.to_le_bytes());
+    key
+}
+
 #[delegate]
 impl DelegateInterface for TokenDelegate {
     fn process(
-        _ctx: &mut DelegateCtx,
+        ctx: &mut DelegateCtx,
         params: Parameters<'static>,
         _origin: Option<MessageOrigin>,
         message: InboundDelegateMsg,
@@ -52,6 +58,16 @@ impl DelegateInterface for TokenDelegate {
                 let params = DelegateParameters::try_from(params)?;
                 match msg {
                     TokenDelegateMessage::RequestNewToken(req) => {
+                        // Persist the request payload across the
+                        // RequestUserInput round-trip via the SecretStore
+                        // (the message-level context doesn't survive the
+                        // host's separate-conversation re-entry on
+                        // UserResponse). The UserResponse arm reads the
+                        // secret and resumes allocation.
+                        let key = pending_secret_key(req.request_id);
+                        let serialized = bincode::serialize(&req)
+                            .map_err(|e| DelegateError::Deser(format!("{e}")))?;
+                        ctx.set_secret(&key, &serialized);
                         allocate_token(params, &mut context, req)
                     }
                     TokenDelegateMessage::Failure(reason) => Err(DelegateError::Other(format!(
@@ -65,14 +81,12 @@ impl DelegateInterface for TokenDelegate {
             InboundDelegateMsg::UserResponse(UserInputResponse {
                 request_id,
                 response,
-                context,
+                context: _,
             }) => {
-                let mut context = Context::try_from(context)?;
-                context.waiting_for_user_input.remove(&request_id);
                 // RESPONSES wire format is the raw bytes "true"/"false" (see
                 // RequestUserInput emitted from `allocate_token`). The host
                 // round-trips them verbatim. Map to the Response enum.
-                let response = match response.as_ref() {
+                let response_enum = match response.as_ref() {
                     b"true" => Response::Allowed,
                     b"false" => Response::NotAllowed,
                     other => {
@@ -81,9 +95,27 @@ impl DelegateInterface for TokenDelegate {
                         )));
                     }
                 };
-                context.user_response.insert(request_id, response);
-                let context: DelegateContext = (&context).try_into()?;
-                Ok(vec![OutboundDelegateMsg::ContextUpdated(context)])
+                // The original RequestNewToken was persisted in the secret
+                // store under `pending_<request_id>` during the first
+                // RequestNewToken call. Pull it back out, build a fresh
+                // Context with `user_response` populated, and re-run
+                // `allocate_token` to hit the (_, Some(response)) arm.
+                // Without this, the response would be saved into a
+                // throwaway context and `allocate_token` would never run
+                // again — the original request payload is lost otherwise.
+                let key = pending_secret_key(request_id);
+                let Some(stashed_bytes) = ctx.get_secret(&key) else {
+                    // No stashed request — either timed out or not ours.
+                    let context: DelegateContext = (&Context::default()).try_into()?;
+                    return Ok(vec![OutboundDelegateMsg::ContextUpdated(context)]);
+                };
+                let req: RequestNewToken = bincode::deserialize(&stashed_bytes)
+                    .map_err(|e| DelegateError::Deser(format!("{e}")))?;
+                ctx.remove_secret(&key);
+                let mut context = Context::default();
+                context.user_response.insert(request_id, response_enum);
+                let params = DelegateParameters::try_from(params)?;
+                allocate_token(params, &mut context, req)
             }
             _ => Err(DelegateError::Other("unexpected message type".into())),
         }
@@ -130,18 +162,24 @@ fn allocate_token(
         (None, None) => {
             // request user input and add to waiting queue
             context.waiting_for_user_input.insert(request_id);
-            let context: DelegateContext = (&*context).try_into()?;
             let message = user_input(&criteria, &verifying_key_bytes);
+            // Stash the original RequestNewToken so the UserResponse arm
+            // can resume allocation once the user grants/denies — without
+            // it the inputs (criteria, records, assignment_hash) are lost
+            // by the time the user-response inbound arrives.
+            let stashed = RequestNewToken {
+                request_id,
+                delegate_id,
+                criteria,
+                records,
+                assignment_hash,
+            };
+            context.pending_requests.insert(request_id, stashed.clone());
+            let context_serialized: DelegateContext = (&*context).try_into()?;
             let req_allocation = {
-                let msg = TokenDelegateMessage::RequestNewToken(RequestNewToken {
-                    request_id,
-                    delegate_id,
-                    criteria,
-                    records,
-                    assignment_hash,
-                });
+                let msg = TokenDelegateMessage::RequestNewToken(stashed);
                 OutboundDelegateMsg::ApplicationMessage(
-                    ApplicationMessage::new(msg.serialize()?).with_context(context),
+                    ApplicationMessage::new(msg.serialize()?).with_context(context_serialized),
                 )
             };
             let request_user_input = OutboundDelegateMsg::RequestUserInput(UserInputRequest {
@@ -219,6 +257,13 @@ fn allocate_token(
 struct Context {
     waiting_for_user_input: HashSet<u32>,
     user_response: HashMap<u32, Response>,
+    /// RequestNewToken payloads stashed when we emit a RequestUserInput.
+    /// On the matching UserResponse arm we pull the original request out
+    /// and complete `allocate_token`. Without this, the response would be
+    /// recorded but never acted on — the original RequestNewToken never
+    /// arrives a second time.
+    #[serde(default)]
+    pending_requests: HashMap<u32, RequestNewToken>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
