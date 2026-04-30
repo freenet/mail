@@ -982,7 +982,10 @@ pub(crate) async fn node_comms(
                     let bytes = summary.as_ref();
                     let summary = match TokenAllocationSummary::try_from(summary.clone()) {
                         Ok(s) => Some(s),
-                        Err(_) => match serde_json::from_slice::<freenet_aft_interface::TokenAllocationRecord>(bytes) {
+                        Err(_) => match serde_json::from_slice::<
+                            freenet_aft_interface::TokenAllocationRecord,
+                        >(bytes)
+                        {
                             Ok(record) => Some(record.summarize()),
                             Err(e) => {
                                 crate::log::error(
@@ -999,10 +1002,7 @@ pub(crate) async fn node_comms(
                         if let Err(e) =
                             AftRecords::confirm_allocation(&mut client, *key.id(), summary).await
                         {
-                            crate::log::error(
-                                format!("confirm_allocation failed: {e}"),
-                                None,
-                            );
+                            crate::log::error(format!("confirm_allocation failed: {e}"), None);
                         }
                     }
                     token_rec_to_id.insert(key, identity.clone());
