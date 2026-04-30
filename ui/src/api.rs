@@ -391,6 +391,9 @@ mod identity_management {
         let key =
             delegate_api::create_delegate(client, ID_MANAGER_CODE_HASH, ID_MANAGER_CODE, &params)
                 .await?;
+        // `Init` is idempotent in the delegate (a no-op when state exists), so
+        // calling it on every page load is safe and ensures the secret is
+        // present before the first GetIdentities/CreateIdentity request.
         let request = DelegateRequest::ApplicationMessages {
             params: params.clone(),
             inbound: vec![InboundDelegateMsg::ApplicationMessage(
@@ -1087,9 +1090,32 @@ pub(crate) async fn node_comms(
                         }
                     }
                 }
+                let is_identities = &key == IDENTITIES_KEY.get().unwrap();
                 for msg in values {
                     match msg {
                         freenet_stdlib::prelude::OutboundDelegateMsg::ApplicationMessage(msg) => {
+                            // Identities-delegate response: payload is a serialized
+                            // `IdentityManagement` (HashMap<alias, AliasInfo>). Restore
+                            // it into the user's identity list so the login screen
+                            // shows previously-created aliases. Without this branch
+                            // the bytes get parsed as a `TokenDelegateMessage` and
+                            // fail with a deser error.
+                            if is_identities {
+                                match ::identity_management::IdentityManagement::try_from(
+                                    msg.payload.as_slice(),
+                                ) {
+                                    Ok(im) => {
+                                        let _ = crate::app::Identity::set_aliases(im, user);
+                                    }
+                                    Err(e) => {
+                                        crate::log::error(
+                                            format!("identities delegate response deser: {e}"),
+                                            None,
+                                        );
+                                    }
+                                }
+                                continue;
+                            }
                             let token = match TokenDelegateMessage::try_from(msg.payload.as_slice())
                             {
                                 Ok(r) => r,
