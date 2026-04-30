@@ -5,7 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
-chrono = { version = "0.4.23", default-features = false, features = ["alloc", "serde"] }
+chrono = { workspace = true }
 freenet-stdlib = { workspace = true }
 ml-dsa = { workspace = true }
 freenet-aft-interface = { workspace = true }

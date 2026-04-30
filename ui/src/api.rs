@@ -1036,11 +1036,14 @@ pub(crate) async fn node_comms(
                 }
             }
             HostResponse::DelegateResponse { key, values } => {
+                // Empty-values response on the identities delegate previously
+                // re-issued `load_aliases`, but the node returns the same empty
+                // result and the UI re-issues again — a tight loop hammering the
+                // delegate executor. The identities reload path is dead until the
+                // Phase 1 restore lands; for now, just ignore empty responses on
+                // the identities key.
                 if values.is_empty() && &key == IDENTITIES_KEY.get().unwrap() {
-                    // may have updated with new alias, refresh identities
-                    identity_management::load_aliases(&mut client)
-                        .await
-                        .unwrap();
+                    // no-op: see comment above
                 } else if values.is_empty() {
                     let found = token_generator_management::CREATED_AFT_GEN.with(|keys| {
                         let pos = keys.borrow().iter().position(|(_, k)| k == &key);
