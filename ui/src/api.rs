@@ -45,10 +45,29 @@ impl WebApi {
     #[cfg(all(target_family = "wasm", feature = "use-node"))]
     fn new() -> Result<Self, String> {
         use futures::SinkExt;
-        let conn = web_sys::WebSocket::new(
-            "ws://localhost:7509/v1/contract/command?encodingProtocol=native",
-        )
-        .unwrap();
+        // Derive the WebSocket URL from the current document origin so the
+        // app talks to whichever gateway served it (production, local
+        // sandbox, alt-port test node). The Freenet gateway shell rejects
+        // `ws://localhost:7509` when served from `http://127.0.0.1:7509`
+        // (origin equality check on `host`, not just port), so a hardcoded
+        // host breaks the moment the user opens the page by IP instead of
+        // by hostname (or vice versa).
+        let location = web_sys::window()
+            .ok_or_else(|| "no window".to_string())?
+            .location();
+        let host = location
+            .host()
+            .map_err(|e| format!("location.host: {e:?}"))?;
+        let scheme = match location
+            .protocol()
+            .map_err(|e| format!("location.protocol: {e:?}"))?
+            .as_str()
+        {
+            "https:" => "wss",
+            _ => "ws",
+        };
+        let url = format!("{scheme}://{host}/v1/contract/command?encodingProtocol=native");
+        let conn = web_sys::WebSocket::new(&url).unwrap();
         let (send_host_responses, host_responses) = futures::channel::mpsc::unbounded();
         let (send_half, requests) = futures::channel::mpsc::unbounded();
         let result_handler = move |result: Result<HostResponse, ClientError>| {
