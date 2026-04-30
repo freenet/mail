@@ -14,6 +14,10 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+# Re-enable `clock` for integration tests so `Utc::now()` is available.
+# The contract WASM build never sees this — it's a dev-dep override on
+# top of the lib's `default-features = false` workspace `chrono` dep.
+chrono = { workspace = true, features = ["clock"] }
 # ML-DSA keygen needs a `rand_core 0.10`-compatible `CryptoRng`. The
 # easiest source is `getrandom::SysRng` wrapped in `UnwrapErr` to turn
 # the fallible `TryRng` into an infallible `RngCore`. This is also the
