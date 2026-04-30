@@ -606,6 +606,14 @@ pub(crate) async fn node_comms(
         crate::aft::AftRecords::load_all(&mut req_sender, &contracts, &mut token_contract_to_id)
             .await;
     }
+    // Register the identities delegate eagerly. Without this, the first
+    // ApplicationMessages (load_aliases / alias_creation) hits a node that
+    // has never seen this delegate, returns DelegateError::Missing, and
+    // the recovery path that registers it after the fact loses the original
+    // request — the user clicks "Create identity" and nothing happens.
+    if let Err(e) = identity_management::create_delegate(&mut req_sender).await {
+        crate::log::error(format!("identities delegate register failed: {e}"), None);
+    }
     let identities_key = identity_management::load_aliases(&mut req_sender)
         .await
         .unwrap();
