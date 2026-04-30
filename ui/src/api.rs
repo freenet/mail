@@ -998,12 +998,11 @@ pub(crate) async fn node_comms(
                             }
                         },
                     };
-                    if let Some(summary) = summary {
-                        if let Err(e) =
+                    if let Some(summary) = summary
+                        && let Err(e) =
                             AftRecords::confirm_allocation(&mut client, *key.id(), summary).await
-                        {
-                            crate::log::error(format!("confirm_allocation failed: {e}"), None);
-                        }
+                    {
+                        crate::log::error(format!("confirm_allocation failed: {e}"), None);
                     }
                     token_rec_to_id.insert(key, identity.clone());
                 }
