@@ -1209,7 +1209,11 @@ pub(crate) async fn node_comms(
                                         Some(TryNodeAction::SendMessage),
                                     )
                                 }
-                                TokenDelegateMessage::RequestNewToken(_) => unreachable!(),
+                                TokenDelegateMessage::RequestNewToken(_) => {
+                                    // Delegate echoes the original request back to itself
+                                    // (with updated context) while it's waiting on user
+                                    // permission input. Not a UI-side action — ignore.
+                                }
                             }
                         }
                         // NOTE: the original code had a second guarded

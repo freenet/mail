@@ -69,8 +69,18 @@ impl DelegateInterface for TokenDelegate {
             }) => {
                 let mut context = Context::try_from(context)?;
                 context.waiting_for_user_input.remove(&request_id);
-                let response = serde_json::from_slice(&response)
-                    .map_err(|err| DelegateError::Deser(format!("{err}")))?;
+                // RESPONSES wire format is the raw bytes "true"/"false" (see
+                // RequestUserInput emitted from `allocate_token`). The host
+                // round-trips them verbatim. Map to the Response enum.
+                let response = match response.as_ref() {
+                    b"true" => Response::Allowed,
+                    b"false" => Response::NotAllowed,
+                    other => {
+                        return Err(DelegateError::Deser(format!(
+                            "unrecognised user response: {other:?}"
+                        )));
+                    }
+                };
                 context.user_response.insert(request_id, response);
                 let context: DelegateContext = (&context).try_into()?;
                 Ok(vec![OutboundDelegateMsg::ContextUpdated(context)])

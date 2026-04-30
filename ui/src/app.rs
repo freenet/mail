@@ -863,8 +863,14 @@ fn NewMessageWindow() -> Element {
             &content_val,
         ) {
             Ok(futs) => {
+                // spawn_forever, not spawn: the send future outlives the
+                // NewMessageWindow component (we navigate away to inbox
+                // immediately below via at_new_msg). spawn() ties the task
+                // to the current component scope and cancels it on unmount,
+                // which silently killed every send before the AFT request
+                // hit the wire.
                 futs.into_iter().for_each(|f| {
-                    let _ = spawn(f);
+                    let _task = dioxus_core::spawn_forever(f);
                 });
             }
             Err(e) => {
