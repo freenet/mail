@@ -538,3 +538,33 @@ fi
 # Run Playwright.
 cd "$ROOT/ui/tests" && npx playwright test
 '''
+
+# ─── Real-node integration helpers ───────────────────────────────────────────
+
+[tasks.iso-nodes-up]
+description = "Start isolated 2-node Freenet network (gateway 7510 + peer 7511)"
+script_runner = "bash"
+script = '''
+"${CARGO_MAKE_WORKING_DIRECTORY}/scripts/run-isolated-nodes.sh" up
+'''
+
+[tasks.iso-nodes-down]
+description = "Stop the isolated 2-node Freenet network (preserves data)"
+script_runner = "bash"
+script = '''
+"${CARGO_MAKE_WORKING_DIRECTORY}/scripts/run-isolated-nodes.sh" down
+'''
+
+[tasks.iso-nodes-wipe]
+description = "Stop + wipe the isolated 2-node Freenet network data"
+script_runner = "bash"
+script = '''
+"${CARGO_MAKE_WORKING_DIRECTORY}/scripts/run-isolated-nodes.sh" wipe
+'''
+
+[tasks.iso-nodes-status]
+description = "Show status of the isolated 2-node Freenet network"
+script_runner = "bash"
+script = '''
+"${CARGO_MAKE_WORKING_DIRECTORY}/scripts/run-isolated-nodes.sh" status
+'''
