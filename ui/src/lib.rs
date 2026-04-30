@@ -83,6 +83,18 @@ pub fn main() {
             )
             .try_init();
     }
+    #[cfg(target_family = "wasm")]
+    {
+        // Surface panics to devtools console with location + message
+        // instead of the raw `RuntimeError: unreachable` that strips all
+        // context. Cheap and safe to install at startup.
+        std::panic::set_hook(Box::new(|info| {
+            let msg = format!("WASM PANIC: {info}");
+            web_sys::console::error_1(
+                &serde_wasm_bindgen::to_value(&msg).unwrap_or_default(),
+            );
+        }));
+    }
 
     // Log which committed contract ID this UI was built against so that
     // a developer looking at devtools can instantly tell whether
