@@ -1104,8 +1104,7 @@ pub(crate) async fn node_comms(
                                     msg.payload.as_slice(),
                                 ) {
                                     Ok(im) => {
-                                        let new_ids =
-                                            crate::app::Identity::set_aliases(im, user);
+                                        let new_ids = crate::app::Identity::set_aliases(im, user);
                                         // ALIASES is a thread_local Vec, not a
                                         // Dioxus signal — bump login_controller
                                         // so the Identities component re-renders.
