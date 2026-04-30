@@ -102,7 +102,6 @@ impl Eq for Identity {}
 
 impl Identity {
     #[must_use]
-    #[allow(dead_code)] // TODO: reinstate via Phase 1 identities delegate path
     pub(crate) fn set_aliases(
         mut new_aliases: IdentityManagement,
         mut user: Signal<crate::app::User>,

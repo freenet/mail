@@ -129,6 +129,21 @@ impl DelegateInterface for IdentityManagement {
                 let msg = IdentityMsg::try_from(&*payload)?;
                 match msg {
                     IdentityMsg::Init => {
+                        // Idempotent: if a secret is already present for this
+                        // params/secret_key, leave it alone. Without this,
+                        // re-issuing Init on every page load (or via the
+                        // missing-delegate recovery path) wipes previously
+                        // stored aliases.
+                        if ctx.get_secret(&secret_key).is_some() {
+                            #[cfg(feature = "contract")]
+                            {
+                                freenet_stdlib::log::info(&format!(
+                                    "init skipped — secret already exists {}",
+                                    params.as_secret_id()
+                                ));
+                            }
+                            return Ok(vec![]);
+                        }
                         #[cfg(feature = "contract")]
                         {
                             freenet_stdlib::log::info(&format!(

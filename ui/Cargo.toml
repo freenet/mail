@@ -15,7 +15,7 @@ name = "app"
 bs58 = { workspace = true }
 arc-swap = "1.6"
 rand_chacha = "0.3"
-chrono = { workspace = true, features = ["wasmbind"] }
+chrono = { workspace = true, features = ["clock", "wasmbind"] }
 dioxus = { workspace = true, features = ["web"] }
 futures = "0.3"
 ml-dsa = { workspace = true }

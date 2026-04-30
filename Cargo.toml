@@ -26,7 +26,13 @@ freenet-email-inbox = { path = "contracts/inbox" }
 # Shared
 bincode = "1"
 bs58 = "0.5"
-chrono = "0.4"
+# default-features = false to keep `clock` (and its js-sys/wasm-bindgen
+# pull-in) out of contract WASMs. Cargo unifies features across the
+# workspace, so any consumer that lets the default `clock` feature in
+# poisons the inbox/aft contract builds with `__wbindgen_*` imports
+# the Freenet runtime can't satisfy. Opt back into `clock`/`wasmbind`
+# at the consumer level (e.g. UI) when needed.
+chrono = { version = "0.4", default-features = false, features = ["alloc", "serde"] }
 # ML-DSA (CRYSTALS-Dilithium), NIST FIPS 204, level-3 parameter set (ML-DSA-65).
 # Replaced RSA-PKCS#1 v1.5 for inbox state-delta signatures and AFT token
 # assignments (Stage 1 + Stage 4 of issue #18). 0.1.0-rc is the latest
