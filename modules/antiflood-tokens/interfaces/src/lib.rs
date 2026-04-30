@@ -79,7 +79,7 @@ impl Display for FailureReason {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RequestNewToken {
     pub request_id: u32,
     pub delegate_id: SecretsId,
@@ -467,7 +467,7 @@ enum AllocationErrorInner {
 }
 
 #[non_exhaustive]
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AllocationCriteria {
     pub frequency: Tier,
     /// Maximum age of the allocated token.
