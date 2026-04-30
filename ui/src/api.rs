@@ -1104,11 +1104,47 @@ pub(crate) async fn node_comms(
                                     msg.payload.as_slice(),
                                 ) {
                                     Ok(im) => {
-                                        let _ = crate::app::Identity::set_aliases(im, user);
+                                        let new_ids = crate::app::Identity::set_aliases(im, user);
                                         // ALIASES is a thread_local Vec, not a
                                         // Dioxus signal — bump login_controller
                                         // so the Identities component re-renders.
                                         login_controller.write().updated = true;
+                                        // Restore runtime wiring lost on reload:
+                                        // INBOX_TO_ID + AFT-record subscriptions
+                                        // (load_all does both), and AFT-gen
+                                        // delegate registration on this session
+                                        // (so assign_token finds it).
+                                        if !new_ids.is_empty() {
+                                            InboxModel::load_all(
+                                                &mut client,
+                                                &new_ids,
+                                                inbox_to_id,
+                                            )
+                                            .await;
+                                            AftRecords::load_all(
+                                                &mut client,
+                                                &new_ids,
+                                                token_rec_to_id,
+                                            )
+                                            .await;
+                                            for id in &new_ids {
+                                                if let Err(e) =
+                                                    token_generator_management::create_delegate(
+                                                        &mut client,
+                                                        Arc::clone(&id.ml_dsa_signing_key),
+                                                    )
+                                                    .await
+                                                {
+                                                    crate::log::error(
+                                                        format!(
+                                                            "AFT-gen re-register for `{}` failed: {e}",
+                                                            id.alias()
+                                                        ),
+                                                        None,
+                                                    );
+                                                }
+                                            }
+                                        }
                                     }
                                     Err(e) => {
                                         crate::log::error(
