@@ -66,9 +66,7 @@ impl WebApi {
             "https:" => "wss",
             _ => "ws",
         };
-        let url = format!(
-            "{scheme}://{host}/v1/contract/command?encodingProtocol=native"
-        );
+        let url = format!("{scheme}://{host}/v1/contract/command?encodingProtocol=native");
         let conn = web_sys::WebSocket::new(&url).unwrap();
         let (send_host_responses, host_responses) = futures::channel::mpsc::unbounded();
         let (send_half, requests) = futures::channel::mpsc::unbounded();
