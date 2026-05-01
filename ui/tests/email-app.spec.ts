@@ -909,3 +909,57 @@ test.describe("Sent folder (#47b)", () => {
     await expect(sheet.locator("textarea.sheet-textarea")).toHaveValue("again");
   });
 });
+
+// Issue #32 — rename own identity. Delete+create with same key at the
+// UI layer. Offline mode handles the action by relabelling ALIASES;
+// the use-node delegate round-trip is exercised by live-node.spec.ts.
+test.describe("Rename identity (#32)", () => {
+  test("renames an id-row in place and surfaces the new alias", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await waitForApp(page);
+
+    const row = page.locator('[data-testid="fm-id-row"][data-alias="address2"]');
+    await row.locator('[data-testid="fm-id-rename"]').click();
+
+    const input = page.locator('[data-testid="fm-rename-input"]');
+    await input.waitFor({ timeout: 5_000 });
+    await input.fill("workmate");
+
+    await page.locator('[data-testid="fm-rename-submit"]').click();
+
+    await expect(
+      page.locator('[data-testid="fm-id-row"][data-alias="workmate"]'),
+    ).toBeVisible({ timeout: 5_000 });
+    // Old alias is gone.
+    await expect(
+      page.locator('[data-testid="fm-id-row"][data-alias="address2"]'),
+    ).toHaveCount(0);
+  });
+
+  test("refuses to rename to an alias that already exists", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await waitForApp(page);
+
+    const row = page.locator('[data-testid="fm-id-row"][data-alias="address1"]');
+    await row.locator('[data-testid="fm-id-rename"]').click();
+
+    const input = page.locator('[data-testid="fm-rename-input"]');
+    await input.waitFor({ timeout: 5_000 });
+    await input.fill("address2");
+
+    await page.locator('[data-testid="fm-rename-submit"]').click();
+
+    // Inline error surfaces; the row keeps its original data-alias and
+    // the editor stays open.
+    await expect(page.getByText(/already in use/)).toBeVisible({
+      timeout: 5_000,
+    });
+    await expect(
+      page.locator('[data-testid="fm-id-row"][data-alias="address1"]'),
+    ).toBeVisible();
+  });
+});
