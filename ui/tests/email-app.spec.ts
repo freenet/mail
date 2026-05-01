@@ -7,14 +7,23 @@ import { APP_NAME } from "./app-name";
 // Firefox takes significantly longer to initialize the RSA keygen
 // for the mock identities, so we give it a generous 60s ceiling.
 async function waitForApp(page: Page) {
-  await page.waitForSelector("h1", { timeout: 60_000 });
-  await expect(page.locator("h1").first()).toContainText(APP_NAME);
+  // Pre-login screens render the redesigned topbar; post-login mounts
+  // the .fm-app shell. Either is enough to know the WASM finished
+  // booting.
+  await page
+    .locator('.brand-name, [data-testid="fm-app"]')
+    .first()
+    .waitFor({ timeout: 60_000 });
+  await expect(page.locator(".brand-name").first()).toContainText(APP_NAME);
 }
 
-// Helper: select an identity by clicking its alias link, then wait
-// for the redesigned mailbox shell to mount.
+// Helper: select an identity by clicking its row's "Open inbox"
+// button. Identity rows are now structural (id-row), so clicking the
+// alias text alone no longer logs in.
 async function selectIdentity(page: Page, alias: string) {
-  await page.getByText(alias, { exact: true }).click();
+  await page
+    .locator(`[data-testid="fm-id-row"][data-alias="${alias}"] [data-testid="fm-id-open"]`)
+    .click();
   await page.locator('[data-testid="fm-app"]').waitFor({ timeout: 10_000 });
   await expect(page.locator(".list-title")).toContainText("Inbox", {
     timeout: 10_000,
@@ -59,12 +68,16 @@ test.describe("Identity list", () => {
     await page.goto("/");
     await waitForApp(page);
 
-    // Both mock identities should be listed.
-    await expect(page.getByText("address1")).toBeVisible();
-    await expect(page.getByText("address2")).toBeVisible();
+    // Both mock identities should be listed as id-rows.
+    await expect(
+      page.locator('[data-testid="fm-id-row"][data-alias="address1"]'),
+    ).toBeVisible();
+    await expect(
+      page.locator('[data-testid="fm-id-row"][data-alias="address2"]'),
+    ).toBeVisible();
 
-    // "Create new identity" link should be present.
-    await expect(page.getByText("Create new identity")).toBeVisible();
+    // "+ Create new identity" affordance should be present.
+    await expect(page.locator('[data-testid="fm-id-create"]')).toBeVisible();
   });
 });
 
@@ -158,7 +171,7 @@ test.describe("Compose and logout", () => {
     // Back at identity list.
     await expect(page.getByText("address1")).toBeVisible();
     await expect(page.getByText("address2")).toBeVisible();
-    await expect(page.getByText("Create new identity")).toBeVisible();
+    await expect(page.locator('[data-testid="fm-id-create"]')).toBeVisible();
   });
 });
 
@@ -239,7 +252,7 @@ test.describe("Multi-turn cross-inbox messaging", () => {
 
     // Log out.
     await logout(page);
-    await expect(page.getByText("Create new identity")).toBeVisible();
+    await expect(page.locator('[data-testid="fm-id-create"]')).toBeVisible();
 
     // ── Turn 2: address2 receives and replies ──────────────────────────
 
@@ -269,7 +282,7 @@ test.describe("Multi-turn cross-inbox messaging", () => {
 
     // Log out.
     await logout(page);
-    await expect(page.getByText("Create new identity")).toBeVisible();
+    await expect(page.locator('[data-testid="fm-id-create"]')).toBeVisible();
 
     // ── Turn 3: address1 sees the reply ────────────────────────────────
 
@@ -317,8 +330,16 @@ test.describe("Sandboxed iframe embedding", () => {
     `);
 
     const iframe = page.frameLocator("iframe");
-    await iframe.locator("h1").first().waitFor({ timeout: 60_000 });
-    await expect(iframe.locator("h1").first()).toContainText(APP_NAME);
+    // Pre-login renders the app brand block in the redesigned topbar;
+    // post-login mounts the .fm-app shell. Either is enough to know
+    // the WASM finished booting.
+    await iframe
+      .locator(".brand-name")
+      .first()
+      .waitFor({ timeout: 60_000 });
+    await expect(iframe.locator(".brand-name").first()).toContainText(
+      APP_NAME,
+    );
   });
 });
 
@@ -380,18 +401,16 @@ test.describe("Address book: import contact and display", () => {
     });
 
     // ── Step 2: open the import-contact dialog ────────────────────────────
-    await page.getByText("+ Import contact", { exact: true }).click();
+    await page.locator('[data-testid="fm-contact-import"]').click();
 
-    await expect(page.getByText("Import contact")).toBeVisible({
-      timeout: 5_000,
-    });
+    const importModal = page.locator('[data-testid="fm-import-contact-modal"]');
+    await importModal.waitFor({ timeout: 5_000 });
 
     // ── Step 3: paste the card and assert the fingerprint panel appears ───
-    await page.locator("textarea").fill(contactCard);
+    await importModal.locator("textarea").fill(contactCard);
 
-    await expect(
-      page.getByText("Fingerprint (verify with sender):"),
-    ).toBeVisible({ timeout: 5_000 });
+    const fingerprintPanel = page.locator('[data-testid="fm-import-fp"]');
+    await expect(fingerprintPanel).toBeVisible({ timeout: 5_000 });
 
     // Alias should be pre-filled with the suggested_alias from the card.
     const labelInput = page.locator('input[placeholder="e.g. Alice (work)"]');
@@ -399,17 +418,16 @@ test.describe("Address book: import contact and display", () => {
 
     await labelInput.fill("charlie-test");
 
-    const fingerprintPanel = page.locator(
-      ".notification.is-info p.is-family-monospace",
-    );
-    await expect(fingerprintPanel).toBeVisible({ timeout: 5_000 });
-    const fingerprintText = (await fingerprintPanel.textContent()) ?? "";
-    const fingerprintWords = fingerprintText.trim().split(/\s+/);
+    // The verify-words block lays each word out in a `.verify-word .w`
+    // grid cell — pull all six and form the inline short form.
+    const fingerprintWords = await fingerprintPanel
+      .locator(".verify-word .w")
+      .allTextContents();
     expect(fingerprintWords).toHaveLength(6);
     const fingerprintShort = `${fingerprintWords[0]}-${fingerprintWords[1]}`;
 
     // ── Step 4: complete import and verify contact appears ────────────────
-    await page.locator("button").filter({ hasText: "Import" }).click();
+    await page.locator('[data-testid="fm-import-submit"]').click();
 
     await expect(page.getByText("Contacts", { exact: true })).toBeVisible({
       timeout: 5_000,
@@ -570,5 +588,171 @@ test.describe("Drafts folder (#47a)", () => {
     await sheet.locator(".sheet-x").click();
 
     await expect(draftsBtn.locator(".count")).toHaveText("1");
+  });
+});
+
+// ── Pre-login redesign coverage (issue #52) ───────────────────────────────
+//
+// These tests pin the redesigned login + address-book flows so they don't
+// regress silently. Offline mode's coroutine handles CreateContact /
+// DeleteContact only — CreateIdentity is dropped — so the assertions stop
+// at the UI surface (form → reveal → dismiss). The actual identity
+// commit + delegate roundtrip is exercised by `live-node.spec.ts`.
+
+test.describe("Create-alias reveal stage (#52)", () => {
+  test("form → Generate shows six-word fingerprint + amber nudge", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await waitForApp(page);
+
+    await page.locator('[data-testid="fm-id-create"]').click();
+    await page.locator('[data-testid="fm-create-alias-input"]').fill("mira");
+    await page.locator('[data-testid="fm-create-submit"]').click();
+
+    // Reveal stage replaces the form. The six-word grid is rendered as
+    // `.verify-word .w` cells inside the heading "Your fingerprint" card.
+    await expect(page.getByText("Your fingerprint")).toBeVisible({
+      timeout: 5_000,
+    });
+    const words = await page.locator(".verify-word .w").allTextContents();
+    expect(words).toHaveLength(6);
+    for (const w of words) {
+      expect(w.trim().length).toBeGreaterThan(0);
+    }
+
+    // Amber backup nudge.
+    await expect(page.getByText(/Back up the key before you continue/)).toBeVisible();
+
+    // Discard returns to hub.
+    await page.getByRole("button", { name: "Discard" }).click();
+    await expect(
+      page.locator('[data-testid="fm-id-row"][data-alias="address1"]'),
+    ).toBeVisible();
+  });
+});
+
+test.describe("Share modal (#52)", () => {
+  test("opens with six-word fingerprint, contact:// token, and copy button", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await waitForApp(page);
+
+    await page
+      .locator('[data-testid="fm-id-row"][data-alias="address1"] [data-testid="fm-id-share"]')
+      .click();
+
+    const modal = page.locator('[data-testid="fm-share-modal"]');
+    await expect(modal).toBeVisible({ timeout: 5_000 });
+
+    // Six-word fingerprint grid.
+    const words = await modal.locator(".verify-word .w").allTextContents();
+    expect(words).toHaveLength(6);
+
+    // Token block contains the contact:// scheme prefix; the full share
+    // text rides on `data-share-text` for live-node consumers.
+    await expect(modal.locator(".token-block")).toContainText("contact://");
+    const shareText = await modal.getAttribute("data-share-text");
+    expect(shareText).toMatch(/^verify: .+\ncontact:\/\//);
+
+    // Copy button + close.
+    await expect(page.locator('[data-testid="fm-share-copy"]')).toBeVisible();
+    await modal.locator(".modal-x").click();
+    await expect(modal).toHaveCount(0);
+  });
+});
+
+test.describe("Import contact verify-check (#52)", () => {
+  test("ticking the verify card flips the contact's badge to verified", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await waitForApp(page);
+
+    // Same fake card the offline import test uses, but we tick the
+    // verify-check before submitting and assert the row gets the
+    // trust-green badge instead of the warn-amber one.
+    const contactCard = await page.evaluate(() => {
+      const mlDsaVk = new Array(1952)
+        .fill(0)
+        .map((_, i) => (i * 11 + 19) & 0xff);
+      const mlKemEk = new Array(1184)
+        .fill(0)
+        .map((_, i) => (i * 13 + 23) & 0xff);
+      const card = {
+        version: 1,
+        ml_dsa_vk_bytes: mlDsaVk,
+        ml_kem_ek_bytes: mlKemEk,
+        suggested_alias: "delta",
+        suggested_description: "Verified test",
+      };
+      return `verify: foo-bar-baz-qux-quux-corge\ncontact://${btoa(
+        JSON.stringify(card),
+      )}`;
+    });
+
+    await page.locator('[data-testid="fm-contact-import"]').click();
+    const importModal = page.locator('[data-testid="fm-import-contact-modal"]');
+    await importModal.locator("textarea").fill(contactCard);
+    await page
+      .locator('input[placeholder="e.g. Alice (work)"]')
+      .fill("delta-test");
+
+    // Tick the meaningful verify card.
+    const check = page.locator('[data-testid="fm-verify-check"]');
+    await expect(check).toBeVisible();
+    await check.click();
+    // Class change confirms the visual lock-in.
+    await expect(check).toHaveClass(/checked/);
+
+    await page.locator('[data-testid="fm-import-submit"]').click();
+
+    const row = page.locator(
+      '[data-testid="contact-row"][data-alias="delta-test"]',
+    );
+    await expect(row).toBeVisible({ timeout: 5_000 });
+    // Verified path — green ✓ badge, not the amber ⚠ one.
+    await expect(
+      row.locator('[data-testid="contact-verify-badge"]'),
+    ).toContainText("✓");
+  });
+});
+
+test.describe("Restore backup card (#52)", () => {
+  test("opens a file-picker form with disabled Restore until a backup is parsed", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await waitForApp(page);
+
+    await page.locator('[data-testid="fm-id-restore"]').click();
+
+    // Heading + amber nudge.
+    await expect(page.getByText("Restore identity")).toBeVisible({
+      timeout: 5_000,
+    });
+    await expect(
+      page.getByText(/Backup files contain raw private keys\./),
+    ).toBeVisible();
+
+    // File input + alias/description placeholders.
+    await expect(
+      page.locator('[data-testid="fm-restore-file"]'),
+    ).toBeVisible();
+    await expect(
+      page.locator('input[placeholder="pre-filled from backup file"]').first(),
+    ).toBeVisible();
+
+    // Restore stays disabled until a parsed backup is in hand.
+    await expect(
+      page.locator('[data-testid="fm-restore-submit"]'),
+    ).toBeDisabled();
+
+    // Cancel returns to hub.
+    await page.getByRole("button", { name: "Cancel" }).click();
+    await expect(
+      page.locator('[data-testid="fm-id-row"][data-alias="address1"]'),
+    ).toBeVisible();
   });
 });

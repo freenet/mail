@@ -65,18 +65,20 @@ test.describe("Live node E2E", () => {
       await page.goto("");
 
       const app = page.frameLocator("iframe#app");
-      await expect(app.locator("h1"), "APP_NAME heading").toContainText(
-        APP_NAME,
-        { timeout: 60_000 },
-      );
+      await expect(
+        app.locator(".brand-name").first(),
+        "APP_NAME brand block",
+      ).toContainText(APP_NAME, { timeout: 60_000 });
 
       // ── Step 1: create identity "alice" ────────────────────────────
-      await app.getByText("Create new identity", { exact: true }).click();
-      await app.locator('input[placeholder="John Smith"]').fill("alice");
-      // The submit control is an `<a class="button">` (not <button>),
-      // so getByRole("button") doesn't resolve it. Match by exact text
-      // on the styled-as-button anchor.
-      await app.locator("a.button", { hasText: /^Create$/ }).click();
+      // Pre-login first-run shows two action-cards. Click the create one,
+      // which lands on the alias-input form; the legacy "John Smith"
+      // placeholder is replaced with `e.g. mira`.
+      await app.locator('[data-testid="fm-id-create"]').click();
+      await app.locator('[data-testid="fm-create-alias-input"]').fill("alice");
+      // Form stage's "Generate" button → reveal stage → "Continue to inbox".
+      await app.locator('[data-testid="fm-create-submit"]').click();
+      await app.locator('[data-testid="fm-create-confirm"]').click();
 
       // Identity should appear in the list within a reasonable window.
       // First-run keygen on real PQ primitives takes a few seconds;
@@ -91,16 +93,18 @@ test.describe("Live node E2E", () => {
       // forces a GetIdentities round-trip and resolves the lag — same
       // remediation a user would do, much faster than extending the
       // initial timeout.
-      const alice = app.getByText("alice", { exact: true });
+      const alice = app.locator('[data-testid="fm-id-row"][data-alias="alice"]');
       try {
         await expect(alice).toBeVisible({ timeout: 15_000 });
       } catch {
         await page.reload();
         await expect(
-          page.frameLocator("iframe#app").locator("h1"),
+          page.frameLocator("iframe#app").locator(".brand-name").first(),
         ).toContainText(APP_NAME, { timeout: 60_000 });
         await expect(
-          page.frameLocator("iframe#app").getByText("alice", { exact: true }),
+          page
+            .frameLocator("iframe#app")
+            .locator('[data-testid="fm-id-row"][data-alias="alice"]'),
           "alice should appear in identity list (after reload fallback)",
         ).toBeVisible({ timeout: 30_000 });
       }
@@ -109,11 +113,11 @@ test.describe("Live node E2E", () => {
       await page.reload();
       const appAfterReload = page.frameLocator("iframe#app");
       await expect(
-        appAfterReload.locator("h1"),
+        appAfterReload.locator(".brand-name").first(),
         "app re-mounts after reload",
       ).toContainText(APP_NAME, { timeout: 60_000 });
       await expect(
-        appAfterReload.getByText("alice", { exact: true }),
+        appAfterReload.locator('[data-testid="fm-id-row"][data-alias="alice"]'),
         "alice persists across reload",
       ).toBeVisible({ timeout: 30_000 });
 
@@ -181,32 +185,31 @@ test.describe("Live node E2E", () => {
 
       // ── Bob shares his contact card ─────────────────────────────
       const bobApp = bobPage.frameLocator("iframe#app");
-      await bobApp
-        .locator('button[title="Share your address with someone"]')
-        .click();
-      const bobCard = await bobApp
-        .locator("textarea.is-family-monospace")
-        .inputValue();
+      await bobApp.locator('[data-testid="fm-id-share"]').first().click();
+      const shareModal = bobApp.locator('[data-testid="fm-share-modal"]');
+      await shareModal.waitFor({ timeout: 5_000 });
+      const bobCard = (await shareModal.getAttribute("data-share-text")) ?? "";
       expect(bobCard, "bob share text contains contact:// payload").toMatch(
         /verify: .+\ncontact:\/\//,
       );
-      await bobApp.locator("button.is-light", { hasText: /^Close$/ }).click();
+      await shareModal.locator(".modal-x").click();
 
       // ── Ada imports bob ─────────────────────────────────────────
       const adaApp = alicePage.frameLocator("iframe#app");
-      await adaApp.getByText("+ Import contact").click();
-      await adaApp
-        .locator('textarea[placeholder="contact://…"]')
-        .fill(bobCard);
+      await adaApp.locator('[data-testid="fm-contact-import"]').click();
+      const importModal = adaApp.locator('[data-testid="fm-import-contact-modal"]');
+      await importModal.locator("textarea").fill(bobCard);
       await adaApp
         .locator('input[placeholder="e.g. Alice (work)"]')
         .fill("bob");
-      await adaApp
-        .locator("button.is-primary", { hasText: /^Import$/ })
-        .click();
+      await adaApp.locator('[data-testid="fm-import-submit"]').click();
 
       // ── Ada composes + sends to bob ─────────────────────────────
-      await adaApp.getByText("ada", { exact: true }).click();
+      // Click the redesigned id-row's Open-inbox button instead of
+      // matching the alias text alone (now non-clickable label text).
+      await adaApp
+        .locator('[data-testid="fm-id-row"][data-alias="ada"] [data-testid="fm-id-open"]')
+        .click();
       // Redesigned shell: open the compose sheet via the sidebar's
       // "New message" button, then drive the real <input>/<textarea>
       // fields. The recipient badge under the To input renders the
@@ -262,22 +265,27 @@ test.describe("Live node E2E", () => {
  */
 async function createIdentity(page: import("@playwright/test").Page, alias: string) {
   const app = page.frameLocator("iframe#app");
-  await expect(app.locator("h1")).toContainText(APP_NAME, { timeout: 60_000 });
-  await app.getByText("Create new identity", { exact: true }).click();
-  await app.locator('input[placeholder="John Smith"]').fill(alias);
-  await app.locator("a.button", { hasText: /^Create$/ }).click();
+  // Topbar carries the brand name in both pre-login and the mailbox.
+  await expect(app.locator(".brand-name").first()).toContainText(APP_NAME, {
+    timeout: 60_000,
+  });
+  await app.locator('[data-testid="fm-id-create"]').click();
+  await app.locator('[data-testid="fm-create-alias-input"]').fill(alias);
+  await app.locator('[data-testid="fm-create-submit"]').click();
+  await app.locator('[data-testid="fm-create-confirm"]').click();
 
-  const target = app.getByText(alias, { exact: true });
+  const target = app.locator(`[data-testid="fm-id-row"][data-alias="${alias}"]`);
   try {
     await expect(target).toBeVisible({ timeout: 15_000 });
   } catch {
     await page.reload();
     const reloaded = page.frameLocator("iframe#app");
-    await expect(reloaded.locator("h1")).toContainText(APP_NAME, {
-      timeout: 60_000,
-    });
+    await expect(reloaded.locator(".brand-name").first()).toContainText(
+      APP_NAME,
+      { timeout: 60_000 },
+    );
     await expect(
-      reloaded.getByText(alias, { exact: true }),
+      reloaded.locator(`[data-testid="fm-id-row"][data-alias="${alias}"]`),
       `${alias} should appear after reload fallback`,
     ).toBeVisible({ timeout: 30_000 });
   }
