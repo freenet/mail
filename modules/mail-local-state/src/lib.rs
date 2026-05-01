@@ -85,6 +85,19 @@ pub enum DeliveryState {
     Failed,
 }
 
+/// A snapshot of an inbox message that the user has explicitly archived.
+/// 47c removes the row from the inbox contract on archive; the local copy
+/// here keeps the message visible in the Archive folder. True unarchive
+/// (re-PUT into the contract via an owner-signed delta) is tracked in #60.
+#[derive(Deserialize, Serialize, PartialEq, Eq, Debug, Clone, Default)]
+pub struct ArchivedMessage {
+    pub from: String,
+    pub title: String,
+    pub content: String,
+    /// Unix millis at the time the user clicked Archive.
+    pub archived_at: i64,
+}
+
 /// A snapshot of an outgoing message stashed locally on Send. Mirrors what the
 /// user typed plus enough metadata to render the Sent folder and to seed
 /// Reply / Forward / Resend without round-tripping the contract.
@@ -142,6 +155,16 @@ pub struct AliasState {
     pub kept: HashMap<String, KeptMessage>,
     #[serde(default)]
     pub sent: HashMap<SentId, SentMessage>,
+    /// Inbox messages explicitly archived by the user. Keyed by stringified
+    /// `MessageId` (matching the kept map's convention).
+    #[serde(default)]
+    pub archived: HashMap<String, ArchivedMessage>,
+    /// Inbox message ids the user has explicitly deleted. Used to hide rows
+    /// in the Inbox view even when the contract eviction has not yet taken
+    /// effect (or, in offline / mock mode, never will). The list is bounded
+    /// by the number of messages the user has touched.
+    #[serde(default)]
+    pub deleted: Vec<MessageId>,
 }
 
 #[derive(Deserialize, Serialize, Debug, Default)]
@@ -180,6 +203,27 @@ impl LocalState {
             .get(alias)
             .into_iter()
             .flat_map(|s| s.sent.iter())
+    }
+
+    pub fn archived_of(&self, alias: &str) -> impl Iterator<Item = (&String, &ArchivedMessage)> {
+        self.aliases
+            .get(alias)
+            .into_iter()
+            .flat_map(|s| s.archived.iter())
+    }
+
+    /// Whether `id` was archived by `alias`. Used by the Inbox merge to hide
+    /// rows the user has moved to the Archive folder.
+    pub fn is_archived(&self, alias: &str, id: MessageId) -> bool {
+        self.aliases
+            .get(alias)
+            .is_some_and(|s| s.archived.contains_key(&id.to_string()))
+    }
+
+    pub fn is_deleted(&self, alias: &str, id: MessageId) -> bool {
+        self.aliases
+            .get(alias)
+            .is_some_and(|s| s.deleted.contains(&id))
     }
 }
 
@@ -221,6 +265,28 @@ pub enum LocalStateMsg {
     DeleteSent {
         alias: Alias,
         id: SentId,
+    },
+    /// Stash an inbox message in the local archive. Issued from OpenMessage's
+    /// Archive button; the UI also fires a `remove_messages` against the
+    /// inbox contract. True unarchive (re-PUT into the contract) is tracked
+    /// in #60.
+    ArchiveMessage {
+        alias: Alias,
+        msg_id: MessageId,
+        archived: ArchivedMessage,
+    },
+    /// Drop the local archive entry for `msg_id`. Does NOT re-insert into
+    /// the contract — that path is gated on #60.
+    UnarchiveMessage {
+        alias: Alias,
+        msg_id: MessageId,
+    },
+    /// Hard delete an inbox message: clear any local copies (kept + archived)
+    /// for that id. The caller is also expected to have issued
+    /// `remove_messages` against the inbox contract.
+    DeleteMessage {
+        alias: Alias,
+        msg_id: MessageId,
     },
     /// Returns the entire `LocalState` JSON via an `ApplicationMessage`
     /// response. UI filters per active alias.
@@ -301,6 +367,45 @@ impl DelegateInterface for LocalState {
                             s.read.push(msg_id);
                         }
                         s.kept.insert(msg_id.to_string(), kept);
+                        store(ctx, &secret_key, &state)?;
+                        Ok(vec![])
+                    }
+                    LocalStateMsg::ArchiveMessage {
+                        alias,
+                        msg_id,
+                        archived,
+                    } => {
+                        let mut state = load_or_default(ctx, &secret_key)?;
+                        let s = state.aliases.entry(alias).or_default();
+                        // Archiving is also "read" by definition — the user
+                        // explicitly acted on it. Drop any kept copy so the
+                        // message isn't surfaced twice (Inbox via kept fallback
+                        // AND Archive folder).
+                        s.kept.remove(&msg_id.to_string());
+                        if !s.read.contains(&msg_id) {
+                            s.read.push(msg_id);
+                        }
+                        s.archived.insert(msg_id.to_string(), archived);
+                        store(ctx, &secret_key, &state)?;
+                        Ok(vec![])
+                    }
+                    LocalStateMsg::UnarchiveMessage { alias, msg_id } => {
+                        let mut state = load_or_default(ctx, &secret_key)?;
+                        if let Some(s) = state.aliases.get_mut(&alias) {
+                            s.archived.remove(&msg_id.to_string());
+                        }
+                        store(ctx, &secret_key, &state)?;
+                        Ok(vec![])
+                    }
+                    LocalStateMsg::DeleteMessage { alias, msg_id } => {
+                        let mut state = load_or_default(ctx, &secret_key)?;
+                        let s = state.aliases.entry(alias).or_default();
+                        s.kept.remove(&msg_id.to_string());
+                        s.archived.remove(&msg_id.to_string());
+                        s.read.retain(|id| *id != msg_id);
+                        if !s.deleted.contains(&msg_id) {
+                            s.deleted.push(msg_id);
+                        }
                         store(ctx, &secret_key, &state)?;
                         Ok(vec![])
                     }
@@ -459,6 +564,36 @@ mod boundary_tests {
         let json = br#"{"to":"bob","recipient_fingerprint":"abcd","subject":"hi","body":"yo","sent_at":1}"#;
         let s: SentMessage = serde_json::from_slice(json).expect("should deserialise");
         assert_eq!(s.delivery_state, DeliveryState::Pending);
+    }
+
+    /// `AliasState` written before the Archive feature deserialises with an
+    /// empty `archived` map. Pre-#47c state must keep loading.
+    #[test]
+    fn alias_state_missing_archived_defaults_empty() {
+        let json = br#"{"drafts":{},"read":[],"kept":{},"sent":{}}"#;
+        let s: AliasState = serde_json::from_slice(json).expect("should deserialise");
+        assert!(s.archived.is_empty());
+    }
+
+    #[test]
+    fn round_trip_archived_state() {
+        let mut state = LocalState::default();
+        let alias = state.aliases.entry("alice".into()).or_default();
+        alias.archived.insert(
+            "9".into(),
+            ArchivedMessage {
+                from: "bob".into(),
+                title: "old".into(),
+                content: "stash".into(),
+                archived_at: 99,
+            },
+        );
+        let bytes = serde_json::to_vec(&state).unwrap();
+        let back = LocalState::try_from(bytes.as_slice()).unwrap();
+        assert!(back.is_archived("alice", 9));
+        let archived: Vec<_> = back.archived_of("alice").collect();
+        assert_eq!(archived.len(), 1);
+        assert_eq!(archived[0].1.content.as_str(), "stash");
     }
 
     #[test]

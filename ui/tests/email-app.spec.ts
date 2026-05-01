@@ -142,8 +142,9 @@ test.describe("Inbox view", () => {
     );
 
     await page.locator('[data-testid="fm-folder-archive"]').click();
+    // 47c: Archive backs a real list; empty detail prompt mirrors Sent.
     await expect(page.locator(".empty-hint")).toContainText(
-      "Archive is empty",
+      "Select an archived message",
     );
   });
 });
@@ -980,5 +981,95 @@ test.describe("Rename identity (#32)", () => {
     await expect(
       page.locator('[data-testid="fm-id-row"][data-alias="address1"]'),
     ).toBeVisible();
+  });
+});
+
+// Archive (issue #47/47c). Archive splits from Delete: Archive stashes the
+// message locally and removes it from the inbox contract; Delete only
+// removes (no local trace). Re-PUT-on-unarchive lands in #60.
+test.describe("Archive folder (#47c)", () => {
+  test("Archive moves message from Inbox to Archive folder", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await waitForApp(page);
+    await selectIdentity(page, "address1");
+
+    // Open the first inbox message (id=0 = Welcome to the offline preview).
+    await page.locator("#email-inbox-accessor-0").click();
+    await expect(page.locator(".detail-subj")).toContainText(
+      "Welcome to the offline preview",
+    );
+
+    // Archive it. Mobile viewports stack columns and the list-col can
+    // intercept the toolbar's pointer events; dispatchEvent fires the
+    // synthetic click directly on the button.
+    await page.locator('[data-testid="fm-archive"]').dispatchEvent("click");
+
+    // Inbox no longer shows the row.
+    await expect(page.locator("#email-inbox-accessor-0")).toHaveCount(0);
+
+    // Archive folder shows the row.
+    await page.locator('[data-testid="fm-folder-archive"]').click();
+    const card = page.locator('[data-testid="fm-archive-card"]').first();
+    await expect(card).toBeVisible();
+    await expect(card.locator(".msg-subj")).toContainText(
+      "Welcome to the offline preview",
+    );
+
+    await card.click();
+    await expect(page.locator(".detail-subj")).toContainText(
+      "Welcome to the offline preview",
+    );
+    // Unarchive is wired but disabled until #60 lands.
+    const unarchive = page.locator('[data-testid="fm-archive-unarchive"]');
+    await expect(unarchive).toBeDisabled();
+  });
+
+  test("Delete from Inbox does not produce an Archive entry", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await waitForApp(page);
+    await selectIdentity(page, "address1");
+
+    await page.locator("#email-inbox-accessor-1").click();
+    await page.locator('[data-testid="fm-delete"]').dispatchEvent("click");
+
+    await expect(page.locator("#email-inbox-accessor-1")).toHaveCount(0);
+
+    await page.locator('[data-testid="fm-folder-archive"]').click();
+    await expect(page.locator('[data-testid="fm-archive-card"]')).toHaveCount(0);
+  });
+
+  test("Archive count badge reflects archived rows", async ({ page }) => {
+    await page.goto("/");
+    await waitForApp(page);
+    await selectIdentity(page, "address1");
+
+    const archiveBtn = page.locator('[data-testid="fm-folder-archive"]');
+    await expect(archiveBtn.locator(".count")).toHaveText("");
+
+    await page.locator("#email-inbox-accessor-2").click();
+    await page.locator('[data-testid="fm-archive"]').dispatchEvent("click");
+
+    await expect(archiveBtn.locator(".count")).toHaveText("1");
+  });
+
+  test("Delete on archived row removes it from Archive too", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await waitForApp(page);
+    await selectIdentity(page, "address1");
+
+    await page.locator("#email-inbox-accessor-0").click();
+    await page.locator('[data-testid="fm-archive"]').dispatchEvent("click");
+
+    await page.locator('[data-testid="fm-folder-archive"]').click();
+    await page.locator('[data-testid="fm-archive-card"]').first().click();
+    await page.locator('[data-testid="fm-archive-delete"]').dispatchEvent("click");
+
+    await expect(page.locator('[data-testid="fm-archive-card"]')).toHaveCount(0);
   });
 });
