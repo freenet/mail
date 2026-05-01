@@ -633,6 +633,7 @@ mod menu {
         folder: Folder,
         email: Option<u64>,
         sent_id: Option<String>,
+        archived_id: Option<u64>,
         new_msg: bool,
         search: String,
         compose_prefill: Option<ComposePrefill>,
@@ -647,6 +648,7 @@ mod menu {
                 self.new_msg = true;
                 self.email = None;
                 self.sent_id = None;
+                self.archived_id = None;
             }
         }
 
@@ -677,6 +679,14 @@ mod menu {
             self.sent_id.as_deref()
         }
 
+        pub fn open_archived(&mut self, id: u64) {
+            self.archived_id = Some(id);
+        }
+
+        pub fn archived_id(&self) -> Option<u64> {
+            self.archived_id
+        }
+
         pub fn take_compose_prefill(&mut self) -> Option<ComposePrefill> {
             self.compose_prefill.take()
         }
@@ -688,6 +698,7 @@ mod menu {
         pub fn at_inbox_list(&mut self) {
             self.email = None;
             self.sent_id = None;
+            self.archived_id = None;
             self.new_msg = false;
             self.compose_prefill = None;
         }
@@ -709,6 +720,7 @@ mod menu {
                 self.folder = f;
                 self.email = None;
                 self.sent_id = None;
+                self.archived_id = None;
             }
         }
 
@@ -731,8 +743,7 @@ fn folder_count(emails: &[Message], folder: menu::Folder, alias: &str) -> usize 
         menu::Folder::Inbox => emails.iter().filter(|m| !m.read).count(),
         menu::Folder::Drafts => crate::local_state::drafts_for(alias).len(),
         menu::Folder::Sent => crate::local_state::sent_for(alias).len(),
-        // Archive isn't backed yet (#47c). Show 0.
-        menu::Folder::Archive => 0,
+        menu::Folder::Archive => crate::local_state::archived_for(alias).len(),
     }
 }
 
@@ -912,6 +923,12 @@ fn MessageList() -> Element {
             let alias = id.alias.to_string();
             for msg in &current_model.borrow().messages {
                 let mut m = Message::from(msg.clone());
+                // Hide archived rows from the Inbox list (#47c). Until the
+                // contract eviction round-trips, the live contract may still
+                // serve a row the user has archived; we drop it client-side.
+                if crate::local_state::is_archived(&alias, m.id) {
+                    continue;
+                }
                 // Read-state survives reload because it lives in the
                 // mail-local-state delegate, not just `mark_as_read`'s
                 // local mutation. See issue #47/47a.
@@ -922,9 +939,13 @@ fn MessageList() -> Element {
             }
             // Merge kept-locally messages (b): rows the inbox contract has
             // already evicted but the user has read. They are always read,
-            // and dedup by id against the live contract messages.
+            // and dedup by id against the live contract messages. Archived
+            // rows are excluded — they belong to the Archive folder, not Inbox.
             for (mid, kept) in crate::local_state::kept_for(&alias) {
                 if emails.iter().any(|m| m.id == mid) {
+                    continue;
+                }
+                if crate::local_state::is_archived(&alias, mid) {
                     continue;
                 }
                 emails.push(Message {
@@ -959,20 +980,27 @@ fn MessageList() -> Element {
 
     let inbox_view = inbox.read();
     let emails = inbox_view.messages.borrow();
+    let active_alias = user
+        .read()
+        .logged_id()
+        .map(|id| id.alias.to_string())
+        .unwrap_or_default();
     let visible: Vec<Message> = if matches!(folder, menu::Folder::Inbox) {
         emails
             .iter()
+            // Hide archived/deleted rows. In offline mode the populate loop
+            // above is a no-op (no inbox_data), so emails are seeded once at
+            // login and never re-filtered without this guard. Same call also
+            // hides them in use-node mode if the contract eviction is still
+            // in flight.
+            .filter(|m| !crate::local_state::is_archived(&active_alias, m.id))
+            .filter(|m| !crate::local_state::is_deleted(&active_alias, m.id))
             .filter(|m| matches_search(m, &search))
             .cloned()
             .collect()
     } else {
         Vec::new()
     };
-    let active_alias = user
-        .read()
-        .logged_id()
-        .map(|id| id.alias.to_string())
-        .unwrap_or_default();
     let drafts: Vec<(String, mail_local_state::Draft)> = if matches!(folder, menu::Folder::Drafts) {
         let mut d = crate::local_state::drafts_for(&active_alias);
         // Newest first.
@@ -989,12 +1017,22 @@ fn MessageList() -> Element {
         } else {
             Vec::new()
         };
+    let archived_msgs: Vec<(u64, mail_local_state::ArchivedMessage)> =
+        if matches!(folder, menu::Folder::Archive) {
+            let mut a = crate::local_state::archived_for(&active_alias);
+            a.sort_by_key(|b| std::cmp::Reverse(b.1.archived_at));
+            a
+        } else {
+            Vec::new()
+        };
     let count = match folder {
         menu::Folder::Drafts => drafts.len(),
         menu::Folder::Sent => sent_msgs.len(),
+        menu::Folder::Archive => archived_msgs.len(),
         _ => visible.len(),
     };
     let selected_sent_id = menu_selection.read().sent_id().map(str::to_string);
+    let selected_archived_id = menu_selection.read().archived_id();
 
     rsx! {
         section { class: "list-col",
@@ -1003,7 +1041,39 @@ fn MessageList() -> Element {
                 span { class: "list-count", "{count}" }
             }
             div { class: "list-scroll", "data-testid": "fm-list",
-                if matches!(folder, menu::Folder::Sent) {
+                if matches!(folder, menu::Folder::Archive) {
+                    if archived_msgs.is_empty() {
+                        div { style: "padding:24px 18px; font-family:'Geist Mono',monospace; font-size:10px; letter-spacing:0.1em; text-transform:uppercase; color:var(--ink4);",
+                            "Archive is empty"
+                        }
+                    } else {
+                        {
+                            archived_msgs.into_iter().map(|(mid, a)| {
+                                let from_disp = if a.from.is_empty() { "(no sender)".to_string() } else { a.from.clone() };
+                                let subj_disp = if a.title.is_empty() { "(no subject)".to_string() } else { a.title.clone() };
+                                let preview = a.content.clone();
+                                let mut classes = String::from("msg-card");
+                                if Some(mid) == selected_archived_id { classes.push_str(" selected"); }
+                                rsx! {
+                                    article {
+                                        class: "{classes}",
+                                        "data-testid": "fm-archive-card",
+                                        "data-msg-id": "{mid}",
+                                        onclick: move |_| {
+                                            menu_selection.write().open_archived(mid);
+                                        },
+                                        div { class: "msg-row1",
+                                            span { class: "msg-sender", "{from_disp}" }
+                                            span { class: "msg-time", "" }
+                                        }
+                                        div { class: "msg-subj", "{subj_disp}" }
+                                        div { class: "msg-prev", "{preview}" }
+                                    }
+                                }
+                            })
+                        }
+                    }
+                } else if matches!(folder, menu::Folder::Sent) {
                     if sent_msgs.is_empty() {
                         div { style: "padding:24px 18px; font-family:'Geist Mono',monospace; font-size:10px; letter-spacing:0.1em; text-transform:uppercase; color:var(--ink4);",
                             "Sent is empty"
@@ -1119,6 +1189,7 @@ fn DetailPanel() -> Element {
     let folder = menu_selection.read().folder();
     let selected_id = menu_selection.read().email();
     let selected_sent_id = menu_selection.read().sent_id().map(str::to_string);
+    let selected_archived_id = menu_selection.read().archived_id();
     let view = inbox.read();
     let emails = view.messages.borrow();
     let selected = selected_id.and_then(|id| emails.iter().find(|m| m.id == id).cloned());
@@ -1133,6 +1204,29 @@ fn DetailPanel() -> Element {
                     div { class: "empty",
                         div { class: "empty-glyph", "✉" }
                         div { class: "empty-hint", "Select a message" }
+                    }
+                }
+            }
+        }
+    } else if matches!(folder, menu::Folder::Archive) {
+        let alias = user
+            .read()
+            .logged_id()
+            .map(|id| id.alias.to_string())
+            .unwrap_or_default();
+        let archived = selected_archived_id.and_then(|aid| {
+            crate::local_state::archived_for(&alias)
+                .into_iter()
+                .find(|(mid, _)| *mid == aid)
+        });
+        if let Some((mid, msg)) = archived {
+            rsx! { OpenArchivedMessage { msg_id: mid, msg } }
+        } else {
+            rsx! {
+                section { class: "detail-col",
+                    div { class: "empty",
+                        div { class: "empty-glyph", "✉" }
+                        div { class: "empty-hint", "Select an archived message" }
                     }
                 }
             }
@@ -1180,6 +1274,104 @@ fn quote_body(body: &str) -> String {
         .map(|l| format!("> {l}"))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+#[component]
+fn OpenArchivedMessage(msg_id: u64, msg: mail_local_state::ArchivedMessage) -> Element {
+    let mut menu_selection = use_context::<Signal<menu::MenuSelection>>();
+    let mut toast = use_context::<Signal<Option<String>>>();
+    let user = use_context::<Signal<User>>();
+    let client = crate::api::WEB_API_SENDER.get().unwrap();
+
+    let from = msg.from.clone();
+    let from_initial = from.chars().next().unwrap_or('·').to_string();
+    let title = msg.title.clone();
+    let content = msg.content.clone();
+    let reply_to = from.clone();
+    let reply_subj = format!("Re: {title}");
+
+    let alias = user
+        .read()
+        .logged_id()
+        .map(|id| id.alias.to_string())
+        .unwrap_or_default();
+    let delete_alias = alias.clone();
+
+    rsx! {
+        section { class: "detail-col",
+            div { class: "detail-head",
+                h1 { class: "detail-subj", "{title}" }
+                div { class: "detail-from",
+                    div { class: "sender-orb", "{from_initial}" }
+                    div { class: "from-text",
+                        span { class: "from-name", "from {from}" }
+                        span { class: "from-addr", "archived" }
+                    }
+                    span { class: "from-time", "" }
+                }
+            }
+            div { class: "toolbar",
+                button {
+                    class: "btn btn-primary",
+                    "data-testid": "fm-archive-reply",
+                    onclick: move |_| {
+                        menu_selection.write().open_compose_with(reply_to.to_string(), reply_subj.clone());
+                    },
+                    "Reply"
+                }
+                // Unarchive lives behind issue #60 (inbox contract OwnerInsert
+                // variant). Disabled here so the affordance is visible without
+                // mis-promising round-trippable archives.
+                button {
+                    class: "btn btn-secondary",
+                    "data-testid": "fm-archive-unarchive",
+                    disabled: true,
+                    title: "Unarchive requires inbox contract OwnerInsert (#60)",
+                    "Unarchive"
+                }
+                button {
+                    class: "btn btn-secondary",
+                    "data-testid": "fm-archive-delete",
+                    onclick: move |_| {
+                        if !delete_alias.is_empty() {
+                            crate::local_state::local_delete_message(&delete_alias, msg_id);
+                            #[cfg(feature = "use-node")]
+                            {
+                                let mut c = client.clone();
+                                let a = delete_alias.clone();
+                                spawn(async move {
+                                    if let Err(e) = crate::local_state::delete_message(
+                                        &mut c, a, msg_id,
+                                    )
+                                    .await
+                                    {
+                                        crate::log::error(
+                                            format!("delete_message failed: {e}"),
+                                            None,
+                                        );
+                                    }
+                                });
+                            }
+                        }
+                        menu_selection.write().at_inbox_list();
+                        toast.set(Some("Deleted".to_string()));
+                        spawn_toast_clear();
+                    },
+                    "Delete"
+                }
+                div { class: "spacer" }
+            }
+            div { class: "detail-scroll",
+                div { class: "detail-body", "data-testid": "fm-archive-body",
+                    {
+                        content.split("\n\n").map(|para| rsx! {
+                            p { "{para}" }
+                        })
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[component]
@@ -1348,6 +1540,16 @@ fn OpenMessage(msg: Message) -> Element {
     let archive_inbox_data = inbox_data.clone();
     let delete_client = client.clone();
     let delete_inbox_data = inbox_data.clone();
+    let active_alias = user
+        .read()
+        .logged_id()
+        .map(|id| id.alias.to_string())
+        .unwrap_or_default();
+    let archive_alias = active_alias.clone();
+    let archive_from = msg.from.to_string();
+    let archive_title = msg.title.to_string();
+    let archive_content = msg.content.to_string();
+    let delete_alias = active_alias.clone();
 
     rsx! {
         section { class: "detail-col",
@@ -1375,6 +1577,40 @@ fn OpenMessage(msg: Message) -> Element {
                     class: "btn btn-secondary",
                     "data-testid": "fm-archive",
                     onclick: move |_| {
+                        // Archive: stash a local copy in mail-local-state then
+                        // remove from the inbox contract. Phase 1 of #47c —
+                        // re-PUT-on-unarchive lands in #60.
+                        let archived = mail_local_state::ArchivedMessage {
+                            from: archive_from.clone(),
+                            title: archive_title.clone(),
+                            content: archive_content.clone(),
+                            archived_at: chrono::Utc::now().timestamp_millis(),
+                        };
+                        if !archive_alias.is_empty() {
+                            crate::local_state::local_archive_message(
+                                &archive_alias,
+                                id,
+                                archived.clone(),
+                            );
+                            #[cfg(feature = "use-node")]
+                            {
+                                let mut c = archive_client.clone();
+                                let a = archive_alias.clone();
+                                let ar = archived.clone();
+                                spawn(async move {
+                                    if let Err(e) = crate::local_state::archive_message(
+                                        &mut c, a, id, ar,
+                                    )
+                                    .await
+                                    {
+                                        crate::log::error(
+                                            format!("archive_message failed: {e}"),
+                                            None,
+                                        );
+                                    }
+                                });
+                            }
+                        }
                         let result = inbox
                             .write()
                             .remove_messages(archive_client.clone(), &[id], archive_inbox_data.clone())
@@ -1390,6 +1626,29 @@ fn OpenMessage(msg: Message) -> Element {
                     class: "btn btn-secondary",
                     "data-testid": "fm-delete",
                     onclick: move |_| {
+                        // Delete: drop any local kept/archived copies AND
+                        // remove from the inbox contract. Distinct from
+                        // Archive because it leaves no trace.
+                        if !delete_alias.is_empty() {
+                            crate::local_state::local_delete_message(&delete_alias, id);
+                            #[cfg(feature = "use-node")]
+                            {
+                                let mut c = delete_client.clone();
+                                let a = delete_alias.clone();
+                                spawn(async move {
+                                    if let Err(e) = crate::local_state::delete_message(
+                                        &mut c, a, id,
+                                    )
+                                    .await
+                                    {
+                                        crate::log::error(
+                                            format!("delete_message failed: {e}"),
+                                            None,
+                                        );
+                                    }
+                                });
+                            }
+                        }
                         let result = inbox
                             .write()
                             .remove_messages(delete_client.clone(), &[id], delete_inbox_data.clone())

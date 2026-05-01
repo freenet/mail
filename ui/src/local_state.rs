@@ -11,7 +11,9 @@
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use mail_local_state::{Draft, KeptMessage, LocalState, LocalStateMsg, MessageId, SentMessage};
+use mail_local_state::{
+    ArchivedMessage, Draft, KeptMessage, LocalState, LocalStateMsg, MessageId, SentMessage,
+};
 
 thread_local! {
     /// Most recent snapshot returned by the delegate. Replaced wholesale on
@@ -44,6 +46,25 @@ pub(crate) fn drafts_for(alias: &str) -> Vec<(String, Draft)> {
 
 pub(crate) fn is_read(alias: &str, id: MessageId) -> bool {
     SNAPSHOT.with(|s| s.borrow().is_read(alias, id))
+}
+
+pub(crate) fn archived_for(alias: &str) -> Vec<(MessageId, ArchivedMessage)> {
+    SNAPSHOT.with(|s| match s.borrow().for_alias(alias) {
+        Some(state) => state
+            .archived
+            .iter()
+            .filter_map(|(k, v)| k.parse::<MessageId>().ok().map(|id| (id, v.clone())))
+            .collect(),
+        None => Vec::new(),
+    })
+}
+
+pub(crate) fn is_archived(alias: &str, id: MessageId) -> bool {
+    SNAPSHOT.with(|s| s.borrow().is_archived(alias, id))
+}
+
+pub(crate) fn is_deleted(alias: &str, id: MessageId) -> bool {
+    SNAPSHOT.with(|s| s.borrow().is_deleted(alias, id))
 }
 
 pub(crate) fn sent_for(alias: &str) -> Vec<(String, SentMessage)> {
@@ -182,6 +203,40 @@ mod wire {
         .await
     }
 
+    pub(crate) async fn archive_message(
+        client: &mut WebApiRequestClient,
+        alias: String,
+        msg_id: MessageId,
+        archived: ArchivedMessage,
+    ) -> Result<(), DynError> {
+        send_msg(
+            client,
+            &LocalStateMsg::ArchiveMessage {
+                alias,
+                msg_id,
+                archived,
+            },
+        )
+        .await
+    }
+
+    #[allow(dead_code)] // Wired for #60 (true unarchive); unused until then.
+    pub(crate) async fn unarchive_message(
+        client: &mut WebApiRequestClient,
+        alias: String,
+        msg_id: MessageId,
+    ) -> Result<(), DynError> {
+        send_msg(client, &LocalStateMsg::UnarchiveMessage { alias, msg_id }).await
+    }
+
+    pub(crate) async fn delete_message(
+        client: &mut WebApiRequestClient,
+        alias: String,
+        msg_id: MessageId,
+    ) -> Result<(), DynError> {
+        send_msg(client, &LocalStateMsg::DeleteMessage { alias, msg_id }).await
+    }
+
     pub(crate) async fn save_sent(
         client: &mut WebApiRequestClient,
         alias: String,
@@ -203,14 +258,14 @@ mod wire {
 
 #[cfg(feature = "use-node")]
 pub(crate) use wire::{
-    LOCAL_STATE_KEY, delete_draft, fetch_all, mark_read, register_and_init, save_draft, save_sent,
+    LOCAL_STATE_KEY, archive_message, delete_draft, delete_message, fetch_all, mark_read,
+    register_and_init, save_draft, save_sent,
 };
-// `delete_sent` and `local_delete_sent` are wired but not yet called from any
-// component; the Archive action in 47c will use them. Re-export here so the
-// future PR doesn't need to touch the export list.
+// `delete_sent`, `local_delete_sent`, and `unarchive_message` are wired but
+// unused until later phases.
 #[cfg(feature = "use-node")]
 #[allow(unused_imports)]
-pub(crate) use wire::delete_sent;
+pub(crate) use wire::{delete_sent, unarchive_message};
 
 // Optimistic local mutations: patch `SNAPSHOT` immediately so the UI
 // re-renders without waiting for the delegate roundtrip.
@@ -258,6 +313,46 @@ pub(crate) fn local_delete_sent(alias: &str, id: &str) {
         let mut state = s.borrow_mut();
         if let Some(entry) = state.aliases_mut().get_mut(alias) {
             entry.sent.remove(id);
+        }
+    });
+    bump();
+}
+
+pub(crate) fn local_archive_message(alias: &str, msg_id: MessageId, archived: ArchivedMessage) {
+    SNAPSHOT.with(|s| {
+        let mut state = s.borrow_mut();
+        let entry = state.aliases_mut().entry(alias.to_string()).or_default();
+        // Mirrors the delegate semantics: archiving implies read, drops any
+        // kept fallback for the same id, and stashes the snapshot.
+        entry.kept.remove(&msg_id.to_string());
+        if !entry.read.contains(&msg_id) {
+            entry.read.push(msg_id);
+        }
+        entry.archived.insert(msg_id.to_string(), archived);
+    });
+    bump();
+}
+
+#[allow(dead_code)] // Wired for #60 (true unarchive).
+pub(crate) fn local_unarchive_message(alias: &str, msg_id: MessageId) {
+    SNAPSHOT.with(|s| {
+        let mut state = s.borrow_mut();
+        if let Some(entry) = state.aliases_mut().get_mut(alias) {
+            entry.archived.remove(&msg_id.to_string());
+        }
+    });
+    bump();
+}
+
+pub(crate) fn local_delete_message(alias: &str, msg_id: MessageId) {
+    SNAPSHOT.with(|s| {
+        let mut state = s.borrow_mut();
+        let entry = state.aliases_mut().entry(alias.to_string()).or_default();
+        entry.kept.remove(&msg_id.to_string());
+        entry.archived.remove(&msg_id.to_string());
+        entry.read.retain(|id| *id != msg_id);
+        if !entry.deleted.contains(&msg_id) {
+            entry.deleted.push(msg_id);
         }
     });
     bump();
