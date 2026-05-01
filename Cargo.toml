@@ -57,7 +57,7 @@ serde_json = "1"
 strum = { version = "0.24", features = ["derive"] }
 thiserror = "1"
 wasm-bindgen = "0.2"
-dioxus = "0.7.3"
+dioxus = "0.7.7"
 # Web-container deps (ported from freenet-river)
 byteorder = "1.5.0"
 ciborium = "0.2.2"
