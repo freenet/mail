@@ -601,6 +601,46 @@ mod identity_management {
         };
         send_identity_msg(client, &msg).await
     }
+
+    /// Rename an own identity by replaying its keypair under a new
+    /// alias and deleting the old entry. Issue #32 — the delegate has
+    /// no atomic Rename op, so we do delete+create at the UI layer.
+    /// Same key bytes + same description, only the map key changes.
+    pub(super) async fn rename_identity_api_call(
+        client: &mut WebApiRequestClient,
+        old: &str,
+        new: &str,
+        identity: &crate::app::login::Identity,
+    ) -> Result<(), DynError> {
+        crate::log::debug!("renaming identity {old} → {new}");
+        let stored = crate::app::login::StoredIdentityKeys::new(
+            &identity.ml_dsa_signing_key,
+            &identity.ml_kem_dk,
+        );
+        let key = serde_json::to_vec(&stored)?;
+        let extra = if identity.description.is_empty() {
+            None
+        } else {
+            Some(identity.description.clone())
+        };
+        // Order matters: create-then-delete avoids leaving the
+        // identity orphaned on a crash between the two messages.
+        // The delegate accepts both alias keys briefly during the
+        // overlap; the local ALIASES update happens after both
+        // messages are accepted so the UI doesn't flicker through a
+        // half-renamed state.
+        let create = IdentityMsg::CreateIdentity {
+            alias: new.to_string(),
+            key,
+            extra,
+            kind: Some(::identity_management::EntryKind::Identity),
+        };
+        send_identity_msg(client, &create).await?;
+        let delete = IdentityMsg::DeleteIdentity {
+            alias: old.to_string(),
+        };
+        send_identity_msg(client, &delete).await
+    }
 }
 
 #[cfg(feature = "use-node")]
@@ -825,6 +865,27 @@ pub(crate) async fn node_comms(
                 } else {
                     crate::app::address_book::remove_contact(&alias);
                     login_controller.write().updated = true;
+                }
+            }
+            NodeAction::RenameIdentity { old, new, identity } => {
+                match identity_management::rename_identity_api_call(
+                    &mut client,
+                    &old,
+                    &new,
+                    &identity,
+                )
+                .await
+                {
+                    Ok(()) => {
+                        crate::app::login::Identity::rename_in_place(&old, &new);
+                        login_controller.write().updated = true;
+                    }
+                    Err(e) => {
+                        crate::log::error(
+                            format!("failed to rename identity {old} → {new}: {e}"),
+                            None,
+                        );
+                    }
                 }
             }
         }

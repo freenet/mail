@@ -301,6 +301,24 @@ impl Identity {
             }
         });
     }
+
+    /// Rewrite the entry whose alias is `old` to use `new`, in place.
+    /// Returns `true` if a matching entry was found and rewritten.
+    /// Refuses (returns `false`) if `new` is already taken.
+    pub(crate) fn rename_in_place(old: &str, new: &str) -> bool {
+        ALIASES.with(|aliases| {
+            let aliases = &mut *aliases.borrow_mut();
+            if aliases.iter().any(|a| &*a.alias == new) {
+                return false;
+            }
+            if let Some(entry) = aliases.iter_mut().find(|a| &*a.alias == old) {
+                entry.alias = Rc::from(new);
+                true
+            } else {
+                false
+            }
+        })
+    }
 }
 
 impl std::hash::Hash for Identity {
@@ -549,12 +567,19 @@ pub(super) fn Identities() -> Element {
         login_controller.write().updated = false;
     }
 
+    // Identity::PartialEq compares by ML-DSA VK bytes only (the stable
+    // cryptographic identifier), so a rename — same key, new alias —
+    // hits the auto-memo on `#[component]` and the row keeps the old
+    // alias on screen. Pass `alias_str` as a separate prop so the memo
+    // sees the change and re-renders.
     #[component]
-    fn IdentityEntry(identity: Identity) -> Element {
+    fn IdentityEntry(identity: Identity, alias_str: String) -> Element {
+        let _ = alias_str;
         let mut user = use_context::<Signal<User>>();
         let mut inbox = use_context::<Signal<InboxView>>();
         let mut share_contact_form = use_context::<Signal<ShareContact>>();
         let mut share_pending = use_context::<Signal<SharePending>>();
+        let actions = use_coroutine_handle::<NodeAction>();
         let id = identity.id;
         let alias = identity.alias.clone();
         let description = identity.description.clone();
@@ -568,60 +593,145 @@ pub(super) fn Identities() -> Element {
         };
         let backup_alias = identity.clone();
         let share_id = identity.clone();
+        let rename_id = identity.clone();
+        // Per-row rename state. `Some(draft)` means the inline editor is
+        // open. Issue #32 — rename is delete+create with the same key.
+        let mut rename_draft: Signal<Option<String>> = use_signal(|| None);
+        let mut rename_error = use_signal(String::new);
+
+        let submit_rename = move |_| {
+            let next = rename_draft
+                .read()
+                .clone()
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            if next.is_empty() {
+                rename_error.set("Alias cannot be empty.".into());
+                return;
+            }
+            if *next == *rename_id.alias {
+                rename_draft.set(None);
+                rename_error.set(String::new());
+                return;
+            }
+            // Refuse collisions with any other own alias on this device.
+            let collision = Identity::get_aliases()
+                .borrow()
+                .iter()
+                .any(|a| *a.alias != *rename_id.alias && *a.alias == *next);
+            if collision {
+                rename_error.set(format!("`{next}` is already in use on this device."));
+                return;
+            }
+            actions.send(NodeAction::RenameIdentity {
+                old: rename_id.alias.clone(),
+                new: Rc::from(next.as_str()),
+                identity: Box::new(rename_id.clone()),
+            });
+            rename_draft.set(None);
+            rename_error.set(String::new());
+        };
 
         rsx! {
             div { class: "id-row", "data-testid": "fm-id-row", "data-alias": "{alias}",
                 div { class: "id-orb", "{initial}" }
                 div { class: "id-meta",
-                    span { class: "id-name", "{alias}" }
-                    if !description.is_empty() {
-                        span { class: "id-desc", "{description}" }
-                    }
-                    span { class: "id-fp",
-                        span { class: "label", "Fingerprint" }
-                        "{fp_short}"
+                    if let Some(draft) = &*rename_draft.read() {
+                        // Inline rename editor.
+                        input {
+                            class: "input",
+                            style: "max-width:240px;",
+                            "data-testid": "fm-rename-input",
+                            value: "{draft}",
+                            oninput: move |evt| { rename_draft.set(Some(evt.value())); },
+                        }
+                        if !rename_error.read().is_empty() {
+                            span { class: "field-help", style: "color:#b91c1c;",
+                                "{rename_error.read()}"
+                            }
+                        }
+                    } else {
+                        span { class: "id-name", "{alias}" }
+                        if !description.is_empty() {
+                            span { class: "id-desc", "{description}" }
+                        }
+                        span { class: "id-fp",
+                            span { class: "label", "Fingerprint" }
+                            "{fp_short}"
+                        }
                     }
                 }
                 div { class: "id-actions",
-                    button {
-                        class: "icon-btn",
-                        title: "Export / backup this identity",
-                        "data-testid": "fm-id-backup",
-                        onclick: move |_| {
-                            let backup = IdentityBackup::from_identity(&backup_alias);
-                            if let Ok(json) = serde_json::to_vec_pretty(&backup) {
-                                let fname = format!("freenet-identity-{}.json", &*backup_alias.alias);
-                                trigger_browser_download(&fname, &json);
-                            }
-                        },
-                        "↓"
-                    }
-                    button {
-                        class: "icon-btn",
-                        title: "Share your address with someone",
-                        "data-testid": "fm-id-share",
-                        onclick: move |_| {
-                            let card = crate::app::address_book::ContactCard::from_identity(&share_id);
-                            let fp = card.fingerprint().join("-");
-                            let share_text = format!("verify: {}\n{}", fp, card.encode());
-                            share_pending.set(SharePending {
-                                data: Some(SharePendingData {
-                                    alias: share_id.alias.to_string(),
-                                    share_text,
-                                }),
-                            });
-                            share_contact_form.write().0 = true;
-                        },
-                        "↗"
-                    }
-                    button {
-                        class: "btn btn-primary",
-                        "data-testid": "fm-id-open",
-                        onclick: move |_| {
-                            user.write().set_logged_id(id);
-                            inbox.write().set_active_id(id);
-                        },
-                        "Open inbox"
+                    if rename_draft.read().is_some() {
+                        button {
+                            class: "btn btn-ghost",
+                            onclick: move |_| {
+                                rename_draft.set(None);
+                                rename_error.set(String::new());
+                            },
+                            "Cancel"
+                        }
+                        button {
+                            class: "btn btn-primary",
+                            "data-testid": "fm-rename-submit",
+                            onclick: submit_rename,
+                            "Save"
+                        }
+                    } else {
+                        button {
+                            class: "icon-btn",
+                            title: "Rename this identity",
+                            "data-testid": "fm-id-rename",
+                            onclick: {
+                                let current = alias.to_string();
+                                move |_| {
+                                    rename_draft.set(Some(current.clone()));
+                                    rename_error.set(String::new());
+                                }
+                            },
+                            "✎"
+                        }
+                        button {
+                            class: "icon-btn",
+                            title: "Export / backup this identity",
+                            "data-testid": "fm-id-backup",
+                            onclick: move |_| {
+                                let backup = IdentityBackup::from_identity(&backup_alias);
+                                if let Ok(json) = serde_json::to_vec_pretty(&backup) {
+                                    let fname = format!("freenet-identity-{}.json", &*backup_alias.alias);
+                                    trigger_browser_download(&fname, &json);
+                                }
+                            },
+                            "↓"
+                        }
+                        button {
+                            class: "icon-btn",
+                            title: "Share your address with someone",
+                            "data-testid": "fm-id-share",
+                            onclick: move |_| {
+                                let card = crate::app::address_book::ContactCard::from_identity(&share_id);
+                                let fp = card.fingerprint().join("-");
+                                let share_text = format!("verify: {}\n{}", fp, card.encode());
+                                share_pending.set(SharePending {
+                                    data: Some(SharePendingData {
+                                        alias: share_id.alias.to_string(),
+                                        share_text,
+                                    }),
+                                });
+                                share_contact_form.write().0 = true;
+                            },
+                            "↗"
+                        }
+                        button {
+                            class: "btn btn-primary",
+                            "data-testid": "fm-id-open",
+                            onclick: move |_| {
+                                user.write().set_logged_id(id);
+                                inbox.write().set_active_id(id);
+                            },
+                            "Open inbox"
+                        }
                     }
                 }
             }
@@ -630,7 +740,8 @@ pub(super) fn Identities() -> Element {
 
     let identities_iter = aliases_list.iter().map(|alias| {
         rsx!(IdentityEntry {
-            identity: alias.clone()
+            identity: alias.clone(),
+            alias_str: alias.alias.to_string(),
         })
     });
 

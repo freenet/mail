@@ -65,6 +65,17 @@ pub(crate) enum NodeAction {
     DeleteContact {
         alias: String,
     },
+    /// Rename an own identity. The keypair is preserved — this is a
+    /// purely local relabel. Implemented as DeleteIdentity{old} +
+    /// CreateIdentity{new, same key, same extra} to avoid a delegate
+    /// version bump (see issue #32). Identity is moved through the
+    /// action so the keypair travels with it without re-reading
+    /// ALIASES on the consumer side.
+    RenameIdentity {
+        old: Rc<str>,
+        new: Rc<str>,
+        identity: Box<Identity>,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -130,6 +141,14 @@ pub(crate) fn app() -> Element {
                         }
                         NodeAction::DeleteContact { alias } => {
                             address_book::remove_contact(&alias);
+                            login_ctl.write().updated = true;
+                        }
+                        NodeAction::RenameIdentity { old, new, .. } => {
+                            // Offline mode: just relabel the in-memory
+                            // ALIASES entries. The delegate isn't
+                            // around, so there's no delete+create round
+                            // trip.
+                            Identity::rename_in_place(&old, &new);
                             login_ctl.write().updated = true;
                         }
                         _ => {}
