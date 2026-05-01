@@ -61,8 +61,8 @@ derive_pubkey() {
 up() {
     setup_dirs
 
-    if pgrep -f "freenet network.*$GW_DATA" > /dev/null 2>&1; then
-        echo "gateway already running"
+    if lsof -i :$GW_PORT_WS -P -sTCP:LISTEN > /dev/null 2>&1; then
+        echo "gateway already listening on :$GW_PORT_WS"
     else
         echo "starting gateway on ws://127.0.0.1:$GW_PORT_WS (net :$GW_PORT_NET)"
         HOME="$GW_HOME" nohup freenet network \
@@ -91,8 +91,8 @@ up() {
     echo "$GW_PUBKEY" > "$GW_PUBKEY_FILE"
     echo "gateway pubkey: $GW_PUBKEY"
 
-    if pgrep -f "freenet network.*$PEER_DATA" > /dev/null 2>&1; then
-        echo "peer already running"
+    if lsof -i :$PEER_PORT_WS -P -sTCP:LISTEN > /dev/null 2>&1; then
+        echo "peer already listening on :$PEER_PORT_WS"
     else
         echo "starting peer on ws://127.0.0.1:$PEER_PORT_WS (net :$PEER_PORT_NET) → gateway 127.0.0.1:$GW_PORT_NET"
         HOME="$PEER_HOME" nohup freenet network \
@@ -134,8 +134,42 @@ down() {
         kill "$(cat "$PEER_PIDFILE")" 2>/dev/null || true
         rm -f "$PEER_PIDFILE"
     fi
-    pkill -f "freenet network.*$GW_DATA" 2>/dev/null || true
-    pkill -f "freenet network.*$PEER_DATA" 2>/dev/null || true
+    # Belt-and-suspenders: kill anything still bound to the iso WS
+    # ports. macOS `ps` truncates argv beyond ~32 chars, so the
+    # data-dir-based pkill from earlier versions silently missed
+    # processes whose argv had been trimmed.
+    for port in $GW_PORT_WS $PEER_PORT_WS; do
+        for pid in $(lsof -ti :"$port" -sTCP:LISTEN 2>/dev/null); do
+            kill "$pid" 2>/dev/null || true
+        done
+    done
+    # Final pass: any freenet process whose argv mentions the iso
+    # root, regardless of which leg it ran.
+    pkill -f "freenet network.*$ROOT" 2>/dev/null || true
+    # macOS truncates argv visible via pgrep in some cases (re-exec /
+    # fork patterns), so additionally kill any pid that holds an open
+    # file under the iso data tree. `lsof +D` recurses; safe because
+    # only freenet writes there.
+    if [ -d "$ROOT" ]; then
+        for pid in $(lsof -t +D "$ROOT" 2>/dev/null | sort -u); do
+            kill "$pid" 2>/dev/null || true
+        done
+    fi
+    # Wait for ports to drain so a back-to-back up doesn't race the
+    # bind. SIGKILL after a grace period.
+    for _ in $(seq 1 10); do
+        if ! lsof -i :$GW_PORT_WS -i :$PEER_PORT_WS -P -sTCP:LISTEN >/dev/null 2>&1; then
+            break
+        fi
+        sleep 0.5
+    done
+    if lsof -i :$GW_PORT_WS -i :$PEER_PORT_WS -P -sTCP:LISTEN >/dev/null 2>&1; then
+        for port in $GW_PORT_WS $PEER_PORT_WS; do
+            for pid in $(lsof -ti :"$port" -sTCP:LISTEN 2>/dev/null); do
+                kill -9 "$pid" 2>/dev/null || true
+            done
+        done
+    fi
     echo "stopped"
 }
 
