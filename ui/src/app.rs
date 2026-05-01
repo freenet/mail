@@ -23,6 +23,7 @@ use crate::{
     inbox::{DecryptedMessage, InboxModel, MessageModel},
 };
 
+pub(crate) mod address_book;
 pub(crate) mod login;
 
 // In-memory mailbox for offline (`example-data`, `!use-node`) mode.
@@ -55,6 +56,14 @@ pub(crate) enum NodeAction {
         alias: Rc<str>,
         /// ML-DSA-65 signing key used by the AFT token-generator delegate.
         ml_dsa_key: Arc<MlDsaSigningKey<MlDsa65>>,
+    },
+    /// Store a new contact in the identity-management delegate.
+    CreateContact {
+        contact: address_book::Contact,
+    },
+    /// Remove a contact from the identity-management delegate.
+    DeleteContact {
+        alias: String,
     },
 }
 
@@ -103,10 +112,30 @@ pub(crate) fn app() -> Element {
     #[cfg(any(not(feature = "use-node"), feature = "no-sync"))]
     {
         let _ = inbox_controller;
-        let _ = login_controller;
         let _ = inbox_data;
+        let mut login_ctl = login_controller;
         let _sync: Coroutine<NodeAction> =
-            use_coroutine(move |_rx: UnboundedReceiver<NodeAction>| async {});
+            use_coroutine(move |mut rx: UnboundedReceiver<NodeAction>| async move {
+                use futures::StreamExt;
+                while let Some(action) = rx.next().await {
+                    // Branches don't compose into a let-chain because
+                    // CreateContact moves `contact` and the match would
+                    // bind it inside a guard.
+                    #[allow(clippy::collapsible_match)]
+                    match action {
+                        NodeAction::CreateContact { contact } => {
+                            if address_book::insert_contact(contact).is_ok() {
+                                login_ctl.write().updated = true;
+                            }
+                        }
+                        NodeAction::DeleteContact { alias } => {
+                            address_book::remove_contact(&alias);
+                            login_ctl.write().updated = true;
+                        }
+                        _ => {}
+                    }
+                }
+            });
     }
     #[allow(unused_variables)]
     let actions = use_coroutine_handle::<NodeAction>();
@@ -263,22 +292,22 @@ impl InboxView {
             // In offline mode, deliver the message to an in-memory mailbox
             // keyed by recipient alias so that switching identities reveals it.
             use ml_kem::kem::KeyExport;
-            if let Some(ek_key) = content.to.first() {
-                if let Some(to_alias) = Identity::alias_for_encaps_key(ek_key.0.as_slice()) {
-                    let msg = Message {
-                        id: 0, // reassigned on load
-                        from: content.from.clone().into(),
-                        title: content.title.clone().into(),
-                        content: content.content.clone().into(),
-                        read: false,
-                    };
-                    MOCK_SENT_MESSAGES.with(|map| {
-                        map.borrow_mut()
-                            .entry(to_alias.to_string())
-                            .or_default()
-                            .push(msg);
-                    });
-                }
+            if let Some(ek_key) = content.to.first()
+                && let Some(to_alias) = Identity::alias_for_encaps_key(ek_key.0.as_slice())
+            {
+                let msg = Message {
+                    id: 0, // reassigned on load
+                    from: content.from.clone().into(),
+                    title: content.title.clone().into(),
+                    content: content.content.clone().into(),
+                    read: false,
+                };
+                MOCK_SENT_MESSAGES.with(|map| {
+                    map.borrow_mut()
+                        .entry(to_alias.to_string())
+                        .or_default()
+                        .push(msg);
+                });
             }
         }
         let _ = client;
@@ -299,7 +328,7 @@ impl InboxView {
             let _ = client;
             let _ = ids;
             let _ = inbox_data;
-            return Ok(async {}.boxed_local());
+            Ok(async {}.boxed_local())
         }
         #[cfg(not(all(feature = "example-data", not(feature = "use-node"))))]
         {
@@ -838,15 +867,39 @@ fn NewMessageWindow() -> Element {
     let mut title = use_signal(String::new);
     let mut content = use_signal(String::new);
 
+    // Cached recipient lookup — re-runs only when `to` changes, not on
+    // every keystroke in subject/body. lookup() clones ~3KB and runs
+    // BLAKE3 for the fingerprint; we don't want that per render.
+    let recipient_lookup = use_memo(move || address_book::lookup(&to.read()));
+
     let alias = user_alias.to_string();
     let send_msg = move |_| {
         let to_val = to.read().clone();
-        // fixme: this will have to come from the address book in the future
-        let (recipient_ek, recipient_vk) = match Identity::get_alias(&to_val) {
-            Some(v) => (v.ml_kem_ek(), v.ml_dsa_vk()),
+        let recipient = match address_book::lookup(&to_val) {
+            Some(r) => r,
             None => {
                 crate::log::error(
                     format!("couldn't find key for `{to_val}`"),
+                    Some(TryNodeAction::GetAlias),
+                );
+                return;
+            }
+        };
+        let recipient_ek = match address_book::ek_from_bytes(&recipient.ml_kem_ek_bytes) {
+            Ok(ek) => ek,
+            Err(e) => {
+                crate::log::error(
+                    format!("bad EK for `{to_val}`: {e}"),
+                    Some(TryNodeAction::GetAlias),
+                );
+                return;
+            }
+        };
+        let recipient_vk = match address_book::vk_from_bytes(&recipient.ml_dsa_vk_bytes) {
+            Ok(vk) => vk,
+            Err(e) => {
+                crate::log::error(
+                    format!("bad VK for `{to_val}`: {e}"),
                     Some(TryNodeAction::GetAlias),
                 );
                 return;
@@ -896,6 +949,36 @@ fn NewMessageWindow() -> Element {
                         tr {
                             th { "To"}
                             td { style: "width: 100%", contenteditable: true, oninput: move |ev| { to.set(ev.value().clone()); } }
+                        }
+                        {
+                            recipient_lookup.read().as_ref().map(|r| {
+                                let (badge_class, badge_label): (&str, &str) =
+                                    if r.is_own {
+                                        ("tag is-success is-light", "you")
+                                    } else if r.verified {
+                                        ("tag is-success is-light", "verified")
+                                    } else {
+                                        ("tag is-warning is-light", "unverified")
+                                    };
+                                let fp_short = r.fingerprint_short();
+                                rsx! {
+                                    tr { "data-testid": "compose-recipient-badge",
+                                        th {}
+                                        td {
+                                            span {
+                                                class: "{badge_class} mr-2",
+                                                "data-testid": "compose-recipient-badge-label",
+                                                "{badge_label}"
+                                            }
+                                            span {
+                                                class: "is-family-monospace is-size-7 has-text-grey",
+                                                "data-testid": "compose-recipient-fingerprint",
+                                                "fingerprint: {fp_short}"
+                                            }
+                                        }
+                                    }
+                                }
+                            })
                         }
                         tr {
                             th { "Subject"}

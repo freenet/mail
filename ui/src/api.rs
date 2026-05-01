@@ -491,6 +491,28 @@ mod identity_management {
         }
     }
 
+    /// Send a single `IdentityMsg` to the identity-management delegate.
+    /// Owns the `params` / `delegate_key` boilerplate shared by every
+    /// alias / contact CRUD path. Fire-and-forget — we do not await an
+    /// ACK from the delegate.
+    async fn send_identity_msg(
+        client: &mut WebApiRequestClient,
+        msg: &IdentityMsg,
+    ) -> Result<(), DynError> {
+        let params = IdentityParams::try_from(ID_MANAGER_KEY)?;
+        let params = Parameters::try_from(params)?;
+        let delegate_key = DelegateKey::from_params(ID_MANAGER_CODE_HASH, &params)?;
+        let request = DelegateRequest::ApplicationMessages {
+            params,
+            inbound: vec![InboundDelegateMsg::ApplicationMessage(
+                ApplicationMessage::new(Vec::<u8>::try_from(msg)?),
+            )],
+            key: delegate_key,
+        };
+        client.send(request.into()).await?;
+        Ok(())
+    }
+
     async fn create_alias_api_call(
         client: &mut WebApiRequestClient,
         alias: Rc<str>,
@@ -499,26 +521,14 @@ mod identity_management {
         ml_kem_dk: DecapsulationKey<MlKem768>,
     ) -> Result<(), DynError> {
         crate::log::debug!("creating {alias}");
-        let params = IdentityParams::try_from(ID_MANAGER_KEY)?;
-        let params = params.try_into()?;
-        let delegate_key = DelegateKey::from_params(ID_MANAGER_CODE_HASH, &params)?;
-        // Serialise the keypair bundle (ML-DSA + ML-KEM seeds) into the opaque
-        // `Vec<u8>` slot that the identity-management delegate stores.
         let stored = StoredIdentityKeys::new(&ml_dsa_key, &ml_kem_dk);
         let msg = IdentityMsg::CreateIdentity {
             alias: alias.to_string(),
             key: serde_json::to_vec(&stored)?,
             extra: Some(description),
+            kind: Some(::identity_management::EntryKind::Identity),
         };
-        let request = DelegateRequest::ApplicationMessages {
-            params,
-            inbound: vec![InboundDelegateMsg::ApplicationMessage(
-                ApplicationMessage::new(Vec::<u8>::try_from(&msg)?),
-            )],
-            key: delegate_key.clone(),
-        };
-        client.send(request.into()).await?;
-        Ok(())
+        send_identity_msg(client, &msg).await
     }
 
     #[derive(Default)]
@@ -550,6 +560,43 @@ mod identity_management {
         /// That byte string is the per-identity stable correlator now that
         /// RSA is gone from the user-identity code path.
         pub(super) static PENDING_CONFIRMATION: RefCell<HashMap<Vec<u8>, NewIdentity>> = RefCell::new(HashMap::new());
+    }
+
+    pub(super) async fn create_contact_api_call(
+        client: &mut WebApiRequestClient,
+        contact: &crate::app::address_book::Contact,
+    ) -> Result<(), DynError> {
+        crate::log::debug!("storing contact {}", contact.local_alias);
+        let stored = crate::app::address_book::StoredContactKeys {
+            ml_dsa_vk_bytes: contact.ml_dsa_vk_bytes.clone(),
+            ml_kem_ek_bytes: contact.ml_kem_ek_bytes.clone(),
+            suggested_alias: Some(contact.local_alias.to_string()),
+            verified: contact.verified,
+        };
+        let msg = IdentityMsg::CreateIdentity {
+            alias: contact.local_alias.to_string(),
+            key: serde_json::to_vec(&stored)?,
+            extra: Some(contact.description.clone()),
+            kind: Some(::identity_management::EntryKind::Contact),
+        };
+        send_identity_msg(client, &msg).await
+    }
+
+    pub(super) async fn delete_contact_api_call(
+        client: &mut WebApiRequestClient,
+        alias: &str,
+    ) -> Result<(), DynError> {
+        crate::log::debug!("deleting contact {alias}");
+        // The delegate stores own identities and contacts in the same
+        // alias-keyed map, so `DeleteIdentity` is the right wire message
+        // for both. Guarding own-identity aliases against accidental
+        // delete is the UI's responsibility (`address_book::remove_contact`
+        // skips `Entry::Own` and the contact list never renders a Remove
+        // button next to an own identity).
+        let msg = IdentityMsg::DeleteIdentity {
+            alias: alias.to_string(),
+        };
+        send_identity_msg(client, &msg).await
     }
 }
 
@@ -617,6 +664,10 @@ pub(crate) async fn node_comms(
     if let Err(e) = identity_management::create_delegate(&mut req_sender).await {
         crate::log::error(format!("identities delegate register failed: {e}"), None);
     }
+    // Copy any entries from previous delegate hashes (`LEGACY_ID_DELEGATE_HASHES`,
+    // currently empty) into the current delegate. No-op until a future
+    // breaking change populates the slice.
+    crate::app::address_book::migrate_legacy_identities();
     let identities_key = identity_management::load_aliases(&mut req_sender)
         .await
         .unwrap();
@@ -631,6 +682,7 @@ pub(crate) async fn node_comms(
         inbox_to_id: &mut HashMap<ContractKey, Identity>,
         token_rec_to_id: &mut HashMap<ContractKey, Identity>,
         user: Signal<crate::app::User>,
+        mut login_controller: Signal<crate::app::LoginController>,
     ) {
         let mut client = api.sender_half();
         match req {
@@ -726,6 +778,32 @@ pub(crate) async fn node_comms(
                     Err(e) => {
                         crate::log::error(format!("{e}"), Some(TryNodeAction::CreateDelegate))
                     }
+                }
+            }
+            NodeAction::CreateContact { contact } => {
+                if let Err(e) =
+                    identity_management::create_contact_api_call(&mut client, &contact).await
+                {
+                    crate::log::error(
+                        format!("failed to store contact {}: {e}", contact.local_alias),
+                        None,
+                    );
+                } else if let Err(e) = crate::app::address_book::insert_contact(contact) {
+                    crate::log::error(format!("address book rejected contact: {e}"), None);
+                } else {
+                    // ContactsSection reads ADDRESS_BOOK directly (not via a
+                    // Signal) so bump the controller to force re-render.
+                    login_controller.write().updated = true;
+                }
+            }
+            NodeAction::DeleteContact { alias } => {
+                if let Err(e) =
+                    identity_management::delete_contact_api_call(&mut client, &alias).await
+                {
+                    crate::log::error(format!("failed to delete contact {alias}: {e}"), None);
+                } else {
+                    crate::app::address_book::remove_contact(&alias);
+                    login_controller.write().updated = true;
                 }
             }
         }
@@ -1286,7 +1364,7 @@ pub(crate) async fn node_comms(
             }
             req = rx.next() => {
                 let Some(req) = req else { panic!("async action ch closed") };
-                handle_action(req, &api, &mut inbox_contract_to_id, &mut token_contract_to_id, user).await;
+                handle_action(req, &api, &mut inbox_contract_to_id, &mut token_contract_to_id, user, login_controller).await;
             }
             req = api.requests.next() => {
                 let Some(req) = req else { panic!("request ch closed") };

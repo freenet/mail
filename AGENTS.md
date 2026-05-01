@@ -368,6 +368,17 @@ contract state.
 2. `cargo make publish-email-test` in another
 3. Open the published webapp URL in the browser
 4. Create identity A and identity B
-5. A sends a message to B (burns an AFT token)
-6. B receives, decrypts, and reads the message
-7. Token accounting check: A's remaining tokens decremented
+5. As B, click "Share address" and copy the contact card (`verify: …\ncontact://…`)
+6. As A, click "+ Import contact", paste B's card, set a local label, click Import
+7. A sends a message to B by typing the imported alias into the To field
+   (the compose form should show a fingerprint badge once the alias resolves);
+   sending burns an AFT token
+8. B receives, decrypts, and reads the message
+9. Token accounting check: A's remaining tokens decremented
+
+Notes:
+- Single-user identity creation only validates the inbox/AFT/encryption
+  pipeline. Cross-identity messaging requires the address-book share/import
+  flow because contact pubkeys are not auto-discovered yet (see issue #42).
+- For two browsers / two nodes, use the iso-nodes harness from #41 and run
+  steps 5–6 on each side.

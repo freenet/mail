@@ -1619,6 +1619,7 @@ name = "freenet-email-ui"
 version = "0.0.1"
 dependencies = [
  "arc-swap",
+ "base64",
  "bs58",
  "chacha20poly1305",
  "chrono",

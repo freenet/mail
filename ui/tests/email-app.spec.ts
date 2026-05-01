@@ -329,3 +329,152 @@ test.describe("No horizontal scrollbar at desktop width", () => {
     expect(hasHScroll).toBe(false);
   });
 });
+
+// ── Address book: import contact and display ─────────────────────────────────
+//
+// This test exercises the address book import flow in offline (example-data,
+// no-sync) mode:
+//   1. Build a fake ContactCard payload (the same shape the Rust code produces)
+//      using browser-native btoa so no extra dependencies are needed.
+//   2. Navigate to the import-contact dialog and paste the encoded token.
+//   3. Assert the fingerprint panel appears and the alias pre-fills.
+//   4. Complete the import and assert the contact appears in the Contacts section.
+//   5. Log in as address1, type the contact alias in the compose To field,
+//      confirm the compose form still accepts it (address_book::lookup resolves it).
+
+test.describe("Address book: import contact and display", () => {
+  test("import contact card → appears in contacts section → compose accepts alias", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await waitForApp(page);
+
+    // ── Step 1: build a fake ContactCard via browser evaluate ─────────────
+    //
+    // ContactCard JSON fields:
+    //   version: u32
+    //   ml_dsa_vk_bytes: array of ints (1952 bytes for ML-DSA-65)
+    //   ml_kem_ek_bytes: array of ints (1184 bytes for ML-KEM-768)
+    //   suggested_alias: string | null
+    //   suggested_description: string | null
+    //
+    // The byte arrays are arbitrary — we only need them to pass the import
+    // parser (which accepts any bytes).  The fingerprint displayed will be
+    // deterministic given these values.
+    const contactCard = await page.evaluate(() => {
+      const mlDsaVk = new Array(1952)
+        .fill(0)
+        .map((_, i) => (i * 7 + 13) & 0xff);
+      const mlKemEk = new Array(1184)
+        .fill(0)
+        .map((_, i) => (i * 5 + 17) & 0xff);
+      const card = {
+        version: 1,
+        ml_dsa_vk_bytes: mlDsaVk,
+        ml_kem_ek_bytes: mlKemEk,
+        suggested_alias: "charlie",
+        suggested_description: "Test contact",
+      };
+      const json = JSON.stringify(card);
+      // Use the full share-text format (verify line + URI), matching what
+      // the Share modal actually copies to the clipboard.  btoa produces
+      // standard base64, matching Rust's base64::STANDARD engine.
+      return `verify: foo-bar-baz-qux-quux-corge\ncontact://${btoa(json)}`;
+    });
+
+    // ── Step 2: open the import-contact dialog ────────────────────────────
+    await page.getByText("+ Import contact", { exact: true }).click();
+
+    await expect(page.getByText("Import contact")).toBeVisible({
+      timeout: 5_000,
+    });
+
+    // ── Step 3: paste the card and assert the fingerprint panel appears ───
+    await page.locator("textarea").fill(contactCard);
+
+    await expect(
+      page.getByText("Fingerprint (verify with sender):")
+    ).toBeVisible({ timeout: 5_000 });
+
+    // Alias should be pre-filled with the suggested_alias from the card.
+    const labelInput = page.locator('input[placeholder="e.g. Alice (work)"]');
+    await expect(labelInput).toHaveValue("charlie");
+
+    // Use a distinct local alias that can't clash with own identities.
+    await labelInput.fill("charlie-test");
+
+    // The displayed fingerprint must match a value that's deterministic
+    // for the byte arrays above — protects against silent drift in the
+    // BLAKE3-to-words mapping. Computed once in JS via the same algorithm
+    // the Rust code uses (BLAKE3 of vk||ek then six 11-bit windows) is
+    // overkill for the test; instead we capture the value the UI shows
+    // and compare it across the import dialog and the compose badge.
+    const fingerprintPanel = page.locator(".notification.is-info p.is-family-monospace");
+    await expect(fingerprintPanel).toBeVisible({ timeout: 5_000 });
+    const fingerprintText = (await fingerprintPanel.textContent()) ?? "";
+    const fingerprintWords = fingerprintText.trim().split(/\s+/);
+    expect(fingerprintWords).toHaveLength(6);
+    const fingerprintShort = `${fingerprintWords[0]}-${fingerprintWords[1]}`;
+
+    // ── Step 4: complete import and verify contact appears ────────────────
+    await page.locator("button").filter({ hasText: "Import" }).click();
+
+    // Import form closes; Contacts section heading appears.
+    await expect(page.getByText("Contacts", { exact: true })).toBeVisible({
+      timeout: 5_000,
+    });
+
+    // The contact row is identified by data-alias (testid-stable, not by
+    // structural Bulma class names).
+    const contactRow = page.locator('[data-testid="contact-row"][data-alias="charlie-test"]');
+    await expect(contactRow).toBeVisible({ timeout: 5_000 });
+
+    // Fingerprint short form shown next to the alias matches what the
+    // import dialog displayed.
+    await expect(
+      contactRow.locator('[data-testid="contact-fingerprint"]')
+    ).toContainText(fingerprintShort);
+
+    // Imported without ticking "verified" → warning badge `⚠`.
+    await expect(
+      contactRow.locator('[data-testid="contact-verify-badge"]')
+    ).toContainText("⚠");
+
+    // ── Step 5: compose recognises the contact via the recipient badge ─────
+    await selectIdentity(page, "address1");
+    await clickMenu(page, "Write message");
+    await expect(page.locator("h3")).toContainText("New message");
+
+    const toCell = page.locator("tr").filter({ hasText: "To" }).locator("td");
+    await toCell.click();
+    await toCell.fill("charlie-test");
+
+    // Badge shows `unverified` (not ticked at import) and the same
+    // fingerprint short form as the contact row.
+    await expect(
+      page.locator('[data-testid="compose-recipient-badge-label"]')
+    ).toContainText("unverified", { timeout: 5_000 });
+    await expect(
+      page.locator('[data-testid="compose-recipient-fingerprint"]')
+    ).toContainText(fingerprintShort);
+
+    // Sanity: typing a non-existent alias removes the badge.
+    await toCell.fill("nobody-here");
+    await expect(
+      page.locator('[data-testid="compose-recipient-badge"]')
+    ).toHaveCount(0, { timeout: 2_000 });
+
+    // ── Step 6: Remove button removes the contact (regression: needs the
+    // login-controller bump in the coroutine to re-render ContactsSection).
+    await clickMenu(page, "Log out");
+    await expect(
+      page.locator('[data-testid="contact-row"][data-alias="charlie-test"]')
+    ).toBeVisible();
+    await page
+      .locator('[data-testid="contact-row"][data-alias="charlie-test"] [data-testid="contact-remove"]')
+      .click();
+    await expect(
+      page.locator('[data-testid="contact-row"][data-alias="charlie-test"]')
+    ).toHaveCount(0, { timeout: 5_000 });
+  });
+});

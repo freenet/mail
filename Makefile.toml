@@ -522,7 +522,10 @@ trap "kill $DX_PID 2>/dev/null || true" EXIT
 echo "Waiting for dev server on port $PORT..."
 SERVER_READY=false
 for i in $(seq 1 90); do
-    if curl -s "http://localhost:$PORT" 2>/dev/null | grep -q "freenet-email-app"; then
+    # Match on the wasm bundle script tag — the dx 0.7 served HTML no
+    # longer contains a literal `freenet-email-app` string the way the
+    # earlier dx version did.
+    if curl -s "http://localhost:$PORT" 2>/dev/null | grep -q "wasm/app.js"; then
         echo "Server ready after $((i * 3))s"
         sleep 3
         SERVER_READY=true

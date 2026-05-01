@@ -72,10 +72,23 @@ type Key = Vec<u8>;
 type Alias = String;
 type Extra = String;
 
+/// Discriminates between a locally-owned identity (holds private key material)
+/// and a contact (holds only public keys received via a ContactCard).
+#[derive(Deserialize, Serialize, PartialEq, Eq, Debug, Clone, Copy, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum EntryKind {
+    #[default]
+    Identity,
+    Contact,
+}
+
 #[derive(Deserialize, Serialize, PartialEq, Eq, Debug)]
 pub struct AliasInfo {
     pub key: Key,
     pub extra: Option<Extra>,
+    /// Defaults to `Identity` when deserialising old state that lacks the field.
+    #[serde(default)]
+    pub kind: EntryKind,
 }
 
 #[derive(Deserialize, Serialize, Default, Debug)]
@@ -156,7 +169,12 @@ impl DelegateInterface for IdentityManagement {
                         ctx.set_secret(&secret_key, &default_value);
                         Ok(vec![])
                     }
-                    IdentityMsg::CreateIdentity { alias, key, extra } => {
+                    IdentityMsg::CreateIdentity {
+                        alias,
+                        key,
+                        extra,
+                        kind,
+                    } => {
                         #[cfg(feature = "contract")]
                         {
                             freenet_stdlib::log::info(&format!(
@@ -168,7 +186,14 @@ impl DelegateInterface for IdentityManagement {
                             .get_secret(&secret_key)
                             .ok_or_else(|| DelegateError::Other("secret not found".into()))?;
                         let mut manager = IdentityManagement::try_from(value.as_slice())?;
-                        manager.identities.insert(alias, AliasInfo { key, extra });
+                        manager.identities.insert(
+                            alias,
+                            AliasInfo {
+                                key,
+                                extra,
+                                kind: kind.unwrap_or_default(),
+                            },
+                        );
                         let updated = serde_json::to_vec(&manager)
                             .map_err(|e| DelegateError::Deser(format!("{e}")))?;
                         ctx.set_secret(&secret_key, &updated);
@@ -207,6 +232,10 @@ pub enum IdentityMsg {
         alias: String,
         key: Key,
         extra: Option<String>,
+        /// Defaults to `Identity` when absent (backwards-compatible with
+        /// senders that pre-date the contact-book feature).
+        #[serde(default)]
+        kind: Option<EntryKind>,
     },
     DeleteIdentity {
         alias: String,
@@ -282,5 +311,53 @@ mod boundary_tests {
             matches!(result, Err(DelegateError::Deser(_))),
             "expected Err(DelegateError::Deser), got {result:?}"
         );
+    }
+
+    /// AliasInfo without a `kind` field must deserialise as `EntryKind::Identity`
+    /// (backwards-compat for state written before the contact-book feature).
+    #[test]
+    fn alias_info_missing_kind_defaults_to_identity() {
+        let json = br#"{"key":[1,2,3],"extra":null}"#;
+        let info: AliasInfo = serde_json::from_slice(json).expect("should deserialise");
+        assert_eq!(info.kind, EntryKind::Identity);
+    }
+
+    /// `IdentityMsg::CreateIdentity` without a `kind` field must deserialise
+    /// successfully (backwards-compat for senders that pre-date the field).
+    #[test]
+    fn create_identity_missing_kind_deserialises() {
+        let json = br#"{"CreateIdentity":{"alias":"alice","key":[1],"extra":null}}"#;
+        let msg: IdentityMsg = serde_json::from_slice(json).expect("should deserialise");
+        if let IdentityMsg::CreateIdentity { kind, .. } = msg {
+            assert_eq!(kind, None);
+        } else {
+            panic!("expected CreateIdentity variant");
+        }
+    }
+
+    /// Storing both Identity and Contact entries round-trips correctly.
+    #[test]
+    fn mixed_entry_kinds_round_trip() {
+        let mut mgr = IdentityManagement::default();
+        mgr.identities.insert(
+            "alice".into(),
+            AliasInfo {
+                key: vec![1],
+                extra: None,
+                kind: EntryKind::Identity,
+            },
+        );
+        mgr.identities.insert(
+            "bob".into(),
+            AliasInfo {
+                key: vec![2],
+                extra: Some("friend".into()),
+                kind: EntryKind::Contact,
+            },
+        );
+        let json = serde_json::to_vec(&mgr).unwrap();
+        let mgr2: IdentityManagement = serde_json::from_slice(&json).unwrap();
+        assert_eq!(mgr2.identities["alice"].kind, EntryKind::Identity);
+        assert_eq!(mgr2.identities["bob"].kind, EntryKind::Contact);
     }
 }
