@@ -678,13 +678,12 @@ pub(super) fn CreateAliasForm() -> Element {
     // Reveal stage: hold the freshly-generated keypair + its fingerprint
     // until the user explicitly continues. This gives them a beat to back
     // up before the keys are persisted via NodeAction::CreateIdentity.
-    let mut pending: Signal<
-        Option<(
-            Arc<MlDsaSigningKey<MlDsa65>>,
-            DecapsulationKey<MlKem768>,
-            [&'static str; 6],
-        )>,
-    > = use_signal(|| None);
+    type PendingIdentity = (
+        Arc<MlDsaSigningKey<MlDsa65>>,
+        DecapsulationKey<MlKem768>,
+        [&'static str; 6],
+    );
+    let mut pending: Signal<Option<PendingIdentity>> = use_signal(|| None);
 
     let submit = move |_| {
         let alias_str = alias_input.read().trim().to_string();
@@ -1155,11 +1154,11 @@ fn ShareContactModal() -> Element {
     let (verify_words, contact_token): (Vec<String>, String) = {
         let mut words = Vec::new();
         let mut token = share_text.clone();
-        if let Some((first, rest)) = share_text.split_once('\n') {
-            if let Some(stripped) = first.strip_prefix("verify: ") {
-                words = stripped.split('-').map(|s| s.to_string()).collect();
-                token = rest.to_string();
-            }
+        if let Some((first, rest)) = share_text.split_once('\n')
+            && let Some(stripped) = first.strip_prefix("verify: ")
+        {
+            words = stripped.split('-').map(|s| s.to_string()).collect();
+            token = rest.to_string();
         }
         (words, token)
     };
