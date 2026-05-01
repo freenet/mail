@@ -74,7 +74,7 @@ test.describe("Live node E2E", () => {
       // Pre-login first-run shows two action-cards. Click the create one,
       // which lands on the alias-input form; the legacy "John Smith"
       // placeholder is replaced with `e.g. mira`.
-      await app.locator('[data-testid="fm-action-create"]').click();
+      await app.locator('[data-testid="fm-id-create"]').click();
       await app.locator('[data-testid="fm-create-alias-input"]').fill("alice");
       // Form stage's "Generate" button → reveal stage → "Continue to inbox".
       await app.locator('[data-testid="fm-create-submit"]').click();
@@ -269,7 +269,7 @@ async function createIdentity(page: import("@playwright/test").Page, alias: stri
   await expect(app.locator(".brand-name").first()).toContainText(APP_NAME, {
     timeout: 60_000,
   });
-  await app.locator('[data-testid="fm-action-create"]').click();
+  await app.locator('[data-testid="fm-id-create"]').click();
   await app.locator('[data-testid="fm-create-alias-input"]').fill(alias);
   await app.locator('[data-testid="fm-create-submit"]').click();
   await app.locator('[data-testid="fm-create-confirm"]').click();
