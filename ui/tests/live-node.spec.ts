@@ -65,10 +65,10 @@ test.describe("Live node E2E", () => {
       await page.goto("");
 
       const app = page.frameLocator("iframe#app");
-      await expect(app.locator("h1"), "APP_NAME heading").toContainText(
-        APP_NAME,
-        { timeout: 60_000 },
-      );
+      await expect(
+        app.locator(".brand-name").first(),
+        "APP_NAME brand block",
+      ).toContainText(APP_NAME, { timeout: 60_000 });
 
       // ── Step 1: create identity "alice" ────────────────────────────
       // Pre-login first-run shows two action-cards. Click the create one,
