@@ -8,21 +8,48 @@ import { APP_NAME } from "./app-name";
 // for the mock identities, so we give it a generous 60s ceiling.
 async function waitForApp(page: Page) {
   await page.waitForSelector("h1", { timeout: 60_000 });
-  await expect(page.locator("h1")).toContainText(APP_NAME);
+  await expect(page.locator("h1").first()).toContainText(APP_NAME);
 }
 
-// Helper: select an identity by clicking its alias link.
+// Helper: select an identity by clicking its alias link, then wait
+// for the redesigned mailbox shell to mount.
 async function selectIdentity(page: Page, alias: string) {
   await page.getByText(alias, { exact: true }).click();
-  // Wait for the inbox panel to appear.
-  await expect(page.locator(".panel-heading")).toContainText("Inbox", {
+  await page.locator('[data-testid="fm-app"]').waitFor({ timeout: 10_000 });
+  await expect(page.locator(".list-title")).toContainText("Inbox", {
     timeout: 10_000,
   });
 }
 
-// Helper: click a menu item in the sidebar.
-async function clickMenu(page: Page, label: string) {
-  await page.locator(".menu-list").getByText(label, { exact: true }).click();
+// Helper: click the redesigned sidebar logout.
+async function logout(page: Page) {
+  await page.locator('[data-testid="fm-logout"]').click();
+}
+
+// Helper: open the compose sheet via the sidebar's "New message" button.
+async function openCompose(page: Page) {
+  await page.locator('[data-testid="fm-compose-btn"]').click();
+  await page
+    .locator('[data-testid="fm-compose-sheet"]')
+    .waitFor({ timeout: 5_000 });
+}
+
+// Helper: fill compose form fields. Inputs are real `<input>` /
+// `<textarea>` elements in the redesign — no contenteditable cells.
+async function fillCompose(
+  page: Page,
+  to: string,
+  subject: string,
+  body: string,
+) {
+  const sheet = page.locator('[data-testid="fm-compose-sheet"]');
+  await sheet.locator('input[placeholder="alias or address"]').fill(to);
+  await sheet.locator('input[placeholder="subject"]').fill(subject);
+  await sheet.locator("textarea.sheet-textarea").fill(body);
+}
+
+async function clickSend(page: Page) {
+  await page.locator('[data-testid="fm-send"]').click();
 }
 
 // ─── Tests ─────────────────────────────────────────────────────────────────
@@ -42,21 +69,23 @@ test.describe("Identity list", () => {
 });
 
 test.describe("Inbox view", () => {
-  test("shows inbox after selecting identity", async ({ page }) => {
+  test("shows redesigned shell after selecting identity", async ({ page }) => {
     await page.goto("/");
     await waitForApp(page);
     await selectIdentity(page, "address1");
 
-    // Inbox panel is visible with tabs.
-    await expect(page.locator(".panel-heading")).toContainText("Inbox");
-    await expect(page.getByText("Primary")).toBeVisible();
-    await expect(page.getByText("Social")).toBeVisible();
-    await expect(page.getByText("Updates")).toBeVisible();
+    // Folder nav is visible with all four folders.
+    await expect(page.locator('[data-testid="fm-folder-inbox"]')).toBeVisible();
+    await expect(page.locator('[data-testid="fm-folder-sent"]')).toBeVisible();
+    await expect(page.locator('[data-testid="fm-folder-drafts"]')).toBeVisible();
+    await expect(
+      page.locator('[data-testid="fm-folder-archive"]'),
+    ).toBeVisible();
 
-    // Search input present.
-    await expect(page.locator('input[placeholder="Search"]')).toBeVisible();
+    // Topbar search is present.
+    await expect(page.locator('[data-testid="fm-search"]')).toBeVisible();
 
-    // Example emails for address1 (UserId 0).
+    // Example emails for address1 (UserId 0) appear as message cards.
     await expect(page.getByText("Ian's Other Account")).toBeVisible();
     await expect(page.getByText("Lunch tomorrow?")).toBeVisible();
     await expect(page.getByText("Your weekly digest")).toBeVisible();
@@ -70,44 +99,61 @@ test.describe("Inbox view", () => {
     // Click the first email (id=0).
     await page.locator("#email-inbox-accessor-0").click();
 
-    // Title and content visible.
-    await expect(page.locator("h2")).toContainText(
-      "Welcome to the offline preview"
+    // Detail panel renders the subject + body.
+    await expect(page.locator(".detail-subj")).toContainText(
+      "Welcome to the offline preview",
     );
-    await expect(page.locator("#email-content-0")).toContainText(
-      "Lorem ipsum"
+    await expect(page.locator("#email-content-0")).toContainText("Lorem ipsum");
+
+    // Toolbar actions are visible.
+    await expect(page.locator('[data-testid="fm-reply"]')).toBeVisible();
+    await expect(page.locator('[data-testid="fm-archive"]')).toBeVisible();
+    await expect(page.locator('[data-testid="fm-delete"]')).toBeVisible();
+  });
+
+  test("non-inbox folders show empty state", async ({ page }) => {
+    await page.goto("/");
+    await waitForApp(page);
+    await selectIdentity(page, "address1");
+
+    await page.locator('[data-testid="fm-folder-sent"]').click();
+    await expect(page.locator(".empty-hint")).toContainText("Sent is empty");
+
+    await page.locator('[data-testid="fm-folder-drafts"]').click();
+    await expect(page.locator(".empty-hint")).toContainText(
+      "Drafts is empty",
     );
 
-    // Back arrow visible.
-    await expect(
-      page.locator('i[aria-label="Back to Inbox"]')
-    ).toBeVisible();
+    await page.locator('[data-testid="fm-folder-archive"]').click();
+    await expect(page.locator(".empty-hint")).toContainText(
+      "Archive is empty",
+    );
   });
 });
 
 test.describe("Compose and logout", () => {
-  test("compose window renders and log out returns to identity list", async ({
+  test("compose sheet renders and log out returns to identity list", async ({
     page,
   }) => {
     await page.goto("/");
     await waitForApp(page);
     await selectIdentity(page, "address1");
 
-    // Click "Write message" in sidebar.
-    await clickMenu(page, "Write message");
+    await openCompose(page);
 
-    // Compose form visible.
-    await expect(page.locator("h3")).toContainText("New message");
-    await expect(page.getByText("From")).toBeVisible();
-    await expect(page.getByText("address1")).toBeVisible(); // From field
-    await expect(page.getByText("To")).toBeVisible();
-    await expect(page.getByText("Subject")).toBeVisible();
-    await expect(
-      page.locator("button").filter({ hasText: "Send" })
-    ).toBeVisible();
+    // Sheet shows the redesigned compose form.
+    const sheet = page.locator('[data-testid="fm-compose-sheet"]');
+    await expect(sheet.locator(".sheet-title")).toContainText("New message");
+    await expect(sheet.getByText("From")).toBeVisible();
+    await expect(sheet.getByText("address1")).toBeVisible();
+    await expect(sheet.getByText("To", { exact: true })).toBeVisible();
+    await expect(sheet.getByText("Re", { exact: true })).toBeVisible();
+    await expect(page.locator('[data-testid="fm-send"]')).toBeVisible();
 
-    // Log out.
-    await clickMenu(page, "Log out");
+    // Discard the sheet, then log out.
+    await sheet.locator(".sheet-x").click();
+    await expect(sheet).toHaveCount(0);
+    await logout(page);
 
     // Back at identity list.
     await expect(page.getByText("address1")).toBeVisible();
@@ -127,35 +173,20 @@ test.describe("Compose and logout", () => {
 // led to discovery: clicking Send should leave the compose view and
 // land back on the inbox view, not silently no-op.
 test.describe("Send returns to inbox view (regression: spawn_forever)", () => {
-  test("clicking Send navigates away from compose", async ({ page }) => {
+  test("clicking Send dismisses the compose sheet", async ({ page }) => {
     await page.goto("/");
     await waitForApp(page);
     await selectIdentity(page, "address1");
-    await clickMenu(page, "Write message");
-    await expect(page.locator("h3")).toContainText("New message");
+    await openCompose(page);
 
-    const toCell = page.locator("tr").filter({ hasText: "To" }).locator("td");
-    await toCell.click();
-    await toCell.fill("address2");
+    await fillCompose(page, "address2", "regression check", "body");
+    await clickSend(page);
 
-    const subjectCell = page
-      .locator("tr")
-      .filter({ hasText: "Subject" })
-      .locator("td");
-    await subjectCell.click();
-    await subjectCell.fill("regression check");
-
-    const bodyDiv = page.locator(".box div[contenteditable]");
-    await bodyDiv.click();
-    await bodyDiv.fill("body");
-
-    await page.locator("button").filter({ hasText: "Send" }).click();
-
-    // After send, the compose heading must disappear — proving the
+    // After send, the compose sheet must disappear — proving the
     // event handler ran the spawn AND the navigation, not just paused.
-    await expect(page.locator("h3").filter({ hasText: "New message" })).toHaveCount(0, {
-      timeout: 5_000,
-    });
+    await expect(
+      page.locator('[data-testid="fm-compose-sheet"]'),
+    ).toHaveCount(0, { timeout: 5_000 });
   });
 });
 
@@ -194,32 +225,20 @@ test.describe("Multi-turn cross-inbox messaging", () => {
     // ── Turn 1: address1 → address2 ────────────────────────────────────
 
     await selectIdentity(page, "address1");
-    await clickMenu(page, "Write message");
-    await expect(page.locator("h3")).toContainText("New message");
-
-    // Fill the compose form.
-    // "To" field is a contenteditable <td>.
-    const toCell = page.locator("tr").filter({ hasText: "To" }).locator("td");
-    await toCell.click();
-    await toCell.fill("address2");
-
-    const subjectCell = page
-      .locator("tr")
-      .filter({ hasText: "Subject" })
-      .locator("td");
-    await subjectCell.click();
-    await subjectCell.fill("Hello from address1");
-
-    // Body is the contenteditable div inside the second .box.
-    const bodyDiv = page.locator(".box div[contenteditable]");
-    await bodyDiv.click();
-    await bodyDiv.fill("This is the body of the first message.");
-
-    // Send.
-    await page.locator("button").filter({ hasText: "Send" }).click();
+    await openCompose(page);
+    await fillCompose(
+      page,
+      "address2",
+      "Hello from address1",
+      "This is the body of the first message.",
+    );
+    await clickSend(page);
+    await expect(
+      page.locator('[data-testid="fm-compose-sheet"]'),
+    ).toHaveCount(0, { timeout: 5_000 });
 
     // Log out.
-    await clickMenu(page, "Log out");
+    await logout(page);
     await expect(page.getByText("Create new identity")).toBeVisible();
 
     // ── Turn 2: address2 receives and replies ──────────────────────────
@@ -234,33 +253,22 @@ test.describe("Multi-turn cross-inbox messaging", () => {
     await expect(page.getByText("Hello from address1")).toBeVisible();
 
     // Reply: address2 → address1. (We skip opening the received message
-    // here — the Dioxus re-render triggered by the back-arrow click is
-    // flaky in headless mode. What we're testing is message delivery,
-    // not navigation state, so going straight to compose is equivalent.)
-    await clickMenu(page, "Write message");
-
-    // Wait for compose form to appear.
-    await expect(page.locator("h3")).toContainText("New message");
-
-    const toCell2 = page.locator("tr").filter({ hasText: "To" }).locator("td");
-    await toCell2.click();
-    await toCell2.fill("address1");
-
-    const subjectCell2 = page
-      .locator("tr")
-      .filter({ hasText: "Subject" })
-      .locator("td");
-    await subjectCell2.click();
-    await subjectCell2.fill("Reply from address2");
-
-    const bodyDiv2 = page.locator(".box div[contenteditable]");
-    await bodyDiv2.click();
-    await bodyDiv2.fill("Got your message, here is my reply.");
-
-    await page.locator("button").filter({ hasText: "Send" }).click();
+    // here — going straight to compose is equivalent for testing message
+    // delivery, not navigation state.)
+    await openCompose(page);
+    await fillCompose(
+      page,
+      "address1",
+      "Reply from address2",
+      "Got your message, here is my reply.",
+    );
+    await clickSend(page);
+    await expect(
+      page.locator('[data-testid="fm-compose-sheet"]'),
+    ).toHaveCount(0, { timeout: 5_000 });
 
     // Log out.
-    await clickMenu(page, "Log out");
+    await logout(page);
     await expect(page.getByText("Create new identity")).toBeVisible();
 
     // ── Turn 3: address1 sees the reply ────────────────────────────────
@@ -275,9 +283,11 @@ test.describe("Multi-turn cross-inbox messaging", () => {
 
     // Open it and verify content.
     await page.getByText("Reply from address2").click();
-    await expect(page.locator("h2")).toContainText("Reply from address2");
-    await expect(page.locator("p")).toContainText(
-      "Got your message, here is my reply."
+    await expect(page.locator(".detail-subj")).toContainText(
+      "Reply from address2",
+    );
+    await expect(page.locator(".detail-body")).toContainText(
+      "Got your message, here is my reply.",
     );
   });
 });
@@ -291,13 +301,15 @@ test.describe("Sandboxed iframe embedding", () => {
     "allow-scripts allow-forms allow-popups allow-same-origin";
 
   test("app renders inside a sandboxed iframe", async ({ page }) => {
+    const baseURL =
+      process.env.FREENET_EMAIL_BASE_URL || "http://127.0.0.1:8092";
     await page.setContent(`
       <!DOCTYPE html>
       <html>
       <body style="margin:0;padding:0;height:100vh;">
         <iframe
           sandbox="${sandboxAttrs}"
-          src="http://127.0.0.1:8082"
+          src="${baseURL}"
           style="width:100%;height:100%;border:none;"
         ></iframe>
       </body>
@@ -305,16 +317,15 @@ test.describe("Sandboxed iframe embedding", () => {
     `);
 
     const iframe = page.frameLocator("iframe");
-    await iframe.locator("h1").waitFor({ timeout: 60_000 });
-    await expect(iframe.locator("h1")).toContainText(APP_NAME);
+    await iframe.locator("h1").first().waitFor({ timeout: 60_000 });
+    await expect(iframe.locator("h1").first()).toContainText(APP_NAME);
   });
 });
 
 test.describe("No horizontal scrollbar at desktop width", () => {
-  // The email UI uses Bulma's .columns layout, which is known to overflow
-  // below the md breakpoint (768px) when the sidebar menu + inbox panel
-  // don't collapse. Mobile responsiveness is tracked separately; here we
-  // only guarantee that desktop-width layouts don't overflow horizontally.
+  // The mailbox shell uses a fixed three-column flex layout. At desktop width
+  // the sidebar (218px) + list (300px) + flex detail must fit inside the
+  // viewport without horizontal overflow.
   test("no overflow at 1280px", async ({ page }) => {
     await page.setViewportSize({ width: 1280, height: 800 });
     await page.goto("/");
@@ -324,7 +335,7 @@ test.describe("No horizontal scrollbar at desktop width", () => {
     const hasHScroll = await page.evaluate(
       () =>
         document.documentElement.scrollWidth >
-        document.documentElement.clientWidth
+        document.documentElement.clientWidth,
     );
     expect(hasHScroll).toBe(false);
   });
@@ -333,14 +344,14 @@ test.describe("No horizontal scrollbar at desktop width", () => {
 // ── Address book: import contact and display ─────────────────────────────────
 //
 // This test exercises the address book import flow in offline (example-data,
-// no-sync) mode:
-//   1. Build a fake ContactCard payload (the same shape the Rust code produces)
-//      using browser-native btoa so no extra dependencies are needed.
-//   2. Navigate to the import-contact dialog and paste the encoded token.
+// no-sync) mode. The pre-login screens (#52 work) still use Bulma; only the
+// compose-side recipient badge has moved to the redesigned sheet.
+//   1. Build a fake ContactCard payload using browser-native btoa.
+//   2. Open the import dialog and paste the encoded token.
 //   3. Assert the fingerprint panel appears and the alias pre-fills.
 //   4. Complete the import and assert the contact appears in the Contacts section.
-//   5. Log in as address1, type the contact alias in the compose To field,
-//      confirm the compose form still accepts it (address_book::lookup resolves it).
+//   5. Log in as address1, type the contact alias in the redesigned compose
+//      To input, confirm the recipient badge resolves it.
 
 test.describe("Address book: import contact and display", () => {
   test("import contact card → appears in contacts section → compose accepts alias", async ({
@@ -350,17 +361,6 @@ test.describe("Address book: import contact and display", () => {
     await waitForApp(page);
 
     // ── Step 1: build a fake ContactCard via browser evaluate ─────────────
-    //
-    // ContactCard JSON fields:
-    //   version: u32
-    //   ml_dsa_vk_bytes: array of ints (1952 bytes for ML-DSA-65)
-    //   ml_kem_ek_bytes: array of ints (1184 bytes for ML-KEM-768)
-    //   suggested_alias: string | null
-    //   suggested_description: string | null
-    //
-    // The byte arrays are arbitrary — we only need them to pass the import
-    // parser (which accepts any bytes).  The fingerprint displayed will be
-    // deterministic given these values.
     const contactCard = await page.evaluate(() => {
       const mlDsaVk = new Array(1952)
         .fill(0)
@@ -376,9 +376,6 @@ test.describe("Address book: import contact and display", () => {
         suggested_description: "Test contact",
       };
       const json = JSON.stringify(card);
-      // Use the full share-text format (verify line + URI), matching what
-      // the Share modal actually copies to the clipboard.  btoa produces
-      // standard base64, matching Rust's base64::STANDARD engine.
       return `verify: foo-bar-baz-qux-quux-corge\ncontact://${btoa(json)}`;
     });
 
@@ -393,23 +390,18 @@ test.describe("Address book: import contact and display", () => {
     await page.locator("textarea").fill(contactCard);
 
     await expect(
-      page.getByText("Fingerprint (verify with sender):")
+      page.getByText("Fingerprint (verify with sender):"),
     ).toBeVisible({ timeout: 5_000 });
 
     // Alias should be pre-filled with the suggested_alias from the card.
     const labelInput = page.locator('input[placeholder="e.g. Alice (work)"]');
     await expect(labelInput).toHaveValue("charlie");
 
-    // Use a distinct local alias that can't clash with own identities.
     await labelInput.fill("charlie-test");
 
-    // The displayed fingerprint must match a value that's deterministic
-    // for the byte arrays above — protects against silent drift in the
-    // BLAKE3-to-words mapping. Computed once in JS via the same algorithm
-    // the Rust code uses (BLAKE3 of vk||ek then six 11-bit windows) is
-    // overkill for the test; instead we capture the value the UI shows
-    // and compare it across the import dialog and the compose badge.
-    const fingerprintPanel = page.locator(".notification.is-info p.is-family-monospace");
+    const fingerprintPanel = page.locator(
+      ".notification.is-info p.is-family-monospace",
+    );
     await expect(fingerprintPanel).toBeVisible({ timeout: 5_000 });
     const fingerprintText = (await fingerprintPanel.textContent()) ?? "";
     const fingerprintWords = fingerprintText.trim().split(/\s+/);
@@ -419,62 +411,62 @@ test.describe("Address book: import contact and display", () => {
     // ── Step 4: complete import and verify contact appears ────────────────
     await page.locator("button").filter({ hasText: "Import" }).click();
 
-    // Import form closes; Contacts section heading appears.
     await expect(page.getByText("Contacts", { exact: true })).toBeVisible({
       timeout: 5_000,
     });
 
-    // The contact row is identified by data-alias (testid-stable, not by
-    // structural Bulma class names).
-    const contactRow = page.locator('[data-testid="contact-row"][data-alias="charlie-test"]');
+    const contactRow = page.locator(
+      '[data-testid="contact-row"][data-alias="charlie-test"]',
+    );
     await expect(contactRow).toBeVisible({ timeout: 5_000 });
 
-    // Fingerprint short form shown next to the alias matches what the
-    // import dialog displayed.
     await expect(
-      contactRow.locator('[data-testid="contact-fingerprint"]')
+      contactRow.locator('[data-testid="contact-fingerprint"]'),
     ).toContainText(fingerprintShort);
 
-    // Imported without ticking "verified" → warning badge `⚠`.
     await expect(
-      contactRow.locator('[data-testid="contact-verify-badge"]')
+      contactRow.locator('[data-testid="contact-verify-badge"]'),
     ).toContainText("⚠");
 
-    // ── Step 5: compose recognises the contact via the recipient badge ─────
+    // ── Step 5: redesigned compose recognises the contact via the badge ────
     await selectIdentity(page, "address1");
-    await clickMenu(page, "Write message");
-    await expect(page.locator("h3")).toContainText("New message");
+    await openCompose(page);
 
-    const toCell = page.locator("tr").filter({ hasText: "To" }).locator("td");
-    await toCell.click();
-    await toCell.fill("charlie-test");
+    const sheet = page.locator('[data-testid="fm-compose-sheet"]');
+    const toInput = sheet.locator('input[placeholder="alias or address"]');
+    await toInput.fill("charlie-test");
 
     // Badge shows `unverified` (not ticked at import) and the same
     // fingerprint short form as the contact row.
     await expect(
-      page.locator('[data-testid="compose-recipient-badge-label"]')
+      page.locator('[data-testid="compose-recipient-badge-label"]'),
     ).toContainText("unverified", { timeout: 5_000 });
     await expect(
-      page.locator('[data-testid="compose-recipient-fingerprint"]')
+      page.locator('[data-testid="compose-recipient-fingerprint"]'),
     ).toContainText(fingerprintShort);
 
     // Sanity: typing a non-existent alias removes the badge.
-    await toCell.fill("nobody-here");
+    await toInput.fill("nobody-here");
     await expect(
-      page.locator('[data-testid="compose-recipient-badge"]')
+      page.locator('[data-testid="compose-recipient-badge"]'),
     ).toHaveCount(0, { timeout: 2_000 });
+
+    // Close the sheet and log out before the contact-removal step.
+    await sheet.locator(".sheet-x").click();
+    await logout(page);
 
     // ── Step 6: Remove button removes the contact (regression: needs the
     // login-controller bump in the coroutine to re-render ContactsSection).
-    await clickMenu(page, "Log out");
     await expect(
-      page.locator('[data-testid="contact-row"][data-alias="charlie-test"]')
+      page.locator('[data-testid="contact-row"][data-alias="charlie-test"]'),
     ).toBeVisible();
     await page
-      .locator('[data-testid="contact-row"][data-alias="charlie-test"] [data-testid="contact-remove"]')
+      .locator(
+        '[data-testid="contact-row"][data-alias="charlie-test"] [data-testid="contact-remove"]',
+      )
       .click();
     await expect(
-      page.locator('[data-testid="contact-row"][data-alias="charlie-test"]')
+      page.locator('[data-testid="contact-row"][data-alias="charlie-test"]'),
     ).toHaveCount(0, { timeout: 5_000 });
   });
 });

@@ -12,3 +12,7 @@ ui/tests/test-results/
 ui/tests/playwright-report/
 # Stray screenshot from earlier investigation sessions
 /makefile.png
+# Local design handoff bundles — kept out of git per scoping decision.
+/design/
+# Per-worktree isolated freenet local node state (run-node task).
+/.run-node/
