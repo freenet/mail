@@ -52,7 +52,7 @@ jobs:
             ~/.cargo/bin/fdev
             ~/.cargo/bin/dx
             ~/.cargo/bin/freenet
-          key: ${{ runner.os }}-cargo-bins-e2e-fdev-0.3.201-dx-0.7.3-freenet-0.2.50-v3
+          key: ${{ runner.os }}-cargo-bins-e2e-fnet-v0.2.50-dx-0.7.3-v1
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -80,12 +80,22 @@ jobs:
       - name: Install fdev + freenet
         if: steps.cache-bins.outputs.cache-hit != 'true' || steps.verify-bins.outputs.missing == '1'
         run: |
-          # Use binstall for prebuilt binaries — cargo install --force
-          # rebuilds from source and was burning ~15 min on cold cache.
-          # Versions match the cache key suffix above so a key bump
-          # picks up new versions on both sides in lockstep.
-          cargo binstall -y --force --version 0.3.201 fdev
-          cargo binstall -y --force --version 0.2.50 freenet
+          # Both binaries ship as prebuilt tarballs on freenet-core's
+          # GitHub releases. Pulling them is ~5s vs ~15min for the
+          # `cargo install` source compile that this job used before.
+          # The matching version is the freenet-core release tag — fdev
+          # crates.io versions (0.3.x) don't track 1:1 and don't carry
+          # binstall metadata, so we go direct to the release artifact.
+          REL="v0.2.50"
+          BASE="https://github.com/freenet/freenet-core/releases/download/${REL}"
+          mkdir -p "$HOME/.cargo/bin"
+          for bin in fdev freenet; do
+            curl -fsSL "${BASE}/${bin}-x86_64-unknown-linux-musl.tar.gz" \
+              | tar -xz -C "$HOME/.cargo/bin/" "${bin}"
+            chmod +x "$HOME/.cargo/bin/${bin}"
+          done
+          fdev --version
+          freenet --version
 
       - name: Install Dioxus CLI
         if: steps.cache-bins.outputs.cache-hit != 'true' || steps.verify-bins.outputs.missing == '1'

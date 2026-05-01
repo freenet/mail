@@ -35,7 +35,7 @@ jobs:
             ~/.cargo/bin/cargo-binstall
             ~/.cargo/bin/fdev
             ~/.cargo/bin/dx
-          key: ${{ runner.os }}-cargo-bins-fdev-0.3.201-dx-0.7.3-v4
+          key: ${{ runner.os }}-cargo-bins-fnet-v0.2.50-dx-0.7.3-v1
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -62,9 +62,18 @@ jobs:
 
       - name: Install fdev
         if: steps.cache-bins.outputs.cache-hit != 'true' || steps.verify-bins.outputs.missing == '1'
-        # binstall (prebuilt) is ~30s vs cargo install --force ~10 min
-        # for fdev source compile.
-        run: cargo binstall -y --force --version 0.3.201 fdev
+        # Pull the prebuilt fdev from freenet-core's GitHub release
+        # (~5s) instead of cargo install --force (~10min source compile).
+        # fdev's crates.io versions don't carry binstall metadata; the
+        # matching freenet-core release tag is what ships the binary.
+        run: |
+          REL="v0.2.50"
+          BASE="https://github.com/freenet/freenet-core/releases/download/${REL}"
+          mkdir -p "$HOME/.cargo/bin"
+          curl -fsSL "${BASE}/fdev-x86_64-unknown-linux-musl.tar.gz" \
+            | tar -xz -C "$HOME/.cargo/bin/" fdev
+          chmod +x "$HOME/.cargo/bin/fdev"
+          fdev --version
 
       - name: Install Dioxus CLI
         if: steps.cache-bins.outputs.cache-hit != 'true' || steps.verify-bins.outputs.missing == '1'
