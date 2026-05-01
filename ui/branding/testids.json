@@ -1,0 +1,61 @@
+{
+  "fmApp": "fm-app",
+  "fmAvatar": "fm-avatar",
+  "fmLogout": "fm-logout",
+  "fmSearch": "fm-search",
+
+  "fmComposeBtn": "fm-compose-btn",
+
+  "fmList": "fm-list",
+  "fmMsgCard": "fm-msg-card",
+  "fmDraftCard": "fm-draft-card",
+  "fmSentCard": "fm-sent-card",
+  "fmArchiveCard": "fm-archive-card",
+
+  "fmReply": "fm-reply",
+  "fmDelete": "fm-delete",
+  "fmArchive": "fm-archive",
+
+  "fmSentBody": "fm-sent-body",
+  "fmSentDelivery": "fm-sent-delivery",
+  "fmSentFingerprint": "fm-sent-fingerprint",
+  "fmSentForward": "fm-sent-forward",
+  "fmSentReply": "fm-sent-reply",
+  "fmSentResend": "fm-sent-resend",
+
+  "fmArchiveBody": "fm-archive-body",
+  "fmArchiveDelete": "fm-archive-delete",
+  "fmArchiveReply": "fm-archive-reply",
+  "fmArchiveUnarchive": "fm-archive-unarchive",
+
+  "fmComposeSheet": "fm-compose-sheet",
+  "fmSend": "fm-send",
+
+  "fmToast": "fm-toast",
+
+  "fmActionCreate": "fm-action-create",
+  "fmActionImport": "fm-action-import",
+  "fmCreateAliasInput": "fm-create-alias-input",
+  "fmCreateConfirm": "fm-create-confirm",
+  "fmCreateSubmit": "fm-create-submit",
+  "fmVerifyCheck": "fm-verify-check",
+  "fmRestoreFile": "fm-restore-file",
+  "fmRestoreSubmit": "fm-restore-submit",
+
+  "fmIdRow": "fm-id-row",
+  "fmIdOpen": "fm-id-open",
+  "fmIdCreate": "fm-id-create",
+  "fmIdBackup": "fm-id-backup",
+  "fmIdRestore": "fm-id-restore",
+  "fmIdRename": "fm-id-rename",
+  "fmIdShare": "fm-id-share",
+  "fmRenameInput": "fm-rename-input",
+  "fmRenameSubmit": "fm-rename-submit",
+
+  "fmShareModal": "fm-share-modal",
+  "fmShareCopy": "fm-share-copy",
+  "fmContactImport": "fm-contact-import",
+  "fmImportContactModal": "fm-import-contact-modal",
+  "fmImportFp": "fm-import-fp",
+  "fmImportSubmit": "fm-import-submit"
+}
