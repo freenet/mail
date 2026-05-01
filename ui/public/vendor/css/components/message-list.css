@@ -78,5 +78,20 @@
       overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     }
 
+    /* Sent-card delivery state badges (#58). Delivered is the happy path
+       and renders no badge so the row stays visually quiet. */
+    .badge {
+      font-family: "Geist Mono", monospace; font-size: 8.5px;
+      letter-spacing: 0.08em; text-transform: uppercase;
+      padding: 2px 6px; border-radius: 4px;
+      flex: 0 0 auto;
+    }
+    .badge-pending {
+      color: var(--ink3); background: var(--c2);
+    }
+    .badge-failed {
+      color: #b91c1c; background: #fee2e2;
+    }
+
   }
 }

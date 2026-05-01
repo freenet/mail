@@ -8,6 +8,7 @@ use std::{borrow::Cow, cell::RefCell, rc::Rc};
 use arc_swap::ArcSwap;
 use chrono::Utc;
 use dioxus::prelude::*;
+use freenet_stdlib::prelude::ContractKey;
 use futures::FutureExt;
 use futures::future::LocalBoxFuture;
 use ml_dsa::{MlDsa65, SigningKey as MlDsaSigningKey};
@@ -267,6 +268,7 @@ impl InboxView {
         *id = user;
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn send_message(
         &mut self,
         client: WebApiRequestClient,
@@ -275,6 +277,10 @@ impl InboxView {
         recipient_ml_dsa_vk: ml_dsa::VerifyingKey<MlDsa65>,
         title: &str,
         content: &str,
+        // Optional `(sender_alias, sent_id, inbox_key)` so the future can
+        // flip the local Sent row to `Failed` if `start_sending` errors
+        // out (AFT denied, encryption, etc.). None during legacy paths.
+        ack_meta: Option<(String, String, ContractKey)>,
     ) -> Result<Vec<LocalBoxFuture<'static, ()>>, DynError> {
         use crate::inbox::MlKemEncapsKey;
         tracing::debug!("sending message from {from}");
@@ -299,14 +305,52 @@ impl InboxView {
                 );
                 return Ok(futs);
             };
+            let ack_meta_async = ack_meta.clone();
             let f = async move {
                 let res = content_clone
                     .start_sending(&mut client, recipient_ek, recipient_ml_dsa_vk, &id)
                     .await;
-                node_response_error_handling(client.into(), res, TryNodeAction::SendMessage).await;
+                let is_err = res.is_err();
+                node_response_error_handling(
+                    client.clone().into(),
+                    res,
+                    TryNodeAction::SendMessage,
+                )
+                .await;
+                if is_err && let Some((sender_alias, sent_id, inbox_key)) = ack_meta_async {
+                    // `start_sending` failed before the inbox UPDATE was
+                    // queued, so the pending entry we enqueued
+                    // synchronously will never get acked. Drop just our
+                    // entry from the queue (concurrent sends to the same
+                    // recipient should be unaffected) and flip the row
+                    // to Failed so the user sees the truth.
+                    crate::inbox::remove_pending_sent_ack(&inbox_key, &sender_alias, &sent_id);
+                    crate::local_state::local_set_sent_delivery_state(
+                        &sender_alias,
+                        &sent_id,
+                        mail_local_state::DeliveryState::Failed,
+                    );
+                    let mut client_clone = client.clone();
+                    if let Err(e) = crate::local_state::set_sent_delivery_state(
+                        &mut client_clone,
+                        sender_alias,
+                        sent_id,
+                        mail_local_state::DeliveryState::Failed,
+                    )
+                    .await
+                    {
+                        crate::log::error(
+                            format!("set_sent_delivery_state(Failed) failed: {e}"),
+                            None,
+                        );
+                    }
+                }
             };
             futs.push(f.boxed_local());
         }
+        // ack_meta is unused on the offline path; explicitly ignored.
+        #[cfg(not(feature = "use-node"))]
+        let _ = ack_meta;
         #[cfg(all(feature = "example-data", not(feature = "use-node")))]
         {
             // In offline mode, deliver the message to an in-memory mailbox
@@ -1105,16 +1149,32 @@ fn MessageList() -> Element {
                                 if Some(&id) == selected_sent_id.as_ref() { classes.push_str(" selected"); }
                                 let id_for_dom = id.clone();
                                 let id_for_click = id.clone();
+                                // Small inline state pill — Delivered is the
+                                // happy path so we hide it; Pending and Failed
+                                // are the user-actionable states.
+                                let (state_class, state_label): (&'static str, Option<&'static str>) =
+                                    match m.delivery_state {
+                                        mail_local_state::DeliveryState::Pending =>
+                                            ("badge badge-pending", Some("pending")),
+                                        mail_local_state::DeliveryState::Failed =>
+                                            ("badge badge-failed", Some("failed")),
+                                        mail_local_state::DeliveryState::Delivered =>
+                                            ("", None),
+                                    };
                                 rsx! {
                                     article {
                                         class: "{classes}",
                                         "data-testid": testid::FM_SENT_CARD,
                                         "data-sent-id": "{id_for_dom}",
+                                        "data-delivery-state": "{m.delivery_state:?}",
                                         onclick: move |_| {
                                             menu_selection.write().open_sent(id_for_click.clone());
                                         },
                                         div { class: "msg-row1",
                                             span { class: "msg-sender", "{to_disp}" }
+                                            {state_label.map(|l| rsx! {
+                                                span { class: "{state_class}", "{l}" }
+                                            })}
                                             span { class: "msg-time", "" }
                                         }
                                         div { class: "msg-subj", "{subj_disp}" }
@@ -1857,6 +1917,29 @@ fn ComposeSheet() -> Element {
         };
         let title_val = title.read().clone();
         let content_val = content.read().clone();
+
+        // Derive the recipient's inbox key BEFORE moving `recipient_vk` into
+        // `send_message` so we can pair the eventual UpdateResponse back to
+        // the Sent row's `SentId`.
+        #[cfg(feature = "use-node")]
+        let inbox_key_for_ack = crate::inbox::inbox_key_for(&recipient_vk);
+
+        // Allocate the SentId up-front so the sync enqueue and the async
+        // failure-flip both name the same row.
+        let sent_id = crate::local_state::new_sent_id();
+        let sender_alias = alias.clone();
+
+        // Build ack_meta only when we have an inbox_key in hand (use-node
+        // path). The future will use it to flip Pending → Failed if
+        // start_sending errors out post-enqueue.
+        #[cfg(feature = "use-node")]
+        let ack_meta = inbox_key_for_ack
+            .as_ref()
+            .ok()
+            .map(|k| (sender_alias.clone(), sent_id.clone(), *k));
+        #[cfg(not(feature = "use-node"))]
+        let ack_meta: Option<(String, String, ContractKey)> = None;
+
         let send_succeeded = match inbox.write().send_message(
             client.clone(),
             &alias,
@@ -1864,6 +1947,7 @@ fn ComposeSheet() -> Element {
             recipient_vk,
             &title_val,
             &content_val,
+            ack_meta,
         ) {
             Ok(futs) => {
                 // spawn_forever, not spawn: send future outlives this
@@ -1881,20 +1965,47 @@ fn ComposeSheet() -> Element {
                 false
             }
         };
-        // Stash a Sent copy locally on success. `delivery_state` is set
-        // optimistically to `Delivered`; the real ack is tracked in #58.
+        // Stash a Sent copy locally. Under `use-node` the real ack is
+        // driven by the recipient's inbox UpdateResponse (api.rs flips
+        // Pending → Delivered) or by an AFT/UPDATE error (Pending →
+        // Failed). Under `example-data,no-sync` the mock delivery is
+        // synchronous and unconditional — there is no future ack signal,
+        // so we set Delivered up-front. See issue #58.
         if send_succeeded {
+            #[cfg(feature = "use-node")]
+            let initial_state = mail_local_state::DeliveryState::Pending;
+            #[cfg(not(feature = "use-node"))]
+            let initial_state = mail_local_state::DeliveryState::Delivered;
+
             let sent = mail_local_state::SentMessage {
                 to: to_val.clone(),
                 recipient_fingerprint: recipient.fingerprint_short(),
                 subject: title_val.clone(),
                 body: content_val.clone(),
                 sent_at: chrono::Utc::now().timestamp_millis(),
-                delivery_state: mail_local_state::DeliveryState::Delivered,
+                delivery_state: initial_state,
             };
-            let sent_id = crate::local_state::new_sent_id();
-            let sender_alias = alias.clone();
             crate::local_state::local_save_sent(&sender_alias, &sent_id, sent.clone());
+
+            // Enqueue against the recipient's inbox key so the
+            // UpdateResponse handler can flip the right Sent row.
+            #[cfg(feature = "use-node")]
+            match inbox_key_for_ack {
+                Ok(inbox_key) => {
+                    crate::inbox::enqueue_pending_sent_ack(
+                        inbox_key,
+                        sender_alias.clone(),
+                        sent_id.clone(),
+                    );
+                }
+                Err(e) => {
+                    crate::log::error(
+                        format!("inbox_key_for failed; sent row will stay Pending: {e}"),
+                        None,
+                    );
+                }
+            }
+
             #[cfg(feature = "use-node")]
             {
                 let mut client_clone = client.clone();

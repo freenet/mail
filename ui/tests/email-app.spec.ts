@@ -1101,3 +1101,39 @@ test.describe("Sidebar fingerprint (#48)", () => {
     expect(fpA).not.toEqual(fpB);
   });
 });
+
+// Issue #58 — per-message delivery ack from the inbox contract. The
+// offline build (`example-data,no-sync`) has no async ack signal, so
+// the UI sets `Delivered` synchronously. These tests guard the offline
+// happy path; the use-node Pending → Delivered/Failed transitions are
+// driven by the api.rs UpdateResponse handler and exercised in
+// live-node.spec.ts.
+test.describe("Sent delivery state (#58)", () => {
+  test("offline send marks the Sent row Delivered", async ({ page }) => {
+    await page.goto("/");
+    await waitForApp(page);
+    await selectIdentity(page, "address1");
+
+    await openCompose(page);
+    await fillCompose(page, "address2", "delivered subj", "delivered body");
+    await Promise.all([
+      page
+        .locator('[data-testid="fm-compose-sheet"]')
+        .waitFor({ state: "detached", timeout: 10_000 }),
+      clickSend(page),
+    ]);
+
+    await page.locator('[data-testid="fm-folder-sent"]').click();
+    const card = page.locator('[data-testid="fm-sent-card"]').first();
+    await expect(card).toBeVisible();
+    await expect(card).toHaveAttribute("data-delivery-state", "Delivered");
+    // Delivered is the happy path → no badge rendered.
+    await expect(card.locator(".badge-pending")).toHaveCount(0);
+    await expect(card.locator(".badge-failed")).toHaveCount(0);
+
+    await card.click();
+    await expect(page.locator('[data-testid="fm-sent-delivery"]')).toContainText(
+      "delivered",
+    );
+  });
+});

@@ -64,10 +64,86 @@ pub(crate) fn inbox_params_pub_key_bytes(ml_dsa_vk: &MlDsaVerifyingKey<MlDsa65>)
     ml_dsa_vk.encode().to_vec()
 }
 
+/// Derive the on-chain inbox `ContractKey` for the inbox owned by
+/// `ml_dsa_vk`. Same derivation as `start_sending` uses internally; exposed
+/// so the compose-Send path can enqueue a pending Sent ack against the
+/// recipient's inbox key without re-implementing the params encoding.
+pub(crate) fn inbox_key_for(
+    ml_dsa_vk: &MlDsaVerifyingKey<MlDsa65>,
+) -> Result<ContractKey, DynError> {
+    let params = InboxParams {
+        pub_key: inbox_params_pub_key_bytes(ml_dsa_vk),
+    }
+    .try_into()
+    .map_err(|e| format!("{e}"))?;
+    ContractKey::from_params(INBOX_CODE_HASH, params).map_err(|e| format!("{e}").into())
+}
+
 thread_local! {
     static PENDING_INBOXES_UPDATE: RefCell<HashMap<InboxContract, Vec<DecryptedMessage>>> = RefCell::new(HashMap::new());
     static INBOX_TO_ID: RefCell<HashMap<InboxContract, Identity>> =
         RefCell::new(HashMap::new());
+    /// Outgoing messages awaiting an `UpdateResponse` from the recipient's
+    /// inbox contract. Populated by the compose-Send path with the
+    /// `(sender_alias, sent_id)` the UI assigned to its local Sent stash;
+    /// drained FIFO when an `UpdateResponse` arrives for that inbox key
+    /// (api.rs flips the corresponding row to `Delivered`).
+    ///
+    /// FIFO is "good enough" — the network does not promise that responses
+    /// for sequential sends to the same inbox land in submission order, but
+    /// every successful send will get acked, and a wrong pairing only
+    /// affects the timing of the UI flip, not the correctness of which rows
+    /// end up Delivered.
+    pub(crate) static PENDING_SENT_ACK: RefCell<HashMap<InboxContract, std::collections::VecDeque<(String, String)>>> =
+        RefCell::new(HashMap::new());
+}
+
+/// Record that a send to `inbox_key` is awaiting an UpdateResponse to flip
+/// the Sent row identified by `(sender_alias, sent_id)` to Delivered.
+pub(crate) fn enqueue_pending_sent_ack(
+    inbox_key: InboxContract,
+    sender_alias: String,
+    sent_id: String,
+) {
+    PENDING_SENT_ACK.with(|m| {
+        m.borrow_mut()
+            .entry(inbox_key)
+            .or_default()
+            .push_back((sender_alias, sent_id));
+    });
+}
+
+/// Pop the next pending sent record for `inbox_key`, if any.
+pub(crate) fn take_next_pending_sent_ack(inbox_key: &InboxContract) -> Option<(String, String)> {
+    PENDING_SENT_ACK.with(|m| {
+        let mut map = m.borrow_mut();
+        let q = map.get_mut(inbox_key)?;
+        let item = q.pop_front();
+        if q.is_empty() {
+            map.remove(inbox_key);
+        }
+        item
+    })
+}
+
+/// Remove a specific pending sent record from the queue (e.g. on
+/// `start_sending` async error so the row stops blocking later acks).
+/// No-op if the entry is not in the queue.
+pub(crate) fn remove_pending_sent_ack(
+    inbox_key: &InboxContract,
+    sender_alias: &str,
+    sent_id: &str,
+) {
+    PENDING_SENT_ACK.with(|m| {
+        let mut map = m.borrow_mut();
+        let Some(q) = map.get_mut(inbox_key) else {
+            return;
+        };
+        q.retain(|(a, id)| !(a == sender_alias && id == sent_id));
+        if q.is_empty() {
+            map.remove(inbox_key);
+        }
+    });
 }
 
 #[derive(Debug, Clone)]
