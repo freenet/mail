@@ -26,9 +26,16 @@ pub(crate) const FM_COMPOSE_BTN: &str = "fm-compose-btn";
 // Message list
 pub(crate) const FM_LIST: &str = "fm-list";
 pub(crate) const FM_MSG_CARD: &str = "fm-msg-card";
+pub(crate) const FM_MSG_TIME: &str = "fm-msg-time";
 pub(crate) const FM_DRAFT_CARD: &str = "fm-draft-card";
 pub(crate) const FM_SENT_CARD: &str = "fm-sent-card";
 pub(crate) const FM_ARCHIVE_CARD: &str = "fm-archive-card";
+
+// Detail header
+pub(crate) const FM_DETAIL_TIME: &str = "fm-detail-time";
+
+// Sidebar
+pub(crate) const FM_SIDEBAR_FINGERPRINT: &str = "fm-sidebar-fingerprint";
 
 // Detail / open message
 pub(crate) const FM_REPLY: &str = "fm-reply";
@@ -104,9 +111,12 @@ mod tests {
             ("fmComposeBtn", super::FM_COMPOSE_BTN),
             ("fmList", super::FM_LIST),
             ("fmMsgCard", super::FM_MSG_CARD),
+            ("fmMsgTime", super::FM_MSG_TIME),
             ("fmDraftCard", super::FM_DRAFT_CARD),
             ("fmSentCard", super::FM_SENT_CARD),
             ("fmArchiveCard", super::FM_ARCHIVE_CARD),
+            ("fmDetailTime", super::FM_DETAIL_TIME),
+            ("fmSidebarFingerprint", super::FM_SIDEBAR_FINGERPRINT),
             ("fmReply", super::FM_REPLY),
             ("fmDelete", super::FM_DELETE),
             ("fmArchive", super::FM_ARCHIVE),

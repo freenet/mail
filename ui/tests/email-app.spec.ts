@@ -1074,6 +1074,41 @@ test.describe("Archive folder (#47c)", () => {
   });
 });
 
+test.describe("Message timestamps (#49)", () => {
+  test("inbox cards show timestamps and sort newest-first", async ({ page }) => {
+    await page.goto("/");
+    await waitForApp(page);
+    await selectIdentity(page, "address1");
+
+    const times = page.locator('[data-testid="fm-msg-time"]');
+    // address1 has 3 example-data messages (welcome / lunch / digest).
+    await expect(times).toHaveCount(3);
+    // First one (~15min ago) is rendered as `H:MM`, contains a colon.
+    await expect(times.first()).toContainText(":");
+
+    // Newest-first sort: the welcome (id=0, 15min ago) ranks above the
+    // weekly digest (id=2, ~4 days ago). The card for id=0 must render
+    // before id=2 in the DOM.
+    const idAttrs = await page
+      .locator('[data-testid="fm-msg-card"]')
+      .evaluateAll((els) => els.map((e) => e.getAttribute("data-msg-id")));
+    expect(idAttrs.indexOf("0")).toBeLessThan(idAttrs.indexOf("2"));
+  });
+
+  test("detail header shows full timestamp", async ({ page }) => {
+    await page.goto("/");
+    await waitForApp(page);
+    await selectIdentity(page, "address1");
+
+    await page.locator("#email-inbox-accessor-0").click();
+
+    const t = page.locator('[data-testid="fm-detail-time"]');
+    await expect(t).toHaveCount(1);
+    // 15 minutes ago → bucketed as "Today, H:MM".
+    await expect(t).toContainText(/^Today, \d{1,2}:\d{2}$/);
+  });
+});
+
 test.describe("Sidebar fingerprint (#48)", () => {
   test("sidebar shows two-word fingerprint for active identity", async ({ page }) => {
     await page.goto("/");
