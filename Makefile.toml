@@ -419,7 +419,11 @@ echo "publishing with test contract id $contract_id"
 # Publish against the committed artifacts, not the freshly built ones,
 # so we fail loudly if the committed published-contract/ is stale
 # relative to HEAD.
-fdev publish \
+# `--port` honours FREENET_LOCAL_PORT so we publish to the same isolated
+# node `run-node` started — otherwise fdev defaults to 7509 and publishes
+# to whatever node owns it, which may be a sibling worktree.
+PORT="${FREENET_LOCAL_PORT:-7509}"
+fdev --port "$PORT" publish \
     --code "$ROOT/published-contract/web_container_contract.wasm" \
     --parameters "$ROOT/published-contract/webapp.parameters" \
     contract \
@@ -469,10 +473,26 @@ description = "Alias for publish-email-test (the old broken stub has been replac
 dependencies = ["publish-email-test"]
 
 [tasks.run-node]
-description = "Run Freenet local node"
+description = "Run Freenet local node (isolated to this worktree)"
 script_runner = "bash"
 script = '''
-RUST_BACKTRACE=1 RUST_LOG=freenet=debug,freenet_core=debug,info freenet local
+set -euo pipefail
+ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
+# Per-worktree state. Without this, parallel worktrees share
+# ~/Library/Application Support/freenet and step on each other; HOME
+# also leaks ~/.config/freenet/gateways.toml so the "local" node phones
+# bootstrap peers. Override both.
+DATA_DIR="${FREENET_LOCAL_DATA_DIR:-$ROOT/.run-node/data}"
+NODE_HOME="${FREENET_LOCAL_HOME:-$ROOT/.run-node/home}"
+PORT="${FREENET_LOCAL_PORT:-7509}"
+mkdir -p "$DATA_DIR" "$NODE_HOME/.config/freenet"
+# Empty gateways to fully isolate from the public network.
+[ -f "$NODE_HOME/.config/freenet/gateways.toml" ] || \
+    printf 'gateways = []\n' > "$NODE_HOME/.config/freenet/gateways.toml"
+echo "freenet local: port=$PORT data-dir=$DATA_DIR home=$NODE_HOME"
+RUST_BACKTRACE=1 RUST_LOG=freenet=debug,freenet_core=debug,info \
+    HOME="$NODE_HOME" \
+    freenet local --data-dir "$DATA_DIR" --port "$PORT"
 '''
 
 [tasks.test]
@@ -511,7 +531,24 @@ script_runner = "bash"
 script = '''
 set -euo pipefail
 ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
-PORT=8082
+# Pick a port: honour FREENET_EMAIL_DX_PORT if set, else find the first
+# free port in 8082..8182 so parallel worktrees / dev servers don't clash.
+if [ -n "${FREENET_EMAIL_DX_PORT:-}" ]; then
+    PORT="$FREENET_EMAIL_DX_PORT"
+else
+    PORT=""
+    for candidate in $(seq 8082 8182); do
+        if ! lsof -ti:"$candidate" >/dev/null 2>&1; then
+            PORT="$candidate"
+            break
+        fi
+    done
+    if [ -z "$PORT" ]; then
+        echo "ERROR: no free port in 8082..8182" >&2
+        exit 1
+    fi
+fi
+echo "Using dev-server port $PORT"
 
 # Start dev server in background.
 cd "$ROOT/ui" && dx serve --port "$PORT" --features example-data,no-sync --no-default-features &
@@ -538,8 +575,8 @@ if [ "$SERVER_READY" != "true" ]; then
     exit 1
 fi
 
-# Run Playwright.
-cd "$ROOT/ui/tests" && npx playwright test
+# Run Playwright. Pass PORT through so the config picks the same one.
+cd "$ROOT/ui/tests" && FREENET_EMAIL_BASE_URL="http://127.0.0.1:$PORT" npx playwright test
 '''
 
 # ─── Real-node integration helpers ───────────────────────────────────────────

@@ -1629,6 +1629,7 @@ dependencies = [
  "freenet-stdlib",
  "futures",
  "getrandom 0.2.17",
+ "gloo-timers",
  "hkdf",
  "identity-management",
  "ml-dsa",

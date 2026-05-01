@@ -554,20 +554,63 @@ impl Ord for Message {
 }
 
 mod menu {
+    #[derive(Default, Clone, Copy, PartialEq, Eq, Debug)]
+    pub(super) enum Folder {
+        #[default]
+        Inbox,
+        Sent,
+        Drafts,
+        Archive,
+    }
+
+    impl Folder {
+        pub fn label(self) -> &'static str {
+            match self {
+                Folder::Inbox => "Inbox",
+                Folder::Sent => "Sent",
+                Folder::Drafts => "Drafts",
+                Folder::Archive => "Archive",
+            }
+        }
+
+        pub fn icon(self) -> &'static str {
+            match self {
+                Folder::Inbox => "▤",
+                Folder::Sent => "↗",
+                Folder::Drafts => "✎",
+                Folder::Archive => "▦",
+            }
+        }
+    }
+
     #[derive(Default)]
     pub(super) struct MenuSelection {
+        folder: Folder,
         email: Option<u64>,
         new_msg: bool,
+        search: String,
+        compose_prefill: Option<(String, String)>,
     }
 
     impl MenuSelection {
         pub fn at_new_msg(&mut self) {
             if self.new_msg {
                 self.new_msg = false;
+                self.compose_prefill = None;
             } else {
                 self.new_msg = true;
                 self.email = None;
             }
+        }
+
+        pub fn open_compose_with(&mut self, to: String, subject: String) {
+            self.new_msg = true;
+            self.email = None;
+            self.compose_prefill = Some((to, subject));
+        }
+
+        pub fn take_compose_prefill(&mut self) -> Option<(String, String)> {
+            self.compose_prefill.take()
         }
 
         pub fn is_new_msg(&self) -> bool {
@@ -577,10 +620,7 @@ mod menu {
         pub fn at_inbox_list(&mut self) {
             self.email = None;
             self.new_msg = false;
-        }
-
-        pub fn is_inbox_list(&self) -> bool {
-            !self.new_msg && self.email.is_none()
+            self.compose_prefill = None;
         }
 
         pub fn open_email(&mut self, id: u64) {
@@ -590,120 +630,191 @@ mod menu {
         pub fn email(&self) -> Option<u64> {
             self.email
         }
+
+        pub fn folder(&self) -> Folder {
+            self.folder
+        }
+
+        pub fn set_folder(&mut self, f: Folder) {
+            if self.folder != f {
+                self.folder = f;
+                self.email = None;
+            }
+        }
+
+        pub fn search(&self) -> &str {
+            &self.search
+        }
+
+        pub fn set_search(&mut self, q: String) {
+            self.search = q;
+        }
     }
+}
+
+thread_local! {
+    static DELAYED_ACTIONS: RefCell<Vec<LocalBoxFuture<'static, ()>>> = RefCell::new(Vec::new());
+}
+
+fn folder_count(emails: &[Message], folder: menu::Folder) -> usize {
+    match folder {
+        menu::Folder::Inbox => emails.iter().filter(|m| !m.read).count(),
+        // Sent / Drafts / Archive aren't backed yet (#47). Show 0.
+        _ => 0,
+    }
+}
+
+fn matches_search(m: &Message, q: &str) -> bool {
+    if q.is_empty() {
+        return true;
+    }
+    let q = q.to_lowercase();
+    m.from.to_lowercase().contains(&q)
+        || m.title.to_lowercase().contains(&q)
+        || m.content.to_lowercase().contains(&q)
 }
 
 #[allow(non_snake_case)]
 fn UserInbox() -> Element {
     use_context_provider(|| Signal::new(menu::MenuSelection::default()));
-    rsx!(
-        div {
-            class: "columns",
-            nav {
-                class: "column is-one-fifth menu",
-                UserMenuComponent {}
+    use_context_provider(|| Signal::new(Option::<String>::None));
+
+    let menu_selection = use_context::<Signal<menu::MenuSelection>>();
+
+    rsx! {
+        div { class: "fm-app", "data-testid": "fm-app",
+            Topbar {}
+            div { class: "main",
+                Sidebar {}
+                MessageList {}
+                DetailPanel {}
             }
-            div {
-                class: "column",
-                InboxComponent {}
+            if menu_selection.read().is_new_msg() {
+                ComposeSheet {}
             }
+            ToastView {}
         }
-    )
+    }
 }
 
 #[allow(non_snake_case)]
-fn UserMenuComponent() -> Element {
+fn Topbar() -> Element {
+    let user = use_context::<Signal<User>>();
+    let mut menu_selection = use_context::<Signal<menu::MenuSelection>>();
+    let alias_initial = user
+        .read()
+        .logged_id()
+        .map(|id| id.alias.chars().next().unwrap_or('·').to_string())
+        .unwrap_or_else(|| "·".to_string());
+    let search = menu_selection.read().search().to_string();
+    rsx! {
+        div { class: "topbar",
+            div { class: "brand",
+                span { class: "brand-glyph", "f" }
+                div { class: "brand-text",
+                    span { class: "brand-name", "Freenet Mail" }
+                    span { class: "brand-tag", "Private · Decentralized" }
+                }
+            }
+            div { class: "topbar-mid",
+                div { class: "search",
+                    span { class: "search-icon", "⌕" }
+                    input {
+                        r#type: "text",
+                        placeholder: "Search",
+                        value: "{search}",
+                        "data-testid": "fm-search",
+                        oninput: move |ev| { menu_selection.write().set_search(ev.value()); },
+                    }
+                }
+            }
+            div { class: "topbar-right",
+                div { class: "avatar", "data-testid": "fm-avatar", "{alias_initial}" }
+            }
+        }
+    }
+}
+
+#[allow(non_snake_case)]
+fn Sidebar() -> Element {
     let mut user = use_context::<Signal<User>>();
     let mut menu_selection = use_context::<Signal<menu::MenuSelection>>();
-
-    let received_class =
-        if menu_selection.read().is_inbox_list() || !menu_selection.read().is_new_msg() {
-            "is-active"
-        } else {
-            ""
-        };
-    let write_msg_class = if menu_selection.read().is_new_msg() {
-        "is-active"
-    } else {
-        ""
-    };
-
-    rsx!(
-        div {
-            class: "pl-3 pr-3 mt-3",
-            ul {
-                class: "menu-list",
-                li {
-                    a {
-                        class: received_class,
-                        onclick: move |_| { menu_selection.write().at_inbox_list(); },
-                        "Received"
+    let inbox = use_context::<Signal<InboxView>>();
+    let emails_snapshot: Vec<Message> = inbox.read().messages.borrow().clone();
+    let active = menu_selection.read().folder();
+    rsx! {
+        nav { class: "sidebar",
+            button {
+                class: "compose-btn",
+                "data-testid": "fm-compose-btn",
+                onclick: move |_| {
+                    let mut sel = menu_selection.write();
+                    if !sel.is_new_msg() {
+                        sel.at_new_msg();
+                    }
+                },
+                span { class: "pen", "✎" }
+                "New message"
+            }
+            div { class: "sect-label", "Folders" }
+            div { class: "nav",
+                {
+                    [menu::Folder::Inbox, menu::Folder::Sent, menu::Folder::Drafts, menu::Folder::Archive]
+                        .into_iter()
+                        .map(|f| {
+                            let cls = if f == active { "nav-item active" } else { "nav-item" };
+                            let count = folder_count(&emails_snapshot, f);
+                            let count_text = if count > 0 { count.to_string() } else { String::new() };
+                            let testid = format!("fm-folder-{}", f.label().to_lowercase());
+                            rsx! {
+                                button {
+                                    class: "{cls}",
+                                    "data-testid": "{testid}",
+                                    onclick: move |_| { menu_selection.write().set_folder(f); },
+                                    span { class: "icon", "{f.icon()}" }
+                                    span { class: "label", "{f.label()}" }
+                                    span { class: "count", "{count_text}" }
+                                }
+                            }
+                        })
+                }
+            }
+            div { class: "sidebar-bottom",
+                div { class: "conn-card",
+                    div { class: "conn-row",
+                        span { class: "lbl",
+                            span { class: "pulse-dot" }
+                            "connection"
+                        }
+                        span { class: "val", "live" }
                     }
                 }
-                li {
-                    a {
-                        class: write_msg_class,
-                        onclick: move |_| {
-                            let mut selection = menu_selection.write();
-                            selection.at_new_msg();
-                        },
-                        "Write message"
-                    }
-                }
-                li {
-                    a {
-                        onclick: move |_| {
-                            let mut logged_state = user.write();
-                            logged_state.logged = false;
-                            logged_state.active_id = None;
-                        },
-                        "Log out"
-                    }
+                button {
+                    class: "nav-item",
+                    "data-testid": "fm-logout",
+                    onclick: move |_| {
+                        let mut state = user.write();
+                        state.logged = false;
+                        state.active_id = None;
+                    },
+                    span { class: "icon", "⏏" }
+                    span { class: "label", "Log out" }
                 }
             }
         }
-    )
+    }
 }
 
 #[allow(non_snake_case)]
-fn InboxComponent() -> Element {
+fn MessageList() -> Element {
     let inbox = use_context::<Signal<InboxView>>();
     let mut controller = use_context::<Signal<InboxController>>();
     let inbox_data = use_context::<InboxesData>();
-    let menu_selection = use_context::<Signal<menu::MenuSelection>>();
+    let mut menu_selection = use_context::<Signal<menu::MenuSelection>>();
     let user = use_context::<Signal<User>>();
-
-    #[component]
-    fn EmailLink(
-        sender: Cow<'static, str>,
-        title: Cow<'static, str>,
-        read: bool,
-        id: u64,
-    ) -> Element {
-        let mut open_mail = use_context::<Signal<menu::MenuSelection>>();
-        let icon_style = if read {
-            "fa-regular fa-envelope"
-        } else {
-            "fa-solid fa-envelope"
-        };
-        rsx!(
-            a {
-                class: "panel-block",
-                id: "email-inbox-accessor-{id}",
-                onclick: move |_| { open_mail.write().open_email(id); },
-                span {
-                    class: "panel-icon",
-                    i { class: icon_style }
-                }
-                span { class: "ml-2", "{sender}" }
-                span { class: "ml-5", "{title}" }
-            }
-        )
-    }
 
     {
         let current_active_id: UserId = user.read().active_id.unwrap();
-        // reload if there were new emails received
         let all_data = inbox_data.load_full();
         if let Some((current_model, id)) = all_data.iter().find_map(|ib| {
             crate::log::debug!("trying to get identity for {key}", key = &ib.borrow().key);
@@ -721,84 +832,115 @@ fn InboxComponent() -> Element {
         }
     }
 
-    // Mark updated as false after after the inbox has been refreshed
     if controller.read().updated {
         controller.write().updated = false;
     }
 
-    let inbox = inbox.read();
-    let emails = inbox.messages.borrow();
-    let is_email: Option<u64> = menu_selection.read().email();
-    if let Some(email_id) = is_email {
-        let id_p = (*emails).binary_search_by_key(&email_id, |e| e.id).unwrap();
-        let email = &emails[id_p];
-        rsx! {
-            OpenMessage {
-                msg: email.clone(),
-            }
+    DELAYED_ACTIONS.with(|queue| {
+        let mut queue = queue.borrow_mut();
+        for fut in queue.drain(..) {
+            let _ = spawn(fut);
         }
-    } else if menu_selection.read().is_new_msg() {
-        rsx! {
-            NewMessageWindow {}
-        }
+    });
+
+    let folder = menu_selection.read().folder();
+    let search = menu_selection.read().search().to_string();
+    let selected_id = menu_selection.read().email();
+
+    let inbox_view = inbox.read();
+    let emails = inbox_view.messages.borrow();
+    let visible: Vec<Message> = if matches!(folder, menu::Folder::Inbox) {
+        emails.iter().filter(|m| matches_search(m, &search)).cloned().collect()
     } else {
-        DELAYED_ACTIONS.with(|queue| {
-            let mut queue = queue.borrow_mut();
-            for fut in queue.drain(..) {
-                let _ = spawn(fut);
+        Vec::new()
+    };
+    let count = visible.len();
+
+    rsx! {
+        section { class: "list-col",
+            div { class: "list-head",
+                span { class: "list-title", "{folder.label()}" }
+                span { class: "list-count", "{count}" }
             }
-        });
-        let links = emails.iter().enumerate().map(|(id, email)| {
-            rsx!(EmailLink {
-                sender: email.from.clone(),
-                title: email.title.clone(),
-                read: email.read,
-                id: id as u64,
-            })
-        });
-        rsx! {
-            div {
-                class: "panel is-link mt-3",
-                p { class: "panel-heading", "Inbox" }
-                p {
-                    class: "panel-tabs",
-                    a {
-                        class: "is-active icon-text",
-                        span { class: "icon", i { class: "fas fa-inbox" } }
-                        span { "Primary" }
+            div { class: "list-scroll", "data-testid": "fm-list",
+                if visible.is_empty() {
+                    div { style: "padding:24px 18px; font-family:'Geist Mono',monospace; font-size:10px; letter-spacing:0.1em; text-transform:uppercase; color:var(--ink4);",
+                        "No messages"
                     }
-                    a {
-                        class: "icon-text",
-                        span { class: "icon",i { class: "fas fa-user-group" } },
-                        span { "Social" }
-                    }
-                    a {
-                        class: "icon-text",
-                        span { class: "icon", i { class: "fas fa-circle-exclamation" } },
-                        span { "Updates" }
-                    }
-                }
-                div {
-                    class: "panel-block",
-                    p {
-                        class: "control has-icons-left",
-                        input { class: "input is-link", r#type: "text", placeholder: "Search" }
-                        span { class: "icon is-left", i { class: "fas fa-search", aria_hidden: true } }
+                } else {
+                    {
+                        visible.into_iter().map(|email| {
+                            let id = email.id;
+                            let mut classes = String::from("msg-card");
+                            if !email.read { classes.push_str(" unread"); }
+                            if Some(id) == selected_id { classes.push_str(" selected"); }
+                            let from = email.from.clone();
+                            let title = email.title.clone();
+                            let preview = email.content.clone();
+                            rsx! {
+                                article {
+                                    class: "{classes}",
+                                    id: "email-inbox-accessor-{id}",
+                                    "data-testid": "fm-msg-card",
+                                    "data-msg-id": "{id}",
+                                    onclick: move |_| { menu_selection.write().open_email(id); },
+                                    div { class: "msg-row1",
+                                        span { class: "msg-sender", "{from}" }
+                                        span { class: "msg-time", "" }
+                                    }
+                                    div { class: "msg-subj", "{title}" }
+                                    div { class: "msg-prev", "{preview}" }
+                                }
+                            }
+                        })
                     }
                 }
-                {links}
             }
         }
     }
 }
 
-thread_local! {
-    static DELAYED_ACTIONS: RefCell<Vec<LocalBoxFuture<'static, ()>>> = RefCell::new(Vec::new());
+#[allow(non_snake_case)]
+fn DetailPanel() -> Element {
+    let inbox = use_context::<Signal<InboxView>>();
+    let menu_selection = use_context::<Signal<menu::MenuSelection>>();
+    let folder = menu_selection.read().folder();
+    let selected_id = menu_selection.read().email();
+    let view = inbox.read();
+    let emails = view.messages.borrow();
+    let selected = selected_id.and_then(|id| {
+        emails.iter().find(|m| m.id == id).cloned()
+    });
+
+    if matches!(folder, menu::Folder::Inbox) {
+        if let Some(msg) = selected {
+            rsx! { OpenMessage { msg } }
+        } else {
+            rsx! {
+                section { class: "detail-col",
+                    div { class: "empty",
+                        div { class: "empty-glyph", "✉" }
+                        div { class: "empty-hint", "Select a message" }
+                    }
+                }
+            }
+        }
+    } else {
+        rsx! {
+            section { class: "detail-col",
+                div { class: "empty",
+                    div { class: "empty-glyph", "✉" }
+                    div { class: "empty-hint", "{folder.label()} is empty" }
+                }
+            }
+        }
+    }
 }
 
 #[component]
 fn OpenMessage(msg: Message) -> Element {
     let mut menu_selection = use_context::<Signal<menu::MenuSelection>>();
+    let mut toast = use_context::<Signal<Option<String>>>();
     let client = crate::api::WEB_API_SENDER.get().unwrap();
     let mut inbox = use_context::<Signal<InboxView>>();
     let inbox_data = use_context::<InboxesData>();
@@ -812,67 +954,130 @@ fn OpenMessage(msg: Message) -> Element {
         queue.borrow_mut().push(result);
     });
 
-    // todo: delete this from the private delegate or send to trash category
-    // let delete = move |_| {
-    //     let result = inbox
-    //         .write()
-    //         .remove_messages(client.clone(), &email_id, inbox_data.clone())
-    //         .unwrap();
-    //     spawn(result);
-    //     menu_selection.write().at_inbox_list();
-    // };
+    let from = msg.from.clone();
+    let from_initial = from.chars().next().unwrap_or('·').to_string();
+    let title = msg.title.clone();
+    let content = msg.content.clone();
+    let id = msg.id;
+    let reply_to = from.clone();
+    let reply_subj = format!("Re: {}", title);
+
+    let archive_client = client.clone();
+    let archive_inbox_data = inbox_data.clone();
+    let delete_client = client.clone();
+    let delete_inbox_data = inbox_data.clone();
 
     rsx! {
-        div {
-            class: "columns title mt-3",
-            div {
-                class: "column",
-                a {
-                    class: "icon is-small",
+        section { class: "detail-col",
+            div { class: "detail-head",
+                h1 { class: "detail-subj", "{title}" }
+                div { class: "detail-from",
+                    div { class: "sender-orb", "{from_initial}" }
+                    div { class: "from-text",
+                        span { class: "from-name", "{from}" }
+                        span { class: "from-addr", "" }
+                    }
+                    span { class: "from-time", "" }
+                }
+            }
+            div { class: "toolbar",
+                button {
+                    class: "btn btn-primary",
+                    "data-testid": "fm-reply",
                     onclick: move |_| {
-                        menu_selection.write().at_inbox_list();
+                        menu_selection.write().open_compose_with(reply_to.to_string(), reply_subj.clone());
                     },
-                    i { class: "fa-sharp fa-solid fa-arrow-left", aria_label: "Back to Inbox", style: "color:#4a4a4a" },
+                    "Reply"
                 }
-            }
-            div { class: "column is-four-fifths", h2 { "{msg.title}" } }
-            div {
-                class: "column",
-                a {
-                    class: "icon is-small",
-                    // onclick: delete,
-                    onclick: move |_| {},
-                    i { class: "fa-sharp fa-solid fa-trash", aria_label: "Delete", style: "color:#4a4a4a" }
+                button {
+                    class: "btn btn-secondary",
+                    "data-testid": "fm-archive",
+                    onclick: move |_| {
+                        let result = inbox
+                            .write()
+                            .remove_messages(archive_client.clone(), &[id], archive_inbox_data.clone())
+                            .unwrap();
+                        DELAYED_ACTIONS.with(|queue| { queue.borrow_mut().push(result); });
+                        menu_selection.write().at_inbox_list();
+                        toast.set(Some("Archived".to_string()));
+                        spawn_toast_clear();
+                    },
+                    "Archive"
                 }
+                button {
+                    class: "btn btn-secondary",
+                    "data-testid": "fm-delete",
+                    onclick: move |_| {
+                        let result = inbox
+                            .write()
+                            .remove_messages(delete_client.clone(), &[id], delete_inbox_data.clone())
+                            .unwrap();
+                        DELAYED_ACTIONS.with(|queue| { queue.borrow_mut().push(result); });
+                        menu_selection.write().at_inbox_list();
+                        toast.set(Some("Deleted".to_string()));
+                        spawn_toast_clear();
+                    },
+                    "Delete"
+                }
+                div { class: "spacer" }
             }
-        }
-        div {
-            id: "email-content-{msg.id}",
-            p {
-                "{msg.content}"
+            div { class: "detail-scroll",
+                div { class: "detail-body", id: "email-content-{id}",
+                    {
+                        content.split("\n\n").map(|para| rsx! {
+                            p { "{para}" }
+                        })
+                    }
+                }
             }
         }
     }
 }
 
+fn spawn_toast_clear() {
+    let mut toast = use_context::<Signal<Option<String>>>();
+    spawn(async move {
+        gloo_timers::future::TimeoutFuture::new(2200).await;
+        toast.set(None);
+    });
+}
+
 #[allow(non_snake_case)]
-fn NewMessageWindow() -> Element {
+fn ToastView() -> Element {
+    let toast = use_context::<Signal<Option<String>>>();
+    let value = toast.read().clone();
+    if let Some(text) = value {
+        rsx! {
+            div { class: "toast", "data-testid": "fm-toast",
+                span { class: "pulse-dot" }
+                span { "{text}" }
+            }
+        }
+    } else {
+        rsx! {}
+    }
+}
+
+#[allow(non_snake_case)]
+fn ComposeSheet() -> Element {
     let mut menu_selection = use_context::<Signal<menu::MenuSelection>>();
+    let mut toast = use_context::<Signal<Option<String>>>();
     let client = crate::api::WEB_API_SENDER.get().unwrap();
     let mut inbox = use_context::<Signal<InboxView>>();
     let user = use_context::<Signal<User>>();
-    let user = user.read();
-    let user_alias = &*user.logged_id().unwrap().alias;
-    let mut to = use_signal(String::new);
-    let mut title = use_signal(String::new);
+    let user_alias = user.read().logged_id().unwrap().alias.to_string();
+
+    let prefill = menu_selection.write().take_compose_prefill();
+    let initial_to = prefill.as_ref().map(|p| p.0.clone()).unwrap_or_default();
+    let initial_subj = prefill.as_ref().map(|p| p.1.clone()).unwrap_or_default();
+
+    let mut to = use_signal(|| initial_to.clone());
+    let mut title = use_signal(|| initial_subj.clone());
     let mut content = use_signal(String::new);
 
-    // Cached recipient lookup — re-runs only when `to` changes, not on
-    // every keystroke in subject/body. lookup() clones ~3KB and runs
-    // BLAKE3 for the fingerprint; we don't want that per render.
     let recipient_lookup = use_memo(move || address_book::lookup(&to.read()));
 
-    let alias = user_alias.to_string();
+    let alias = user_alias.clone();
     let send_msg = move |_| {
         let to_val = to.read().clone();
         let recipient = match address_book::lookup(&to_val) {
@@ -916,12 +1121,11 @@ fn NewMessageWindow() -> Element {
             &content_val,
         ) {
             Ok(futs) => {
-                // spawn_forever, not spawn: the send future outlives the
-                // NewMessageWindow component (we navigate away to inbox
-                // immediately below via at_new_msg). spawn() ties the task
-                // to the current component scope and cancels it on unmount,
-                // which silently killed every send before the AFT request
-                // hit the wire.
+                // spawn_forever, not spawn: send future outlives this
+                // component (we navigate away below). spawn() ties the
+                // task to the current scope and cancels on unmount,
+                // which silently killed every send before the AFT
+                // request hit the wire.
                 futs.into_iter().for_each(|f| {
                     let _task = dioxus_core::spawn_forever(f);
                 });
@@ -931,75 +1135,101 @@ fn NewMessageWindow() -> Element {
             }
         }
         menu_selection.write().at_new_msg();
+        toast.set(Some("Sent".to_string()));
+        spawn_toast_clear();
     };
 
     rsx! {
-        div {
-            class: "column mt-3",
-            div {
-                class: "box has-background-light",
-                h3 { class: "title is-3", "New message" }
-                table {
-                    class: "table is-narrow has-background-light",
-                    tbody {
-                        tr {
-                            th { "From" }
-                            td { style: "width: 100%", "{user_alias}" }
-                        }
-                        tr {
-                            th { "To"}
-                            td { style: "width: 100%", contenteditable: true, oninput: move |ev| { to.set(ev.value().clone()); } }
-                        }
-                        {
-                            recipient_lookup.read().as_ref().map(|r| {
-                                let (badge_class, badge_label): (&str, &str) =
-                                    if r.is_own {
-                                        ("tag is-success is-light", "you")
-                                    } else if r.verified {
-                                        ("tag is-success is-light", "verified")
-                                    } else {
-                                        ("tag is-warning is-light", "unverified")
-                                    };
-                                let fp_short = r.fingerprint_short();
-                                rsx! {
-                                    tr { "data-testid": "compose-recipient-badge",
-                                        th {}
-                                        td {
-                                            span {
-                                                class: "{badge_class} mr-2",
-                                                "data-testid": "compose-recipient-badge-label",
-                                                "{badge_label}"
-                                            }
-                                            span {
-                                                class: "is-family-monospace is-size-7 has-text-grey",
-                                                "data-testid": "compose-recipient-fingerprint",
-                                                "fingerprint: {fp_short}"
-                                            }
-                                        }
-                                    }
-                                }
-                            })
-                        }
-                        tr {
-                            th { "Subject"}
-                            td { style: "width: 100%", contenteditable: true, oninput: move |ev| { title.set(ev.value().clone()); }  }
-                        }
+        div { class: "veil",
+            onclick: move |_| { menu_selection.write().at_new_msg(); },
+            div { class: "sheet",
+                "data-testid": "fm-compose-sheet",
+                onclick: move |ev| { ev.stop_propagation(); },
+                div { class: "sheet-head",
+                    span { class: "sheet-title", "New message" }
+                    button {
+                        class: "sheet-x",
+                        onclick: move |_| { menu_selection.write().at_new_msg(); },
+                        "✕"
                     }
                 }
-            }
-            div {
-                class: "box",
-                div {
-                    contenteditable: true,
-                    oninput: move |ev| { content.set(ev.value().clone()); },
-                    br {}
+                div { class: "sheet-field",
+                    span { class: "field-lbl", "From" }
+                    span { class: "field-input", style: "color:var(--ink2);", "{user_alias}" }
                 }
-            }
-            div {
-                button {
-                    class: "button is-info is-outlined",
-                    onclick: send_msg,
-                    "Send"
+                div { class: "sheet-field",
+                    span { class: "field-lbl", "To" }
+                    input {
+                        class: "field-input",
+                        r#type: "text",
+                        placeholder: "alias or address",
+                        value: "{to}",
+                        oninput: move |ev| { to.set(ev.value()); },
+                    }
+                }
+                {
+                    recipient_lookup.read().as_ref().map(|r| {
+                        let (badge_class, badge_label): (&str, &str) =
+                            if r.is_own {
+                                ("badge badge-trust", "you")
+                            } else if r.verified {
+                                ("badge badge-trust", "verified")
+                            } else {
+                                ("badge badge-warn", "unverified")
+                            };
+                        let fp_short = r.fingerprint_short();
+                        rsx! {
+                            div { class: "sheet-recipient-badge", "data-testid": "compose-recipient-badge",
+                                span {
+                                    class: "{badge_class}",
+                                    "data-testid": "compose-recipient-badge-label",
+                                    "{badge_label}"
+                                }
+                                span {
+                                    class: "badge-fp",
+                                    "data-testid": "compose-recipient-fingerprint",
+                                    "fingerprint: {fp_short}"
+                                }
+                            }
+                        }
+                    })
+                }
+                div { class: "sheet-field",
+                    span { class: "field-lbl", "Re" }
+                    input {
+                        class: "field-input",
+                        r#type: "text",
+                        placeholder: "subject",
+                        value: "{title}",
+                        oninput: move |ev| { title.set(ev.value()); },
+                    }
+                }
+                div { class: "sheet-body",
+                    textarea {
+                        class: "sheet-textarea",
+                        placeholder: "Write something thoughtful…",
+                        value: "{content}",
+                        oninput: move |ev| { content.set(ev.value()); },
+                    }
+                }
+                div { class: "sheet-foot",
+                    div { class: "foot-meta",
+                        span { class: "pulse-dot" }
+                        span { "Encrypted · routed through Freenet" }
+                    }
+                    div { class: "foot-actions",
+                        button {
+                            class: "btn btn-ghost",
+                            onclick: move |_| { menu_selection.write().at_new_msg(); },
+                            "Discard"
+                        }
+                        button {
+                            class: "btn btn-primary",
+                            "data-testid": "fm-send",
+                            onclick: send_msg,
+                            "Send"
+                        }
+                    }
                 }
             }
         }

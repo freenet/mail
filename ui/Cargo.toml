@@ -32,6 +32,7 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 wasm-bindgen = { workspace = true }
 wasm-bindgen-futures = "0.4"
+gloo-timers = { version = "0.3", features = ["futures"] }
 rand = { version = "0.8", features = ["std"] }
 
 freenet-email-inbox = { workspace = true, features = ["wasmbind"] }
