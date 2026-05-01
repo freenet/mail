@@ -120,6 +120,22 @@ jobs:
         run: npx playwright install-deps chromium
         working-directory: ./ui/tests
 
+      - name: Block freenet auto-update GitHub probe
+        # The pinned `freenet` binary (0.2.50) polls
+        # https://api.github.com/repos/freenet/freenet-core/releases/latest
+        # ~30s into startup and gracefully shuts down if a newer release
+        # exists. That race kills the iso gateway mid-test on any PR
+        # whose CI run lands after a freenet-core release. Block the
+        # update probe by routing api.github.com to localhost just for
+        # this job — Playwright + Actions artifact uploads use
+        # results-receiver.actions.githubusercontent.com / objects.git…
+        # which are unaffected.
+        run: |
+          echo "127.0.0.1 api.github.com" | sudo tee -a /etc/hosts
+          # Sanity: the resolver agrees and the freenet binary will see
+          # a refused connection, not a successful version response.
+          getent hosts api.github.com
+
       - name: Run real-node E2E
         run: cargo make test-e2e-real-node
         env:
