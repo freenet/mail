@@ -1103,8 +1103,7 @@ fn DetailPanel() -> Element {
     let view = inbox.read();
     let emails = view.messages.borrow();
     let selected = selected_id.and_then(|id| emails.iter().find(|m| m.id == id).cloned());
-    let _local_gen = crate::local_state::GENERATION
-        .load(std::sync::atomic::Ordering::Relaxed);
+    let _local_gen = crate::local_state::GENERATION.load(std::sync::atomic::Ordering::Relaxed);
 
     if matches!(folder, menu::Folder::Inbox) {
         if let Some(msg) = selected {
