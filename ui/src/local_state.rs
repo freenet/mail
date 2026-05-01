@@ -64,16 +64,13 @@ mod wire {
     use crate::api::WebApiRequestClient;
     use freenet_stdlib::{
         client_api::DelegateRequest,
-        prelude::{
-            ApplicationMessage, DelegateKey, InboundDelegateMsg, Parameters,
-        },
+        prelude::{ApplicationMessage, DelegateKey, InboundDelegateMsg, Parameters},
     };
     use mail_local_state::LocalStateParams;
     use std::sync::OnceLock;
 
-    const CODE_HASH: &str = include_str!(
-        "../../modules/mail-local-state/build/mail_local_state_code_hash"
-    );
+    const CODE_HASH: &str =
+        include_str!("../../modules/mail-local-state/build/mail_local_state_code_hash");
     const CODE: &[u8] =
         include_bytes!("../../modules/mail-local-state/build/freenet/mail_local_state");
     const PARAMS: &[u8] =
@@ -148,15 +145,7 @@ mod wire {
         id: String,
         draft: Draft,
     ) -> Result<(), DynError> {
-        send_msg(
-            client,
-            &LocalStateMsg::SaveDraft {
-                alias,
-                id,
-                draft,
-            },
-        )
-        .await
+        send_msg(client, &LocalStateMsg::SaveDraft { alias, id, draft }).await
     }
 
     pub(crate) async fn delete_draft(

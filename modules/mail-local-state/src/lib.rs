@@ -220,7 +220,12 @@ impl DelegateInterface for LocalState {
                     }
                     LocalStateMsg::SaveDraft { alias, id, draft } => {
                         let mut state = load_or_default(ctx, &secret_key)?;
-                        state.aliases.entry(alias).or_default().drafts.insert(id, draft);
+                        state
+                            .aliases
+                            .entry(alias)
+                            .or_default()
+                            .drafts
+                            .insert(id, draft);
                         store(ctx, &secret_key, &state)?;
                         Ok(vec![])
                     }
@@ -232,7 +237,11 @@ impl DelegateInterface for LocalState {
                         store(ctx, &secret_key, &state)?;
                         Ok(vec![])
                     }
-                    LocalStateMsg::MarkRead { alias, msg_id, kept } => {
+                    LocalStateMsg::MarkRead {
+                        alias,
+                        msg_id,
+                        kept,
+                    } => {
                         let mut state = load_or_default(ctx, &secret_key)?;
                         let s = state.aliases.entry(alias).or_default();
                         if !s.read.contains(&msg_id) {
@@ -243,9 +252,9 @@ impl DelegateInterface for LocalState {
                         Ok(vec![])
                     }
                     LocalStateMsg::GetAll => {
-                        let value = ctx.get_secret(&secret_key).unwrap_or_else(|| {
-                            serde_json::to_vec(&LocalState::default()).unwrap()
-                        });
+                        let value = ctx
+                            .get_secret(&secret_key)
+                            .unwrap_or_else(|| serde_json::to_vec(&LocalState::default()).unwrap());
                         Ok(vec![OutboundDelegateMsg::ApplicationMessage(
                             ApplicationMessage::new(value),
                         )])
@@ -352,10 +361,7 @@ mod boundary_tests {
         let back = LocalState::try_from(bytes.as_slice()).unwrap();
         assert!(back.is_read("alice", 7));
         assert_eq!(back.drafts_of("alice").count(), 1);
-        assert_eq!(
-            back.aliases["alice"].kept["7"].content.as_str(),
-            "yo"
-        );
+        assert_eq!(back.aliases["alice"].kept["7"].content.as_str(), "yo");
     }
 
     #[test]

@@ -787,8 +787,7 @@ fn Sidebar() -> Element {
         .unwrap_or_default();
     // Track local-state generation so Drafts count re-renders when the
     // user types into the compose sheet (autosave bumps `GENERATION`).
-    let _local_gen = crate::local_state::GENERATION
-        .load(std::sync::atomic::Ordering::Relaxed);
+    let _local_gen = crate::local_state::GENERATION.load(std::sync::atomic::Ordering::Relaxed);
     rsx! {
         nav { class: "sidebar",
             button {
@@ -921,8 +920,7 @@ fn MessageList() -> Element {
     let selected_id = menu_selection.read().email();
     // Touch the local-state generation so this component re-renders when
     // drafts are added/removed.
-    let _local_gen = crate::local_state::GENERATION
-        .load(std::sync::atomic::Ordering::Relaxed);
+    let _local_gen = crate::local_state::GENERATION.load(std::sync::atomic::Ordering::Relaxed);
 
     let inbox_view = inbox.read();
     let emails = inbox_view.messages.borrow();
@@ -1242,7 +1240,10 @@ fn ComposeSheet() -> Element {
 
     let prefill = menu_selection.write().take_compose_prefill();
     let initial_to = prefill.as_ref().map(|p| p.to.clone()).unwrap_or_default();
-    let initial_subj = prefill.as_ref().map(|p| p.subject.clone()).unwrap_or_default();
+    let initial_subj = prefill
+        .as_ref()
+        .map(|p| p.subject.clone())
+        .unwrap_or_default();
     let initial_body = prefill.as_ref().map(|p| p.body.clone()).unwrap_or_default();
     // Reuse the draft id when re-opening an existing draft so SaveDraft
     // overwrites the same row instead of creating a duplicate.
@@ -1305,8 +1306,7 @@ fn ComposeSheet() -> Element {
             let mut client_clone = client.clone();
             let alias = alias_for_delete.clone();
             spawn(async move {
-                if let Err(e) =
-                    crate::local_state::delete_draft(&mut client_clone, alias, id).await
+                if let Err(e) = crate::local_state::delete_draft(&mut client_clone, alias, id).await
                 {
                     crate::log::error(format!("delete_draft failed: {e}"), None);
                 }
