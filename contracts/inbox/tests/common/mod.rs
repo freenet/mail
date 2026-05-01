@@ -109,6 +109,8 @@ pub fn make_message(content: Vec<u8>, token: TokenAssignment) -> Message {
     Message {
         content,
         token_assignment: token,
+        sender_vk: Vec::new(),
+        signature: Vec::new(),
     }
 }
 

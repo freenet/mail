@@ -307,6 +307,18 @@ pub fn all_contacts() -> Vec<Contact> {
     })
 }
 
+/// Look up a contact by ML-DSA verifying key (#51 — sender trust). Returns
+/// `None` for unknown VKs and for the user's own identities (which are
+/// stored as `Own` entries, not contacts).
+pub fn contact_by_vk(vk_bytes: &[u8]) -> Option<Contact> {
+    ADDRESS_BOOK.with(|ab| {
+        ab.borrow().values().find_map(|e| match e {
+            Entry::Contact(c) if c.ml_dsa_vk_bytes == vk_bytes => Some(c.clone()),
+            _ => None,
+        })
+    })
+}
+
 /// Check whether a fingerprint matches one of the user's own identities
 /// (used to reject self-import during contact import).
 pub fn is_own_fingerprint(vk_bytes: &[u8], ek_bytes: &[u8]) -> bool {

@@ -20,8 +20,8 @@ use std::sync::Arc;
 use futures::FutureExt;
 use futures::future::LocalBoxFuture;
 use ml_dsa::{
-    MlDsa65, SigningKey as MlDsaSigningKey, VerifyingKey as MlDsaVerifyingKey,
-    signature::{Keypair as MlDsaKeypair, Signer as MlDsaSigner},
+    EncodedVerifyingKey, MlDsa65, SigningKey as MlDsaSigningKey, VerifyingKey as MlDsaVerifyingKey,
+    signature::{Keypair as MlDsaKeypair, Signer as MlDsaSigner, Verifier as MlDsaVerifier},
 };
 use ml_kem::{
     DecapsulationKey, EncapsulationKey, MlKem768,
@@ -79,8 +79,30 @@ pub(crate) fn inbox_key_for(
     ContractKey::from_params(INBOX_CODE_HASH, params).map_err(|e| format!("{e}").into())
 }
 
+/// Verify a detached ML-DSA-65 signature over `ciphertext` using the
+/// sender's encoded verifying key. Returns `false` for empty / wrong-
+/// length / cryptographically-invalid inputs (the recipient renders
+/// these as "unverified" rather than rejecting; #51).
+pub(crate) fn verify_message_signature(
+    ciphertext: &[u8],
+    sender_vk: &[u8],
+    signature: &[u8],
+) -> bool {
+    if sender_vk.is_empty() || signature.is_empty() {
+        return false;
+    }
+    let Ok(encoded_vk): Result<EncodedVerifyingKey<MlDsa65>, _> = sender_vk.try_into() else {
+        return false;
+    };
+    let vk = MlDsaVerifyingKey::<MlDsa65>::decode(&encoded_vk);
+    let Ok(sig) = ml_dsa::Signature::<MlDsa65>::try_from(signature) else {
+        return false;
+    };
+    MlDsaVerifier::verify(&vk, ciphertext, &sig).is_ok()
+}
+
 thread_local! {
-    static PENDING_INBOXES_UPDATE: RefCell<HashMap<InboxContract, Vec<DecryptedMessage>>> = RefCell::new(HashMap::new());
+    static PENDING_INBOXES_UPDATE: RefCell<HashMap<InboxContract, Vec<PendingOutgoing>>> = RefCell::new(HashMap::new());
     static INBOX_TO_ID: RefCell<HashMap<InboxContract, Identity>> =
         RefCell::new(HashMap::new());
     /// Outgoing messages awaiting an `UpdateResponse` from the recipient's
@@ -146,6 +168,14 @@ pub(crate) fn remove_pending_sent_ack(
     });
 }
 
+/// Outgoing message awaiting an AFT token assignment. Holds the sender
+/// identity so we can sign the ciphertext with the sender's ML-DSA-65
+/// signing key when the assignment lands (#51).
+struct PendingOutgoing {
+    msg: DecryptedMessage,
+    sender: Identity,
+}
+
 #[derive(Debug, Clone)]
 struct InternalSettings {
     /// This id is used for internal handling of the inbox and is not persistent
@@ -198,11 +228,37 @@ impl InternalSettings {
     }
 }
 
+/// Per-message signature-verification state (#51). Combines a pure
+/// crypto check (sig validates against `sender_vk`) with an address-book
+/// lookup (does the user trust this VK).
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum VerificationState {
+    /// Signature verified AND `sender_vk` matches a contact the user has
+    /// flagged as verified.
+    VerifiedKnown,
+    /// Signature verified, but the sender VK is unknown to the address
+    /// book (or known-unverified).
+    VerifiedUnknown,
+    /// Signature missing, malformed, or fails to verify.
+    #[default]
+    Unverified,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub(crate) struct MessageModel {
     pub id: u64,
     pub content: DecryptedMessage,
     pub token_assignment: TokenAssignment,
+    /// Sender's ML-DSA-65 verifying key bytes. Empty for legacy messages.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sender_vk: Vec<u8>,
+    /// Pure-crypto verification: sig validates against `sender_vk` over
+    /// the ciphertext blob. Address-book trust is layered on top at
+    /// render time. The address-book lookup is fast (HashMap) so we
+    /// don't cache a `VerificationState` here — see `verification_state`
+    /// in the UI render path.
+    #[serde(default)]
+    pub signature_valid: bool,
 }
 
 impl MessageModel {
@@ -214,6 +270,11 @@ impl MessageModel {
         Ok::<_, DynError>(StoredMessage {
             content,
             token_assignment: self.token_assignment.clone(),
+            // Re-encryption path doesn't have access to the original
+            // sender's signing key. Empty sig = recipient renders as
+            // "unverified" (#51). The to_state path isn't wired up yet.
+            sender_vk: Vec::new(),
+            signature: Vec::new(),
         })
     }
 
@@ -240,8 +301,9 @@ impl MessageModel {
         });
 
         if let Some(update) = pending_update {
+            let stored = update.msg.to_stored(assignment, &update.sender)?;
             let delta = UpdateInbox::AddMessages {
-                messages: vec![update.to_stored(assignment)?],
+                messages: vec![stored],
             };
             let request = ContractRequest::Update {
                 key: inbox_contract,
@@ -317,17 +379,37 @@ impl DecryptedMessage {
 
         PENDING_INBOXES_UPDATE.with(|map| {
             let map = &mut *map.borrow_mut();
-            map.entry(inbox_key).or_insert_with(Vec::new).push(self);
+            map.entry(inbox_key)
+                .or_insert_with(Vec::new)
+                .push(PendingOutgoing {
+                    msg: self,
+                    sender: from.clone(),
+                });
         });
         let _ = recipient_ek; // ek is used inside to_stored via pending queue
         Ok(())
     }
 
-    fn to_stored(&self, token_assignment: TokenAssignment) -> Result<StoredMessage, DynError> {
+    fn to_stored(
+        &self,
+        token_assignment: TokenAssignment,
+        sender: &Identity,
+    ) -> Result<StoredMessage, DynError> {
+        use ml_dsa::signature::Keypair;
         let (_, content) = self.assignment_hash_and_signed_content()?;
+        // Detached ML-DSA-65 signature over the ciphertext (#51). The
+        // recipient verifies before decrypting; sender VK is sent
+        // alongside so the recipient can both verify and recognise the
+        // sender even if the address book has never seen this key.
+        let signing_key = sender.ml_dsa_signing_key.as_ref();
+        let sig: ml_dsa::Signature<MlDsa65> = MlDsaSigner::sign(signing_key, &content);
+        let signature = sig.encode().to_vec();
+        let sender_vk = signing_key.verifying_key().encode().to_vec();
         Ok::<_, DynError>(StoredMessage {
             content,
             token_assignment,
+            sender_vk,
+            signature,
         })
     }
 
@@ -616,7 +698,12 @@ impl InboxModel {
                 .iter()
                 .any(|c| c.content.time == m.content.time)
             {
-                self.add_received_message(m.content, m.token_assignment);
+                self.add_received_message(
+                    m.content,
+                    m.token_assignment,
+                    m.sender_vk,
+                    m.signature_valid,
+                );
             }
         }
     }
@@ -658,10 +745,14 @@ impl InboxModel {
             .enumerate()
             .map(|(id, msg)| {
                 let content = DecryptedMessage::from_stored(&ml_kem_dk, msg.content.clone());
+                let signature_valid =
+                    verify_message_signature(&msg.content, &msg.sender_vk, &msg.signature);
                 Ok(MessageModel {
                     id: id as u64,
                     content,
                     token_assignment: msg.token_assignment.clone(),
+                    sender_vk: msg.sender_vk.clone(),
+                    signature_valid,
                 })
             })
             .collect::<Result<Vec<_>, DynError>>()?;
@@ -681,11 +772,15 @@ impl InboxModel {
         &mut self,
         content: DecryptedMessage,
         token_assignment: TokenAssignment,
+        sender_vk: Vec<u8>,
+        signature_valid: bool,
     ) {
         self.messages.push(MessageModel {
             id: self.settings.next_msg_id,
             content,
             token_assignment,
+            sender_vk,
+            signature_valid,
         });
         self.settings.next_msg_id += 1;
     }
@@ -799,6 +894,8 @@ mod tests {
                 id,
                 content: DecryptedMessage::default(),
                 token_assignment: crate::test_util::test_assignment(),
+                sender_vk: Vec::new(),
+                signature_valid: false,
             });
         }
         let t0 = std::time::Instant::now();
@@ -806,5 +903,58 @@ mod tests {
             inbox.remove_received_message(&[id]);
         }
         eprintln!("{}ms", t0.elapsed().as_millis());
+    }
+
+    fn fresh_signing_key() -> MlDsaSigningKey<MlDsa65> {
+        MlDsa65::from_seed(&rand::random::<[u8; 32]>().into())
+    }
+
+    #[test]
+    fn verify_signature_round_trip() {
+        let sk = fresh_signing_key();
+        let ciphertext = b"opaque encrypted payload".to_vec();
+        let sig: ml_dsa::Signature<MlDsa65> = MlDsaSigner::sign(&sk, &ciphertext);
+        let sig_bytes = sig.encode().to_vec();
+        let vk_bytes = MlDsaKeypair::verifying_key(&sk).encode().to_vec();
+        assert!(verify_message_signature(&ciphertext, &vk_bytes, &sig_bytes));
+    }
+
+    #[test]
+    fn verify_rejects_tampered_ciphertext() {
+        let sk = fresh_signing_key();
+        let ciphertext = b"original payload".to_vec();
+        let sig: ml_dsa::Signature<MlDsa65> = MlDsaSigner::sign(&sk, &ciphertext);
+        let sig_bytes = sig.encode().to_vec();
+        let vk_bytes = MlDsaKeypair::verifying_key(&sk).encode().to_vec();
+        let tampered = b"different payload".to_vec();
+        assert!(!verify_message_signature(&tampered, &vk_bytes, &sig_bytes));
+    }
+
+    #[test]
+    fn verify_rejects_wrong_vk() {
+        let sk1 = fresh_signing_key();
+        let sk2 = fresh_signing_key();
+        let ciphertext = b"payload".to_vec();
+        let sig: ml_dsa::Signature<MlDsa65> = MlDsaSigner::sign(&sk1, &ciphertext);
+        let sig_bytes = sig.encode().to_vec();
+        let vk2_bytes = MlDsaKeypair::verifying_key(&sk2).encode().to_vec();
+        assert!(!verify_message_signature(
+            &ciphertext,
+            &vk2_bytes,
+            &sig_bytes
+        ));
+    }
+
+    #[test]
+    fn verify_rejects_empty_inputs() {
+        assert!(!verify_message_signature(b"x", &[], &[1, 2, 3]));
+        assert!(!verify_message_signature(b"x", &[1, 2, 3], &[]));
+        assert!(!verify_message_signature(b"x", &[], &[]));
+    }
+
+    #[test]
+    fn verify_rejects_garbage_lengths() {
+        // Wrong-length VK and signature bytes both bail out cleanly.
+        assert!(!verify_message_signature(b"x", &[0u8; 5], &[0u8; 5]));
     }
 }
