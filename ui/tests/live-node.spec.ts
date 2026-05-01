@@ -207,30 +207,24 @@ test.describe("Live node E2E", () => {
 
       // ── Ada composes + sends to bob ─────────────────────────────
       await adaApp.getByText("ada", { exact: true }).click();
-      // Compose entry point varies (icon or text); try a few likely
-      // selectors and fall back to the first contenteditable form.
-      const composeBtn = adaApp.getByRole("button", {
-        name: /Compose|New|message/i,
-      });
-      if (await composeBtn.first().isVisible().catch(() => false)) {
-        await composeBtn.first().click();
-      }
-      await adaApp.locator('td[contenteditable="true"]').nth(0).fill("bob");
+      // Redesigned shell: open the compose sheet via the sidebar's
+      // "New message" button, then drive the real <input>/<textarea>
+      // fields. The recipient badge under the To input renders the
+      // fingerprint short form once `address_book::lookup` resolves.
+      await adaApp.locator('[data-testid="fm-compose-btn"]').click();
+      const adaSheet = adaApp.locator('[data-testid="fm-compose-sheet"]');
+      await adaSheet
+        .locator('input[placeholder="alias or address"]')
+        .fill("bob");
       await expect(
         adaApp.getByTestId("compose-recipient-fingerprint"),
         "fingerprint badge resolves for bob",
       ).toBeVisible({ timeout: 15_000 });
-      await adaApp
-        .locator('td[contenteditable="true"]')
-        .nth(1)
-        .fill("hello bob");
-      await adaApp
-        .locator('div[contenteditable="true"]')
-        .last()
-        .fill("body text");
+      await adaSheet.locator('input[placeholder="subject"]').fill("hello bob");
+      await adaSheet.locator("textarea.sheet-textarea").fill("body text");
 
       const sendStart = Date.now();
-      await adaApp.getByRole("button", { name: "Send" }).click();
+      await adaApp.locator('[data-testid="fm-send"]').click();
 
       // PR #38: send must spawn_forever. PR #39: AFT resume after
       // UserResponse. PR #40: defensive UpdateResponse summary deser.
