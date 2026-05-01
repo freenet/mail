@@ -470,3 +470,105 @@ test.describe("Address book: import contact and display", () => {
     ).toHaveCount(0, { timeout: 5_000 });
   });
 });
+
+// Drafts (issue #47/47a). Offline mode talks to a stubbed delegate path
+// (no use-node), so the optimistic local update from the compose form is
+// what these tests observe. The delegate roundtrip itself is covered by
+// the unit tests in `modules/mail-local-state`.
+test.describe("Drafts folder (#47a)", () => {
+  test("typing in compose populates Drafts; reopening restores fields", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await waitForApp(page);
+    await selectIdentity(page, "address1");
+
+    await openCompose(page);
+    await fillCompose(page, "address2", "draft subject", "draft body text");
+
+    // Close the sheet without sending: draft should persist in the folder.
+    const sheet = page.locator('[data-testid="fm-compose-sheet"]');
+    await sheet.locator(".sheet-x").click();
+    await expect(sheet).toHaveCount(0);
+
+    // Switch to Drafts. The card carries the typed To/subject/body.
+    await page.locator('[data-testid="fm-folder-drafts"]').click();
+    const draftCard = page
+      .locator('[data-testid="fm-draft-card"]')
+      .first();
+    await expect(draftCard).toBeVisible();
+    await expect(draftCard.locator(".msg-sender")).toContainText("address2");
+    await expect(draftCard.locator(".msg-subj")).toContainText(
+      "draft subject",
+    );
+    await expect(draftCard.locator(".msg-prev")).toContainText(
+      "draft body text",
+    );
+
+    // Click the card → compose sheet re-opens with fields prefilled.
+    await draftCard.click();
+    const reopened = page.locator('[data-testid="fm-compose-sheet"]');
+    await reopened.waitFor({ timeout: 5_000 });
+    await expect(
+      reopened.locator('input[placeholder="alias or address"]'),
+    ).toHaveValue("address2");
+    await expect(
+      reopened.locator('input[placeholder="subject"]'),
+    ).toHaveValue("draft subject");
+    await expect(reopened.locator("textarea.sheet-textarea")).toHaveValue(
+      "draft body text",
+    );
+  });
+
+  test("Discard removes the draft", async ({ page }) => {
+    await page.goto("/");
+    await waitForApp(page);
+    await selectIdentity(page, "address1");
+
+    await openCompose(page);
+    await fillCompose(page, "address2", "to be discarded", "throwaway");
+
+    // Discard from the footer button.
+    const sheet = page.locator('[data-testid="fm-compose-sheet"]');
+    await sheet.getByRole("button", { name: "Discard" }).click();
+    await expect(sheet).toHaveCount(0);
+
+    // Drafts folder is empty again.
+    await page.locator('[data-testid="fm-folder-drafts"]').click();
+    await expect(page.locator('[data-testid="fm-draft-card"]')).toHaveCount(0);
+  });
+
+  test("Send removes the draft", async ({ page }) => {
+    await page.goto("/");
+    await waitForApp(page);
+    await selectIdentity(page, "address1");
+
+    await openCompose(page);
+    await fillCompose(page, "address2", "send and clear", "body");
+
+    await Promise.all([
+      page.locator('[data-testid="fm-compose-sheet"]').waitFor({ state: "detached", timeout: 10_000 }),
+      clickSend(page),
+    ]);
+
+    await page.locator('[data-testid="fm-folder-drafts"]').click();
+    await expect(page.locator('[data-testid="fm-draft-card"]')).toHaveCount(0);
+  });
+
+  test("draft folder count badge reflects pending drafts", async ({ page }) => {
+    await page.goto("/");
+    await waitForApp(page);
+    await selectIdentity(page, "address1");
+
+    const draftsBtn = page.locator('[data-testid="fm-folder-drafts"]');
+    // Initially no count badge text.
+    await expect(draftsBtn.locator(".count")).toHaveText("");
+
+    await openCompose(page);
+    await fillCompose(page, "address2", "counted", "yo");
+    const sheet = page.locator('[data-testid="fm-compose-sheet"]');
+    await sheet.locator(".sheet-x").click();
+
+    await expect(draftsBtn.locator(".count")).toHaveText("1");
+  });
+});

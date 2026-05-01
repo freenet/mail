@@ -598,13 +598,24 @@ mod menu {
         }
     }
 
+    /// Initial values handed to the compose sheet on open. `draft_id` is set
+    /// when the user re-opens an existing draft from the Drafts folder; the
+    /// sheet keeps that id so SaveDraft / DeleteDraft target the same row.
+    #[derive(Default, Clone)]
+    pub(super) struct ComposePrefill {
+        pub to: String,
+        pub subject: String,
+        pub body: String,
+        pub draft_id: Option<String>,
+    }
+
     #[derive(Default)]
     pub(super) struct MenuSelection {
         folder: Folder,
         email: Option<u64>,
         new_msg: bool,
         search: String,
-        compose_prefill: Option<(String, String)>,
+        compose_prefill: Option<ComposePrefill>,
     }
 
     impl MenuSelection {
@@ -621,10 +632,21 @@ mod menu {
         pub fn open_compose_with(&mut self, to: String, subject: String) {
             self.new_msg = true;
             self.email = None;
-            self.compose_prefill = Some((to, subject));
+            self.compose_prefill = Some(ComposePrefill {
+                to,
+                subject,
+                body: String::new(),
+                draft_id: None,
+            });
         }
 
-        pub fn take_compose_prefill(&mut self) -> Option<(String, String)> {
+        pub fn open_draft(&mut self, prefill: ComposePrefill) {
+            self.new_msg = true;
+            self.email = None;
+            self.compose_prefill = Some(prefill);
+        }
+
+        pub fn take_compose_prefill(&mut self) -> Option<ComposePrefill> {
             self.compose_prefill.take()
         }
 
@@ -671,10 +693,11 @@ thread_local! {
     static DELAYED_ACTIONS: RefCell<Vec<LocalBoxFuture<'static, ()>>> = RefCell::new(Vec::new());
 }
 
-fn folder_count(emails: &[Message], folder: menu::Folder) -> usize {
+fn folder_count(emails: &[Message], folder: menu::Folder, alias: &str) -> usize {
     match folder {
         menu::Folder::Inbox => emails.iter().filter(|m| !m.read).count(),
-        // Sent / Drafts / Archive aren't backed yet (#47). Show 0.
+        menu::Folder::Drafts => crate::local_state::drafts_for(alias).len(),
+        // Sent / Archive aren't backed yet (#47b/#47c). Show 0.
         _ => 0,
     }
 }
@@ -757,6 +780,15 @@ fn Sidebar() -> Element {
     let inbox = use_context::<Signal<InboxView>>();
     let emails_snapshot: Vec<Message> = inbox.read().messages.borrow().clone();
     let active = menu_selection.read().folder();
+    let active_alias = user
+        .read()
+        .logged_id()
+        .map(|id| id.alias.to_string())
+        .unwrap_or_default();
+    // Track local-state generation so Drafts count re-renders when the
+    // user types into the compose sheet (autosave bumps `GENERATION`).
+    let _local_gen = crate::local_state::GENERATION
+        .load(std::sync::atomic::Ordering::Relaxed);
     rsx! {
         nav { class: "sidebar",
             button {
@@ -778,7 +810,7 @@ fn Sidebar() -> Element {
                         .into_iter()
                         .map(|f| {
                             let cls = if f == active { "nav-item active" } else { "nav-item" };
-                            let count = folder_count(&emails_snapshot, f);
+                            let count = folder_count(&emails_snapshot, f, &active_alias);
                             let count_text = if count > 0 { count.to_string() } else { String::new() };
                             let testid = format!("fm-folder-{}", f.label().to_lowercase());
                             rsx! {
@@ -843,9 +875,31 @@ fn MessageList() -> Element {
             let inbox = inbox.read();
             let mut emails = inbox.messages.borrow_mut();
             emails.clear();
+            let alias = id.alias.to_string();
             for msg in &current_model.borrow().messages {
-                let m = Message::from(msg.clone());
+                let mut m = Message::from(msg.clone());
+                // Read-state survives reload because it lives in the
+                // mail-local-state delegate, not just `mark_as_read`'s
+                // local mutation. See issue #47/47a.
+                if crate::local_state::is_read(&alias, m.id) {
+                    m.read = true;
+                }
                 emails.push(m);
+            }
+            // Merge kept-locally messages (b): rows the inbox contract has
+            // already evicted but the user has read. They are always read,
+            // and dedup by id against the live contract messages.
+            for (mid, kept) in crate::local_state::kept_for(&alias) {
+                if emails.iter().any(|m| m.id == mid) {
+                    continue;
+                }
+                emails.push(Message {
+                    id: mid,
+                    from: kept.from.into(),
+                    title: kept.title.into(),
+                    content: kept.content.into(),
+                    read: true,
+                });
             }
             crate::log::debug!("active id: {:?}; emails number: {}", id.alias, emails.len());
         }
@@ -865,6 +919,10 @@ fn MessageList() -> Element {
     let folder = menu_selection.read().folder();
     let search = menu_selection.read().search().to_string();
     let selected_id = menu_selection.read().email();
+    // Touch the local-state generation so this component re-renders when
+    // drafts are added/removed.
+    let _local_gen = crate::local_state::GENERATION
+        .load(std::sync::atomic::Ordering::Relaxed);
 
     let inbox_view = inbox.read();
     let emails = inbox_view.messages.borrow();
@@ -877,7 +935,24 @@ fn MessageList() -> Element {
     } else {
         Vec::new()
     };
-    let count = visible.len();
+    let active_alias = user
+        .read()
+        .logged_id()
+        .map(|id| id.alias.to_string())
+        .unwrap_or_default();
+    let drafts: Vec<(String, mail_local_state::Draft)> = if matches!(folder, menu::Folder::Drafts) {
+        let mut d = crate::local_state::drafts_for(&active_alias);
+        // Newest first.
+        d.sort_by_key(|b| std::cmp::Reverse(b.1.updated_at));
+        d
+    } else {
+        Vec::new()
+    };
+    let count = if matches!(folder, menu::Folder::Drafts) {
+        drafts.len()
+    } else {
+        visible.len()
+    };
 
     rsx! {
         section { class: "list-col",
@@ -886,7 +961,44 @@ fn MessageList() -> Element {
                 span { class: "list-count", "{count}" }
             }
             div { class: "list-scroll", "data-testid": "fm-list",
-                if visible.is_empty() {
+                if matches!(folder, menu::Folder::Drafts) {
+                    if drafts.is_empty() {
+                        div { style: "padding:24px 18px; font-family:'Geist Mono',monospace; font-size:10px; letter-spacing:0.1em; text-transform:uppercase; color:var(--ink4);",
+                            "Drafts is empty"
+                        }
+                    } else {
+                        {
+                            drafts.into_iter().map(|(id, d)| {
+                                let to_disp = if d.to.is_empty() { "(no recipient)".to_string() } else { d.to.clone() };
+                                let subj_disp = if d.subject.is_empty() { "(no subject)".to_string() } else { d.subject.clone() };
+                                let preview = d.body.clone();
+                                let prefill = menu::ComposePrefill {
+                                    to: d.to.clone(),
+                                    subject: d.subject.clone(),
+                                    body: d.body.clone(),
+                                    draft_id: Some(id.clone()),
+                                };
+                                let id_for_dom = id.clone();
+                                rsx! {
+                                    article {
+                                        class: "msg-card",
+                                        "data-testid": "fm-draft-card",
+                                        "data-draft-id": "{id_for_dom}",
+                                        onclick: move |_| {
+                                            menu_selection.write().open_draft(prefill.clone());
+                                        },
+                                        div { class: "msg-row1",
+                                            span { class: "msg-sender", "{to_disp}" }
+                                            span { class: "msg-time", "" }
+                                        }
+                                        div { class: "msg-subj", "{subj_disp}" }
+                                        div { class: "msg-prev", "{preview}" }
+                                    }
+                                }
+                            })
+                        }
+                    }
+                } else if visible.is_empty() {
                     div { style: "padding:24px 18px; font-family:'Geist Mono',monospace; font-size:10px; letter-spacing:0.1em; text-transform:uppercase; color:var(--ink4);",
                         "No messages"
                     }
@@ -965,6 +1077,7 @@ fn OpenMessage(msg: Message) -> Element {
     let client = crate::api::WEB_API_SENDER.get().unwrap();
     let mut inbox = use_context::<Signal<InboxView>>();
     let inbox_data = use_context::<InboxesData>();
+    let user = use_context::<Signal<User>>();
     let email_id = [msg.id];
 
     let result = inbox
@@ -974,6 +1087,45 @@ fn OpenMessage(msg: Message) -> Element {
     DELAYED_ACTIONS.with(|queue| {
         queue.borrow_mut().push(result);
     });
+
+    // Persist read flag + a local snapshot of the message in the
+    // mail-local-state delegate (issue #47/47a). This is additive to the
+    // existing inbox-contract `remove_messages` call above: the contract
+    // still evicts the row, but the kept-locally copy lets the UI keep
+    // showing the message after reload.
+    {
+        let alias = user
+            .read()
+            .logged_id()
+            .map(|id| id.alias.to_string())
+            .unwrap_or_default();
+        if !alias.is_empty() {
+            let kept = mail_local_state::KeptMessage {
+                from: msg.from.to_string(),
+                title: msg.title.to_string(),
+                content: msg.content.to_string(),
+                kept_at: chrono::Utc::now().timestamp_millis(),
+            };
+            crate::local_state::local_mark_read(&alias, msg.id, kept.clone());
+            #[cfg(feature = "use-node")]
+            {
+                let mut client_clone = client.clone();
+                let alias_for_send = alias.clone();
+                spawn(async move {
+                    if let Err(e) = crate::local_state::mark_read(
+                        &mut client_clone,
+                        alias_for_send,
+                        msg.id,
+                        kept,
+                    )
+                    .await
+                    {
+                        crate::log::error(format!("mark_read failed: {e}"), None);
+                    }
+                });
+            }
+        }
+    }
 
     let from = msg.from.clone();
     let from_initial = from.chars().next().unwrap_or('·').to_string();
@@ -1089,16 +1241,78 @@ fn ComposeSheet() -> Element {
     let user_alias = user.read().logged_id().unwrap().alias.to_string();
 
     let prefill = menu_selection.write().take_compose_prefill();
-    let initial_to = prefill.as_ref().map(|p| p.0.clone()).unwrap_or_default();
-    let initial_subj = prefill.as_ref().map(|p| p.1.clone()).unwrap_or_default();
+    let initial_to = prefill.as_ref().map(|p| p.to.clone()).unwrap_or_default();
+    let initial_subj = prefill.as_ref().map(|p| p.subject.clone()).unwrap_or_default();
+    let initial_body = prefill.as_ref().map(|p| p.body.clone()).unwrap_or_default();
+    // Reuse the draft id when re-opening an existing draft so SaveDraft
+    // overwrites the same row instead of creating a duplicate.
+    let initial_draft_id = prefill
+        .as_ref()
+        .and_then(|p| p.draft_id.clone())
+        .unwrap_or_else(crate::local_state::new_draft_id);
 
     let mut to = use_signal(|| initial_to.clone());
     let mut title = use_signal(|| initial_subj.clone());
-    let mut content = use_signal(String::new);
+    let mut content = use_signal(|| initial_body.clone());
+    let draft_id = use_signal(|| initial_draft_id.clone());
+
+    // Persist the draft on every keystroke. Optimistic local update (the
+    // Drafts folder reflects the typing immediately) plus a fire-and-forget
+    // send to the delegate. Empty drafts are skipped — opening the sheet,
+    // typing nothing, closing should not produce a Drafts entry.
+    let alias_for_save = user_alias.clone();
+    let autosave = use_callback(move |()| {
+        let to_v = to.read().clone();
+        let subj_v = title.read().clone();
+        let body_v = content.read().clone();
+        if to_v.is_empty() && subj_v.is_empty() && body_v.is_empty() {
+            return;
+        }
+        let id = draft_id.read().clone();
+        let updated_at = chrono::Utc::now().timestamp_millis();
+        let draft = mail_local_state::Draft {
+            to: to_v,
+            subject: subj_v,
+            body: body_v,
+            updated_at,
+        };
+        crate::local_state::local_save_draft(&alias_for_save, &id, draft.clone());
+        #[cfg(feature = "use-node")]
+        {
+            let mut client_clone = client.clone();
+            let alias = alias_for_save.clone();
+            spawn(async move {
+                if let Err(e) =
+                    crate::local_state::save_draft(&mut client_clone, alias, id, draft).await
+                {
+                    crate::log::error(format!("save_draft failed: {e}"), None);
+                }
+            });
+        }
+    });
 
     let recipient_lookup = use_memo(move || address_book::lookup(&to.read()));
 
     let alias = user_alias.clone();
+    let alias_for_delete = user_alias.clone();
+    // Delete the draft both locally (immediate UI update) and via the
+    // delegate. Used on Send (success) and Discard.
+    let delete_draft_now = use_callback(move |()| {
+        let id = draft_id.read().clone();
+        crate::local_state::local_delete_draft(&alias_for_delete, &id);
+        #[cfg(feature = "use-node")]
+        {
+            let mut client_clone = client.clone();
+            let alias = alias_for_delete.clone();
+            spawn(async move {
+                if let Err(e) =
+                    crate::local_state::delete_draft(&mut client_clone, alias, id).await
+                {
+                    crate::log::error(format!("delete_draft failed: {e}"), None);
+                }
+            });
+        }
+    });
     let send_msg = move |_| {
         let to_val = to.read().clone();
         let recipient = match address_book::lookup(&to_val) {
@@ -1155,6 +1369,7 @@ fn ComposeSheet() -> Element {
                 crate::log::error(format!("{e}"), Some(TryNodeAction::SendMessage));
             }
         }
+        delete_draft_now(());
         menu_selection.write().at_new_msg();
         toast.set(Some("Sent".to_string()));
         spawn_toast_clear();
@@ -1185,7 +1400,7 @@ fn ComposeSheet() -> Element {
                         r#type: "text",
                         placeholder: "alias or address",
                         value: "{to}",
-                        oninput: move |ev| { to.set(ev.value()); },
+                        oninput: move |ev| { to.set(ev.value()); autosave(()); },
                     }
                 }
                 {
@@ -1222,7 +1437,7 @@ fn ComposeSheet() -> Element {
                         r#type: "text",
                         placeholder: "subject",
                         value: "{title}",
-                        oninput: move |ev| { title.set(ev.value()); },
+                        oninput: move |ev| { title.set(ev.value()); autosave(()); },
                     }
                 }
                 div { class: "sheet-body",
@@ -1230,7 +1445,7 @@ fn ComposeSheet() -> Element {
                         class: "sheet-textarea",
                         placeholder: "Write something thoughtful…",
                         value: "{content}",
-                        oninput: move |ev| { content.set(ev.value()); },
+                        oninput: move |ev| { content.set(ev.value()); autosave(()); },
                     }
                 }
                 div { class: "sheet-foot",
@@ -1241,7 +1456,10 @@ fn ComposeSheet() -> Element {
                     div { class: "foot-actions",
                         button {
                             class: "btn btn-ghost",
-                            onclick: move |_| { menu_selection.write().at_new_msg(); },
+                            onclick: move |_| {
+                                delete_draft_now(());
+                                menu_selection.write().at_new_msg();
+                            },
                             "Discard"
                         }
                         button {

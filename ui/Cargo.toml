@@ -39,6 +39,8 @@ freenet-email-inbox = { workspace = true, features = ["wasmbind"] }
 freenet-stdlib = { workspace = true, features = ["net"] }
 freenet-aft-interface = { workspace = true }
 identity-management = { workspace = true }
+mail-local-state = { workspace = true }
+uuid = { version = "1", features = ["v4", "js"] }
 
 [target.'cfg(target_family = "wasm")'.dependencies]
 getrandom = { version = "0.2", features = ["js"] }
