@@ -363,6 +363,21 @@ impl InboxView {
 
     #[cfg(feature = "example-data")]
     fn load_example_messages(&self, id: &Identity) -> Result<(), DynError> {
+        // Idempotent: only reload from MOCK_SENT_MESSAGES + seed mocks
+        // when the active identity changes. `app()` re-renders many
+        // times per session (toast set, signal writes, etc.) and each
+        // re-render used to call this — which drained MOCK_SENT_MESSAGES
+        // on the *first* render after login, then repopulated `messages`
+        // with only the seed mocks on subsequent renders, losing any
+        // cross-identity reply that had just been merged in.
+        {
+            let active = self.active_id.borrow();
+            if *active == id.id && !self.messages.borrow().is_empty() {
+                return Ok(());
+            }
+        }
+        *self.active_id.borrow_mut() = id.id;
+
         let body: Cow<'static, str> = "Lorem ipsum dolor sit amet, consectetur adipiscing elit. \
              Sed do eiusmod tempor incidunt ut labore et dolore magna aliqua."
             .into();
@@ -796,6 +811,10 @@ fn Sidebar() -> Element {
                         let mut state = user.write();
                         state.logged = false;
                         state.active_id = None;
+                        // Clear the per-identity message cache so the next
+                        // login re-runs `load_example_messages` instead of
+                        // hitting the idempotency guard with stale rows.
+                        inbox.read().messages.borrow_mut().clear();
                     },
                     span { class: "icon", "⏏" }
                     span { class: "label", "Log out" }
