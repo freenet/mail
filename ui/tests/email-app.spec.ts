@@ -376,8 +376,10 @@ test.describe("Address book: import contact and display", () => {
         suggested_description: "Test contact",
       };
       const json = JSON.stringify(card);
-      // btoa produces standard base64, matching Rust's base64::STANDARD engine.
-      return `contact://${btoa(json)}`;
+      // Use the full share-text format (verify line + URI), matching what
+      // the Share modal actually copies to the clipboard.  btoa produces
+      // standard base64, matching Rust's base64::STANDARD engine.
+      return `verify: foo-bar-baz-qux-quux-corge\ncontact://${btoa(json)}`;
     });
 
     // ── Step 2: open the import-contact dialog ────────────────────────────
@@ -404,17 +406,22 @@ test.describe("Address book: import contact and display", () => {
     // ── Step 4: complete import and verify contact appears ────────────────
     await page.locator("button").filter({ hasText: "Import" }).click();
 
-    // Import form closes; Contacts section shows the new entry.
-    await expect(page.getByText("charlie-test")).toBeVisible({
+    // Import form closes; Contacts section heading appears.
+    await expect(page.getByText("Contacts", { exact: true })).toBeVisible({
       timeout: 5_000,
     });
 
-    // ── Step 5: compose accepts the imported contact alias ────────────────
-    //
-    // address_book::lookup("charlie-test") will find the contact and return a
-    // Recipient.  The send will fail at ek_from_bytes (arbitrary byte array),
-    // but compose shows the form and accepts the alias in the To field, which
-    // is the behaviour we're testing here.
+    // The contact's local label is rendered as a contact card title.
+    const contactRow = page
+      .locator(".card-content")
+      .filter({ hasText: "charlie-test" });
+    await expect(contactRow).toBeVisible({ timeout: 5_000 });
+
+    // The fingerprint short form (first two BIP-39 words joined by `-`) is
+    // shown next to the alias for disambiguation.
+    await expect(contactRow).toContainText(/[a-z]+-[a-z]+/);
+
+    // ── Step 5: compose recognises the contact via the recipient badge ─────
     await selectIdentity(page, "address1");
     await clickMenu(page, "Write message");
     await expect(page.locator("h3")).toContainText("New message");
@@ -423,22 +430,18 @@ test.describe("Address book: import contact and display", () => {
     await toCell.click();
     await toCell.fill("charlie-test");
 
-    // Subject and body so the form is complete.
-    const subjectCell = page
-      .locator("tr")
-      .filter({ hasText: "Subject" })
-      .locator("td");
-    await subjectCell.click();
-    await subjectCell.fill("hello charlie");
-
-    const bodyDiv = page.locator(".box div[contenteditable]");
-    await bodyDiv.click();
-    await bodyDiv.fill("test body");
-
-    // The compose form with the alias typed in To should still be visible
-    // (no "not found" error crashed the UI before Send is even clicked).
+    // Recipient badge: contact was imported without ticking "verified", so
+    // the warning tag is shown along with the fingerprint line.  This proves
+    // address_book::lookup resolved the typed alias to the imported Contact.
+    await expect(page.locator(".tag.is-warning")).toContainText("unverified", {
+      timeout: 5_000,
+    });
     await expect(
-      page.locator("tr").filter({ hasText: "To" }).locator("td")
-    ).toContainText("charlie-test");
+      page.locator("td").filter({ hasText: "fingerprint:" })
+    ).toBeVisible();
+
+    // Sanity: typing a non-existent alias removes the badge.
+    await toCell.fill("nobody-here");
+    await expect(page.locator(".tag")).toHaveCount(0, { timeout: 2_000 });
   });
 });

@@ -77,6 +77,13 @@ impl Identity {
             .encode()
             .to_vec()
     }
+
+    /// Encoded ML-KEM-768 encapsulation key bytes (1184 bytes). Public
+    /// key half of `ml_kem_dk`; senders use it to encrypt to this identity.
+    pub(crate) fn ml_kem_ek_bytes(&self) -> Vec<u8> {
+        use ml_kem::kem::KeyExport;
+        self.ml_kem_dk.encapsulation_key().to_bytes().to_vec()
+    }
 }
 
 impl Clone for Identity {
@@ -447,9 +454,17 @@ struct ImportBackup(bool);
 struct ShareContact(bool);
 
 /// Pending share-card data passed from the click handler to
-/// `ShareContactModal` via context. `(identity alias, card share text)`.
+/// `ShareContactModal` via context.
 #[derive(Default, Clone)]
-struct SharePending(Option<(String, String)>);
+struct SharePending {
+    data: Option<SharePendingData>,
+}
+
+#[derive(Clone)]
+struct SharePendingData {
+    alias: String,
+    share_text: String,
+}
 
 struct ImportContact(bool);
 
@@ -584,10 +599,12 @@ pub(super) fn Identities() -> Element {
                                         let card = crate::app::address_book::ContactCard::from_identity(&identity);
                                         let fp = card.fingerprint().join("-");
                                         let share_text = format!("verify: {}\n{}", fp, card.encode());
-                                        share_pending.set(SharePending(Some((
-                                            identity.alias.to_string(),
-                                            share_text,
-                                        ))));
+                                        share_pending.set(SharePending {
+                                            data: Some(SharePendingData {
+                                                alias: identity.alias.to_string(),
+                                                share_text,
+                                            }),
+                                        });
                                         share_contact_form.write().0 = true;
                                     }
                                 },
@@ -1050,9 +1067,10 @@ fn ShareContactModal() -> Element {
     let share_pending = use_context::<Signal<SharePending>>();
     let (alias, share_text) = share_pending
         .read()
-        .0
-        .clone()
-        .unwrap_or_else(|| ("".into(), "".into()));
+        .data
+        .as_ref()
+        .map(|d| (d.alias.clone(), d.share_text.clone()))
+        .unwrap_or_default();
     let mut copied = use_signal(|| false);
 
     rsx! {
@@ -1317,6 +1335,10 @@ fn ContactsSection() -> Element {
                                         actions.send(NodeAction::DeleteContact {
                                             alias: del_alias.clone(),
                                         });
+                                        // Bump the login controller so this section
+                                        // (which reads `all_contacts()` synchronously,
+                                        // not via a Signal) re-renders.
+                                        login_controller.write().updated = true;
                                     },
                                     span { class: "icon is-small", i { class: "fas fa-trash" } }
                                 }

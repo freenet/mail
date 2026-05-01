@@ -860,6 +860,11 @@ fn NewMessageWindow() -> Element {
     let mut title = use_signal(String::new);
     let mut content = use_signal(String::new);
 
+    // Cached recipient lookup — re-runs only when `to` changes, not on
+    // every keystroke in subject/body. lookup() clones ~3KB and runs
+    // BLAKE3 for the fingerprint; we don't want that per render.
+    let recipient_lookup = use_memo(move || address_book::lookup(&to.read()));
+
     let alias = user_alias.to_string();
     let send_msg = move |_| {
         let to_val = to.read().clone();
@@ -939,21 +944,16 @@ fn NewMessageWindow() -> Element {
                             td { style: "width: 100%", contenteditable: true, oninput: move |ev| { to.set(ev.value().clone()); } }
                         }
                         {
-                            let to_val = to.read();
-                            address_book::lookup(&to_val).map(|r| {
-                                let badge_class = if r.is_own || r.verified {
-                                    "tag is-success is-light"
-                                } else {
-                                    "tag is-warning is-light"
-                                };
-                                let badge_label = if r.is_own {
-                                    "you".to_string()
-                                } else if r.verified {
-                                    "verified".to_string()
-                                } else {
-                                    "unverified".to_string()
-                                };
-                                let fp_short = format!("{}-{}", r.fingerprint[0], r.fingerprint[1]);
+                            recipient_lookup.read().as_ref().map(|r| {
+                                let (badge_class, badge_label): (&str, &str) =
+                                    if r.is_own {
+                                        ("tag is-success is-light", "you")
+                                    } else if r.verified {
+                                        ("tag is-success is-light", "verified")
+                                    } else {
+                                        ("tag is-warning is-light", "unverified")
+                                    };
+                                let fp_short = r.fingerprint_short();
                                 rsx! {
                                     tr {
                                         th {}

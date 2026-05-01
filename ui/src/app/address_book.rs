@@ -81,20 +81,28 @@ impl ContactCard {
     }
 
     pub fn decode(input: &str) -> Result<Self, String> {
-        let b64 = input
-            .trim()
-            .strip_prefix(Self::URI_SCHEME)
-            .unwrap_or(input.trim());
+        // Accept three forms:
+        //   1. Full share text:  "verify: word-...\ncontact://<base64>"
+        //   2. URI alone:        "contact://<base64>"
+        //   3. Bare base64:      "<base64>"
+        // For (1) and (2) we slice from the first `contact://` to the end of
+        // the line; for (3) we feed the trimmed input straight to base64.
+        let trimmed = input.trim();
+        let b64 = if let Some(start) = trimmed.find(Self::URI_SCHEME) {
+            let rest = &trimmed[start + Self::URI_SCHEME.len()..];
+            rest.split_whitespace().next().unwrap_or(rest)
+        } else {
+            trimmed
+        };
         let json = B64.decode(b64).map_err(|e| format!("base64 decode: {e}"))?;
         serde_json::from_slice(&json).map_err(|e| format!("json decode: {e}"))
     }
 
     pub fn from_identity(identity: &Identity) -> Self {
-        use ml_kem::kem::KeyExport;
         Self {
             version: Self::VERSION,
             ml_dsa_vk_bytes: identity.ml_dsa_vk_bytes(),
-            ml_kem_ek_bytes: identity.ml_kem_dk.encapsulation_key().to_bytes().to_vec(),
+            ml_kem_ek_bytes: identity.ml_kem_ek_bytes(),
             suggested_alias: Some(identity.alias.to_string()),
             suggested_description: if identity.description.is_empty() {
                 None
@@ -150,7 +158,7 @@ enum Entry {
 
 /// A resolved recipient ready for message composition.
 /// Carries everything the send path needs without exposing private material.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Recipient {
     pub local_alias: Rc<str>,
     pub ml_dsa_vk_bytes: Vec<u8>,
@@ -162,13 +170,10 @@ pub struct Recipient {
 }
 
 impl Recipient {
-    /// Display label for the compose picker: `alias (word-word)`.
-    #[allow(dead_code)]
-    pub fn display_label(&self) -> String {
-        format!(
-            "{} ({}-{})",
-            self.local_alias, self.fingerprint[0], self.fingerprint[1]
-        )
+    /// First two fingerprint words joined with `-`. Cheap disambiguator
+    /// shown in the compose picker.
+    pub fn fingerprint_short(&self) -> String {
+        format!("{}-{}", self.fingerprint[0], self.fingerprint[1])
     }
 }
 
@@ -203,14 +208,11 @@ pub fn insert_contact(contact: Contact) -> Result<(), String> {
         // Self-import guard: enforced here so any caller path (UI form,
         // future API, test harness) gets the same protection.
         for entry in ab.values() {
-            if let Entry::Own(id) = entry {
-                use ml_kem::kem::KeyExport;
-                let own_ek = id.ml_kem_dk.encapsulation_key().to_bytes();
-                if id.ml_dsa_vk_bytes() == contact.ml_dsa_vk_bytes
-                    && own_ek.as_slice() == contact.ml_kem_ek_bytes.as_slice()
-                {
-                    return Err("cannot import your own identity as a contact".into());
-                }
+            if let Entry::Own(id) = entry
+                && id.ml_dsa_vk_bytes() == contact.ml_dsa_vk_bytes
+                && id.ml_kem_ek_bytes() == contact.ml_kem_ek_bytes
+            {
+                return Err("cannot import your own identity as a contact".into());
             }
         }
         if let Some(existing) = ab.get(contact.local_alias.as_ref()) {
@@ -253,8 +255,7 @@ pub fn lookup(alias: &str) -> Option<Recipient> {
         ab.borrow().get(alias).map(|entry| match entry {
             Entry::Own(id) => {
                 let ml_dsa_vk_bytes = id.ml_dsa_vk_bytes();
-                use ml_kem::kem::KeyExport;
-                let ml_kem_ek_bytes = id.ml_kem_dk.encapsulation_key().to_bytes().to_vec();
+                let ml_kem_ek_bytes = id.ml_kem_ek_bytes();
                 let fingerprint = fingerprint_words(&ml_dsa_vk_bytes, &ml_kem_ek_bytes);
                 Recipient {
                     local_alias: id.alias.clone(),
@@ -301,13 +302,8 @@ pub fn all_contacts() -> Vec<Contact> {
 pub fn is_own_fingerprint(vk_bytes: &[u8], ek_bytes: &[u8]) -> bool {
     ADDRESS_BOOK.with(|ab| {
         ab.borrow().values().any(|e| {
-            if let Entry::Own(id) = e {
-                use ml_kem::kem::KeyExport;
-                id.ml_dsa_vk_bytes() == vk_bytes
-                    && id.ml_kem_dk.encapsulation_key().to_bytes().as_slice() == ek_bytes
-            } else {
-                false
-            }
+            matches!(e, Entry::Own(id)
+                if id.ml_dsa_vk_bytes() == vk_bytes && id.ml_kem_ek_bytes() == ek_bytes)
         })
     })
 }
@@ -439,6 +435,28 @@ mod tests {
         let encoded = card.encode();
         let bare = encoded.strip_prefix("contact://").unwrap();
         let decoded = ContactCard::decode(bare).expect("bare base64 should decode");
+        assert_eq!(decoded.ml_dsa_vk_bytes, card.ml_dsa_vk_bytes);
+    }
+
+    #[test]
+    fn contact_card_decode_share_text_with_verify_line() {
+        // The Share modal copies a multi-line blob: a `verify:` line for
+        // human comparison followed by the `contact://...` URI. The import
+        // form must accept the whole blob, not just the URI.
+        let card = ContactCard {
+            version: 1,
+            ml_dsa_vk_bytes: vec![5u8; 10],
+            ml_kem_ek_bytes: vec![6u8; 10],
+            suggested_alias: Some("alice".into()),
+            suggested_description: None,
+        };
+        let share_text = format!(
+            "verify: {}\n{}",
+            card.fingerprint().join("-"),
+            card.encode()
+        );
+        let decoded =
+            ContactCard::decode(&share_text).expect("share text with verify line should decode");
         assert_eq!(decoded.ml_dsa_vk_bytes, card.ml_dsa_vk_bytes);
     }
 }
