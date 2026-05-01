@@ -73,6 +73,21 @@ fn main() {
             "cargo make generate-identity-params",
         ),
         (
+            "modules/mail-local-state/build/freenet/mail_local_state",
+            "mail-local-state delegate WASM",
+            "cargo make build-mail-local-state-delegate",
+        ),
+        (
+            "modules/mail-local-state/build/mail_local_state_code_hash",
+            "mail-local-state code hash",
+            "cargo make build-mail-local-state-delegate",
+        ),
+        (
+            "modules/mail-local-state/build/mail-local-state-params",
+            "mail-local-state parameters (serialized)",
+            "cargo make generate-mail-local-state-params",
+        ),
+        (
             "published-contract/contract-id.txt",
             "committed web-container contract id",
             "cargo make update-published-contract",

@@ -93,6 +93,54 @@ printf '%s' "$hash" > build/identity_management_code_hash
 echo "wrote build/identity_management_code_hash: $hash"
 '''
 
+[tasks.build-mail-local-state-delegate]
+description = "Build mail-local-state delegate WASM + code hash"
+script_runner = "bash"
+script = '''
+set -euo pipefail
+CRATE_DIR="${CARGO_MAKE_WORKING_DIRECTORY}/modules/mail-local-state"
+cd "$CRATE_DIR"
+CARGO_TARGET_DIR="${CARGO_MAKE_WORKING_DIRECTORY}/target" fdev build \
+    --package-type delegate --features freenet-main-delegate,contract
+hash=$(CARGO_TARGET_DIR="${CARGO_MAKE_WORKING_DIRECTORY}/target" fdev inspect \
+    build/freenet/mail_local_state delegate | \
+    grep 'code hash:' | cut -d' ' -f3)
+mkdir -p build
+printf '%s' "$hash" > build/mail_local_state_code_hash
+echo "wrote build/mail_local_state_code_hash: $hash"
+'''
+
+[tasks.generate-mail-local-state-params]
+description = "Generate the test mail-local-state keypair and serialized params"
+script_runner = "bash"
+script = '''
+set -euo pipefail
+CRATE_DIR="${CARGO_MAKE_WORKING_DIRECTORY}/modules/mail-local-state"
+OUT_DIR="$CRATE_DIR/build"
+KEY_DIR="${CARGO_MAKE_WORKING_DIRECTORY}/test-contract/mail-local-state"
+mkdir -p "$OUT_DIR" "$KEY_DIR"
+
+if [ -f "$OUT_DIR/mail-local-state-params" ] && \
+   [ "$(wc -c < "$OUT_DIR/mail-local-state-params")" -gt 20 ] && \
+   ! grep -q PLACEHOLDER "$OUT_DIR/mail-local-state-params" 2>/dev/null; then
+    echo "mail-local-state-params already present, skipping generation"
+    exit 0
+fi
+
+if [ -f "$KEY_DIR/mail-local-state-key.private.pem" ]; then
+    echo "reusing existing test key at $KEY_DIR"
+    cargo run --quiet --manifest-path "$CRATE_DIR/Cargo.toml" --bin tool -- \
+        --path "$OUT_DIR" --key "$KEY_DIR/mail-local-state-key.private.pem"
+else
+    echo "generating fresh test key at $KEY_DIR"
+    cargo run --quiet --manifest-path "$CRATE_DIR/Cargo.toml" --bin tool -- \
+        --path "$OUT_DIR"
+    mv "$OUT_DIR/mail-local-state-key.private.pem" "$KEY_DIR/"
+    mv "$OUT_DIR/mail-local-state-key.public.pem"  "$KEY_DIR/"
+fi
+echo "wrote $OUT_DIR/mail-local-state-params"
+'''
+
 [tasks.generate-identity-params]
 description = "Generate the test identity-manager keypair and serialized params"
 script_runner = "bash"
@@ -149,7 +197,9 @@ dependencies = [
     "build-token-allocation-record",
     "build-token-generator",
     "build-identity-management-delegate",
+    "build-mail-local-state-delegate",
     "generate-identity-params",
+    "generate-mail-local-state-params",
 ]
 
 # ─── Web container, UI, dev ────────────────────────────────────────────────────

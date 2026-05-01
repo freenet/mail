@@ -198,12 +198,15 @@ mod contract_api {
 }
 
 #[cfg(feature = "use-node")]
+pub(crate) use delegate_api::create_delegate;
+
+#[cfg(feature = "use-node")]
 mod delegate_api {
     use freenet_stdlib::{client_api::DelegateRequest, prelude::*};
 
     use super::*;
 
-    pub(super) async fn create_delegate(
+    pub(crate) async fn create_delegate(
         client: &mut WebApiRequestClient,
         delegate_code_hash: &str,
         delegate_code: &[u8],
@@ -671,6 +674,24 @@ pub(crate) async fn node_comms(
     let identities_key = identity_management::load_aliases(&mut req_sender)
         .await
         .unwrap();
+
+    // Register mail-local-state delegate (drafts + read-state, issue #47/47a).
+    // Eager-register matches the identities pattern above: without it the
+    // first SaveDraft / MarkRead hits a node that's never seen the delegate.
+    match crate::local_state::register_and_init(&mut req_sender).await {
+        Ok(key) => {
+            // Pull initial snapshot. The DelegateResponse handler below
+            // routes the reply by `key` into `local_state::replace_snapshot`.
+            if let Err(e) = crate::local_state::fetch_all(&mut req_sender, &key).await {
+                crate::log::error(format!("local-state initial fetch failed: {e}"), None);
+            }
+            let _ = crate::local_state::LOCAL_STATE_KEY.set(key);
+        }
+        Err(e) => {
+            crate::log::error(format!("local-state delegate register failed: {e}"), None);
+        }
+    }
+
     WEB_API_SENDER.set(req_sender).unwrap();
 
     static IDENTITIES_KEY: OnceLock<DelegateKey> = OnceLock::new();
@@ -1161,8 +1182,14 @@ pub(crate) async fn node_comms(
                 // delegate executor. The identities reload path is dead until the
                 // Phase 1 restore lands; for now, just ignore empty responses on
                 // the identities key.
+                let is_local_state_empty = crate::local_state::LOCAL_STATE_KEY
+                    .get()
+                    .is_some_and(|k| k == &key);
                 if values.is_empty() && &key == IDENTITIES_KEY.get().unwrap() {
                     // no-op: see comment above
+                } else if values.is_empty() && is_local_state_empty {
+                    // Empty local-state response (e.g. SaveDraft / DeleteDraft /
+                    // MarkRead acks) — no AFT-gen lookup needed.
                 } else if values.is_empty() {
                     let found = token_generator_management::CREATED_AFT_GEN.with(|keys| {
                         let pos = keys.borrow().iter().position(|(_, k)| k == &key);
@@ -1199,9 +1226,30 @@ pub(crate) async fn node_comms(
                     }
                 }
                 let is_identities = &key == IDENTITIES_KEY.get().unwrap();
+                let is_local_state = crate::local_state::LOCAL_STATE_KEY
+                    .get()
+                    .is_some_and(|k| k == &key);
                 for msg in values {
                     match msg {
                         freenet_stdlib::prelude::OutboundDelegateMsg::ApplicationMessage(msg) => {
+                            // mail-local-state delegate response (drafts + read-state, #47).
+                            // Payload is a serialized `mail_local_state::LocalState`.
+                            if is_local_state {
+                                match ::mail_local_state::LocalState::try_from(
+                                    msg.payload.as_slice(),
+                                ) {
+                                    Ok(state) => {
+                                        crate::local_state::replace_snapshot(state);
+                                    }
+                                    Err(e) => {
+                                        crate::log::error(
+                                            format!("local-state delegate response deser: {e}"),
+                                            None,
+                                        );
+                                    }
+                                }
+                                continue;
+                            }
                             // Identities-delegate response: payload is a serialized
                             // `IdentityManagement` (HashMap<alias, AliasInfo>). Restore
                             // it into the user's identity list so the login screen
