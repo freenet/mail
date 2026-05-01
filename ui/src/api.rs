@@ -604,7 +604,7 @@ mod identity_management {
 pub(crate) async fn node_comms(
     mut rx: UnboundedReceiver<crate::app::NodeAction>,
     inbox_controller: Signal<crate::app::InboxController>,
-    mut login_controller: Signal<crate::app::LoginController>,
+    login_controller: Signal<crate::app::LoginController>,
     user: Signal<crate::app::User>,
     // todo: refactor: instead of passing this arround,
     // where necessary we could be getting the fresh data via static methods calls to Inbox
@@ -682,6 +682,7 @@ pub(crate) async fn node_comms(
         inbox_to_id: &mut HashMap<ContractKey, Identity>,
         token_rec_to_id: &mut HashMap<ContractKey, Identity>,
         user: Signal<crate::app::User>,
+        mut login_controller: Signal<crate::app::LoginController>,
     ) {
         let mut client = api.sender_half();
         match req {
@@ -1363,7 +1364,7 @@ pub(crate) async fn node_comms(
             }
             req = rx.next() => {
                 let Some(req) = req else { panic!("async action ch closed") };
-                handle_action(req, &api, &mut inbox_contract_to_id, &mut token_contract_to_id, user).await;
+                handle_action(req, &api, &mut inbox_contract_to_id, &mut token_contract_to_id, user, login_controller).await;
             }
             req = api.requests.next() => {
                 let Some(req) = req else { panic!("request ch closed") };
