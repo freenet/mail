@@ -35,25 +35,39 @@ jobs:
             ~/.cargo/bin/cargo-binstall
             ~/.cargo/bin/fdev
             ~/.cargo/bin/dx
-          key: ${{ runner.os }}-cargo-bins-fdev-0.3.201-dx-0.7.3-v3
+          key: ${{ runner.os }}-cargo-bins-fdev-0.3.201-dx-0.7.3-v4
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
+      - name: Verify cached binaries
+        id: verify-bins
+        run: |
+          missing=0
+          for bin in cargo-make cargo-binstall fdev dx; do
+            if [ ! -x "$HOME/.cargo/bin/$bin" ]; then
+              echo "missing: $bin"
+              missing=1
+            fi
+          done
+          echo "missing=$missing" >> "$GITHUB_OUTPUT"
+
       - name: Install cargo-binstall
-        if: steps.cache-bins.outputs.cache-hit != 'true'
+        if: steps.cache-bins.outputs.cache-hit != 'true' || steps.verify-bins.outputs.missing == '1'
         uses: taiki-e/install-action@cargo-binstall
 
       - name: Install cargo-make
-        if: steps.cache-bins.outputs.cache-hit != 'true'
+        if: steps.cache-bins.outputs.cache-hit != 'true' || steps.verify-bins.outputs.missing == '1'
         run: cargo binstall -y --force cargo-make
 
       - name: Install fdev
-        if: steps.cache-bins.outputs.cache-hit != 'true'
-        run: cargo install --force fdev
+        if: steps.cache-bins.outputs.cache-hit != 'true' || steps.verify-bins.outputs.missing == '1'
+        # binstall (prebuilt) is ~30s vs cargo install --force ~10 min
+        # for fdev source compile.
+        run: cargo binstall -y --force --version 0.3.201 fdev
 
       - name: Install Dioxus CLI
-        if: steps.cache-bins.outputs.cache-hit != 'true'
+        if: steps.cache-bins.outputs.cache-hit != 'true' || steps.verify-bins.outputs.missing == '1'
         run: cargo binstall -y --force --version 0.7.3 dioxus-cli
 
       - name: Build all contracts and UI
@@ -89,21 +103,33 @@ jobs:
             ~/.cargo/bin/cargo-make
             ~/.cargo/bin/cargo-binstall
             ~/.cargo/bin/dx
-          key: ${{ runner.os }}-cargo-bins-playwright-dx-0.7.3-v3
+          key: ${{ runner.os }}-cargo-bins-playwright-dx-0.7.3-v4
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
+      - name: Verify cached binaries
+        id: verify-bins
+        run: |
+          missing=0
+          for bin in cargo-make cargo-binstall dx; do
+            if [ ! -x "$HOME/.cargo/bin/$bin" ]; then
+              echo "missing: $bin"
+              missing=1
+            fi
+          done
+          echo "missing=$missing" >> "$GITHUB_OUTPUT"
+
       - name: Install cargo-binstall
-        if: steps.cache-bins.outputs.cache-hit != 'true'
+        if: steps.cache-bins.outputs.cache-hit != 'true' || steps.verify-bins.outputs.missing == '1'
         uses: taiki-e/install-action@cargo-binstall
 
       - name: Install cargo-make
-        if: steps.cache-bins.outputs.cache-hit != 'true'
+        if: steps.cache-bins.outputs.cache-hit != 'true' || steps.verify-bins.outputs.missing == '1'
         run: cargo binstall -y --force cargo-make
 
       - name: Install Dioxus CLI
-        if: steps.cache-bins.outputs.cache-hit != 'true'
+        if: steps.cache-bins.outputs.cache-hit != 'true' || steps.verify-bins.outputs.missing == '1'
         run: cargo binstall -y --force --version 0.7.3 dioxus-cli
 
       - name: Setup Node.js

@@ -52,7 +52,7 @@ jobs:
             ~/.cargo/bin/fdev
             ~/.cargo/bin/dx
             ~/.cargo/bin/freenet
-          key: ${{ runner.os }}-cargo-bins-e2e-fdev-0.3.201-dx-0.7.3-freenet-0.2.50-v2
+          key: ${{ runner.os }}-cargo-bins-e2e-fdev-0.3.201-dx-0.7.3-freenet-0.2.50-v3
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -80,8 +80,12 @@ jobs:
       - name: Install fdev + freenet
         if: steps.cache-bins.outputs.cache-hit != 'true' || steps.verify-bins.outputs.missing == '1'
         run: |
-          cargo install --force fdev
-          cargo install --force freenet
+          # Use binstall for prebuilt binaries — cargo install --force
+          # rebuilds from source and was burning ~15 min on cold cache.
+          # Versions match the cache key suffix above so a key bump
+          # picks up new versions on both sides in lockstep.
+          cargo binstall -y --force --version 0.3.201 fdev
+          cargo binstall -y --force --version 0.2.50 freenet
 
       - name: Install Dioxus CLI
         if: steps.cache-bins.outputs.cache-hit != 'true' || steps.verify-bins.outputs.missing == '1'
