@@ -11,7 +11,7 @@
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use mail_local_state::{Draft, KeptMessage, LocalState, LocalStateMsg, MessageId};
+use mail_local_state::{Draft, KeptMessage, LocalState, LocalStateMsg, MessageId, SentMessage};
 
 thread_local! {
     /// Most recent snapshot returned by the delegate. Replaced wholesale on
@@ -44,6 +44,15 @@ pub(crate) fn drafts_for(alias: &str) -> Vec<(String, Draft)> {
 
 pub(crate) fn is_read(alias: &str, id: MessageId) -> bool {
     SNAPSHOT.with(|s| s.borrow().is_read(alias, id))
+}
+
+pub(crate) fn sent_for(alias: &str) -> Vec<(String, SentMessage)> {
+    SNAPSHOT.with(|s| {
+        s.borrow()
+            .sent_of(alias)
+            .map(|(id, m)| (id.clone(), m.clone()))
+            .collect()
+    })
 }
 
 pub(crate) fn kept_for(alias: &str) -> Vec<(MessageId, KeptMessage)> {
@@ -172,12 +181,36 @@ mod wire {
         )
         .await
     }
+
+    pub(crate) async fn save_sent(
+        client: &mut WebApiRequestClient,
+        alias: String,
+        id: String,
+        sent: SentMessage,
+    ) -> Result<(), DynError> {
+        send_msg(client, &LocalStateMsg::SaveSent { alias, id, sent }).await
+    }
+
+    #[allow(dead_code)] // Wired for 47c (Archive); unused until then.
+    pub(crate) async fn delete_sent(
+        client: &mut WebApiRequestClient,
+        alias: String,
+        id: String,
+    ) -> Result<(), DynError> {
+        send_msg(client, &LocalStateMsg::DeleteSent { alias, id }).await
+    }
 }
 
 #[cfg(feature = "use-node")]
 pub(crate) use wire::{
-    LOCAL_STATE_KEY, delete_draft, fetch_all, mark_read, register_and_init, save_draft,
+    LOCAL_STATE_KEY, delete_draft, fetch_all, mark_read, register_and_init, save_draft, save_sent,
 };
+// `delete_sent` and `local_delete_sent` are wired but not yet called from any
+// component; the Archive action in 47c will use them. Re-export here so the
+// future PR doesn't need to touch the export list.
+#[cfg(feature = "use-node")]
+#[allow(unused_imports)]
+pub(crate) use wire::delete_sent;
 
 // Optimistic local mutations: patch `SNAPSHOT` immediately so the UI
 // re-renders without waiting for the delegate roundtrip.
@@ -206,6 +239,30 @@ pub(crate) fn local_delete_draft(alias: &str, id: &str) {
     bump();
 }
 
+pub(crate) fn local_save_sent(alias: &str, id: &str, sent: SentMessage) {
+    SNAPSHOT.with(|s| {
+        let mut state = s.borrow_mut();
+        state
+            .aliases_mut()
+            .entry(alias.to_string())
+            .or_default()
+            .sent
+            .insert(id.to_string(), sent);
+    });
+    bump();
+}
+
+#[allow(dead_code)] // Wired for 47c (Archive); unused until then.
+pub(crate) fn local_delete_sent(alias: &str, id: &str) {
+    SNAPSHOT.with(|s| {
+        let mut state = s.borrow_mut();
+        if let Some(entry) = state.aliases_mut().get_mut(alias) {
+            entry.sent.remove(id);
+        }
+    });
+    bump();
+}
+
 pub(crate) fn local_mark_read(alias: &str, msg_id: MessageId, kept: KeptMessage) {
     SNAPSHOT.with(|s| {
         let mut state = s.borrow_mut();
@@ -219,5 +276,9 @@ pub(crate) fn local_mark_read(alias: &str, msg_id: MessageId, kept: KeptMessage)
 }
 
 pub(crate) fn new_draft_id() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
+pub(crate) fn new_sent_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }

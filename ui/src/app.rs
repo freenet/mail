@@ -613,6 +613,7 @@ mod menu {
     pub(super) struct MenuSelection {
         folder: Folder,
         email: Option<u64>,
+        sent_id: Option<String>,
         new_msg: bool,
         search: String,
         compose_prefill: Option<ComposePrefill>,
@@ -626,12 +627,14 @@ mod menu {
             } else {
                 self.new_msg = true;
                 self.email = None;
+                self.sent_id = None;
             }
         }
 
         pub fn open_compose_with(&mut self, to: String, subject: String) {
             self.new_msg = true;
             self.email = None;
+            self.sent_id = None;
             self.compose_prefill = Some(ComposePrefill {
                 to,
                 subject,
@@ -643,7 +646,16 @@ mod menu {
         pub fn open_draft(&mut self, prefill: ComposePrefill) {
             self.new_msg = true;
             self.email = None;
+            self.sent_id = None;
             self.compose_prefill = Some(prefill);
+        }
+
+        pub fn open_sent(&mut self, id: String) {
+            self.sent_id = Some(id);
+        }
+
+        pub fn sent_id(&self) -> Option<&str> {
+            self.sent_id.as_deref()
         }
 
         pub fn take_compose_prefill(&mut self) -> Option<ComposePrefill> {
@@ -656,6 +668,7 @@ mod menu {
 
         pub fn at_inbox_list(&mut self) {
             self.email = None;
+            self.sent_id = None;
             self.new_msg = false;
             self.compose_prefill = None;
         }
@@ -676,6 +689,7 @@ mod menu {
             if self.folder != f {
                 self.folder = f;
                 self.email = None;
+                self.sent_id = None;
             }
         }
 
@@ -697,8 +711,9 @@ fn folder_count(emails: &[Message], folder: menu::Folder, alias: &str) -> usize 
     match folder {
         menu::Folder::Inbox => emails.iter().filter(|m| !m.read).count(),
         menu::Folder::Drafts => crate::local_state::drafts_for(alias).len(),
-        // Sent / Archive aren't backed yet (#47b/#47c). Show 0.
-        _ => 0,
+        menu::Folder::Sent => crate::local_state::sent_for(alias).len(),
+        // Archive isn't backed yet (#47c). Show 0.
+        menu::Folder::Archive => 0,
     }
 }
 
@@ -947,11 +962,20 @@ fn MessageList() -> Element {
     } else {
         Vec::new()
     };
-    let count = if matches!(folder, menu::Folder::Drafts) {
-        drafts.len()
-    } else {
-        visible.len()
+    let sent_msgs: Vec<(String, mail_local_state::SentMessage)> =
+        if matches!(folder, menu::Folder::Sent) {
+            let mut s = crate::local_state::sent_for(&active_alias);
+            s.sort_by_key(|b| std::cmp::Reverse(b.1.sent_at));
+            s
+        } else {
+            Vec::new()
+        };
+    let count = match folder {
+        menu::Folder::Drafts => drafts.len(),
+        menu::Folder::Sent => sent_msgs.len(),
+        _ => visible.len(),
     };
+    let selected_sent_id = menu_selection.read().sent_id().map(str::to_string);
 
     rsx! {
         section { class: "list-col",
@@ -960,7 +984,41 @@ fn MessageList() -> Element {
                 span { class: "list-count", "{count}" }
             }
             div { class: "list-scroll", "data-testid": "fm-list",
-                if matches!(folder, menu::Folder::Drafts) {
+                if matches!(folder, menu::Folder::Sent) {
+                    if sent_msgs.is_empty() {
+                        div { style: "padding:24px 18px; font-family:'Geist Mono',monospace; font-size:10px; letter-spacing:0.1em; text-transform:uppercase; color:var(--ink4);",
+                            "Sent is empty"
+                        }
+                    } else {
+                        {
+                            sent_msgs.into_iter().map(|(id, m)| {
+                                let to_disp = if m.to.is_empty() { "(no recipient)".to_string() } else { m.to.clone() };
+                                let subj_disp = if m.subject.is_empty() { "(no subject)".to_string() } else { m.subject.clone() };
+                                let preview = m.body.clone();
+                                let mut classes = String::from("msg-card");
+                                if Some(&id) == selected_sent_id.as_ref() { classes.push_str(" selected"); }
+                                let id_for_dom = id.clone();
+                                let id_for_click = id.clone();
+                                rsx! {
+                                    article {
+                                        class: "{classes}",
+                                        "data-testid": "fm-sent-card",
+                                        "data-sent-id": "{id_for_dom}",
+                                        onclick: move |_| {
+                                            menu_selection.write().open_sent(id_for_click.clone());
+                                        },
+                                        div { class: "msg-row1",
+                                            span { class: "msg-sender", "{to_disp}" }
+                                            span { class: "msg-time", "" }
+                                        }
+                                        div { class: "msg-subj", "{subj_disp}" }
+                                        div { class: "msg-prev", "{preview}" }
+                                    }
+                                }
+                            })
+                        }
+                    }
+                } else if matches!(folder, menu::Folder::Drafts) {
                     if drafts.is_empty() {
                         div { style: "padding:24px 18px; font-family:'Geist Mono',monospace; font-size:10px; letter-spacing:0.1em; text-transform:uppercase; color:var(--ink4);",
                             "Drafts is empty"
@@ -1038,11 +1096,14 @@ fn MessageList() -> Element {
 fn DetailPanel() -> Element {
     let inbox = use_context::<Signal<InboxView>>();
     let menu_selection = use_context::<Signal<menu::MenuSelection>>();
+    let user = use_context::<Signal<User>>();
     let folder = menu_selection.read().folder();
     let selected_id = menu_selection.read().email();
+    let selected_sent_id = menu_selection.read().sent_id().map(str::to_string);
     let view = inbox.read();
     let emails = view.messages.borrow();
     let selected = selected_id.and_then(|id| emails.iter().find(|m| m.id == id).cloned());
+    let _local_gen = crate::local_state::GENERATION.load(std::sync::atomic::Ordering::Relaxed);
 
     if matches!(folder, menu::Folder::Inbox) {
         if let Some(msg) = selected {
@@ -1057,12 +1118,142 @@ fn DetailPanel() -> Element {
                 }
             }
         }
+    } else if matches!(folder, menu::Folder::Sent) {
+        let alias = user
+            .read()
+            .logged_id()
+            .map(|id| id.alias.to_string())
+            .unwrap_or_default();
+        let sent = selected_sent_id.as_ref().and_then(|id| {
+            crate::local_state::sent_for(&alias)
+                .into_iter()
+                .find(|(sid, _)| sid == id)
+                .map(|(_, m)| m)
+        });
+        if let Some(msg) = sent {
+            rsx! { OpenSentMessage { msg } }
+        } else {
+            rsx! {
+                section { class: "detail-col",
+                    div { class: "empty",
+                        div { class: "empty-glyph", "✉" }
+                        div { class: "empty-hint", "Select a sent message" }
+                    }
+                }
+            }
+        }
     } else {
         rsx! {
             section { class: "detail-col",
                 div { class: "empty",
                     div { class: "empty-glyph", "✉" }
                     div { class: "empty-hint", "{folder.label()} is empty" }
+                }
+            }
+        }
+    }
+}
+
+/// Quote `body` as plain-text reply/forward block (each line prefixed with
+/// "> "). Mirrors the Drafts/compose-sheet's plain-text body model.
+fn quote_body(body: &str) -> String {
+    body.lines()
+        .map(|l| format!("> {l}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[component]
+fn OpenSentMessage(msg: mail_local_state::SentMessage) -> Element {
+    let mut menu_selection = use_context::<Signal<menu::MenuSelection>>();
+    let to = msg.to.clone();
+    let to_initial = to.chars().next().unwrap_or('·').to_string();
+    let subject = msg.subject.clone();
+    let body = msg.body.clone();
+    let fingerprint = msg.recipient_fingerprint.clone();
+    let delivery = match msg.delivery_state {
+        mail_local_state::DeliveryState::Pending => "pending",
+        mail_local_state::DeliveryState::Delivered => "delivered",
+        mail_local_state::DeliveryState::Failed => "failed",
+    };
+
+    // Reply: same recipient, "Re: <subject>".
+    let reply_prefill = menu::ComposePrefill {
+        to: to.clone(),
+        subject: format!("Re: {subject}"),
+        body: String::new(),
+        draft_id: None,
+    };
+    // Forward: blank recipient, "Fwd: <subject>", body quoted.
+    let forward_prefill = menu::ComposePrefill {
+        to: String::new(),
+        subject: format!("Fwd: {subject}"),
+        body: quote_body(&body),
+        draft_id: None,
+    };
+    // Resend: identical fields, fresh draft id (a new send → new Sent row).
+    let resend_prefill = menu::ComposePrefill {
+        to: to.clone(),
+        subject: subject.clone(),
+        body: body.clone(),
+        draft_id: None,
+    };
+
+    rsx! {
+        section { class: "detail-col",
+            div { class: "detail-head",
+                h1 { class: "detail-subj", "{subject}" }
+                div { class: "detail-from",
+                    div { class: "sender-orb", "{to_initial}" }
+                    div { class: "from-text",
+                        span { class: "from-name", "to {to}" }
+                        span {
+                            class: "from-addr",
+                            "data-testid": "fm-sent-fingerprint",
+                            "fingerprint: {fingerprint}"
+                        }
+                    }
+                    span {
+                        class: "from-time",
+                        "data-testid": "fm-sent-delivery",
+                        "{delivery}"
+                    }
+                }
+            }
+            div { class: "toolbar",
+                button {
+                    class: "btn btn-primary",
+                    "data-testid": "fm-sent-reply",
+                    onclick: move |_| {
+                        menu_selection.write().open_draft(reply_prefill.clone());
+                    },
+                    "Reply"
+                }
+                button {
+                    class: "btn btn-secondary",
+                    "data-testid": "fm-sent-forward",
+                    onclick: move |_| {
+                        menu_selection.write().open_draft(forward_prefill.clone());
+                    },
+                    "Forward"
+                }
+                button {
+                    class: "btn btn-secondary",
+                    "data-testid": "fm-sent-resend",
+                    onclick: move |_| {
+                        menu_selection.write().open_draft(resend_prefill.clone());
+                    },
+                    "Resend"
+                }
+                div { class: "spacer" }
+            }
+            div { class: "detail-scroll",
+                div { class: "detail-body", "data-testid": "fm-sent-body",
+                    {
+                        body.split("\n\n").map(|para| rsx! {
+                            p { "{para}" }
+                        })
+                    }
                 }
             }
         }
@@ -1257,11 +1448,19 @@ fn ComposeSheet() -> Element {
     let mut title = use_signal(|| initial_subj.clone());
     let mut content = use_signal(|| initial_body.clone());
     let draft_id = use_signal(|| initial_draft_id.clone());
+    // Monotonic token bumped by every keystroke. The debounced delegate save
+    // captures the token at scheduling time and only fires the wire call if
+    // it still matches when the timer elapses — older keystrokes are silently
+    // dropped. Send / Discard bump the token to cancel a pending save.
+    let mut autosave_token = use_signal(|| 0u64);
+    /// Idle window before a draft is flushed to the delegate. Picked to feel
+    /// instant for normal typing while still coalescing fast bursts.
+    const AUTOSAVE_DEBOUNCE_MS: u32 = 500;
 
-    // Persist the draft on every keystroke. Optimistic local update (the
-    // Drafts folder reflects the typing immediately) plus a fire-and-forget
-    // send to the delegate. Empty drafts are skipped — opening the sheet,
-    // typing nothing, closing should not produce a Drafts entry.
+    // Persist the draft on every keystroke. The optimistic local snapshot is
+    // updated immediately so the Drafts folder reflects the typing without
+    // delay; the delegate roundtrip is debounced to avoid hammering the
+    // WebSocket bridge with one SaveDraft per character.
     let alias_for_save = user_alias.clone();
     let autosave = use_callback(move |()| {
         let to_v = to.read().clone();
@@ -1279,11 +1478,22 @@ fn ComposeSheet() -> Element {
             updated_at,
         };
         crate::local_state::local_save_draft(&alias_for_save, &id, draft.clone());
+
+        // Bump the token, then schedule a delayed delegate save that
+        // double-checks the token before firing. If another keystroke landed
+        // first the saved-token won't match and this send is a no-op.
+        let my_token = *autosave_token.read() + 1;
+        autosave_token.set(my_token);
         #[cfg(feature = "use-node")]
         {
             let mut client_clone = client.clone();
             let alias = alias_for_save.clone();
+            let token_signal = autosave_token;
             spawn(async move {
+                gloo_timers::future::TimeoutFuture::new(AUTOSAVE_DEBOUNCE_MS).await;
+                if *token_signal.read() != my_token {
+                    return;
+                }
                 if let Err(e) =
                     crate::local_state::save_draft(&mut client_clone, alias, id, draft).await
                 {
@@ -1301,6 +1511,10 @@ fn ComposeSheet() -> Element {
     // delegate. Used on Send (success) and Discard.
     let delete_draft_now = use_callback(move |()| {
         let id = draft_id.read().clone();
+        // Invalidate any in-flight debounced SaveDraft so it can't race the
+        // DeleteDraft that follows.
+        let bumped = *autosave_token.read() + 1;
+        autosave_token.set(bumped);
         crate::local_state::local_delete_draft(&alias_for_delete, &id);
         #[cfg(feature = "use-node")]
         {
@@ -1348,7 +1562,7 @@ fn ComposeSheet() -> Element {
         };
         let title_val = title.read().clone();
         let content_val = content.read().clone();
-        match inbox.write().send_message(
+        let send_succeeded = match inbox.write().send_message(
             client.clone(),
             &alias,
             recipient_ek,
@@ -1365,9 +1579,44 @@ fn ComposeSheet() -> Element {
                 futs.into_iter().for_each(|f| {
                     let _task = dioxus_core::spawn_forever(f);
                 });
+                true
             }
             Err(e) => {
                 crate::log::error(format!("{e}"), Some(TryNodeAction::SendMessage));
+                false
+            }
+        };
+        // Stash a Sent copy locally on success. `delivery_state` is set
+        // optimistically to `Delivered`; the real ack is tracked in #58.
+        if send_succeeded {
+            let sent = mail_local_state::SentMessage {
+                to: to_val.clone(),
+                recipient_fingerprint: recipient.fingerprint_short(),
+                subject: title_val.clone(),
+                body: content_val.clone(),
+                sent_at: chrono::Utc::now().timestamp_millis(),
+                delivery_state: mail_local_state::DeliveryState::Delivered,
+            };
+            let sent_id = crate::local_state::new_sent_id();
+            let sender_alias = alias.clone();
+            crate::local_state::local_save_sent(&sender_alias, &sent_id, sent.clone());
+            #[cfg(feature = "use-node")]
+            {
+                let mut client_clone = client.clone();
+                let alias_async = sender_alias.clone();
+                let id_async = sent_id.clone();
+                spawn(async move {
+                    if let Err(e) = crate::local_state::save_sent(
+                        &mut client_clone,
+                        alias_async,
+                        id_async,
+                        sent,
+                    )
+                    .await
+                    {
+                        crate::log::error(format!("save_sent failed: {e}"), None);
+                    }
+                });
             }
         }
         delete_draft_now(());
