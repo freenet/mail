@@ -8,9 +8,13 @@
 
   "fmList": "fm-list",
   "fmMsgCard": "fm-msg-card",
+  "fmMsgTime": "fm-msg-time",
   "fmDraftCard": "fm-draft-card",
   "fmSentCard": "fm-sent-card",
   "fmArchiveCard": "fm-archive-card",
+
+  "fmDetailTime": "fm-detail-time",
+  "fmSidebarFingerprint": "fm-sidebar-fingerprint",
 
   "fmReply": "fm-reply",
   "fmDelete": "fm-delete",

@@ -365,6 +365,7 @@ impl InboxView {
                     title: content.title.clone().into(),
                     content: content.content.clone().into(),
                     read: false,
+                    time: content.time,
                 };
                 MOCK_SENT_MESSAGES.with(|map| {
                     map.borrow_mut()
@@ -445,6 +446,8 @@ impl InboxView {
         let body: Cow<'static, str> = "Lorem ipsum dolor sit amet, consectetur adipiscing elit. \
              Sed do eiusmod tempor incidunt ut labore et dolore magna aliqua."
             .into();
+        let now = chrono::Utc::now();
+        let t = |minutes_ago: i64| now - chrono::Duration::minutes(minutes_ago);
         let mut emails = if id.id == UserId(0) {
             vec![
                 Message {
@@ -453,6 +456,7 @@ impl InboxView {
                     title: "Welcome to the offline preview".into(),
                     content: body.clone(),
                     read: false,
+                    time: t(15),
                 },
                 Message {
                     id: 1,
@@ -460,6 +464,7 @@ impl InboxView {
                     title: "Lunch tomorrow?".into(),
                     content: body.clone(),
                     read: false,
+                    time: t(60 * 26),
                 },
                 Message {
                     id: 2,
@@ -467,6 +472,7 @@ impl InboxView {
                     title: "Your weekly digest".into(),
                     content: body,
                     read: true,
+                    time: t(60 * 24 * 4),
                 },
             ]
         } else {
@@ -477,6 +483,7 @@ impl InboxView {
                     title: "Welcome to the offline preview".into(),
                     content: body.clone(),
                     read: false,
+                    time: t(35),
                 },
                 Message {
                     id: 1,
@@ -484,6 +491,7 @@ impl InboxView {
                     title: "Re: design review".into(),
                     content: body,
                     read: false,
+                    time: t(60 * 50),
                 },
             ]
         };
@@ -600,6 +608,10 @@ struct Message {
     title: Cow<'static, str>,
     content: Cow<'static, str>,
     read: bool,
+    /// Sender-stamped (`DecryptedMessage.time`). Used for list-card
+    /// short timestamp + detail-header full timestamp + descending
+    /// sort. See issue #49.
+    time: chrono::DateTime<chrono::Utc>,
 }
 
 impl From<MessageModel> for Message {
@@ -610,6 +622,7 @@ impl From<MessageModel> for Message {
             title: value.content.title.into(),
             content: value.content.content.into(),
             read: false,
+            time: value.content.time,
         }
     }
 }
@@ -629,6 +642,54 @@ impl PartialOrd for Message {
 impl Ord for Message {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.id.cmp(&other.id)
+    }
+}
+
+/// Format a timestamp for message-list cards. Buckets:
+///   today    → `H:MM`
+///   yesterday→ `Yesterday`
+///   this week→ short weekday (`Mon`, `Tue`, …)
+///   older    → `MMM D` (or `MMM D, YYYY` if a different year)
+pub(crate) fn format_time_short(t: chrono::DateTime<chrono::Utc>) -> String {
+    use chrono::{Datelike, Local};
+    let local: chrono::DateTime<Local> = chrono::DateTime::from(t);
+    let now = Local::now();
+    let days = now
+        .date_naive()
+        .signed_duration_since(local.date_naive())
+        .num_days();
+    if days <= 0 {
+        local.format("%-H:%M").to_string()
+    } else if days == 1 {
+        "Yesterday".into()
+    } else if days < 7 {
+        local.format("%a").to_string()
+    } else if local.year() == now.year() {
+        local.format("%b %-d").to_string()
+    } else {
+        local.format("%b %-d, %Y").to_string()
+    }
+}
+
+/// Format a timestamp for the detail-header.
+///   today    → `Today, H:MM`
+///   yesterday→ `Yesterday, H:MM`
+///   older    → `MMM D, YYYY · H:MM`
+pub(crate) fn format_time_full(t: chrono::DateTime<chrono::Utc>) -> String {
+    use chrono::Local;
+    let local: chrono::DateTime<Local> = chrono::DateTime::from(t);
+    let now = Local::now();
+    let days = now
+        .date_naive()
+        .signed_duration_since(local.date_naive())
+        .num_days();
+    let hm = local.format("%-H:%M");
+    if days <= 0 {
+        format!("Today, {hm}")
+    } else if days == 1 {
+        format!("Yesterday, {hm}")
+    } else {
+        local.format("%b %-d, %Y · %-H:%M").to_string()
     }
 }
 
@@ -936,7 +997,7 @@ fn Sidebar() -> Element {
                             span { class: "lbl", "key" }
                             span {
                                 class: "val",
-                                "data-testid": "fm-sidebar-fingerprint",
+                                "data-testid": testid::FM_SIDEBAR_FINGERPRINT,
                                 "{active_fp_short}"
                             }
                         }
@@ -1009,12 +1070,15 @@ fn MessageList() -> Element {
                 if crate::local_state::is_archived(&alias, mid) {
                     continue;
                 }
+                let time = chrono::DateTime::from_timestamp_millis(kept.kept_at)
+                    .unwrap_or_else(chrono::Utc::now);
                 emails.push(Message {
                     id: mid,
                     from: kept.from.into(),
                     title: kept.title.into(),
                     content: kept.content.into(),
                     read: true,
+                    time,
                 });
             }
             crate::log::debug!("active id: {:?}; emails number: {}", id.alias, emails.len());
@@ -1047,7 +1111,7 @@ fn MessageList() -> Element {
         .map(|id| id.alias.to_string())
         .unwrap_or_default();
     let visible: Vec<Message> = if matches!(folder, menu::Folder::Inbox) {
-        emails
+        let mut v: Vec<Message> = emails
             .iter()
             // Hide archived/deleted rows. In offline mode the populate loop
             // above is a no-op (no inbox_data), so emails are seeded once at
@@ -1058,7 +1122,10 @@ fn MessageList() -> Element {
             .filter(|m| !crate::local_state::is_deleted(&active_alias, m.id))
             .filter(|m| matches_search(m, &search))
             .cloned()
-            .collect()
+            .collect();
+        // Newest first (#49). Sender-stamped time is what the design assumes.
+        v.sort_by_key(|m| std::cmp::Reverse(m.time));
+        v
     } else {
         Vec::new()
     };
@@ -1115,6 +1182,9 @@ fn MessageList() -> Element {
                                 let preview = a.content.clone();
                                 let mut classes = String::from("msg-card");
                                 if Some(mid) == selected_archived_id { classes.push_str(" selected"); }
+                                let time_short = chrono::DateTime::from_timestamp_millis(a.archived_at)
+                                    .map(format_time_short)
+                                    .unwrap_or_default();
                                 rsx! {
                                     article {
                                         class: "{classes}",
@@ -1125,7 +1195,7 @@ fn MessageList() -> Element {
                                         },
                                         div { class: "msg-row1",
                                             span { class: "msg-sender", "{from_disp}" }
-                                            span { class: "msg-time", "" }
+                                            span { class: "msg-time", "{time_short}" }
                                         }
                                         div { class: "msg-subj", "{subj_disp}" }
                                         div { class: "msg-prev", "{preview}" }
@@ -1161,6 +1231,9 @@ fn MessageList() -> Element {
                                         mail_local_state::DeliveryState::Delivered =>
                                             ("", None),
                                     };
+                                let time_short = chrono::DateTime::from_timestamp_millis(m.sent_at)
+                                    .map(format_time_short)
+                                    .unwrap_or_default();
                                 rsx! {
                                     article {
                                         class: "{classes}",
@@ -1175,7 +1248,7 @@ fn MessageList() -> Element {
                                             {state_label.map(|l| rsx! {
                                                 span { class: "{state_class}", "{l}" }
                                             })}
-                                            span { class: "msg-time", "" }
+                                            span { class: "msg-time", "{time_short}" }
                                         }
                                         div { class: "msg-subj", "{subj_disp}" }
                                         div { class: "msg-prev", "{preview}" }
@@ -1195,6 +1268,9 @@ fn MessageList() -> Element {
                                 let to_disp = if d.to.is_empty() { "(no recipient)".to_string() } else { d.to.clone() };
                                 let subj_disp = if d.subject.is_empty() { "(no subject)".to_string() } else { d.subject.clone() };
                                 let preview = d.body.clone();
+                                let time_short = chrono::DateTime::from_timestamp_millis(d.updated_at)
+                                    .map(format_time_short)
+                                    .unwrap_or_default();
                                 let prefill = menu::ComposePrefill {
                                     to: d.to.clone(),
                                     subject: d.subject.clone(),
@@ -1212,7 +1288,7 @@ fn MessageList() -> Element {
                                         },
                                         div { class: "msg-row1",
                                             span { class: "msg-sender", "{to_disp}" }
-                                            span { class: "msg-time", "" }
+                                            span { class: "msg-time", "{time_short}" }
                                         }
                                         div { class: "msg-subj", "{subj_disp}" }
                                         div { class: "msg-prev", "{preview}" }
@@ -1235,6 +1311,7 @@ fn MessageList() -> Element {
                             let from = email.from.clone();
                             let title = email.title.clone();
                             let preview = email.content.clone();
+                            let time_short = format_time_short(email.time);
                             rsx! {
                                 article {
                                     class: "{classes}",
@@ -1244,7 +1321,11 @@ fn MessageList() -> Element {
                                     onclick: move |_| { menu_selection.write().open_email(id); },
                                     div { class: "msg-row1",
                                         span { class: "msg-sender", "{from}" }
-                                        span { class: "msg-time", "" }
+                                        span {
+                                            class: "msg-time",
+                                            "data-testid": testid::FM_MSG_TIME,
+                                            "{time_short}"
+                                        }
                                     }
                                     div { class: "msg-subj", "{title}" }
                                     div { class: "msg-prev", "{preview}" }
@@ -1366,6 +1447,9 @@ fn OpenArchivedMessage(msg_id: u64, msg: mail_local_state::ArchivedMessage) -> E
     let content = msg.content.clone();
     let reply_to = from.clone();
     let reply_subj = format!("Re: {title}");
+    let time_full = chrono::DateTime::from_timestamp_millis(msg.archived_at)
+        .map(format_time_full)
+        .unwrap_or_default();
 
     let alias = user
         .read()
@@ -1384,7 +1468,11 @@ fn OpenArchivedMessage(msg_id: u64, msg: mail_local_state::ArchivedMessage) -> E
                         span { class: "from-name", "from {from}" }
                         span { class: "from-addr", "archived" }
                     }
-                    span { class: "from-time", "" }
+                    span {
+                        class: "from-time",
+                        "data-testid": testid::FM_DETAIL_TIME,
+                        "{time_full}"
+                    }
                 }
             }
             div { class: "toolbar",
@@ -1459,6 +1547,9 @@ fn OpenSentMessage(msg: mail_local_state::SentMessage) -> Element {
     let subject = msg.subject.clone();
     let body = msg.body.clone();
     let fingerprint = msg.recipient_fingerprint.clone();
+    let time_full = chrono::DateTime::from_timestamp_millis(msg.sent_at)
+        .map(format_time_full)
+        .unwrap_or_default();
     let delivery = match msg.delivery_state {
         mail_local_state::DeliveryState::Pending => "pending",
         mail_local_state::DeliveryState::Delivered => "delivered",
@@ -1500,6 +1591,11 @@ fn OpenSentMessage(msg: mail_local_state::SentMessage) -> Element {
                             "data-testid": testid::FM_SENT_FINGERPRINT,
                             "fingerprint: {fingerprint}"
                         }
+                    }
+                    span {
+                        class: "from-time",
+                        "data-testid": testid::FM_DETAIL_TIME,
+                        "{time_full}"
                     }
                     span {
                         class: "from-time",
@@ -1612,6 +1708,7 @@ fn OpenMessage(msg: Message) -> Element {
     let id = msg.id;
     let reply_to = from.clone();
     let reply_subj = format!("Re: {}", title);
+    let time_full = format_time_full(msg.time);
 
     let archive_client = client.clone();
     let archive_inbox_data = inbox_data.clone();
@@ -1638,7 +1735,11 @@ fn OpenMessage(msg: Message) -> Element {
                         span { class: "from-name", "{from}" }
                         span { class: "from-addr", "" }
                     }
-                    span { class: "from-time", "" }
+                    span {
+                        class: "from-time",
+                        "data-testid": testid::FM_DETAIL_TIME,
+                        "{time_full}"
+                    }
                 }
             }
             div { class: "toolbar",
@@ -2128,5 +2229,58 @@ fn ComposeSheet() -> Element {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod time_format_tests {
+    use super::{format_time_full, format_time_short};
+    use chrono::{Duration, Local, Utc};
+
+    #[test]
+    fn short_today_is_h_colon_mm() {
+        let s = format_time_short(Utc::now());
+        assert!(s.contains(':'), "expected H:MM, got {s:?}");
+        assert!(!s.eq_ignore_ascii_case("yesterday"));
+    }
+
+    #[test]
+    fn short_yesterday_says_yesterday() {
+        let now = Local::now();
+        let y = (now - Duration::days(1)).with_timezone(&Utc);
+        assert_eq!(format_time_short(y), "Yesterday");
+    }
+
+    #[test]
+    fn short_older_than_week_uses_month_day() {
+        let now = Local::now();
+        let old = (now - Duration::days(20)).with_timezone(&Utc);
+        let s = format_time_short(old);
+        assert!(!s.eq_ignore_ascii_case("yesterday"));
+        assert!(!s.contains(':'), "{s:?} should not be H:MM");
+        assert!(s.chars().any(char::is_alphabetic) && s.chars().any(char::is_numeric));
+    }
+
+    #[test]
+    fn full_today_starts_with_today() {
+        let s = format_time_full(Utc::now());
+        assert!(s.starts_with("Today, "), "got {s:?}");
+    }
+
+    #[test]
+    fn full_yesterday_starts_with_yesterday() {
+        let now = Local::now();
+        let y = (now - Duration::days(1)).with_timezone(&Utc);
+        let s = format_time_full(y);
+        assert!(s.starts_with("Yesterday, "), "got {s:?}");
+    }
+
+    #[test]
+    fn full_older_uses_month_day_year_dot_time() {
+        let now = Local::now();
+        let old = (now - Duration::days(40)).with_timezone(&Utc);
+        let s = format_time_full(old);
+        assert!(s.contains('·'), "got {s:?}");
+        assert!(s.contains(':'), "got {s:?}");
     }
 }
