@@ -1,0 +1,48 @@
+/* Topbar — brand, search, avatar. */
+
+/* TOPBAR */
+.fm-app .topbar {
+  height: 50px; flex: 0 0 50px; display: flex; align-items: stretch;
+  background: var(--c1);
+  border-bottom: 1px solid var(--line);
+  z-index: 5;
+}
+.fm-app .brand {
+  width: 218px; flex: 0 0 218px; display: flex; align-items: center; gap: 10px;
+  padding: 0 18px; border-right: 1px solid var(--line);
+}
+.fm-app .brand-glyph {
+  font-family: "Fraunces", serif; font-style: italic; font-weight: 300;
+  font-size: 22px; letter-spacing: -0.03em; color: var(--accent); line-height: 1;
+  margin-right: 2px;
+}
+.fm-app .brand-text { display: flex; flex-direction: column; gap: 1px; line-height: 1; }
+.fm-app .brand-name { font-family: "Fraunces", serif; font-size: 14px; font-weight: 500; letter-spacing: -0.025em; color: var(--ink0); }
+.fm-app .brand-tag { font-family: "Geist Mono", monospace; font-size: 7.5px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink4); }
+
+.fm-app .topbar-mid { flex: 1; display: flex; align-items: center; justify-content: center; padding: 0 18px; }
+.fm-app .search { position: relative; width: 100%; max-width: 310px; height: 31px; }
+.fm-app .search input {
+  width: 100%; height: 100%; border: 1px solid transparent; border-radius: 8px;
+  background: rgba(241, 245, 249, 0.8);
+  padding: 0 12px 0 30px;
+  font-size: 12.5px; color: var(--ink1);
+  transition: background .15s ease, border-color .15s ease;
+}
+.fm-app .search input::placeholder { color: var(--ink4); }
+.fm-app .search input:focus { background: #fff; border-color: var(--accent-mid); }
+.fm-app .search-icon {
+  position: absolute; left: 11px; top: 50%; transform: translateY(-50%);
+  font-size: 11px; color: var(--ink4); font-family: "Geist Mono", monospace;
+  pointer-events: none;
+}
+
+.fm-app .topbar-right { display: flex; align-items: center; padding: 0 18px; gap: 14px; }
+.fm-app .avatar {
+  width: 28px; height: 28px; border-radius: 50%;
+  background: var(--accent-bg); border: 1px solid var(--accent-mid);
+  display: flex; align-items: center; justify-content: center;
+  font-family: "Fraunces", serif; font-style: italic; color: var(--accent); font-size: 13px;
+  cursor: default;
+}
+

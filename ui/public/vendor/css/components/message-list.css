@@ -1,0 +1,77 @@
+/* Message list — unread/read rows, draft/sent cards. */
+
+/* MESSAGE LIST */
+.fm-app .list-col {
+  width: 300px; flex: 0 0 300px;
+  background: var(--c0);
+  border-right: 1px solid var(--line);
+  display: flex; flex-direction: column; min-height: 0;
+}
+.fm-app .list-head {
+  display: flex; align-items: baseline; justify-content: space-between;
+  padding: 18px 22px 10px;
+  border-bottom: 1px solid var(--line2);
+}
+.fm-app .list-title {
+  font-family: "Fraunces", serif; font-size: 18px; font-weight: 400;
+  letter-spacing: -0.04em; color: var(--ink0);
+}
+.fm-app .list-count { font-family: "Geist Mono", monospace; font-size: 9.5px; color: var(--ink4); }
+.fm-app .list-scroll { flex: 1; overflow-y: auto; padding: 6px 10px 16px; }
+.fm-app .list-scroll::-webkit-scrollbar { width: 8px; }
+.fm-app .list-scroll::-webkit-scrollbar-thumb { background: rgba(100, 116, 139, 0.18); border-radius: 4px; }
+
+.fm-app .msg-card {
+  position: relative;
+  padding: 11px 14px 12px 16px;
+  border-radius: 8px;
+  cursor: default;
+  margin-bottom: 2px;
+  transition: background .1s ease;
+  opacity: 0; animation: fm-fadeUp 0.26s ease both;
+}
+.fm-app .msg-card:nth-child(1) { animation-delay: 0s; }
+.fm-app .msg-card:nth-child(2) { animation-delay: 0.04s; }
+.fm-app .msg-card:nth-child(3) { animation-delay: 0.08s; }
+.fm-app .msg-card:nth-child(4) { animation-delay: 0.13s; }
+.fm-app .msg-card:nth-child(5) { animation-delay: 0.18s; }
+.fm-app .msg-card:nth-child(6) { animation-delay: 0.22s; }
+.fm-app .msg-card:nth-child(7) { animation-delay: 0.26s; }
+@keyframes fm-fadeUp {
+  from { opacity: 0; transform: translateY(5px); }
+  to   { opacity: 1; transform: none; }
+}
+.fm-app .msg-card:hover { background: rgba(255, 255, 255, 0.6); }
+.fm-app .msg-card.unread::before {
+  content: ""; position: absolute; left: 6px; top: 14px; bottom: 14px;
+  width: 2px; border-radius: 2px; background: var(--unread);
+}
+.fm-app .msg-card.selected {
+  background: #fff;
+  box-shadow: var(--sh-sm), inset 3px 0 0 var(--accent);
+}
+.fm-app .msg-card.selected.unread::before { display: none; }
+
+.fm-app .msg-row1 { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.fm-app .msg-sender {
+  font-size: 12.5px; color: var(--ink2); font-weight: 400;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.fm-app .msg-card.unread .msg-sender { color: var(--ink0); font-weight: 600; }
+.fm-app .msg-time {
+  font-family: "Geist Mono", monospace; font-size: 9px; color: var(--ink4);
+  flex: 0 0 auto;
+}
+.fm-app .msg-subj {
+  font-family: "Fraunces", serif; font-size: 13px; font-weight: 400;
+  letter-spacing: -0.025em; line-height: 1.25; color: var(--ink1);
+  margin-top: 3px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.fm-app .msg-card.unread .msg-subj { font-weight: 500; color: var(--ink0); }
+.fm-app .msg-prev {
+  font-size: 11.5px; font-style: italic; color: var(--ink4);
+  margin-top: 3px; line-height: 1.4;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+

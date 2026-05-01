@@ -9,7 +9,16 @@
          allows same-origin (`default-src http://127.0.0.1:7509`), so
          remote CDN stylesheets are blocked. See ui/public/vendor/. -->
     <link rel="stylesheet" href="vendor/css/fonts.css" />
-    <link rel="stylesheet" href="vendor/css/fm-design.css" />
+    <!-- Design tokens must load before component partials reference them. -->
+    <link rel="stylesheet" href="vendor/css/components/tokens.css" />
+    <link rel="stylesheet" href="vendor/css/components/topbar.css" />
+    <link rel="stylesheet" href="vendor/css/components/main.css" />
+    <link rel="stylesheet" href="vendor/css/components/sidebar.css" />
+    <link rel="stylesheet" href="vendor/css/components/message-list.css" />
+    <link rel="stylesheet" href="vendor/css/components/detail.css" />
+    <link rel="stylesheet" href="vendor/css/components/compose.css" />
+    <link rel="stylesheet" href="vendor/css/components/toast.css" />
+    <link rel="stylesheet" href="vendor/css/components/login.css" />
   </head>
   <body>
     <div id="main"></div>
