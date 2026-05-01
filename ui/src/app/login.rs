@@ -17,26 +17,29 @@ use crate::app::{ContractType, User, UserId};
 
 use super::{InboxView, NodeAction};
 
-// Solid grey 48x48 PNG placeholder. The previous data URL committed in
-// this file was not valid base64 (length 2065, not divisible by 4), so
-// every browser silently failed to decode it and rendered the broken-
-// image glyph next to each identity.
-const DEFAULT_ID_ICON: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAADAAAAAwCAIAAADYYG7QAAAANklEQVR42u3OQREAAAwCIPunMKotdntAAtJnIiQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCR0Z4ze4PF0Ch1IAAAAAElFTkSuQmCC";
-
 struct ImportId(bool);
 
 struct CreateAlias(bool);
 
+/// Pre-login topbar: brand block + "Private · Decentralized" tag +
+/// connection-state indicator on the right (vs the avatar in the
+/// post-login mailbox).
 #[allow(non_snake_case)]
-fn LoginHeader() -> Element {
+fn Topbar() -> Element {
     let app_name = crate::app_name();
     rsx! {
-        div {
-            class: "columns",
-            div { class: "column is-4" }
-            section {
-                class: "section is-small",
-                h1 { class: "title", "{app_name}" }
+        header { class: "topbar",
+            div { class: "brand",
+                span { class: "brand-glyph", "f" }
+                div { class: "brand-text",
+                    span { class: "brand-name", "{app_name}" }
+                    span { class: "brand-tag", "Private · Decentralized" }
+                }
+            }
+            div { class: "topbar-spacer" }
+            div { class: "topbar-state",
+                span { class: "pulse-dot" }
+                span { "local · ready" }
             }
         }
     }
@@ -499,41 +502,36 @@ pub(super) fn IdentifiersList() -> Element {
     use_context_provider(|| Signal::new(ShareContact(false)));
     use_context_provider(|| Signal::new(SharePending::default()));
     use_context_provider(|| Signal::new(ImportContact(false)));
+    // ImportForm is shared between the hub flow (toggled by ImportBackup
+    // here) and the first-run flow (toggled by ImportId in
+    // GetOrCreateIdentity). Provide both contexts so the same component
+    // can clear whichever wrapper is active.
+    use_context_provider(|| Signal::new(ImportId(false)));
     let create_alias_form = use_context::<Signal<CreateAlias>>();
     let import_backup_form = use_context::<Signal<ImportBackup>>();
     let share_contact_form = use_context::<Signal<ShareContact>>();
     let import_contact_form = use_context::<Signal<ImportContact>>();
 
     rsx! {
-        LoginHeader {}
-        div {
-            class: "columns",
-            div { class: "column is-3" }
-            div {
-                class: "column is-6",
-                div {
-                    class: "card has-background-light is-small mt-2",
-                    Identities {}
+        div { class: "fm-pre",
+            Topbar {}
+            section { class: "page screen",
+                div { class: "col-wide",
                     if create_alias_form.read().0 {
                         CreateAliasForm {}
-                    }
-                    if import_backup_form.read().0 {
+                    } else if import_backup_form.read().0 {
                         ImportForm {}
-                    }
-                    if share_contact_form.read().0 {
-                        ShareContactModal {}
-                    }
-                    if import_contact_form.read().0 {
-                        ImportContactForm {}
-                    }
-                    if !create_alias_form.read().0
-                        && !import_backup_form.read().0
-                        && !share_contact_form.read().0
-                        && !import_contact_form.read().0
-                    {
+                    } else {
+                        Identities {}
                         ContactsSection {}
                     }
                 }
+            }
+            if share_contact_form.read().0 {
+                ShareContactModal {}
+            }
+            if import_contact_form.read().0 {
+                ImportContactForm {}
             }
         }
     }
@@ -545,7 +543,6 @@ pub(super) fn Identities() -> Element {
     let aliases_list = aliases.borrow();
     let mut create_alias_form = use_context::<Signal<CreateAlias>>();
     let mut import_backup_form = use_context::<Signal<ImportBackup>>();
-    let share_contact_form = use_context::<Signal<ShareContact>>();
     let mut login_controller = use_context::<Signal<LoginController>>();
 
     if login_controller.read().updated {
@@ -561,112 +558,106 @@ pub(super) fn Identities() -> Element {
         let id = identity.id;
         let alias = identity.alias.clone();
         let description = identity.description.clone();
+        let initial = alias.chars().next().unwrap_or('·').to_string();
+        let fp_short = {
+            let words = crate::app::address_book::fingerprint_words(
+                &identity.ml_dsa_vk_bytes(),
+                &identity.ml_kem_ek_bytes(),
+            );
+            format!("{} {}", words[0], words[1])
+        };
+        let backup_alias = identity.clone();
+        let share_id = identity.clone();
 
         rsx! {
-            div {
-                class: "card-content",
-                div {
-                    class: "media",
-                    div {
-                        class: "media-left",
-                        figure { class: "image is-48x48", img { src: DEFAULT_ID_ICON } }
+            div { class: "id-row", "data-testid": "fm-id-row", "data-alias": "{alias}",
+                div { class: "id-orb", "{initial}" }
+                div { class: "id-meta",
+                    span { class: "id-name", "{alias}" }
+                    if !description.is_empty() {
+                        span { class: "id-desc", "{description}" }
                     }
-                    div {
-                        class: "media-content",
-                        p {
-                            class: "title is-4",
-                            a {
-                                style: "color: inherit",
-                                onclick: move |_| {
-                                    user.write().set_logged_id(id);
-                                    inbox.write().set_active_id(id);
-                                },
-                                "{alias}"
+                    span { class: "id-fp",
+                        span { class: "label", "Fingerprint" }
+                        "{fp_short}"
+                    }
+                }
+                div { class: "id-actions",
+                    button {
+                        class: "icon-btn",
+                        title: "Export / backup this identity",
+                        "data-testid": "fm-id-backup",
+                        onclick: move |_| {
+                            let backup = IdentityBackup::from_identity(&backup_alias);
+                            if let Ok(json) = serde_json::to_vec_pretty(&backup) {
+                                let fname = format!("freenet-identity-{}.json", &*backup_alias.alias);
+                                trigger_browser_download(&fname, &json);
                             }
                         },
-                        p { class: "subtitle is-6", "{description}" }
-                        div {
-                            class: "buttons mt-1",
-                            button {
-                                class: "button is-small is-light",
-                                title: "Export / backup this identity",
-                                onclick: {
-                                    let identity = identity.clone();
-                                    move |_| {
-                                        let backup = IdentityBackup::from_identity(&identity);
-                                        if let Ok(json) = serde_json::to_vec_pretty(&backup) {
-                                            let fname = format!("freenet-identity-{}.json", &*identity.alias);
-                                            trigger_browser_download(&fname, &json);
-                                        }
-                                    }
-                                },
-                                span { class: "icon is-small", i { class: "fas fa-download" } }
-                                span { "Backup" }
-                            }
-                            button {
-                                class: "button is-small is-info is-light",
-                                title: "Share your address with someone",
-                                onclick: {
-                                    let identity = identity.clone();
-                                    move |_| {
-                                        let card = crate::app::address_book::ContactCard::from_identity(&identity);
-                                        let fp = card.fingerprint().join("-");
-                                        let share_text = format!("verify: {}\n{}", fp, card.encode());
-                                        share_pending.set(SharePending {
-                                            data: Some(SharePendingData {
-                                                alias: identity.alias.to_string(),
-                                                share_text,
-                                            }),
-                                        });
-                                        share_contact_form.write().0 = true;
-                                    }
-                                },
-                                span { class: "icon is-small", i { class: "fas fa-share-alt" } }
-                                span { "Share address" }
-                            }
-                        }
-                        p { class: "help is-warning", "Backup files contain raw private keys — store securely." }
+                        "↓"
+                    }
+                    button {
+                        class: "icon-btn",
+                        title: "Share your address with someone",
+                        "data-testid": "fm-id-share",
+                        onclick: move |_| {
+                            let card = crate::app::address_book::ContactCard::from_identity(&share_id);
+                            let fp = card.fingerprint().join("-");
+                            let share_text = format!("verify: {}\n{}", fp, card.encode());
+                            share_pending.set(SharePending {
+                                data: Some(SharePendingData {
+                                    alias: share_id.alias.to_string(),
+                                    share_text,
+                                }),
+                            });
+                            share_contact_form.write().0 = true;
+                        },
+                        "↗"
+                    }
+                    button {
+                        class: "btn btn-primary",
+                        "data-testid": "fm-id-open",
+                        onclick: move |_| {
+                            user.write().set_logged_id(id);
+                            inbox.write().set_active_id(id);
+                        },
+                        "Open inbox"
                     }
                 }
             }
         }
     }
 
-    let identities = aliases_list.iter().map(|alias| {
+    let identities_iter = aliases_list.iter().map(|alias| {
         rsx!(IdentityEntry {
             identity: alias.clone()
         })
     });
 
-    let any_form =
-        create_alias_form.read().0 || import_backup_form.read().0 || share_contact_form.read().0;
-
     rsx! {
-        div {
-            hidden: "{any_form}",
-            {identities}
-            div {
-                class: "card-content columns",
-                div { class: "column is-4" }
-                a {
-                    class: "column is-4 is-link",
-                    onclick: move |_| {
-                        create_alias_form.write().0 = true;
-                    },
-                    "Create new identity"
-                }
+        div { style: "display:flex; align-items:baseline; justify-content:space-between; margin-bottom:18px;",
+            h1 { class: "display lg italic", "Your identities" }
+            span { class: "mono-tag", "{aliases_list.len()} on this device" }
+        }
+        div { class: "id-list",
+            {identities_iter}
+        }
+        div { style: "display:flex; gap:10px; margin-top:18px;",
+            button {
+                class: "btn btn-secondary",
+                "data-testid": "fm-id-create",
+                onclick: move |_| { create_alias_form.write().0 = true; },
+                "+ Create new identity"
             }
-            div {
-                class: "card-content columns",
-                div { class: "column is-4" }
-                a {
-                    class: "column is-4 is-link",
-                    onclick: move |_| {
-                        import_backup_form.write().0 = true;
-                    },
-                    "Restore identity from backup"
-                }
+            button {
+                class: "btn btn-ghost",
+                "data-testid": "fm-id-restore",
+                onclick: move |_| { import_backup_form.write().0 = true; },
+                "Restore from backup"
             }
+        }
+        p { class: "field-help", style: "margin-top:14px;",
+            "Backup files contain raw private keys — store them securely."
         }
     }
 }
@@ -682,145 +673,171 @@ pub(super) fn CreateAliasForm() -> Element {
     }
 
     let mut login_error = use_signal(String::new);
-    let mut show_error = use_signal(|| false);
-    let mut generate = use_signal(|| true);
-    let mut address = use_signal(String::new);
+    let mut alias_input = use_signal(String::new);
     let mut description = use_signal(String::new);
-    let key_path = use_signal(|| {
-        std::iter::repeat_n('\u{80}', 100)
-            .chain(std::iter::repeat_n('.', 300))
-            .collect::<String>()
-    });
+    // Reveal stage: hold the freshly-generated keypair + its fingerprint
+    // until the user explicitly continues. This gives them a beat to back
+    // up before the keys are persisted via NodeAction::CreateIdentity.
+    let mut pending: Signal<
+        Option<(
+            Arc<MlDsaSigningKey<MlDsa65>>,
+            DecapsulationKey<MlKem768>,
+            [&'static str; 6],
+        )>,
+    > = use_signal(|| None);
 
-    rsx! {
-        div {
-            class: "box has-background-primary is-small mt-2",
-            div {
-                class: "field",
-                label { "Name" }
-                div {
-                    class: "control has-icons-left",
-                    input {
-                        class: "input",
-                        placeholder: "John Smith",
-                        value: "{address}",
-                        oninput: move |evt| address.set(evt.value().clone())
-                    }
-                    span { class: "icon is-small is-left", i { class: "fas fa-envelope" } }
-                }
+    let submit = move |_| {
+        let alias_str = alias_input.read().trim().to_string();
+        if alias_str.is_empty() {
+            login_error.set("Alias is required.".into());
+            return;
+        }
+        match get_keys() {
+            Ok((ml_dsa, ml_kem)) => {
+                use ml_dsa::signature::Keypair;
+                use ml_kem::kem::KeyExport;
+                let vk_bytes: Vec<u8> = ml_dsa.as_ref().verifying_key().encode().to_vec();
+                let ek_bytes: Vec<u8> = ml_kem.encapsulation_key().to_bytes().to_vec();
+                let words = crate::app::address_book::fingerprint_words(&vk_bytes, &ek_bytes);
+                pending.set(Some((ml_dsa, ml_kem, words)));
+                login_error.set(String::new());
             }
-            div {
-                class: "field",
-                label { "Description" }
-                div {
-                    class: "control has-icons-left",
-                    input {
-                        class: "input",
-                        placeholder: "",
-                        value: "{description}",
-                        oninput: move |evt| description.set(evt.value().clone())
-                    }
-                    span { class: "icon is-small is-left", i { class: "fas fa-envelope" } }
-                }
-            }
-            div {
-                class: "columns mb-2 mt-2",
-                div {
-                    class: "column is-two-fifths",
-                    div {
-                        class: "file is-small has-name",
-                        label {
-                            class: "file-label",
-                            input { class: "file-input", r#type: "file", name: "keypair-file" }
-                            span {
-                                class: "file-cta",
-                                span { class: "file-icon", i { class: "fas fa-upload" } }
-                                span { class: "file-label", "Import key file" }
-                            }
-                            span { class: "file-name has-background-white", "{key_path}" }
-                        }
-                    }
-                }
-                div {
-                    class:"column is-one-fifth" ,
-                    p { class: "has-text-centered", "or" }
-                }
-                div {
-                    class: "column is-two-fifths",
-
-                    label {
-                        class: "checkbox",
-                        input {
-                            r#type: "checkbox",
-                            checked: true,
-                            onclick: move |_| {
-                                let current = *generate.read();
-                                generate.set(!current);
-                            }
-                        },
-                        "  generate"
-                    }
-                }
-            }
-            a {
-                class: "button",
-                onclick: move |_|  {
-                    let alias: Rc<str> = address.read().to_owned().into();
-                    let keys = match get_keys() {
-                        Ok(k) => {
-                            create_alias_form.write().0 = false;
-                            Some(k)
-                        },
-                        Err(e) => {
-                            crate::log::debug!("Failed to generate keys: {:?}", e);
-                            show_error.set(true);
-                            login_error.set(format!("Failed to generate keys: {:?}", e));
-                            None
-                        }
-                    };
-                    if let Some((ml_dsa_key, ml_kem_dk)) = keys {
-                        // - create inbox contract
-                        actions.send(NodeAction::CreateContract {
-                            alias: alias.clone(),
-                            ml_dsa_key: ml_dsa_key.clone(),
-                            contract_type: ContractType::InboxContract,
-                        });
-                        // - create AFT delegate && contract
-                        actions.send(NodeAction::CreateDelegate {
-                            alias: alias.clone(),
-                            ml_dsa_key: ml_dsa_key.clone(),
-                        });
-                        actions.send(NodeAction::CreateContract {
-                            alias: alias.clone(),
-                            ml_dsa_key: ml_dsa_key.clone(),
-                            contract_type: ContractType::AFTContract,
-                        });
-
-                        let description_val = description.read().clone();
-                        actions.send(NodeAction::CreateIdentity {
-                            alias,
-                            ml_dsa_key,
-                            ml_kem_dk: Box::new(ml_kem_dk),
-                            description: description_val,
-                        });
-                    } else {
-                        crate::log::debug!("Failed to create identity");
-                    }
-                },
-                "Create"
+            Err(e) => {
+                login_error.set(format!("Failed to generate keys: {e:?}"));
             }
         }
-        div {
-            hidden: "{!*show_error.read()}",
-            class: "notification is-danger",
-            button {
-                class: "delete",
-                onclick: move |_| {
-                    show_error.set(false);
-                    login_error.set(String::default());
-                },
-            },
-            {login_error.read().clone()}
+    };
+
+    let confirm = move |_| {
+        let alias_str = alias_input.read().trim().to_string();
+        let desc_val = description.read().clone();
+        let Some((ml_dsa, ml_kem, _words)) = pending.write().take() else {
+            return;
+        };
+        let alias: Rc<str> = alias_str.into();
+        actions.send(NodeAction::CreateContract {
+            alias: alias.clone(),
+            ml_dsa_key: ml_dsa.clone(),
+            contract_type: ContractType::InboxContract,
+        });
+        actions.send(NodeAction::CreateDelegate {
+            alias: alias.clone(),
+            ml_dsa_key: ml_dsa.clone(),
+        });
+        actions.send(NodeAction::CreateContract {
+            alias: alias.clone(),
+            ml_dsa_key: ml_dsa.clone(),
+            contract_type: ContractType::AFTContract,
+        });
+        actions.send(NodeAction::CreateIdentity {
+            alias,
+            ml_dsa_key: ml_dsa,
+            ml_kem_dk: Box::new(ml_kem),
+            description: desc_val,
+        });
+        create_alias_form.write().0 = false;
+    };
+
+    let cancel = move |_| {
+        pending.set(None);
+        alias_input.set(String::new());
+        description.set(String::new());
+        create_alias_form.write().0 = false;
+    };
+
+    let words_opt = pending.read().as_ref().map(|(_, _, w)| *w);
+
+    rsx! {
+        if let Some(words) = words_opt {
+            // ── Reveal stage ────────────────────────────────────────
+            div { class: "card",
+                h2 { class: "display md italic", "Your fingerprint" }
+                p { class: "lede",
+                    "Six words. Same value, every time. Read these to a contact through a separate channel before they trust your address."
+                }
+                div { class: "verify-words",
+                    div { class: "verify-words-label",
+                        span { class: "pulse-dot" }
+                        "Six-word fingerprint"
+                    }
+                    div { class: "verify-words-grid",
+                        {
+                            words.iter().enumerate().map(|(i, w)| rsx! {
+                                div { class: "verify-word",
+                                    span { class: "num", "{i + 1:02}" }
+                                    span { class: "w", "{w}" }
+                                }
+                            })
+                        }
+                    }
+                }
+                div { class: "nudge",
+                    span { class: "nudge-icon", "⚠" }
+                    div { class: "nudge-text",
+                        strong { "Back up the key before you continue." }
+                        " It lives in this browser only. There is no recovery."
+                    }
+                }
+                div { class: "modal-foot", style: "background:transparent; border:0; padding:18px 0 0;",
+                    button {
+                        class: "btn btn-ghost",
+                        onclick: cancel,
+                        "Discard"
+                    }
+                    button {
+                        class: "btn btn-primary btn-lg",
+                        "data-testid": "fm-create-confirm",
+                        onclick: confirm,
+                        "Continue to inbox"
+                    }
+                }
+            }
+        } else {
+            // ── Form stage ──────────────────────────────────────────
+            div { class: "card",
+                h2 { class: "display md italic", "New identity" }
+                p { class: "lede",
+                    "Generated locally. No server has seen this key."
+                }
+                div { class: "field", style: "margin-top:24px;",
+                    label { class: "field-label", "Alias" }
+                    input {
+                        class: "input",
+                        placeholder: "e.g. mira",
+                        value: "{alias_input}",
+                        "data-testid": "fm-create-alias-input",
+                        oninput: move |evt| alias_input.set(evt.value()),
+                    }
+                    span { class: "field-help", "Used as your local handle. Other people see only your fingerprint." }
+                }
+                div { class: "field",
+                    label { class: "field-label", "Description (optional)" }
+                    input {
+                        class: "input",
+                        placeholder: "e.g. work",
+                        value: "{description}",
+                        oninput: move |evt| description.set(evt.value()),
+                    }
+                }
+                if !login_error.read().is_empty() {
+                    div { class: "info", style: "background:#fef2f2; border-color:#fecaca; color:#991b1b;",
+                        "{login_error.read()}"
+                    }
+                }
+                div { class: "modal-foot", style: "background:transparent; border:0; padding:18px 0 0;",
+                    button {
+                        class: "btn btn-ghost",
+                        onclick: cancel,
+                        "Cancel"
+                    }
+                    button {
+                        class: "btn btn-primary btn-lg",
+                        "data-testid": "fm-create-submit",
+                        onclick: submit,
+                        "Generate"
+                    }
+                }
+            }
         }
     }
 }
@@ -859,16 +876,15 @@ pub(super) fn GetOrCreateIdentity() -> Element {
     use_context_provider(|| Signal::new(ImportId(false)));
     let import_form_state = use_context::<Signal<ImportId>>();
     rsx! {
-        LoginHeader {}
-        div {
-            class: "columns",
-            div { class: "column is-4"}
-            div {
-                class: "column is-4",
-                if !import_form_state.read().0 {
-                    CreateLinks {}
-                } else {
-                    ImportForm {}
+        div { class: "fm-pre",
+            Topbar {}
+            section { class: "page screen",
+                div { class: "col",
+                    if !import_form_state.read().0 {
+                        FirstRunCards {}
+                    } else {
+                        ImportForm {}
+                    }
                 }
             }
         }
@@ -876,182 +892,229 @@ pub(super) fn GetOrCreateIdentity() -> Element {
 }
 
 #[allow(non_snake_case)]
-fn CreateLinks() -> Element {
+fn FirstRunCards() -> Element {
     let mut user = use_context::<Signal<User>>();
-    let mut create_user_form = use_context::<Signal<ImportId>>();
+    let mut import_form = use_context::<Signal<ImportId>>();
     rsx! {
-        div {
-            class: "box is-small",
-            a {
-                class: "is-link",
-                onclick: move |_| {
-                    create_user_form.write().0 = false;
-                    user.write().identified = true;
-                },
-                "Create new identity"
+        div { style: "display:flex; flex-direction:column; align-items:center; gap:18px; text-align:center; margin-bottom:8px;",
+            div { class: "glyph", "✉" }
+            h1 { class: "display lg italic", style: "max-width:32ch;",
+                "A quiet inbox you keep, in the open."
             }
-        },
-        div {
-            class: "box is-small",
-            a {
-                class: "is-link",
-                onclick: move |_| create_user_form.write().0 = true ,
-                "Import existing identity"
+            p { class: "lede", style: "text-align:center;",
+                "Generate or restore an identity. Your keys live in this browser; nothing leaves it until you say so."
             }
         }
+        div { class: "actions",
+            button {
+                class: "action-card",
+                "data-testid": "fm-action-create",
+                onclick: move |_| {
+                    import_form.write().0 = false;
+                    user.write().identified = true;
+                },
+                span { class: "action-icon", "✚" }
+                span { class: "action-title", "Create new identity" }
+                span { class: "action-desc",
+                    "Generate a fresh keypair locally. Pick an alias and back up the key before you go further."
+                }
+            }
+            button {
+                class: "action-card",
+                "data-testid": "fm-action-import",
+                onclick: move |_| { import_form.write().0 = true; },
+                span { class: "action-icon", "↥" }
+                span { class: "action-title", "Restore from backup" }
+                span { class: "action-desc",
+                    "Paste or upload a previously exported identity backup file."
+                }
+            }
+        }
+        p { class: "quiet-hint", "no servers · no accounts · no recovery" }
     }
 }
 
 #[allow(non_snake_case)]
 fn ImportForm() -> Element {
+    let mut import_id_form = use_context::<Signal<ImportId>>();
     let mut import_backup_form = use_context::<Signal<ImportBackup>>();
     let actions = use_coroutine_handle::<NodeAction>();
     let parsed_backup: Signal<Option<IdentityBackup>> = use_signal(|| None);
     let mut address = use_signal(String::new);
     let mut description = use_signal(String::new);
 
+    let preview_words: Option<[&'static str; 6]> = parsed_backup.read().as_ref().map(|b| {
+        let ml_dsa = b.keys.ml_dsa_signing_key();
+        let ml_kem = b.keys.ml_kem_dk();
+        use ml_dsa::signature::Keypair;
+        use ml_kem::kem::KeyExport;
+        let vk_bytes: Vec<u8> = ml_dsa.as_ref().verifying_key().encode().to_vec();
+        let ek_bytes: Vec<u8> = ml_kem.encapsulation_key().to_bytes().to_vec();
+        crate::app::address_book::fingerprint_words(&vk_bytes, &ek_bytes)
+    });
+
+    let cancel = move |_| {
+        // Both flows share this form: hub mode toggles ImportBackup;
+        // first-run mode toggles ImportId.
+        import_backup_form.write().0 = false;
+        import_id_form.write().0 = false;
+    };
+
     rsx! {
-        div {
-            class: "box has-background-primary is-small mt-2",
-            div {
-                class: "file is-small mb-2",
-                label {
-                    class: "file-label",
-                    input {
-                        class: "file-input",
-                        r#type: "file",
-                        accept: ".json",
-                        id: "restore-file-input",
-                        onchange: move |_| {
-                            #[cfg(target_family = "wasm")]
+        div { class: "card",
+            h2 { class: "display md italic", "Restore identity" }
+            p { class: "lede",
+                "Pick the backup file you exported earlier. The keys never leave this browser."
+            }
+            div { class: "field", style: "margin-top:24px;",
+                label { class: "field-label", "Backup file" }
+                input {
+                    class: "input",
+                    r#type: "file",
+                    accept: ".json",
+                    id: "restore-file-input",
+                    "data-testid": "fm-restore-file",
+                    onchange: move |_| {
+                        #[cfg(target_family = "wasm")]
+                        {
+                            use wasm_bindgen::{JsCast, closure::Closure};
+                            use web_sys::{FileReader, HtmlInputElement};
+                            let document = match web_sys::window()
+                                .and_then(|w| w.document())
                             {
-                                use wasm_bindgen::{JsCast, closure::Closure};
-                                use web_sys::{FileReader, HtmlInputElement};
-                                let document = match web_sys::window()
-                                    .and_then(|w| w.document())
+                                Some(d) => d,
+                                None => return,
+                            };
+                            let input = match document
+                                .get_element_by_id("restore-file-input")
+                                .and_then(|el| el.dyn_into::<HtmlInputElement>().ok())
+                            {
+                                Some(el) => el,
+                                None => return,
+                            };
+                            let files = match input.files() {
+                                Some(f) => f,
+                                None => return,
+                            };
+                            let file = match files.item(0) {
+                                Some(f) => f,
+                                None => return,
+                            };
+                            let reader = match FileReader::new() {
+                                Ok(r) => r,
+                                Err(_) => return,
+                            };
+                            let reader_c = reader.clone();
+                            let mut pb = parsed_backup;
+                            let mut addr = address;
+                            let mut desc = description;
+                            let cb = Closure::once(Box::new(move || {
+                                let result = reader_c.result().ok()
+                                    .and_then(|v| v.as_string());
+                                if let Some(text) = result
+                                    && let Ok(b) = serde_json::from_str::<IdentityBackup>(&text)
                                 {
-                                    Some(d) => d,
-                                    None => return,
-                                };
-                                let input = match document
-                                    .get_element_by_id("restore-file-input")
-                                    .and_then(|el| el.dyn_into::<HtmlInputElement>().ok())
-                                {
-                                    Some(el) => el,
-                                    None => return,
-                                };
-                                let files = match input.files() {
-                                    Some(f) => f,
-                                    None => return,
-                                };
-                                let file = match files.item(0) {
-                                    Some(f) => f,
-                                    None => return,
-                                };
-                                let reader = match FileReader::new() {
-                                    Ok(r) => r,
-                                    Err(_) => return,
-                                };
-                                let reader_c = reader.clone();
-                                let mut pb = parsed_backup;
-                                let mut addr = address;
-                                let mut desc = description;
-                                let cb = Closure::once(Box::new(move || {
-                                    let result = reader_c.result().ok()
-                                        .and_then(|v| v.as_string());
-                                    if let Some(text) = result
-                                        && let Ok(b) = serde_json::from_str::<IdentityBackup>(&text)
-                                    {
-                                        addr.set(b.alias.clone());
-                                        desc.set(b.description.clone());
-                                        pb.set(Some(b));
-                                    }
-                                }) as Box<dyn FnOnce()>);
-                                reader.set_onloadend(Some(cb.as_ref().unchecked_ref()));
-                                let _ = reader.read_as_text(&file);
-                                cb.forget();
+                                    addr.set(b.alias.clone());
+                                    desc.set(b.description.clone());
+                                    pb.set(Some(b));
+                                }
+                            }) as Box<dyn FnOnce()>);
+                            reader.set_onloadend(Some(cb.as_ref().unchecked_ref()));
+                            let _ = reader.read_as_text(&file);
+                            cb.forget();
+                        }
+                    },
+                }
+            }
+            if let Some(words) = preview_words {
+                div { class: "verify-words",
+                    div { class: "verify-words-label",
+                        span { class: "pulse-dot" }
+                        "Recovered fingerprint"
+                    }
+                    div { class: "verify-words-grid",
+                        {
+                            words.iter().enumerate().map(|(i, w)| rsx! {
+                                div { class: "verify-word",
+                                    span { class: "num", "{i + 1:02}" }
+                                    span { class: "w", "{w}" }
+                                }
+                            })
+                        }
+                    }
+                }
+            }
+            div { class: "field",
+                label { class: "field-label", "Alias" }
+                input {
+                    class: "input",
+                    placeholder: "pre-filled from backup file",
+                    value: "{address}",
+                    oninput: move |evt| address.set(evt.value()),
+                }
+            }
+            div { class: "field",
+                label { class: "field-label", "Description" }
+                input {
+                    class: "input",
+                    placeholder: "pre-filled from backup file",
+                    value: "{description}",
+                    oninput: move |evt| description.set(evt.value()),
+                }
+            }
+            div { class: "nudge",
+                span { class: "nudge-icon", "⚠" }
+                div { class: "nudge-text",
+                    strong { "Backup files contain raw private keys." }
+                    " Once restored, treat the original file like a password — store it offline or delete it."
+                }
+            }
+            div { class: "modal-foot", style: "background:transparent; border:0; padding:18px 0 0;",
+                button {
+                    class: "btn btn-ghost",
+                    onclick: cancel,
+                    "Cancel"
+                }
+                button {
+                    class: "btn btn-primary btn-lg",
+                    "data-testid": "fm-restore-submit",
+                    disabled: parsed_backup.read().is_none(),
+                    onclick: move |_| {
+                        if let Some(backup) = parsed_backup.read().clone() {
+                            if let Err(_msg) = backup.check_version() {
+                                crate::log::debug!("Rejected backup: {_msg}");
+                                return;
                             }
+                            let alias: Rc<str> = address.read().to_owned().into();
+                            let desc_val = description.read().clone();
+                            let ml_dsa = backup.keys.ml_dsa_signing_key();
+                            let ml_kem = backup.keys.ml_kem_dk();
+                            actions.send(NodeAction::CreateContract {
+                                alias: alias.clone(),
+                                ml_dsa_key: ml_dsa.clone(),
+                                contract_type: ContractType::InboxContract,
+                            });
+                            actions.send(NodeAction::CreateDelegate {
+                                alias: alias.clone(),
+                                ml_dsa_key: ml_dsa.clone(),
+                            });
+                            actions.send(NodeAction::CreateContract {
+                                alias: alias.clone(),
+                                ml_dsa_key: ml_dsa.clone(),
+                                contract_type: ContractType::AFTContract,
+                            });
+                            actions.send(NodeAction::CreateIdentity {
+                                alias,
+                                ml_dsa_key: ml_dsa,
+                                ml_kem_dk: Box::new(ml_kem),
+                                description: desc_val,
+                            });
+                            import_backup_form.write().0 = false;
+                            import_id_form.write().0 = false;
                         }
-                    }
-                    span {
-                        class: "file-cta",
-                        span { class: "file-icon", i { class: "fas fa-upload" } }
-                        span { class: "file-label", "Choose backup file (.json)" }
-                    }
+                    },
+                    "Restore"
                 }
-            }
-            div {
-                class: "field",
-                label { "Alias" }
-                div {
-                    class: "control has-icons-left",
-                    input {
-                        class: "input",
-                        placeholder: "pre-filled from backup file",
-                        value: "{address}",
-                        oninput: move |evt| address.set(evt.value().clone())
-                    }
-                    span { class: "icon is-small is-left", i { class: "fas fa-envelope" } }
-                }
-            }
-            div {
-                class: "field",
-                label { "Description" }
-                div {
-                    class: "control",
-                    input {
-                        class: "input",
-                        placeholder: "pre-filled from backup file",
-                        value: "{description}",
-                        oninput: move |evt| description.set(evt.value().clone())
-                    }
-                }
-            }
-            p { class: "help is-warning mb-2",
-                "Backup files contain raw private keys — store them securely."
-            }
-            button {
-                class: if parsed_backup.read().is_some() { "button is-primary mr-2" } else { "button is-primary mr-2 is-static" },
-                disabled: parsed_backup.read().is_none(),
-                onclick: move |_| {
-                    if let Some(backup) = parsed_backup.read().clone() {
-                        if let Err(_msg) = backup.check_version() {
-                            crate::log::debug!("Rejected backup: {_msg}");
-                            return;
-                        }
-                        let alias: Rc<str> = address.read().to_owned().into();
-                        let desc_val = description.read().clone();
-                        let ml_dsa = backup.keys.ml_dsa_signing_key();
-                        let ml_kem = backup.keys.ml_kem_dk();
-                        actions.send(NodeAction::CreateContract {
-                            alias: alias.clone(),
-                            ml_dsa_key: ml_dsa.clone(),
-                            contract_type: ContractType::InboxContract,
-                        });
-                        actions.send(NodeAction::CreateDelegate {
-                            alias: alias.clone(),
-                            ml_dsa_key: ml_dsa.clone(),
-                        });
-                        actions.send(NodeAction::CreateContract {
-                            alias: alias.clone(),
-                            ml_dsa_key: ml_dsa.clone(),
-                            contract_type: ContractType::AFTContract,
-                        });
-                        actions.send(NodeAction::CreateIdentity {
-                            alias,
-                            ml_dsa_key: ml_dsa,
-                            ml_kem_dk: Box::new(ml_kem),
-                            description: desc_val,
-                        });
-                        import_backup_form.write().0 = false;
-                    }
-                },
-                "Restore"
-            }
-            button {
-                class: "button is-light",
-                onclick: move |_| { import_backup_form.write().0 = false; },
-                "Cancel"
             }
         }
     }
@@ -1086,40 +1149,82 @@ fn ShareContactModal() -> Element {
         .unwrap_or_default();
     let mut copied = use_signal(|| false);
 
+    // Pull the verify line ("verify: w-w-w-w-w-w") off the front of the
+    // share text so we can render the six words in the trust-surface
+    // verify-words block. The remainder is the contact:// token.
+    let (verify_words, contact_token): (Vec<String>, String) = {
+        let mut words = Vec::new();
+        let mut token = share_text.clone();
+        if let Some((first, rest)) = share_text.split_once('\n') {
+            if let Some(stripped) = first.strip_prefix("verify: ") {
+                words = stripped.split('-').map(|s| s.to_string()).collect();
+                token = rest.to_string();
+            }
+        }
+        (words, token)
+    };
+    let close = move |_| {
+        share_contact_form.write().0 = false;
+        copied.set(false);
+    };
+
     rsx! {
-        div {
-            class: "box has-background-primary is-small mt-2",
-            p { class: "title is-5", "Share your address ({alias})" }
-            p { class: "is-size-7 mb-2",
-                "Send this text to whoever needs to reach you. \
-                 Ask them to confirm the verify: line matches what you see here."
-            }
-            textarea {
-                class: "textarea is-family-monospace is-small mb-2",
-                readonly: true,
-                rows: "4",
-                value: "{share_text}"
-            }
-            div {
-                class: "buttons",
-                button {
-                    class: "button is-info",
-                    onclick: {
-                        let share_text = share_text.clone();
-                        move |_| {
-                            copy_to_clipboard(share_text.clone());
-                            copied.set(true);
-                        }
-                    },
-                    if *copied.read() { "Copied!" } else { "Copy to clipboard" }
+        div { class: "veil",
+            onclick: move |_| {
+                share_contact_form.write().0 = false;
+                copied.set(false);
+            },
+            div { class: "modal",
+                "data-testid": "fm-share-modal",
+                "data-share-text": "{share_text}",
+                onclick: move |ev| { ev.stop_propagation(); },
+                div { class: "modal-head",
+                    span { class: "modal-title", "Share {alias}" }
+                    button { class: "modal-x", onclick: close, "✕" }
                 }
-                button {
-                    class: "button is-light",
-                    onclick: move |_| {
-                        share_contact_form.write().0 = false;
-                        copied.set(false);
-                    },
-                    "Close"
+                div { class: "modal-body",
+                    p { class: "field-help", style: "margin: -4px 0 14px;",
+                        "Read these six words to your contact through a separate channel — phone, in person, Signal. They should match what they see when they import."
+                    }
+                    if verify_words.len() == 6 {
+                        div { class: "verify-words",
+                            div { class: "verify-words-label",
+                                span { class: "pulse-dot" }
+                                "Six-word fingerprint"
+                            }
+                            div { class: "verify-words-grid",
+                                {
+                                    verify_words.iter().enumerate().map(|(i, w)| rsx! {
+                                        div { class: "verify-word",
+                                            span { class: "num", "{i + 1:02}" }
+                                            span { class: "w", "{w}" }
+                                        }
+                                    })
+                                }
+                            }
+                        }
+                    }
+                    label { class: "field-label", "Token" }
+                    div { class: "token-block", "{contact_token}" }
+                }
+                div { class: "modal-foot",
+                    button {
+                        class: "btn btn-secondary",
+                        "data-testid": "fm-share-copy",
+                        onclick: {
+                            let share_text = share_text.clone();
+                            move |_| {
+                                copy_to_clipboard(share_text.clone());
+                                copied.set(true);
+                            }
+                        },
+                        if *copied.read() { "Copied" } else { "Copy" }
+                    }
+                    button {
+                        class: "btn btn-primary",
+                        onclick: close,
+                        "Close"
+                    }
                 }
             }
         }
@@ -1168,126 +1273,150 @@ fn ImportContactForm() -> Element {
 
     let can_import = fingerprint_words.read().is_some() && !local_alias.read().is_empty();
 
+    let cancel = move |_| {
+        import_contact_form.write().0 = false;
+        error_msg.set(String::new());
+    };
+    let verify_check_class = if *verified.read() {
+        "verify-check checked"
+    } else {
+        "verify-check"
+    };
+
     rsx! {
-        div {
-            class: "box has-background-primary is-small mt-2",
-            p { class: "title is-5", "Import contact" }
-            div {
-                class: "field",
-                label { "Paste contact card (contact://… or bare base64)" }
-                div {
-                    class: "control",
-                    textarea {
-                        class: "textarea is-small",
-                        placeholder: "contact://…",
-                        rows: "3",
-                        value: "{paste_text}",
-                        oninput: on_paste_change
-                    }
+        div { class: "veil",
+            onclick: move |_| {
+                import_contact_form.write().0 = false;
+                error_msg.set(String::new());
+            },
+            div { class: "modal",
+                "data-testid": "fm-import-contact-modal",
+                onclick: move |ev| { ev.stop_propagation(); },
+                div { class: "modal-head",
+                    span { class: "modal-title", "Import contact" }
+                    button { class: "modal-x", onclick: cancel, "✕" }
                 }
-            }
-            if let Some(ref words) = *fingerprint_words.read() {
-                div {
-                    class: "notification is-info is-light mb-2",
-                    p { class: "has-text-weight-bold", "Fingerprint (verify with sender):" }
-                    p { class: "is-family-monospace is-size-6",
-                        "{words[0]} {words[1]} {words[2]} {words[3]} {words[4]} {words[5]}"
+                div { class: "modal-body",
+                    p { class: "field-help", style: "margin: -4px 0 14px;",
+                        "Paste the contact:// token your contact gave you. The decoded fingerprint appears below — confirm it through a separate channel before you tick the verify box."
                     }
-                    label {
-                        class: "checkbox",
+                    div { class: "field",
+                        label { class: "field-label", "Contact card" }
+                        textarea {
+                            class: "textarea",
+                            placeholder: "contact://…",
+                            rows: "3",
+                            value: "{paste_text}",
+                            oninput: on_paste_change,
+                        }
+                    }
+                    if let Some(ref words) = *fingerprint_words.read() {
+                        div { class: "verify-words",
+                            "data-testid": "fm-import-fp",
+                            div { class: "verify-words-label",
+                                span { class: "pulse-dot" }
+                                "Fingerprint (verify with sender)"
+                            }
+                            div { class: "verify-words-grid",
+                                {
+                                    words.iter().enumerate().map(|(i, w)| rsx! {
+                                        div { class: "verify-word",
+                                            span { class: "num", "{i + 1:02}" }
+                                            span { class: "w", "{w}" }
+                                        }
+                                    })
+                                }
+                            }
+                        }
+                    }
+                    div { class: "field",
+                        label { class: "field-label", "Your local label (must be unique)" }
                         input {
-                            r#type: "checkbox",
-                            checked: *verified.read(),
+                            class: "input",
+                            placeholder: "e.g. Alice (work)",
+                            value: "{local_alias}",
+                            oninput: move |evt| local_alias.set(evt.value()),
+                        }
+                    }
+                    div { class: "field",
+                        label { class: "field-label", "Description (optional)" }
+                        input {
+                            class: "input",
+                            placeholder: "",
+                            value: "{description}",
+                            oninput: move |evt| description.set(evt.value()),
+                        }
+                    }
+                    if fingerprint_words.read().is_some() {
+                        label {
+                            class: "{verify_check_class}",
+                            "data-testid": "fm-verify-check",
                             onclick: move |_| {
                                 let v = *verified.read();
                                 verified.set(!v);
+                            },
+                            div { class: "verify-box",
+                                span { class: "tick", "✓" }
                             }
-                        }
-                        " I verified the fingerprint with the sender"
-                    }
-                }
-            }
-            div {
-                class: "field",
-                label { "Your local label (must be unique)" }
-                div {
-                    class: "control",
-                    input {
-                        class: "input",
-                        placeholder: "e.g. Alice (work)",
-                        value: "{local_alias}",
-                        oninput: move |evt| local_alias.set(evt.value().clone())
-                    }
-                }
-            }
-            div {
-                class: "field",
-                label { "Description (optional)" }
-                div {
-                    class: "control",
-                    input {
-                        class: "input",
-                        placeholder: "",
-                        value: "{description}",
-                        oninput: move |evt| description.set(evt.value().clone())
-                    }
-                }
-            }
-            if !error_msg.read().is_empty() {
-                div {
-                    class: "notification is-danger is-light mb-2",
-                    "{error_msg}"
-                }
-            }
-            div {
-                class: "buttons",
-                button {
-                    class: if can_import { "button is-primary" } else { "button is-primary is-static" },
-                    disabled: !can_import,
-                    onclick: move |_| {
-                        let text = paste_text.read().clone();
-                        let alias_str = local_alias.read().clone();
-                        if alias_str.is_empty() { return; }
-                        match crate::app::address_book::ContactCard::decode(&text) {
-                            Ok(card) => {
-                                if crate::app::address_book::is_own_fingerprint(
-                                    &card.ml_dsa_vk_bytes,
-                                    &card.ml_kem_ek_bytes,
-                                ) {
-                                    error_msg.set("That card belongs to one of your own identities.".into());
-                                    return;
+                            div { class: "verify-text",
+                                span { class: "verify-headline",
+                                    "I verified these six words with the sender"
                                 }
-                                let stored = crate::app::address_book::StoredContactKeys::from_card(
-                                    &card,
-                                    *verified.read(),
-                                );
-                                let contact = stored.into_contact(
-                                    alias_str.clone().into(),
-                                    description.read().clone(),
-                                );
-                                actions.send(NodeAction::CreateContact { contact });
-                                import_contact_form.write().0 = false;
-                                paste_text.set(String::new());
-                                local_alias.set(String::new());
-                                description.set(String::new());
-                                verified.set(false);
-                                fingerprint_words.set(None);
-                                error_msg.set(String::new());
-                            }
-                            Err(e) => {
-                                error_msg.set(format!("Failed to parse: {e}"));
+                                span { class: "verify-sub",
+                                    "Phone, in person, Signal — anything but this app. Untick if you have not."
+                                }
                             }
                         }
-                    },
-                    "Import"
+                    }
+                    if !error_msg.read().is_empty() {
+                        div { class: "info", style: "background:#fef2f2; border-color:#fecaca; color:#991b1b;",
+                            "{error_msg}"
+                        }
+                    }
                 }
-                button {
-                    class: "button is-light",
-                    onclick: move |_| {
-                        import_contact_form.write().0 = false;
-                        error_msg.set(String::new());
-                    },
-                    "Cancel"
+                div { class: "modal-foot",
+                    button { class: "btn btn-ghost", onclick: cancel, "Cancel" }
+                    button {
+                        class: "btn btn-primary",
+                        "data-testid": "fm-import-submit",
+                        disabled: !can_import,
+                        onclick: move |_| {
+                            let text = paste_text.read().clone();
+                            let alias_str = local_alias.read().clone();
+                            if alias_str.is_empty() { return; }
+                            match crate::app::address_book::ContactCard::decode(&text) {
+                                Ok(card) => {
+                                    if crate::app::address_book::is_own_fingerprint(
+                                        &card.ml_dsa_vk_bytes,
+                                        &card.ml_kem_ek_bytes,
+                                    ) {
+                                        error_msg.set("That card belongs to one of your own identities.".into());
+                                        return;
+                                    }
+                                    let stored = crate::app::address_book::StoredContactKeys::from_card(
+                                        &card,
+                                        *verified.read(),
+                                    );
+                                    let contact = stored.into_contact(
+                                        alias_str.clone().into(),
+                                        description.read().clone(),
+                                    );
+                                    actions.send(NodeAction::CreateContact { contact });
+                                    import_contact_form.write().0 = false;
+                                    paste_text.set(String::new());
+                                    local_alias.set(String::new());
+                                    description.set(String::new());
+                                    verified.set(false);
+                                    fingerprint_words.set(None);
+                                    error_msg.set(String::new());
+                                }
+                                Err(e) => {
+                                    error_msg.set(format!("Failed to parse: {e}"));
+                                }
+                            }
+                        },
+                        "Import"
+                    }
                 }
             }
         }
@@ -1307,78 +1436,70 @@ fn ContactsSection() -> Element {
     }
 
     rsx! {
-        div {
-            class: "card-content",
-            p { class: "title is-5 mb-1", "Contacts" }
-            if contacts.is_empty() {
-                p { class: "is-size-7 has-text-grey", "No contacts yet. Import one to send messages." }
+        div { class: "section-head",
+            span { class: "section-title", "Contacts" }
+            button {
+                class: "btn btn-secondary",
+                "data-testid": "fm-contact-import",
+                onclick: move |_| { import_contact_form.write().0 = true; },
+                "+ Import contact"
             }
-            for contact in contacts {
-                {
-                    let alias_str = contact.local_alias.to_string();
-                    let fp = contact.fingerprint_short();
-                    let badge = if contact.verified { "✓" } else { "⚠" };
-                    let badge_class = if contact.verified {
-                        "has-text-success"
-                    } else {
-                        "has-text-warning"
-                    };
-                    let del_alias = alias_str.clone();
-                    rsx! {
-                        div {
-                            class: "media mb-1",
-                            "data-testid": "contact-row",
-                            "data-alias": "{alias_str}",
-                            div {
-                                class: "media-content",
-                                p {
-                                    class: "is-size-6",
-                                    span {
-                                        class: "{badge_class} mr-1",
-                                        "data-testid": "contact-verify-badge",
-                                        "{badge}"
+        }
+        if contacts.is_empty() {
+            div { class: "empty-state",
+                div { class: "glyph sm", "✉" }
+                p { class: "field-help", style: "text-align:center; max-width:36ch;",
+                    "No contacts yet. Import one — they share a six-word fingerprint and you decide whether you trust it."
+                }
+            }
+        } else {
+            div { class: "contact-list",
+                for contact in contacts {
+                    {
+                        let alias_str = contact.local_alias.to_string();
+                        let fp_short = contact.fingerprint_short();
+                        let del_alias = alias_str.clone();
+                        let verified = contact.verified;
+                        let description = contact.description.clone();
+                        rsx! {
+                            div { class: "contact-row",
+                                "data-testid": "contact-row",
+                                "data-alias": "{alias_str}",
+                                div { class: "contact-name",
+                                    span { class: "contact-label", "{alias_str}" }
+                                    if !description.is_empty() {
+                                        span { class: "id-desc", "{description}" }
                                     }
-                                    strong { "{alias_str}" }
-                                    span {
-                                        class: "has-text-grey is-size-7 ml-2",
+                                    span { class: "contact-fp",
                                         "data-testid": "contact-fingerprint",
-                                        "({fp})"
+                                        "{fp_short}"
                                     }
                                 }
-                                if !contact.description.is_empty() {
-                                    p { class: "is-size-7 has-text-grey", "{contact.description}" }
+                                if verified {
+                                    span { class: "badge badge-trust",
+                                        "data-testid": "contact-verify-badge",
+                                        "✓ verified"
+                                    }
+                                } else {
+                                    span { class: "badge badge-warn",
+                                        "data-testid": "contact-verify-badge",
+                                        "⚠ unverified"
+                                    }
                                 }
-                            }
-                            div {
-                                class: "media-right",
                                 button {
-                                    class: "button is-small is-danger is-light",
+                                    class: "icon-btn danger",
                                     title: "Remove contact",
                                     "data-testid": "contact-remove",
                                     onclick: move |_| {
-                                        // Re-render is triggered by the
-                                        // coroutine handler bumping
-                                        // login_controller AFTER the
-                                        // address_book mutation completes.
                                         actions.send(NodeAction::DeleteContact {
                                             alias: del_alias.clone(),
                                         });
                                     },
-                                    span { class: "icon is-small", i { class: "fas fa-trash" } }
+                                    "✕"
                                 }
                             }
                         }
                     }
-                }
-            }
-            div {
-                class: "mt-2",
-                a {
-                    class: "is-link is-size-7",
-                    onclick: move |_| {
-                        import_contact_form.write().0 = true;
-                    },
-                    "+ Import contact"
                 }
             }
         }

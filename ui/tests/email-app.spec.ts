@@ -7,14 +7,23 @@ import { APP_NAME } from "./app-name";
 // Firefox takes significantly longer to initialize the RSA keygen
 // for the mock identities, so we give it a generous 60s ceiling.
 async function waitForApp(page: Page) {
-  await page.waitForSelector("h1", { timeout: 60_000 });
-  await expect(page.locator("h1").first()).toContainText(APP_NAME);
+  // Pre-login screens render the redesigned topbar; post-login mounts
+  // the .fm-app shell. Either is enough to know the WASM finished
+  // booting.
+  await page
+    .locator('.brand-name, [data-testid="fm-app"]')
+    .first()
+    .waitFor({ timeout: 60_000 });
+  await expect(page.locator(".brand-name").first()).toContainText(APP_NAME);
 }
 
-// Helper: select an identity by clicking its alias link, then wait
-// for the redesigned mailbox shell to mount.
+// Helper: select an identity by clicking its row's "Open inbox"
+// button. Identity rows are now structural (id-row), so clicking the
+// alias text alone no longer logs in.
 async function selectIdentity(page: Page, alias: string) {
-  await page.getByText(alias, { exact: true }).click();
+  await page
+    .locator(`[data-testid="fm-id-row"][data-alias="${alias}"] [data-testid="fm-id-open"]`)
+    .click();
   await page.locator('[data-testid="fm-app"]').waitFor({ timeout: 10_000 });
   await expect(page.locator(".list-title")).toContainText("Inbox", {
     timeout: 10_000,
@@ -59,12 +68,16 @@ test.describe("Identity list", () => {
     await page.goto("/");
     await waitForApp(page);
 
-    // Both mock identities should be listed.
-    await expect(page.getByText("address1")).toBeVisible();
-    await expect(page.getByText("address2")).toBeVisible();
+    // Both mock identities should be listed as id-rows.
+    await expect(
+      page.locator('[data-testid="fm-id-row"][data-alias="address1"]'),
+    ).toBeVisible();
+    await expect(
+      page.locator('[data-testid="fm-id-row"][data-alias="address2"]'),
+    ).toBeVisible();
 
-    // "Create new identity" link should be present.
-    await expect(page.getByText("Create new identity")).toBeVisible();
+    // "+ Create new identity" affordance should be present.
+    await expect(page.locator('[data-testid="fm-id-create"]')).toBeVisible();
   });
 });
 
@@ -158,7 +171,7 @@ test.describe("Compose and logout", () => {
     // Back at identity list.
     await expect(page.getByText("address1")).toBeVisible();
     await expect(page.getByText("address2")).toBeVisible();
-    await expect(page.getByText("Create new identity")).toBeVisible();
+    await expect(page.locator('[data-testid="fm-id-create"]')).toBeVisible();
   });
 });
 
@@ -239,7 +252,7 @@ test.describe("Multi-turn cross-inbox messaging", () => {
 
     // Log out.
     await logout(page);
-    await expect(page.getByText("Create new identity")).toBeVisible();
+    await expect(page.locator('[data-testid="fm-id-create"]')).toBeVisible();
 
     // ── Turn 2: address2 receives and replies ──────────────────────────
 
@@ -269,7 +282,7 @@ test.describe("Multi-turn cross-inbox messaging", () => {
 
     // Log out.
     await logout(page);
-    await expect(page.getByText("Create new identity")).toBeVisible();
+    await expect(page.locator('[data-testid="fm-id-create"]')).toBeVisible();
 
     // ── Turn 3: address1 sees the reply ────────────────────────────────
 
@@ -380,18 +393,16 @@ test.describe("Address book: import contact and display", () => {
     });
 
     // ── Step 2: open the import-contact dialog ────────────────────────────
-    await page.getByText("+ Import contact", { exact: true }).click();
+    await page.locator('[data-testid="fm-contact-import"]').click();
 
-    await expect(page.getByText("Import contact")).toBeVisible({
-      timeout: 5_000,
-    });
+    const importModal = page.locator('[data-testid="fm-import-contact-modal"]');
+    await importModal.waitFor({ timeout: 5_000 });
 
     // ── Step 3: paste the card and assert the fingerprint panel appears ───
-    await page.locator("textarea").fill(contactCard);
+    await importModal.locator("textarea").fill(contactCard);
 
-    await expect(
-      page.getByText("Fingerprint (verify with sender):"),
-    ).toBeVisible({ timeout: 5_000 });
+    const fingerprintPanel = page.locator('[data-testid="fm-import-fp"]');
+    await expect(fingerprintPanel).toBeVisible({ timeout: 5_000 });
 
     // Alias should be pre-filled with the suggested_alias from the card.
     const labelInput = page.locator('input[placeholder="e.g. Alice (work)"]');
@@ -399,17 +410,16 @@ test.describe("Address book: import contact and display", () => {
 
     await labelInput.fill("charlie-test");
 
-    const fingerprintPanel = page.locator(
-      ".notification.is-info p.is-family-monospace",
-    );
-    await expect(fingerprintPanel).toBeVisible({ timeout: 5_000 });
-    const fingerprintText = (await fingerprintPanel.textContent()) ?? "";
-    const fingerprintWords = fingerprintText.trim().split(/\s+/);
+    // The verify-words block lays each word out in a `.verify-word .w`
+    // grid cell — pull all six and form the inline short form.
+    const fingerprintWords = await fingerprintPanel
+      .locator(".verify-word .w")
+      .allTextContents();
     expect(fingerprintWords).toHaveLength(6);
     const fingerprintShort = `${fingerprintWords[0]}-${fingerprintWords[1]}`;
 
     // ── Step 4: complete import and verify contact appears ────────────────
-    await page.locator("button").filter({ hasText: "Import" }).click();
+    await page.locator('[data-testid="fm-import-submit"]').click();
 
     await expect(page.getByText("Contacts", { exact: true })).toBeVisible({
       timeout: 5_000,

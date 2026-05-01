@@ -745,12 +745,13 @@ fn Topbar() -> Element {
         .map(|id| id.alias.chars().next().unwrap_or('·').to_string())
         .unwrap_or_else(|| "·".to_string());
     let search = menu_selection.read().search().to_string();
+    let app_name = crate::app_name();
     rsx! {
         div { class: "topbar",
             div { class: "brand",
                 span { class: "brand-glyph", "f" }
                 div { class: "brand-text",
-                    span { class: "brand-name", "Freenet Mail" }
+                    span { class: "brand-name", "{app_name}" }
                     span { class: "brand-tag", "Private · Decentralized" }
                 }
             }
