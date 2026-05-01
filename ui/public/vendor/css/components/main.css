@@ -1,5 +1,8 @@
 /* Main grid — sidebar + content split. */
 
-/* MAIN */
-.fm-app .main { flex: 1; display: flex; min-height: 0; }
+@layer components {
 
+  /* MAIN */
+  .fm-app .main { flex: 1; display: flex; min-height: 0; }
+
+}
