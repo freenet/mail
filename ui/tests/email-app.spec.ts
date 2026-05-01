@@ -1109,6 +1109,35 @@ test.describe("Message timestamps (#49)", () => {
   });
 });
 
+test.describe("Sender trust badge (#51)", () => {
+  test("detail header shows verified badge for incoming message", async ({ page }) => {
+    await page.goto("/");
+    await waitForApp(page);
+    await selectIdentity(page, "address1");
+    await page.locator("#email-inbox-accessor-0").click();
+
+    // example-data messages are unsigned (no real send path), so they
+    // render as "unverified". The badge surface is what matters here.
+    const badge = page.locator('[data-testid="fm-detail-verif"]');
+    await expect(badge).toHaveCount(1);
+    await expect(badge).toContainText("unverified");
+  });
+
+  test("compose sheet shows 'Sending as: <fingerprint>' label", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await waitForApp(page);
+    await selectIdentity(page, "address1");
+    await page.locator('[data-testid="fm-compose-btn"]').click();
+
+    const label = page.locator('[data-testid="fm-compose-sending-as"]');
+    await expect(label).toHaveCount(1);
+    // "Sending as: <two-word fingerprint>".
+    await expect(label).toHaveText(/^Sending as: [a-z]+-[a-z]+$/);
+  });
+});
+
 test.describe("Sidebar fingerprint (#48)", () => {
   test("sidebar shows two-word fingerprint for active identity", async ({ page }) => {
     await page.goto("/");

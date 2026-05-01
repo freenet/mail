@@ -124,6 +124,15 @@ type EncryptedContent = Vec<u8>;
 pub struct Message {
     pub content: EncryptedContent,
     pub token_assignment: TokenAssignment,
+    /// Sender's ML-DSA-65 verifying key (FIPS 204 encoded, 1952 bytes).
+    /// Empty for legacy unsigned messages — the recipient renders those
+    /// as "unverified" rather than rejecting (#51).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sender_vk: Vec<u8>,
+    /// Detached ML-DSA-65 signature over `content` (the ciphertext blob).
+    /// Verifies before decryption. Empty for legacy unsigned messages.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub signature: Vec<u8>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

@@ -366,6 +366,8 @@ impl InboxView {
                     content: content.content.clone().into(),
                     read: false,
                     time: content.time,
+                    sender_vk: Vec::new(),
+                    signature_valid: false,
                 };
                 MOCK_SENT_MESSAGES.with(|map| {
                     map.borrow_mut()
@@ -457,6 +459,8 @@ impl InboxView {
                     content: body.clone(),
                     read: false,
                     time: t(15),
+                    sender_vk: Vec::new(),
+                    signature_valid: false,
                 },
                 Message {
                     id: 1,
@@ -465,6 +469,8 @@ impl InboxView {
                     content: body.clone(),
                     read: false,
                     time: t(60 * 26),
+                    sender_vk: Vec::new(),
+                    signature_valid: false,
                 },
                 Message {
                     id: 2,
@@ -473,6 +479,8 @@ impl InboxView {
                     content: body,
                     read: true,
                     time: t(60 * 24 * 4),
+                    sender_vk: Vec::new(),
+                    signature_valid: false,
                 },
             ]
         } else {
@@ -484,6 +492,8 @@ impl InboxView {
                     content: body.clone(),
                     read: false,
                     time: t(35),
+                    sender_vk: Vec::new(),
+                    signature_valid: false,
                 },
                 Message {
                     id: 1,
@@ -492,6 +502,8 @@ impl InboxView {
                     content: body,
                     read: false,
                     time: t(60 * 50),
+                    sender_vk: Vec::new(),
+                    signature_valid: false,
                 },
             ]
         };
@@ -612,6 +624,32 @@ struct Message {
     /// short timestamp + detail-header full timestamp + descending
     /// sort. See issue #49.
     time: chrono::DateTime<chrono::Utc>,
+    /// Sender's ML-DSA-65 verifying key bytes (FIPS 204 encoded). Empty
+    /// for legacy unsigned messages. Used for the per-message verified
+    /// badge + sender-fingerprint surface (#51).
+    sender_vk: Vec<u8>,
+    /// Pure-crypto signature check result. Combined with the address-
+    /// book lookup at render time to produce a `VerificationState`.
+    signature_valid: bool,
+}
+
+impl Message {
+    /// Three-valued verification: combines crypto check + address-book
+    /// trust (#51). Verified-known requires both a signature that
+    /// validates AND an address-book contact whose `verified` flag is
+    /// set; verified-unknown is a valid signature without a verified
+    /// contact; everything else (missing/forged signature) is
+    /// unverified.
+    fn verification_state(&self) -> crate::inbox::VerificationState {
+        use crate::inbox::VerificationState;
+        if !self.signature_valid {
+            return VerificationState::Unverified;
+        }
+        match address_book::contact_by_vk(&self.sender_vk) {
+            Some(c) if c.verified => VerificationState::VerifiedKnown,
+            _ => VerificationState::VerifiedUnknown,
+        }
+    }
 }
 
 impl From<MessageModel> for Message {
@@ -623,6 +661,8 @@ impl From<MessageModel> for Message {
             content: value.content.content.into(),
             read: false,
             time: value.content.time,
+            sender_vk: value.sender_vk,
+            signature_valid: value.signature_valid,
         }
     }
 }
@@ -1079,6 +1119,8 @@ fn MessageList() -> Element {
                     content: kept.content.into(),
                     read: true,
                     time,
+                    sender_vk: Vec::new(),
+                    signature_valid: false,
                 });
             }
             crate::log::debug!("active id: {:?}; emails number: {}", id.alias, emails.len());
@@ -1709,6 +1751,31 @@ fn OpenMessage(msg: Message) -> Element {
     let reply_to = from.clone();
     let reply_subj = format!("Re: {}", title);
     let time_full = format_time_full(msg.time);
+    // Sender trust state (#51) — three-valued: verified-known (sig OK +
+    // contact verified), verified-unknown (sig OK, sender VK not in AB),
+    // unverified (no sig / forged sig). Fingerprint short-form is shown
+    // when the VK is present (i.e. the message was signed).
+    let verification = msg.verification_state();
+    let (verif_class, verif_label) = match verification {
+        crate::inbox::VerificationState::VerifiedKnown => ("verif-badge verif-known", "verified"),
+        crate::inbox::VerificationState::VerifiedUnknown => {
+            ("verif-badge verif-unknown", "signed · unknown sender")
+        }
+        crate::inbox::VerificationState::Unverified => ("verif-badge verif-none", "unverified"),
+    };
+    let sender_fp_short = if msg.sender_vk.is_empty() {
+        String::new()
+    } else {
+        // Address-book fingerprint mixes both VK and EK; for messages
+        // we only have the sender's VK, so use it twice (the message's
+        // unique key here is the VK alone).
+        let words = address_book::fingerprint_words(&msg.sender_vk, &msg.sender_vk);
+        format!("{}-{}", words[0], words[1])
+    };
+    let show_add_to_ab = matches!(
+        verification,
+        crate::inbox::VerificationState::VerifiedUnknown
+    );
 
     let archive_client = client.clone();
     let archive_inbox_data = inbox_data.clone();
@@ -1733,7 +1800,20 @@ fn OpenMessage(msg: Message) -> Element {
                     div { class: "sender-orb", "{from_initial}" }
                     div { class: "from-text",
                         span { class: "from-name", "{from}" }
-                        span { class: "from-addr", "" }
+                        if !sender_fp_short.is_empty() {
+                            span {
+                                class: "from-addr",
+                                "data-testid": testid::FM_DETAIL_FINGERPRINT,
+                                "{sender_fp_short}"
+                            }
+                        } else {
+                            span { class: "from-addr", "" }
+                        }
+                    }
+                    span {
+                        class: "{verif_class}",
+                        "data-testid": testid::FM_DETAIL_VERIF,
+                        "{verif_label}"
                     }
                     span {
                         class: "from-time",
@@ -1743,6 +1823,23 @@ fn OpenMessage(msg: Message) -> Element {
                 }
             }
             div { class: "toolbar",
+                if show_add_to_ab {
+                    button {
+                        class: "btn btn-secondary",
+                        "data-testid": testid::FM_ADD_TO_AB,
+                        onclick: move |_| {
+                            // Stub: opens the existing address-book import
+                            // modal. Pre-filling it with this sender's VK
+                            // is a follow-up — the affordance is wired now
+                            // so the verified-unknown flow has a path
+                            // (#51).
+                            toast.set(Some(
+                                "Open the address book to add this sender".into(),
+                            ));
+                        },
+                        "Add to address book"
+                    }
+                }
                 button {
                     class: "btn btn-primary",
                     "data-testid": testid::FM_REPLY,
@@ -1885,6 +1982,19 @@ fn ComposeSheet() -> Element {
     let mut inbox = use_context::<Signal<InboxView>>();
     let user = use_context::<Signal<User>>();
     let user_alias = user.read().logged_id().unwrap().alias.to_string();
+    // "Sending as <fingerprint>" surface (#51) — shows the user which
+    // ML-DSA key the outgoing message will be signed under.
+    let sender_fp_short = {
+        let user_ref = user.read();
+        match user_ref.logged_id() {
+            Some(id) => {
+                let words =
+                    address_book::fingerprint_words(&id.ml_dsa_vk_bytes(), &id.ml_kem_ek_bytes());
+                format!("{}-{}", words[0], words[1])
+            }
+            None => String::new(),
+        }
+    };
 
     let prefill = menu_selection.write().take_compose_prefill();
     let initial_to = prefill.as_ref().map(|p| p.to.clone()).unwrap_or_default();
@@ -2149,6 +2259,14 @@ fn ComposeSheet() -> Element {
                 div { class: "sheet-field",
                     span { class: "field-lbl", "From" }
                     span { class: "field-input", style: "color:var(--ink2);", "{user_alias}" }
+                    if !sender_fp_short.is_empty() {
+                        span {
+                            class: "from-addr",
+                            style: "margin-left:8px;",
+                            "data-testid": testid::FM_COMPOSE_SENDING_AS,
+                            "Sending as: {sender_fp_short}"
+                        }
+                    }
                 }
                 div { class: "sheet-field",
                     span { class: "field-lbl", "To" }

@@ -33,6 +33,10 @@ pub(crate) const FM_ARCHIVE_CARD: &str = "fm-archive-card";
 
 // Detail header
 pub(crate) const FM_DETAIL_TIME: &str = "fm-detail-time";
+pub(crate) const FM_DETAIL_FINGERPRINT: &str = "fm-detail-fingerprint";
+pub(crate) const FM_DETAIL_VERIF: &str = "fm-detail-verif";
+pub(crate) const FM_ADD_TO_AB: &str = "fm-add-to-ab";
+pub(crate) const FM_COMPOSE_SENDING_AS: &str = "fm-compose-sending-as";
 
 // Sidebar
 pub(crate) const FM_SIDEBAR_FINGERPRINT: &str = "fm-sidebar-fingerprint";
@@ -116,6 +120,10 @@ mod tests {
             ("fmSentCard", super::FM_SENT_CARD),
             ("fmArchiveCard", super::FM_ARCHIVE_CARD),
             ("fmDetailTime", super::FM_DETAIL_TIME),
+            ("fmDetailFingerprint", super::FM_DETAIL_FINGERPRINT),
+            ("fmDetailVerif", super::FM_DETAIL_VERIF),
+            ("fmAddToAb", super::FM_ADD_TO_AB),
+            ("fmComposeSendingAs", super::FM_COMPOSE_SENDING_AS),
             ("fmSidebarFingerprint", super::FM_SIDEBAR_FINGERPRINT),
             ("fmReply", super::FM_REPLY),
             ("fmDelete", super::FM_DELETE),
