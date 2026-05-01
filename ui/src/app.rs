@@ -826,11 +826,17 @@ fn Sidebar() -> Element {
     let inbox = use_context::<Signal<InboxView>>();
     let emails_snapshot: Vec<Message> = inbox.read().messages.borrow().clone();
     let active = menu_selection.read().folder();
-    let active_alias = user
-        .read()
-        .logged_id()
-        .map(|id| id.alias.to_string())
-        .unwrap_or_default();
+    let (active_alias, active_fp_short) = {
+        let user_ref = user.read();
+        match user_ref.logged_id() {
+            Some(id) => {
+                let words =
+                    address_book::fingerprint_words(&id.ml_dsa_vk_bytes(), &id.ml_kem_ek_bytes());
+                (id.alias.to_string(), format!("{}-{}", words[0], words[1]))
+            }
+            None => (String::new(), String::new()),
+        }
+    };
     // Track local-state generation so Drafts count re-renders when the
     // user types into the compose sheet (autosave bumps `GENERATION`).
     let _local_gen = crate::local_state::GENERATION.load(std::sync::atomic::Ordering::Relaxed);
@@ -879,6 +885,16 @@ fn Sidebar() -> Element {
                             "connection"
                         }
                         span { class: "val", "live" }
+                    }
+                    if !active_fp_short.is_empty() {
+                        div { class: "conn-row",
+                            span { class: "lbl", "key" }
+                            span {
+                                class: "val",
+                                "data-testid": "fm-sidebar-fingerprint",
+                                "{active_fp_short}"
+                            }
+                        }
                     }
                 }
                 button {

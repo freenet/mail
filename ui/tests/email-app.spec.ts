@@ -1073,3 +1073,31 @@ test.describe("Archive folder (#47c)", () => {
     await expect(page.locator('[data-testid="fm-archive-card"]')).toHaveCount(0);
   });
 });
+
+test.describe("Sidebar fingerprint (#48)", () => {
+  test("sidebar shows two-word fingerprint for active identity", async ({ page }) => {
+    await page.goto("/");
+    await waitForApp(page);
+    await selectIdentity(page, "address1");
+
+    const fp = page.locator('[data-testid="fm-sidebar-fingerprint"]');
+    await expect(fp).toHaveCount(1);
+    // Two BIP-39 words joined by `-`, lowercase a-z only.
+    await expect(fp).toHaveText(/^[a-z]+-[a-z]+$/);
+  });
+
+  test("fingerprint changes when switching identities", async ({ page }) => {
+    await page.goto("/");
+    await waitForApp(page);
+    await selectIdentity(page, "address1");
+
+    const fp = page.locator('[data-testid="fm-sidebar-fingerprint"]');
+    const fpA = await fp.textContent();
+
+    await page.locator('[data-testid="fm-logout"]').click();
+    await selectIdentity(page, "address2");
+
+    const fpB = await fp.textContent();
+    expect(fpA).not.toEqual(fpB);
+  });
+});
