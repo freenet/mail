@@ -1,0 +1,147 @@
+name: E2E (real node)
+
+# Heavy: brings up a real isolated 2-node Freenet network, publishes the
+# webapp, and drives the UI through the AFT permission flow with
+# Playwright. Not run on every PR — restricted to tags, nightly, and
+# manual dispatch. See AGENTS.md §"Automated real-node harness".
+
+on:
+  push:
+    tags:
+      - 'v*'
+  pull_request:
+    # Only run when the harness itself or its inputs change, to keep
+    # PR cost low. Other PRs rely on the standard ui-playwright job.
+    paths:
+      - '.github/workflows/e2e-real-node.yml'
+      - 'scripts/run-isolated-nodes.sh'
+      - 'ui/tests/live-node.spec.ts'
+      - 'Makefile.toml'
+  schedule:
+    # Nightly at 04:30 UTC.
+    - cron: '30 4 * * *'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Bare-minimum browser install: chromium only (matches the spec's
+  # project skip — see ui/tests/live-node.spec.ts).
+  PLAYWRIGHT_BROWSERS: chromium
+
+jobs:
+  e2e-real-node:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo-installed binaries
+        id: cache-bins
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/cargo-make
+            ~/.cargo/bin/cargo-binstall
+            ~/.cargo/bin/fdev
+            ~/.cargo/bin/dx
+            ~/.cargo/bin/freenet
+          key: ${{ runner.os }}-cargo-bins-e2e-fdev-0.3.201-dx-0.7.3-freenet-0.2.50-v2
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Verify cached binaries
+        id: verify-bins
+        run: |
+          missing=0
+          for bin in cargo-make cargo-binstall fdev dx freenet; do
+            if [ ! -x "$HOME/.cargo/bin/$bin" ]; then
+              echo "missing: $bin"
+              missing=1
+            fi
+          done
+          echo "missing=$missing" >> "$GITHUB_OUTPUT"
+
+      - name: Install cargo-binstall
+        if: steps.cache-bins.outputs.cache-hit != 'true' || steps.verify-bins.outputs.missing == '1'
+        uses: taiki-e/install-action@cargo-binstall
+
+      - name: Install cargo-make
+        if: steps.cache-bins.outputs.cache-hit != 'true' || steps.verify-bins.outputs.missing == '1'
+        run: cargo binstall -y --force cargo-make
+
+      - name: Install fdev + freenet
+        if: steps.cache-bins.outputs.cache-hit != 'true' || steps.verify-bins.outputs.missing == '1'
+        run: |
+          cargo install --force fdev
+          cargo install --force freenet
+
+      - name: Install Dioxus CLI
+        if: steps.cache-bins.outputs.cache-hit != 'true' || steps.verify-bins.outputs.missing == '1'
+        run: cargo binstall -y --force --version 0.7.3 dioxus-cli
+
+      - name: Install GNU tar
+        run: |
+          # Ubuntu's default tar is GNU tar — verify it's available
+          # under the name `tar` (compress-webapp prefers `gtar` then
+          # falls back to `tar` if it identifies as GNU).
+          tar --version | head -1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Playwright test dependencies
+        run: npm install
+        working-directory: ./ui/tests
+
+      - name: Cache Playwright browser (chromium only)
+        id: cache-playwright
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-1.59.1-chromium
+
+      - name: Install Playwright chromium
+        if: steps.cache-playwright.outputs.cache-hit != 'true'
+        run: npx playwright install --with-deps chromium
+        working-directory: ./ui/tests
+
+      - name: Install Playwright system deps (cached browser)
+        if: steps.cache-playwright.outputs.cache-hit == 'true'
+        run: npx playwright install-deps chromium
+        working-directory: ./ui/tests
+
+      - name: Run real-node E2E
+        run: cargo make test-e2e-real-node
+        env:
+          # Don't tear down on failure — uploads below capture state.
+          FREENET_E2E_KEEP: '1'
+
+      - name: Upload Playwright artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-real-node-playwright
+          path: |
+            ui/tests/test-results/
+            ui/tests/playwright-report/
+          if-no-files-found: ignore
+
+      - name: Upload iso-node logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-real-node-logs
+          path: |
+            ~/freenet-mail-iso/gw/logs/
+            ~/freenet-mail-iso/peer/logs/
+          if-no-files-found: ignore
