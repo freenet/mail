@@ -12,7 +12,8 @@ use std::cell::RefCell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use mail_local_state::{
-    ArchivedMessage, Draft, KeptMessage, LocalState, LocalStateMsg, MessageId, SentMessage,
+    ArchivedMessage, DeliveryState, Draft, KeptMessage, LocalState, LocalStateMsg, MessageId,
+    SentMessage,
 };
 
 thread_local! {
@@ -254,12 +255,25 @@ mod wire {
     ) -> Result<(), DynError> {
         send_msg(client, &LocalStateMsg::DeleteSent { alias, id }).await
     }
+
+    pub(crate) async fn set_sent_delivery_state(
+        client: &mut WebApiRequestClient,
+        alias: String,
+        id: String,
+        state: DeliveryState,
+    ) -> Result<(), DynError> {
+        send_msg(
+            client,
+            &LocalStateMsg::SetSentDeliveryState { alias, id, state },
+        )
+        .await
+    }
 }
 
 #[cfg(feature = "use-node")]
 pub(crate) use wire::{
     LOCAL_STATE_KEY, archive_message, delete_draft, delete_message, fetch_all, mark_read,
-    register_and_init, save_draft, save_sent,
+    register_and_init, save_draft, save_sent, set_sent_delivery_state,
 };
 // `delete_sent`, `local_delete_sent`, and `unarchive_message` are wired but
 // unused until later phases.
@@ -313,6 +327,18 @@ pub(crate) fn local_delete_sent(alias: &str, id: &str) {
         let mut state = s.borrow_mut();
         if let Some(entry) = state.aliases_mut().get_mut(alias) {
             entry.sent.remove(id);
+        }
+    });
+    bump();
+}
+
+pub(crate) fn local_set_sent_delivery_state(alias: &str, id: &str, state: DeliveryState) {
+    SNAPSHOT.with(|s| {
+        let mut snap = s.borrow_mut();
+        if let Some(entry) = snap.aliases_mut().get_mut(alias)
+            && let Some(sent) = entry.sent.get_mut(id)
+        {
+            sent.delivery_state = state;
         }
     });
     bump();

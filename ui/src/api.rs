@@ -1128,6 +1128,37 @@ pub(crate) async fn node_comms(
                 }
             }
             HostResponse::ContractResponse(ContractResponse::UpdateResponse { key, summary }) => {
+                // Sent-folder delivery ack (#58): if this UpdateResponse is
+                // for a recipient inbox we sent to, flip the next pending
+                // Sent row's delivery_state from Pending → Delivered.
+                if let Some((sender_alias, sent_id)) =
+                    crate::inbox::take_next_pending_sent_ack(&key)
+                {
+                    crate::local_state::local_set_sent_delivery_state(
+                        &sender_alias,
+                        &sent_id,
+                        mail_local_state::DeliveryState::Delivered,
+                    );
+                    let mut client_clone = client.clone();
+                    let alias_async = sender_alias;
+                    let id_async = sent_id;
+                    wasm_bindgen_futures::spawn_local(async move {
+                        if let Err(e) = crate::local_state::set_sent_delivery_state(
+                            &mut client_clone,
+                            alias_async,
+                            id_async,
+                            mail_local_state::DeliveryState::Delivered,
+                        )
+                        .await
+                        {
+                            crate::log::error(
+                                format!("set_sent_delivery_state(Delivered) failed: {e}"),
+                                None,
+                            );
+                        }
+                    });
+                }
+
                 if let Some(identity) = token_rec_to_id.remove(&key) {
                     // The host's UpdateResponse `summary` field has, in
                     // practice, sometimes carried the full
