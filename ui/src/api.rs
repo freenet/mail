@@ -509,6 +509,7 @@ mod identity_management {
             alias: alias.to_string(),
             key: serde_json::to_vec(&stored)?,
             extra: Some(description),
+            kind: Some(::identity_management::EntryKind::Identity),
         };
         let request = DelegateRequest::ApplicationMessages {
             params,
@@ -550,6 +551,59 @@ mod identity_management {
         /// That byte string is the per-identity stable correlator now that
         /// RSA is gone from the user-identity code path.
         pub(super) static PENDING_CONFIRMATION: RefCell<HashMap<Vec<u8>, NewIdentity>> = RefCell::new(HashMap::new());
+    }
+
+    pub(super) async fn create_contact_api_call(
+        client: &mut WebApiRequestClient,
+        contact: &crate::app::address_book::Contact,
+    ) -> Result<(), DynError> {
+        crate::log::debug!("storing contact {}", contact.local_alias);
+        let params = IdentityParams::try_from(ID_MANAGER_KEY)?;
+        let params = params.try_into()?;
+        let delegate_key = DelegateKey::from_params(ID_MANAGER_CODE_HASH, &params)?;
+        let stored = crate::app::address_book::StoredContactKeys {
+            ml_dsa_vk_bytes: contact.ml_dsa_vk_bytes.clone(),
+            ml_kem_ek_bytes: contact.ml_kem_ek_bytes.clone(),
+            suggested_alias: Some(contact.local_alias.to_string()),
+            verified: contact.verified,
+        };
+        let msg = IdentityMsg::CreateIdentity {
+            alias: contact.local_alias.to_string(),
+            key: serde_json::to_vec(&stored)?,
+            extra: Some(contact.description.clone()),
+            kind: Some(::identity_management::EntryKind::Contact),
+        };
+        let request = DelegateRequest::ApplicationMessages {
+            params,
+            inbound: vec![InboundDelegateMsg::ApplicationMessage(
+                ApplicationMessage::new(Vec::<u8>::try_from(&msg)?),
+            )],
+            key: delegate_key,
+        };
+        client.send(request.into()).await?;
+        Ok(())
+    }
+
+    pub(super) async fn delete_contact_api_call(
+        client: &mut WebApiRequestClient,
+        alias: &str,
+    ) -> Result<(), DynError> {
+        crate::log::debug!("deleting contact {alias}");
+        let params = IdentityParams::try_from(ID_MANAGER_KEY)?;
+        let params = params.try_into()?;
+        let delegate_key = DelegateKey::from_params(ID_MANAGER_CODE_HASH, &params)?;
+        let msg = IdentityMsg::DeleteIdentity {
+            alias: alias.to_string(),
+        };
+        let request = DelegateRequest::ApplicationMessages {
+            params,
+            inbound: vec![InboundDelegateMsg::ApplicationMessage(
+                ApplicationMessage::new(Vec::<u8>::try_from(&msg)?),
+            )],
+            key: delegate_key,
+        };
+        client.send(request.into()).await?;
+        Ok(())
     }
 }
 
@@ -726,6 +780,27 @@ pub(crate) async fn node_comms(
                     Err(e) => {
                         crate::log::error(format!("{e}"), Some(TryNodeAction::CreateDelegate))
                     }
+                }
+            }
+            NodeAction::CreateContact { contact } => {
+                if let Err(e) =
+                    identity_management::create_contact_api_call(&mut client, &contact).await
+                {
+                    crate::log::error(
+                        format!("failed to store contact {}: {e}", contact.local_alias),
+                        None,
+                    );
+                } else {
+                    let _ = crate::app::address_book::insert_contact(contact);
+                }
+            }
+            NodeAction::DeleteContact { alias } => {
+                if let Err(e) =
+                    identity_management::delete_contact_api_call(&mut client, &alias).await
+                {
+                    crate::log::error(format!("failed to delete contact {alias}: {e}"), None);
+                } else {
+                    crate::app::address_book::remove_contact(&alias);
                 }
             }
         }

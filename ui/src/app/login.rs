@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use dioxus::prelude::*;
 use freenet_stdlib::prelude::ContractKey;
-use identity_management::IdentityManagement;
+use identity_management::{EntryKind, IdentityManagement};
 use ml_dsa::{KeyGen, MlDsa65, SigningKey as MlDsaSigningKey, VerifyingKey as MlDsaVerifyingKey};
 use ml_kem::{DecapsulationKey, EncapsulationKey, MlKem768};
 
@@ -111,39 +111,67 @@ impl Identity {
             let mut to_add = Vec::new();
             for alias in &*aliases {
                 // just modify and avoid creating a new id
-                if let Some(info) = new_aliases.remove(&alias.alias) {
-                    to_add.push(
-                        alias
-                            .clone()
-                            .with_description(info.extra.unwrap_or_default()),
-                    );
+                if let Some(info) = new_aliases.remove(&alias.alias)
+                    && info.kind == EntryKind::Identity
+                {
+                    let id = alias
+                        .clone()
+                        .with_description(info.extra.unwrap_or_default());
+                    crate::app::address_book::register_identity(&id);
+                    to_add.push(id);
                 }
             }
             let mut identities = Vec::new();
-            new_aliases.into_info().for_each(|(alias, info)| {
-                let stored: StoredIdentityKeys =
-                    serde_json::from_slice(&info.key).expect("failed to deserialise identity keys");
-                let ml_dsa_signing_key = stored.ml_dsa_signing_key();
-                let ml_kem_dk = stored.ml_kem_dk();
-                let alias: Rc<str> = alias.into();
-                let id = UserId::new();
-                let identity = Identity {
-                    id,
-                    ml_dsa_signing_key: Arc::clone(&ml_dsa_signing_key),
-                    ml_kem_dk: ml_kem_dk.clone(),
-                    description: String::default(),
-                    alias: alias.clone(),
-                };
-                user.write().identities.push(identity.clone());
-                to_add.push(Identity {
-                    alias: alias.clone(),
-                    id,
-                    description: info.extra.unwrap_or_default(),
-                    ml_dsa_signing_key,
-                    ml_kem_dk,
+            new_aliases
+                .into_info()
+                .for_each(|(alias, info)| match info.kind {
+                    EntryKind::Identity => {
+                        let stored: StoredIdentityKeys = match serde_json::from_slice(&info.key) {
+                            Ok(s) => s,
+                            Err(e) => {
+                                crate::log::debug!("skipping identity {alias}: bad key bytes: {e}");
+                                return;
+                            }
+                        };
+                        let ml_dsa_signing_key = stored.ml_dsa_signing_key();
+                        let ml_kem_dk = stored.ml_kem_dk();
+                        let alias: Rc<str> = alias.into();
+                        let id = UserId::new();
+                        let identity = Identity {
+                            id,
+                            ml_dsa_signing_key: Arc::clone(&ml_dsa_signing_key),
+                            ml_kem_dk: ml_kem_dk.clone(),
+                            description: String::default(),
+                            alias: alias.clone(),
+                        };
+                        user.write().identities.push(identity.clone());
+                        let full = Identity {
+                            alias: alias.clone(),
+                            id,
+                            description: info.extra.unwrap_or_default(),
+                            ml_dsa_signing_key,
+                            ml_kem_dk,
+                        };
+                        crate::app::address_book::register_identity(&full);
+                        to_add.push(full);
+                        identities.push(identity);
+                    }
+                    EntryKind::Contact => {
+                        let stored: crate::app::address_book::StoredContactKeys =
+                            match serde_json::from_slice(&info.key) {
+                                Ok(s) => s,
+                                Err(e) => {
+                                    crate::log::debug!(
+                                        "skipping contact {alias}: bad key bytes: {e}"
+                                    );
+                                    return;
+                                }
+                            };
+                        let contact = stored
+                            .into_contact(alias.clone().into(), info.extra.unwrap_or_default());
+                        let _ = crate::app::address_book::insert_contact(contact);
+                    }
                 });
-                identities.push(identity);
-            });
             *aliases = to_add;
             identities
         })
@@ -173,13 +201,15 @@ impl Identity {
         user.write().identities.push(identity.clone());
         ALIASES.with(|aliases| {
             let aliases = &mut *aliases.borrow_mut();
-            aliases.push(Identity {
+            let full = Identity {
                 alias,
                 id: identity.id,
                 description,
                 ml_dsa_signing_key,
                 ml_kem_dk,
-            });
+            };
+            crate::app::address_book::register_identity(&full);
+            aliases.push(full);
         });
         identity
     }
@@ -192,6 +222,7 @@ impl Identity {
         })
     }
 
+    #[allow(dead_code)]
     pub(crate) fn get_alias(alias: impl AsRef<str>) -> Option<Identity> {
         let alias = alias.as_ref();
         ALIASES.with(|aliases: &LazyCell<Rc<RefCell<Vec<Identity>>>>| {
@@ -206,12 +237,14 @@ impl Identity {
 
     /// Return the ML-KEM-768 encapsulation (public) key for this identity.
     /// Senders use this to encrypt messages.
+    #[allow(dead_code)]
     pub(crate) fn ml_kem_ek(&self) -> EncapsulationKey<MlKem768> {
         self.ml_kem_dk.encapsulation_key().clone()
     }
 
     /// Return the ML-DSA-65 verifying (public) key for this identity.
     /// Used to compute the inbox contract ID.
+    #[allow(dead_code)]
     pub(crate) fn ml_dsa_vk(&self) -> MlDsaVerifyingKey<MlDsa65> {
         use ml_dsa::signature::Keypair;
         self.ml_dsa_signing_key.as_ref().verifying_key()
@@ -240,6 +273,7 @@ impl Identity {
         ALIASES.with(|aliases| {
             let aliases = &mut *aliases.borrow_mut();
             if !aliases.iter().any(|a| a.alias == identity.alias) {
+                crate::app::address_book::register_identity(&identity);
                 aliases.push(identity);
             }
         });
@@ -410,6 +444,10 @@ fn trigger_browser_download(_filename: &str, _json_bytes: &[u8]) {}
 
 struct ImportBackup(bool);
 
+struct ShareContact(bool);
+
+struct ImportContact(bool);
+
 #[derive(Debug, Clone)]
 pub struct LoginController {
     pub updated: bool,
@@ -425,8 +463,12 @@ impl LoginController {
 pub(super) fn IdentifiersList() -> Element {
     use_context_provider(|| Signal::new(CreateAlias(false)));
     use_context_provider(|| Signal::new(ImportBackup(false)));
+    use_context_provider(|| Signal::new(ShareContact(false)));
+    use_context_provider(|| Signal::new(ImportContact(false)));
     let create_alias_form = use_context::<Signal<CreateAlias>>();
     let import_backup_form = use_context::<Signal<ImportBackup>>();
+    let share_contact_form = use_context::<Signal<ShareContact>>();
+    let import_contact_form = use_context::<Signal<ImportContact>>();
 
     rsx! {
         LoginHeader {}
@@ -444,10 +486,29 @@ pub(super) fn IdentifiersList() -> Element {
                     if import_backup_form.read().0 {
                         ImportForm {}
                     }
+                    if share_contact_form.read().0 {
+                        ShareContactModal {}
+                    }
+                    if import_contact_form.read().0 {
+                        ImportContactForm {}
+                    }
+                    if !create_alias_form.read().0
+                        && !import_backup_form.read().0
+                        && !share_contact_form.read().0
+                        && !import_contact_form.read().0
+                    {
+                        ContactsSection {}
+                    }
                 }
             }
         }
     }
+}
+
+// Pending share text for the share modal: (identity alias, card text).
+thread_local! {
+    static SHARE_PENDING: std::cell::RefCell<Option<(String, String)>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 #[allow(non_snake_case)]
@@ -456,6 +517,7 @@ pub(super) fn Identities() -> Element {
     let aliases_list = aliases.borrow();
     let mut create_alias_form = use_context::<Signal<CreateAlias>>();
     let mut import_backup_form = use_context::<Signal<ImportBackup>>();
+    let share_contact_form = use_context::<Signal<ShareContact>>();
     let mut login_controller = use_context::<Signal<LoginController>>();
 
     if login_controller.read().updated {
@@ -466,6 +528,7 @@ pub(super) fn Identities() -> Element {
     fn IdentityEntry(identity: Identity) -> Element {
         let mut user = use_context::<Signal<User>>();
         let mut inbox = use_context::<Signal<InboxView>>();
+        let mut share_contact_form = use_context::<Signal<ShareContact>>();
         let id = identity.id;
         let alias = identity.alias.clone();
         let description = identity.description.clone();
@@ -493,21 +556,60 @@ pub(super) fn Identities() -> Element {
                             }
                         },
                         p { class: "subtitle is-6", "{description}" }
-                        button {
-                            class: "button is-small is-light mt-1",
-                            title: "Export / backup this identity",
-                            onclick: {
-                                let identity = identity.clone();
-                                move |_| {
-                                    let backup = IdentityBackup::from_identity(&identity);
-                                    if let Ok(json) = serde_json::to_vec_pretty(&backup) {
-                                        let fname = format!("freenet-identity-{}.json", &*identity.alias);
-                                        trigger_browser_download(&fname, &json);
+                        div {
+                            class: "buttons mt-1",
+                            button {
+                                class: "button is-small is-light",
+                                title: "Export / backup this identity",
+                                onclick: {
+                                    let identity = identity.clone();
+                                    move |_| {
+                                        let backup = IdentityBackup::from_identity(&identity);
+                                        if let Ok(json) = serde_json::to_vec_pretty(&backup) {
+                                            let fname = format!("freenet-identity-{}.json", &*identity.alias);
+                                            trigger_browser_download(&fname, &json);
+                                        }
                                     }
-                                }
-                            },
-                            span { class: "icon is-small", i { class: "fas fa-download" } }
-                            span { "Backup" }
+                                },
+                                span { class: "icon is-small", i { class: "fas fa-download" } }
+                                span { "Backup" }
+                            }
+                            button {
+                                class: "button is-small is-info is-light",
+                                title: "Share your address with someone",
+                                onclick: {
+                                    let identity = identity.clone();
+                                    move |_| {
+                                        use ml_kem::kem::KeyExport;
+                                        let vk_bytes = identity.ml_dsa_vk_bytes();
+                                        let ek_bytes = identity.ml_kem_dk
+                                            .encapsulation_key()
+                                            .to_bytes()
+                                            .to_vec();
+                                        let card = crate::app::address_book::ContactCard {
+                                            version: crate::app::address_book::ContactCard::VERSION,
+                                            ml_dsa_vk_bytes: vk_bytes.clone(),
+                                            ml_kem_ek_bytes: ek_bytes.clone(),
+                                            suggested_alias: Some(identity.alias.to_string()),
+                                            suggested_description: if identity.description.is_empty() {
+                                                None
+                                            } else {
+                                                Some(identity.description.clone())
+                                            },
+                                        };
+                                        let fp = crate::app::address_book::fingerprint_words(&vk_bytes, &ek_bytes);
+                                        let fp_line = fp.join("-");
+                                        let card_uri = card.encode();
+                                        let share_text = format!("verify: {fp_line}\n{card_uri}");
+                                        SHARE_PENDING.with(|sp| {
+                                            *sp.borrow_mut() = Some((identity.alias.to_string(), share_text));
+                                        });
+                                        share_contact_form.write().0 = true;
+                                    }
+                                },
+                                span { class: "icon is-small", i { class: "fas fa-share-alt" } }
+                                span { "Share address" }
+                            }
                         }
                         p { class: "help is-warning", "Backup files contain raw private keys — store securely." }
                     }
@@ -522,9 +624,12 @@ pub(super) fn Identities() -> Element {
         })
     });
 
+    let any_form =
+        create_alias_form.read().0 || import_backup_form.read().0 || share_contact_form.read().0;
+
     rsx! {
         div {
-            hidden: "{create_alias_form.read().0 || import_backup_form.read().0}",
+            hidden: "{any_form}",
             {identities}
             div {
                 class: "card-content columns",
@@ -933,6 +1038,317 @@ fn ImportForm() -> Element {
                 class: "button is-light",
                 onclick: move |_| { import_backup_form.write().0 = false; },
                 "Cancel"
+            }
+        }
+    }
+}
+
+/// Copy `text` to the system clipboard via the async Clipboard API.
+/// No-op on non-WASM or when the API is unavailable (e.g. non-HTTPS).
+#[cfg(target_family = "wasm")]
+fn copy_to_clipboard(text: String) {
+    use wasm_bindgen_futures::spawn_local;
+    spawn_local(async move {
+        if let Some(window) = web_sys::window() {
+            let clipboard = window.navigator().clipboard();
+            let _ = wasm_bindgen_futures::JsFuture::from(clipboard.write_text(&text)).await;
+        }
+    });
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn copy_to_clipboard(_text: String) {}
+
+/// Modal that displays the shareable ContactCard text and offers a copy button.
+#[allow(non_snake_case)]
+fn ShareContactModal() -> Element {
+    let mut share_contact_form = use_context::<Signal<ShareContact>>();
+    let (alias, share_text) = SHARE_PENDING.with(|sp| {
+        sp.borrow()
+            .clone()
+            .unwrap_or_else(|| ("".into(), "".into()))
+    });
+    let mut copied = use_signal(|| false);
+
+    rsx! {
+        div {
+            class: "box has-background-primary is-small mt-2",
+            p { class: "title is-5", "Share your address ({alias})" }
+            p { class: "is-size-7 mb-2",
+                "Send this text to whoever needs to reach you. \
+                 Ask them to confirm the verify: line matches what you see here."
+            }
+            textarea {
+                class: "textarea is-family-monospace is-small mb-2",
+                readonly: true,
+                rows: "4",
+                value: "{share_text}"
+            }
+            div {
+                class: "buttons",
+                button {
+                    class: "button is-info",
+                    onclick: {
+                        let share_text = share_text.clone();
+                        move |_| {
+                            copy_to_clipboard(share_text.clone());
+                            copied.set(true);
+                        }
+                    },
+                    if *copied.read() { "Copied!" } else { "Copy to clipboard" }
+                }
+                button {
+                    class: "button is-light",
+                    onclick: move |_| {
+                        share_contact_form.write().0 = false;
+                        copied.set(false);
+                    },
+                    "Close"
+                }
+            }
+        }
+    }
+}
+
+/// Form to import a contact from a pasted ContactCard.
+#[allow(non_snake_case)]
+fn ImportContactForm() -> Element {
+    let mut import_contact_form = use_context::<Signal<ImportContact>>();
+    let actions = use_coroutine_handle::<NodeAction>();
+
+    let mut paste_text = use_signal(String::new);
+    let mut local_alias = use_signal(String::new);
+    let mut description = use_signal(String::new);
+    let mut verified = use_signal(|| false);
+    let mut error_msg = use_signal(String::new);
+    let mut fingerprint_words: Signal<Option<[String; 6]>> = use_signal(|| None);
+
+    let on_paste_change = move |evt: dioxus::prelude::Event<dioxus::html::FormData>| {
+        let text = evt.value().clone();
+        paste_text.set(text.clone());
+        error_msg.set(String::new());
+        fingerprint_words.set(None);
+        match crate::app::address_book::ContactCard::decode(&text) {
+            Ok(card) => {
+                if local_alias.read().is_empty()
+                    && let Some(ref s) = card.suggested_alias
+                {
+                    local_alias.set(s.clone());
+                }
+                if description.read().is_empty()
+                    && let Some(ref s) = card.suggested_description
+                {
+                    description.set(s.clone());
+                }
+                fingerprint_words.set(Some(card.fingerprint()));
+            }
+            Err(e) => {
+                if !text.trim().is_empty() {
+                    error_msg.set(format!("Could not parse contact card: {e}"));
+                }
+            }
+        }
+    };
+
+    let can_import = fingerprint_words.read().is_some() && !local_alias.read().is_empty();
+
+    rsx! {
+        div {
+            class: "box has-background-primary is-small mt-2",
+            p { class: "title is-5", "Import contact" }
+            div {
+                class: "field",
+                label { "Paste contact card (contact://… or bare base64)" }
+                div {
+                    class: "control",
+                    textarea {
+                        class: "textarea is-small",
+                        placeholder: "contact://…",
+                        rows: "3",
+                        value: "{paste_text}",
+                        oninput: on_paste_change
+                    }
+                }
+            }
+            if let Some(ref words) = *fingerprint_words.read() {
+                div {
+                    class: "notification is-info is-light mb-2",
+                    p { class: "has-text-weight-bold", "Fingerprint (verify with sender):" }
+                    p { class: "is-family-monospace is-size-6",
+                        "{words[0]} {words[1]} {words[2]} {words[3]} {words[4]} {words[5]}"
+                    }
+                    label {
+                        class: "checkbox",
+                        input {
+                            r#type: "checkbox",
+                            checked: *verified.read(),
+                            onclick: move |_| {
+                                let v = *verified.read();
+                                verified.set(!v);
+                            }
+                        }
+                        " I verified the fingerprint with the sender"
+                    }
+                }
+            }
+            div {
+                class: "field",
+                label { "Your local label (must be unique)" }
+                div {
+                    class: "control",
+                    input {
+                        class: "input",
+                        placeholder: "e.g. Alice (work)",
+                        value: "{local_alias}",
+                        oninput: move |evt| local_alias.set(evt.value().clone())
+                    }
+                }
+            }
+            div {
+                class: "field",
+                label { "Description (optional)" }
+                div {
+                    class: "control",
+                    input {
+                        class: "input",
+                        placeholder: "",
+                        value: "{description}",
+                        oninput: move |evt| description.set(evt.value().clone())
+                    }
+                }
+            }
+            if !error_msg.read().is_empty() {
+                div {
+                    class: "notification is-danger is-light mb-2",
+                    "{error_msg}"
+                }
+            }
+            div {
+                class: "buttons",
+                button {
+                    class: if can_import { "button is-primary" } else { "button is-primary is-static" },
+                    disabled: !can_import,
+                    onclick: move |_| {
+                        let text = paste_text.read().clone();
+                        let alias_str = local_alias.read().clone();
+                        if alias_str.is_empty() { return; }
+                        match crate::app::address_book::ContactCard::decode(&text) {
+                            Ok(card) => {
+                                if crate::app::address_book::is_own_fingerprint(
+                                    &card.ml_dsa_vk_bytes,
+                                    &card.ml_kem_ek_bytes,
+                                ) {
+                                    error_msg.set("That card belongs to one of your own identities.".into());
+                                    return;
+                                }
+                                let stored = crate::app::address_book::StoredContactKeys::from_card(
+                                    &card,
+                                    *verified.read(),
+                                );
+                                let contact = stored.into_contact(
+                                    alias_str.clone().into(),
+                                    description.read().clone(),
+                                );
+                                actions.send(NodeAction::CreateContact { contact });
+                                import_contact_form.write().0 = false;
+                                paste_text.set(String::new());
+                                local_alias.set(String::new());
+                                description.set(String::new());
+                                verified.set(false);
+                                fingerprint_words.set(None);
+                                error_msg.set(String::new());
+                            }
+                            Err(e) => {
+                                error_msg.set(format!("Failed to parse: {e}"));
+                            }
+                        }
+                    },
+                    "Import"
+                }
+                button {
+                    class: "button is-light",
+                    onclick: move |_| {
+                        import_contact_form.write().0 = false;
+                        error_msg.set(String::new());
+                    },
+                    "Cancel"
+                }
+            }
+        }
+    }
+}
+
+/// Address book section showing all imported contacts.
+#[allow(non_snake_case)]
+fn ContactsSection() -> Element {
+    let mut import_contact_form = use_context::<Signal<ImportContact>>();
+    let actions = use_coroutine_handle::<NodeAction>();
+    let contacts = crate::app::address_book::all_contacts();
+    let mut login_controller = use_context::<Signal<LoginController>>();
+
+    if login_controller.read().updated {
+        login_controller.write().updated = false;
+    }
+
+    rsx! {
+        div {
+            class: "card-content",
+            p { class: "title is-5 mb-1", "Contacts" }
+            if contacts.is_empty() {
+                p { class: "is-size-7 has-text-grey", "No contacts yet. Import one to send messages." }
+            }
+            for contact in contacts {
+                {
+                    let alias_str = contact.local_alias.to_string();
+                    let fp = contact.fingerprint_short();
+                    let badge = if contact.verified { "✓" } else { "⚠" };
+                    let badge_class = if contact.verified {
+                        "has-text-success"
+                    } else {
+                        "has-text-warning"
+                    };
+                    let del_alias = alias_str.clone();
+                    rsx! {
+                        div {
+                            class: "media mb-1",
+                            div {
+                                class: "media-content",
+                                p {
+                                    class: "is-size-6",
+                                    span { class: "{badge_class} mr-1", "{badge}" }
+                                    strong { "{alias_str}" }
+                                    span { class: "has-text-grey is-size-7 ml-2", "({fp})" }
+                                }
+                                if !contact.description.is_empty() {
+                                    p { class: "is-size-7 has-text-grey", "{contact.description}" }
+                                }
+                            }
+                            div {
+                                class: "media-right",
+                                button {
+                                    class: "button is-small is-danger is-light",
+                                    title: "Remove contact",
+                                    onclick: move |_| {
+                                        actions.send(NodeAction::DeleteContact {
+                                            alias: del_alias.clone(),
+                                        });
+                                    },
+                                    span { class: "icon is-small", i { class: "fas fa-trash" } }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            div {
+                class: "mt-2",
+                a {
+                    class: "is-link is-size-7",
+                    onclick: move |_| {
+                        import_contact_form.write().0 = true;
+                    },
+                    "+ Import contact"
+                }
             }
         }
     }

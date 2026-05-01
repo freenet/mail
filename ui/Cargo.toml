@@ -13,6 +13,8 @@ name = "app"
 
 [dependencies]
 bs58 = { workspace = true }
+blake3 = { workspace = true }
+base64 = { workspace = true }
 arc-swap = "1.6"
 rand_chacha = "0.3"
 chrono = { workspace = true, features = ["clock", "wasmbind"] }
@@ -47,6 +49,7 @@ features = [
     "BinaryType",
     "Blob",
     "BlobPropertyBag",
+    "Clipboard",
     "console",
     "Document",
     "ErrorEvent",
@@ -55,6 +58,7 @@ features = [
     "FileReader",
     "HtmlAnchorElement",
     "HtmlInputElement",
+    "Navigator",
     "Url",
     "WebSocket",
     "Window",

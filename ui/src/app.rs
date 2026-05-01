@@ -23,6 +23,7 @@ use crate::{
     inbox::{DecryptedMessage, InboxModel, MessageModel},
 };
 
+pub(crate) mod address_book;
 pub(crate) mod login;
 
 // In-memory mailbox for offline (`example-data`, `!use-node`) mode.
@@ -55,6 +56,14 @@ pub(crate) enum NodeAction {
         alias: Rc<str>,
         /// ML-DSA-65 signing key used by the AFT token-generator delegate.
         ml_dsa_key: Arc<MlDsaSigningKey<MlDsa65>>,
+    },
+    /// Store a new contact in the identity-management delegate.
+    CreateContact {
+        contact: address_book::Contact,
+    },
+    /// Remove a contact from the identity-management delegate.
+    DeleteContact {
+        alias: String,
     },
 }
 
@@ -106,7 +115,20 @@ pub(crate) fn app() -> Element {
         let _ = login_controller;
         let _ = inbox_data;
         let _sync: Coroutine<NodeAction> =
-            use_coroutine(move |_rx: UnboundedReceiver<NodeAction>| async {});
+            use_coroutine(move |mut rx: UnboundedReceiver<NodeAction>| async move {
+                use futures::StreamExt;
+                while let Some(action) = rx.next().await {
+                    match action {
+                        NodeAction::CreateContact { contact } => {
+                            let _ = address_book::insert_contact(contact);
+                        }
+                        NodeAction::DeleteContact { alias } => {
+                            address_book::remove_contact(&alias);
+                        }
+                        _ => {}
+                    }
+                }
+            });
     }
     #[allow(unused_variables)]
     let actions = use_coroutine_handle::<NodeAction>();
@@ -841,12 +863,31 @@ fn NewMessageWindow() -> Element {
     let alias = user_alias.to_string();
     let send_msg = move |_| {
         let to_val = to.read().clone();
-        // fixme: this will have to come from the address book in the future
-        let (recipient_ek, recipient_vk) = match Identity::get_alias(&to_val) {
-            Some(v) => (v.ml_kem_ek(), v.ml_dsa_vk()),
+        let recipient = match address_book::lookup(&to_val) {
+            Some(r) => r,
             None => {
                 crate::log::error(
                     format!("couldn't find key for `{to_val}`"),
+                    Some(TryNodeAction::GetAlias),
+                );
+                return;
+            }
+        };
+        let recipient_ek = match address_book::ek_from_bytes(&recipient.ml_kem_ek_bytes) {
+            Ok(ek) => ek,
+            Err(e) => {
+                crate::log::error(
+                    format!("bad EK for `{to_val}`: {e}"),
+                    Some(TryNodeAction::GetAlias),
+                );
+                return;
+            }
+        };
+        let recipient_vk = match address_book::vk_from_bytes(&recipient.ml_dsa_vk_bytes) {
+            Ok(vk) => vk,
+            Err(e) => {
+                crate::log::error(
+                    format!("bad VK for `{to_val}`: {e}"),
                     Some(TryNodeAction::GetAlias),
                 );
                 return;
