@@ -285,22 +285,22 @@ impl InboxView {
             // In offline mode, deliver the message to an in-memory mailbox
             // keyed by recipient alias so that switching identities reveals it.
             use ml_kem::kem::KeyExport;
-            if let Some(ek_key) = content.to.first() {
-                if let Some(to_alias) = Identity::alias_for_encaps_key(ek_key.0.as_slice()) {
-                    let msg = Message {
-                        id: 0, // reassigned on load
-                        from: content.from.clone().into(),
-                        title: content.title.clone().into(),
-                        content: content.content.clone().into(),
-                        read: false,
-                    };
-                    MOCK_SENT_MESSAGES.with(|map| {
-                        map.borrow_mut()
-                            .entry(to_alias.to_string())
-                            .or_default()
-                            .push(msg);
-                    });
-                }
+            if let Some(ek_key) = content.to.first()
+                && let Some(to_alias) = Identity::alias_for_encaps_key(ek_key.0.as_slice())
+            {
+                let msg = Message {
+                    id: 0, // reassigned on load
+                    from: content.from.clone().into(),
+                    title: content.title.clone().into(),
+                    content: content.content.clone().into(),
+                    read: false,
+                };
+                MOCK_SENT_MESSAGES.with(|map| {
+                    map.borrow_mut()
+                        .entry(to_alias.to_string())
+                        .or_default()
+                        .push(msg);
+                });
             }
         }
         let _ = client;
@@ -321,7 +321,7 @@ impl InboxView {
             let _ = client;
             let _ = ids;
             let _ = inbox_data;
-            return Ok(async {}.boxed_local());
+            Ok(async {}.boxed_local())
         }
         #[cfg(not(all(feature = "example-data", not(feature = "use-node"))))]
         {
@@ -937,6 +937,35 @@ fn NewMessageWindow() -> Element {
                         tr {
                             th { "To"}
                             td { style: "width: 100%", contenteditable: true, oninput: move |ev| { to.set(ev.value().clone()); } }
+                        }
+                        {
+                            let to_val = to.read();
+                            address_book::lookup(&to_val).map(|r| {
+                                let badge_class = if r.is_own || r.verified {
+                                    "tag is-success is-light"
+                                } else {
+                                    "tag is-warning is-light"
+                                };
+                                let badge_label = if r.is_own {
+                                    "you".to_string()
+                                } else if r.verified {
+                                    "verified".to_string()
+                                } else {
+                                    "unverified".to_string()
+                                };
+                                let fp_short = format!("{}-{}", r.fingerprint[0], r.fingerprint[1]);
+                                rsx! {
+                                    tr {
+                                        th {}
+                                        td {
+                                            span { class: "{badge_class} mr-2", "{badge_label}" }
+                                            span { class: "is-family-monospace is-size-7 has-text-grey",
+                                                "fingerprint: {fp_short}"
+                                            }
+                                        }
+                                    }
+                                }
+                            })
                         }
                         tr {
                             th { "Subject"}

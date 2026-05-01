@@ -6,54 +6,29 @@
 //!   - `ContactCard` — wire format for sharing / importing contacts
 //!   - `fingerprint_words(vk, ek)` — 6-word BIP-39-like fingerprint
 
-use std::{cell::RefCell, collections::HashMap, rc::Rc};
+use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::OnceLock};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
+use freenet_stdlib::prelude::blake3;
 use ml_dsa::{MlDsa65, VerifyingKey as MlDsaVerifyingKey};
 use ml_kem::{EncapsulationKey, MlKem768};
 use serde::{Deserialize, Serialize};
 
 use crate::app::login::Identity;
 
-// ── BIP-39 wordlist (2048 words) ─────────────────────────────────────────────
-//
-// We embed only the English BIP-39 wordlist to derive a 6-word fingerprint
-// from BLAKE3(vk_bytes || ek_bytes). The words are included verbatim from
-// the canonical list (https://github.com/bitcoin/bips/blob/master/bip-0039/english.txt).
-// 66 bits of entropy; adequate for casual verbal confirmation.
 const BIP39_WORDS: &str = include_str!("bip39_english.txt");
 
-thread_local! {
-    static WORDLIST: RefCell<Option<Vec<&'static str>>> = const { RefCell::new(None) };
-}
-
 fn wordlist() -> &'static [&'static str] {
-    // SAFETY: BIP39_WORDS is 'static and we only ever return slices into it.
-    // The Vec is stored in the thread-local for the lifetime of the thread.
-    WORDLIST.with(|wl| {
-        let mut wl = wl.borrow_mut();
-        if wl.is_none() {
-            let words: Vec<&'static str> = BIP39_WORDS
-                .split_whitespace()
-                // SAFETY: the static str lives for the program duration
-                .map(|w| unsafe { std::mem::transmute::<&str, &'static str>(w) })
-                .collect();
-            *wl = Some(words);
-        }
-    });
-    WORDLIST.with(|wl| {
-        let wl = wl.borrow();
-        let slice = wl.as_deref().unwrap();
-        // Return a raw-pointer-backed slice that has the 'static lifetime of the content.
-        // Safe because the Vec is never dropped while the thread is alive.
-        unsafe { std::slice::from_raw_parts(slice.as_ptr(), slice.len()) }
-    })
+    static WORDLIST: OnceLock<Vec<&'static str>> = OnceLock::new();
+    WORDLIST.get_or_init(|| BIP39_WORDS.split_whitespace().collect())
 }
 
-/// Derive a 6-word fingerprint from the concatenation of the ML-DSA verifying
-/// key and ML-KEM encapsulation key bytes.  Uses BLAKE3 as the hash function
-/// and the BIP-39 English wordlist to encode groups of 11 bits.
-pub fn fingerprint_words(vk_bytes: &[u8], ek_bytes: &[u8]) -> [String; 6] {
+/// Six-word fingerprint over `BLAKE3(vk_bytes || ek_bytes)`.
+///
+/// 66 bits of entropy (six 11-bit indices into the BIP-39 English
+/// wordlist). Adequate for casual verbal confirmation; not a substitute
+/// for a full key fingerprint.
+pub fn fingerprint_words(vk_bytes: &[u8], ek_bytes: &[u8]) -> [&'static str; 6] {
     let mut hasher = blake3::Hasher::new();
     hasher.update(vk_bytes);
     hasher.update(ek_bytes);
@@ -61,44 +36,20 @@ pub fn fingerprint_words(vk_bytes: &[u8], ek_bytes: &[u8]) -> [String; 6] {
     let bytes = hash.as_bytes();
 
     let wl = wordlist();
-    assert_eq!(
-        wl.len(),
-        2048,
-        "BIP-39 wordlist must have exactly 2048 words"
-    );
+    debug_assert_eq!(wl.len(), 2048);
 
-    // Extract 6 × 11-bit indices from the first 9 bytes (66 bits).
-    let bits = |byte_offset: usize, bit_offset: usize| -> usize {
-        let lo = bytes[byte_offset] as usize;
-        let hi = if byte_offset + 1 < bytes.len() {
-            bytes[byte_offset + 1] as usize
-        } else {
-            0
-        };
-        let wide = (lo << 8) | hi;
-        (wide >> (5 - bit_offset)) & 0x7FF
-    };
-
-    // Unpack 11-bit windows: bits [0..11), [11..22), [22..33), [33..44), [44..55), [55..66)
-    let idx0 = ((bytes[0] as usize) << 3) | ((bytes[1] as usize) >> 5);
-    let idx1 = ((bytes[1] as usize & 0x1F) << 6) | ((bytes[2] as usize) >> 2);
-    let idx2 =
-        ((bytes[2] as usize & 0x03) << 9) | ((bytes[3] as usize) << 1) | ((bytes[4] as usize) >> 7);
-    let idx3 = ((bytes[4] as usize & 0x7F) << 4) | ((bytes[5] as usize) >> 4);
-    let idx4 = ((bytes[5] as usize & 0x0F) << 7) | ((bytes[6] as usize) >> 1);
-    let idx5 = ((bytes[6] as usize & 0x01) << 10)
-        | ((bytes[7] as usize) << 2)
-        | ((bytes[8] as usize) >> 6);
-
-    let _ = bits; // suppress unused warning
-    [
-        wl[idx0 & 0x7FF].to_string(),
-        wl[idx1 & 0x7FF].to_string(),
-        wl[idx2 & 0x7FF].to_string(),
-        wl[idx3 & 0x7FF].to_string(),
-        wl[idx4 & 0x7FF].to_string(),
-        wl[idx5 & 0x7FF].to_string(),
-    ]
+    // Pack the first 12 bytes as a u128 (big-endian) so we can pull six
+    // 11-bit windows with shift+mask. 6×11 = 66 bits; the low 30 bits of
+    // the u128 are unused.
+    let mut packed = [0u8; 16];
+    packed[..12].copy_from_slice(&bytes[..12]);
+    let n = u128::from_be_bytes(packed);
+    let mut out = [""; 6];
+    for (i, slot) in out.iter_mut().enumerate() {
+        let shift = 128 - 11 * (i + 1);
+        *slot = wl[((n >> shift) & 0x7FF) as usize];
+    }
+    out
 }
 
 // ── Wire format ───────────────────────────────────────────────────────────────
@@ -119,15 +70,16 @@ pub struct ContactCard {
 
 impl ContactCard {
     pub const VERSION: u32 = 1;
+    /// Wire format uses standard (non-URL-safe) base64; the Playwright
+    /// test (email-app.spec.ts) exchanges cards via `btoa()` and relies
+    /// on the encodings matching.
     pub const URI_SCHEME: &'static str = "contact://";
 
-    /// Encode as `contact://<base64(serde_json)>`.
     pub fn encode(&self) -> String {
         let json = serde_json::to_vec(self).expect("ContactCard serialization infallible");
         format!("{}{}", Self::URI_SCHEME, B64.encode(&json))
     }
 
-    /// Parse `contact://<base64>` or a bare base64 blob.
     pub fn decode(input: &str) -> Result<Self, String> {
         let b64 = input
             .trim()
@@ -137,12 +89,25 @@ impl ContactCard {
         serde_json::from_slice(&json).map_err(|e| format!("json decode: {e}"))
     }
 
-    /// Derive the 6-word fingerprint for this card.
-    pub fn fingerprint(&self) -> [String; 6] {
+    pub fn from_identity(identity: &Identity) -> Self {
+        use ml_kem::kem::KeyExport;
+        Self {
+            version: Self::VERSION,
+            ml_dsa_vk_bytes: identity.ml_dsa_vk_bytes(),
+            ml_kem_ek_bytes: identity.ml_kem_dk.encapsulation_key().to_bytes().to_vec(),
+            suggested_alias: Some(identity.alias.to_string()),
+            suggested_description: if identity.description.is_empty() {
+                None
+            } else {
+                Some(identity.description.clone())
+            },
+        }
+    }
+
+    pub fn fingerprint(&self) -> [&'static str; 6] {
         fingerprint_words(&self.ml_dsa_vk_bytes, &self.ml_kem_ek_bytes)
     }
 
-    /// Format the first two fingerprint words as `word-word`.
     #[allow(dead_code)]
     pub fn fingerprint_short(&self) -> String {
         let fp = self.fingerprint();
@@ -164,7 +129,7 @@ pub struct Contact {
 }
 
 impl Contact {
-    pub fn fingerprint(&self) -> [String; 6] {
+    pub fn fingerprint(&self) -> [&'static str; 6] {
         fingerprint_words(&self.ml_dsa_vk_bytes, &self.ml_kem_ek_bytes)
     }
 
@@ -190,11 +155,9 @@ pub struct Recipient {
     pub local_alias: Rc<str>,
     pub ml_dsa_vk_bytes: Vec<u8>,
     pub ml_kem_ek_bytes: Vec<u8>,
-    pub fingerprint: [String; 6],
+    pub fingerprint: [&'static str; 6],
     /// True only for contacts whose fingerprint was confirmed by the user.
-    #[allow(dead_code)]
     pub verified: bool,
-    #[allow(dead_code)]
     pub is_own: bool,
 }
 
@@ -227,11 +190,29 @@ pub fn register_identity(identity: &Identity) {
     });
 }
 
-/// Insert a contact.  Returns an error string if the alias is already taken
-/// by a *different* fingerprint (allows overwrite of the same fingerprint).
+/// Insert a contact. Errors if:
+/// - the contact's keys match one of the user's own identities (self-import),
+/// - the alias is already taken by an own identity, or
+/// - the alias is already taken by a contact with a *different* fingerprint.
+///
+/// Re-inserting a contact with the same alias and same fingerprint succeeds
+/// (allows overwrite of metadata like description / verified flag).
 pub fn insert_contact(contact: Contact) -> Result<(), String> {
     ADDRESS_BOOK.with(|ab| {
         let mut ab = ab.borrow_mut();
+        // Self-import guard: enforced here so any caller path (UI form,
+        // future API, test harness) gets the same protection.
+        for entry in ab.values() {
+            if let Entry::Own(id) = entry {
+                use ml_kem::kem::KeyExport;
+                let own_ek = id.ml_kem_dk.encapsulation_key().to_bytes();
+                if id.ml_dsa_vk_bytes() == contact.ml_dsa_vk_bytes
+                    && own_ek.as_slice() == contact.ml_kem_ek_bytes.as_slice()
+                {
+                    return Err("cannot import your own identity as a contact".into());
+                }
+            }
+        }
         if let Some(existing) = ab.get(contact.local_alias.as_ref()) {
             match existing {
                 Entry::Own(_) => {
@@ -241,7 +222,6 @@ pub fn insert_contact(contact: Contact) -> Result<(), String> {
                     ));
                 }
                 Entry::Contact(c) => {
-                    // Allow overwrite only when fingerprint matches.
                     if c.ml_dsa_vk_bytes != contact.ml_dsa_vk_bytes {
                         return Err(format!(
                             "alias \"{}\" is already used by a different contact",
@@ -368,16 +348,16 @@ impl StoredContactKeys {
     }
 }
 
-/// ML-KEM encapsulation key from raw bytes for use in the send path.
+/// Decode an ML-KEM encapsulation key from raw bytes. Thin wrapper over
+/// `MlKemEncapsKey::to_key` to keep the address-book module's error type
+/// uniform.
 pub fn ek_from_bytes(bytes: &[u8]) -> Result<EncapsulationKey<MlKem768>, String> {
-    use ml_kem::kem::Key;
-    let arr: Key<EncapsulationKey<MlKem768>> =
-        Key::<EncapsulationKey<MlKem768>>::try_from(bytes)
-            .map_err(|_| format!("ML-KEM EK wrong length (got {})", bytes.len()))?;
-    EncapsulationKey::<MlKem768>::new(&arr).map_err(|e| format!("ML-KEM EK decode: {e:?}"))
+    crate::inbox::MlKemEncapsKey(bytes.to_vec())
+        .to_key()
+        .map_err(|e| format!("{e}"))
 }
 
-/// ML-DSA verifying key from raw bytes for use in the send path.
+/// Decode an ML-DSA-65 verifying key from raw bytes (1952 bytes expected).
 pub fn vk_from_bytes(bytes: &[u8]) -> Result<MlDsaVerifyingKey<MlDsa65>, String> {
     use ml_dsa::EncodedVerifyingKey;
     let arr: EncodedVerifyingKey<MlDsa65> = bytes
@@ -419,7 +399,7 @@ mod tests {
         let words = fingerprint_words(&vk, &ek);
         let wl = wordlist();
         for word in &words {
-            assert!(wl.contains(&word.as_str()), "word {word} not in wordlist");
+            assert!(wl.contains(word), "word {word} not in wordlist");
         }
     }
 

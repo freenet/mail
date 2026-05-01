@@ -522,7 +522,7 @@ trap "kill $DX_PID 2>/dev/null || true" EXIT
 echo "Waiting for dev server on port $PORT..."
 SERVER_READY=false
 for i in $(seq 1 90); do
-    if curl -s "http://localhost:$PORT" 2>/dev/null | grep -q "freenet-email-app"; then
+    if curl -s "http://localhost:$PORT" 2>/dev/null | grep -q "wasm/app.js"; then
         echo "Server ready after $((i * 3))s"
         sleep 3
         SERVER_READY=true

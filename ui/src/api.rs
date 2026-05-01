@@ -491,6 +491,28 @@ mod identity_management {
         }
     }
 
+    /// Send a single `IdentityMsg` to the identity-management delegate.
+    /// Owns the `params` / `delegate_key` boilerplate shared by every
+    /// alias / contact CRUD path. Fire-and-forget — we do not await an
+    /// ACK from the delegate.
+    async fn send_identity_msg(
+        client: &mut WebApiRequestClient,
+        msg: &IdentityMsg,
+    ) -> Result<(), DynError> {
+        let params = IdentityParams::try_from(ID_MANAGER_KEY)?;
+        let params = Parameters::try_from(params)?;
+        let delegate_key = DelegateKey::from_params(ID_MANAGER_CODE_HASH, &params)?;
+        let request = DelegateRequest::ApplicationMessages {
+            params,
+            inbound: vec![InboundDelegateMsg::ApplicationMessage(
+                ApplicationMessage::new(Vec::<u8>::try_from(msg)?),
+            )],
+            key: delegate_key,
+        };
+        client.send(request.into()).await?;
+        Ok(())
+    }
+
     async fn create_alias_api_call(
         client: &mut WebApiRequestClient,
         alias: Rc<str>,
@@ -499,11 +521,6 @@ mod identity_management {
         ml_kem_dk: DecapsulationKey<MlKem768>,
     ) -> Result<(), DynError> {
         crate::log::debug!("creating {alias}");
-        let params = IdentityParams::try_from(ID_MANAGER_KEY)?;
-        let params = params.try_into()?;
-        let delegate_key = DelegateKey::from_params(ID_MANAGER_CODE_HASH, &params)?;
-        // Serialise the keypair bundle (ML-DSA + ML-KEM seeds) into the opaque
-        // `Vec<u8>` slot that the identity-management delegate stores.
         let stored = StoredIdentityKeys::new(&ml_dsa_key, &ml_kem_dk);
         let msg = IdentityMsg::CreateIdentity {
             alias: alias.to_string(),
@@ -511,15 +528,7 @@ mod identity_management {
             extra: Some(description),
             kind: Some(::identity_management::EntryKind::Identity),
         };
-        let request = DelegateRequest::ApplicationMessages {
-            params,
-            inbound: vec![InboundDelegateMsg::ApplicationMessage(
-                ApplicationMessage::new(Vec::<u8>::try_from(&msg)?),
-            )],
-            key: delegate_key.clone(),
-        };
-        client.send(request.into()).await?;
-        Ok(())
+        send_identity_msg(client, &msg).await
     }
 
     #[derive(Default)]
@@ -558,9 +567,6 @@ mod identity_management {
         contact: &crate::app::address_book::Contact,
     ) -> Result<(), DynError> {
         crate::log::debug!("storing contact {}", contact.local_alias);
-        let params = IdentityParams::try_from(ID_MANAGER_KEY)?;
-        let params = params.try_into()?;
-        let delegate_key = DelegateKey::from_params(ID_MANAGER_CODE_HASH, &params)?;
         let stored = crate::app::address_book::StoredContactKeys {
             ml_dsa_vk_bytes: contact.ml_dsa_vk_bytes.clone(),
             ml_kem_ek_bytes: contact.ml_kem_ek_bytes.clone(),
@@ -573,15 +579,7 @@ mod identity_management {
             extra: Some(contact.description.clone()),
             kind: Some(::identity_management::EntryKind::Contact),
         };
-        let request = DelegateRequest::ApplicationMessages {
-            params,
-            inbound: vec![InboundDelegateMsg::ApplicationMessage(
-                ApplicationMessage::new(Vec::<u8>::try_from(&msg)?),
-            )],
-            key: delegate_key,
-        };
-        client.send(request.into()).await?;
-        Ok(())
+        send_identity_msg(client, &msg).await
     }
 
     pub(super) async fn delete_contact_api_call(
@@ -589,21 +587,10 @@ mod identity_management {
         alias: &str,
     ) -> Result<(), DynError> {
         crate::log::debug!("deleting contact {alias}");
-        let params = IdentityParams::try_from(ID_MANAGER_KEY)?;
-        let params = params.try_into()?;
-        let delegate_key = DelegateKey::from_params(ID_MANAGER_CODE_HASH, &params)?;
         let msg = IdentityMsg::DeleteIdentity {
             alias: alias.to_string(),
         };
-        let request = DelegateRequest::ApplicationMessages {
-            params,
-            inbound: vec![InboundDelegateMsg::ApplicationMessage(
-                ApplicationMessage::new(Vec::<u8>::try_from(&msg)?),
-            )],
-            key: delegate_key,
-        };
-        client.send(request.into()).await?;
-        Ok(())
+        send_identity_msg(client, &msg).await
     }
 }
 

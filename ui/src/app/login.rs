@@ -410,8 +410,8 @@ fn trigger_browser_download(filename: &str, json_bytes: &[u8]) {
     let uint8 = js_sys::Uint8Array::from(json_bytes);
     let array = js_sys::Array::new();
     array.push(&uint8);
-    let mut opts = BlobPropertyBag::new();
-    opts.type_("application/json");
+    let opts = BlobPropertyBag::new();
+    opts.set_type("application/json");
     let blob = match Blob::new_with_u8_array_sequence_and_options(&array, &opts) {
         Ok(b) => b,
         Err(_) => return,
@@ -446,6 +446,11 @@ struct ImportBackup(bool);
 
 struct ShareContact(bool);
 
+/// Pending share-card data passed from the click handler to
+/// `ShareContactModal` via context. `(identity alias, card share text)`.
+#[derive(Default, Clone)]
+struct SharePending(Option<(String, String)>);
+
 struct ImportContact(bool);
 
 #[derive(Debug, Clone)]
@@ -464,6 +469,7 @@ pub(super) fn IdentifiersList() -> Element {
     use_context_provider(|| Signal::new(CreateAlias(false)));
     use_context_provider(|| Signal::new(ImportBackup(false)));
     use_context_provider(|| Signal::new(ShareContact(false)));
+    use_context_provider(|| Signal::new(SharePending::default()));
     use_context_provider(|| Signal::new(ImportContact(false)));
     let create_alias_form = use_context::<Signal<CreateAlias>>();
     let import_backup_form = use_context::<Signal<ImportBackup>>();
@@ -505,12 +511,6 @@ pub(super) fn IdentifiersList() -> Element {
     }
 }
 
-// Pending share text for the share modal: (identity alias, card text).
-thread_local! {
-    static SHARE_PENDING: std::cell::RefCell<Option<(String, String)>> =
-        const { std::cell::RefCell::new(None) };
-}
-
 #[allow(non_snake_case)]
 pub(super) fn Identities() -> Element {
     let aliases = Identity::get_aliases();
@@ -529,6 +529,7 @@ pub(super) fn Identities() -> Element {
         let mut user = use_context::<Signal<User>>();
         let mut inbox = use_context::<Signal<InboxView>>();
         let mut share_contact_form = use_context::<Signal<ShareContact>>();
+        let mut share_pending = use_context::<Signal<SharePending>>();
         let id = identity.id;
         let alias = identity.alias.clone();
         let description = identity.description.clone();
@@ -580,30 +581,13 @@ pub(super) fn Identities() -> Element {
                                 onclick: {
                                     let identity = identity.clone();
                                     move |_| {
-                                        use ml_kem::kem::KeyExport;
-                                        let vk_bytes = identity.ml_dsa_vk_bytes();
-                                        let ek_bytes = identity.ml_kem_dk
-                                            .encapsulation_key()
-                                            .to_bytes()
-                                            .to_vec();
-                                        let card = crate::app::address_book::ContactCard {
-                                            version: crate::app::address_book::ContactCard::VERSION,
-                                            ml_dsa_vk_bytes: vk_bytes.clone(),
-                                            ml_kem_ek_bytes: ek_bytes.clone(),
-                                            suggested_alias: Some(identity.alias.to_string()),
-                                            suggested_description: if identity.description.is_empty() {
-                                                None
-                                            } else {
-                                                Some(identity.description.clone())
-                                            },
-                                        };
-                                        let fp = crate::app::address_book::fingerprint_words(&vk_bytes, &ek_bytes);
-                                        let fp_line = fp.join("-");
-                                        let card_uri = card.encode();
-                                        let share_text = format!("verify: {fp_line}\n{card_uri}");
-                                        SHARE_PENDING.with(|sp| {
-                                            *sp.borrow_mut() = Some((identity.alias.to_string(), share_text));
-                                        });
+                                        let card = crate::app::address_book::ContactCard::from_identity(&identity);
+                                        let fp = card.fingerprint().join("-");
+                                        let share_text = format!("verify: {}\n{}", fp, card.encode());
+                                        share_pending.set(SharePending(Some((
+                                            identity.alias.to_string(),
+                                            share_text,
+                                        ))));
                                         share_contact_form.write().0 = true;
                                     }
                                 },
@@ -939,18 +923,18 @@ fn ImportForm() -> Element {
                                     Err(_) => return,
                                 };
                                 let reader_c = reader.clone();
-                                let mut pb = parsed_backup.clone();
-                                let mut addr = address.clone();
-                                let mut desc = description.clone();
+                                let mut pb = parsed_backup;
+                                let mut addr = address;
+                                let mut desc = description;
                                 let cb = Closure::once(Box::new(move || {
                                     let result = reader_c.result().ok()
                                         .and_then(|v| v.as_string());
-                                    if let Some(text) = result {
-                                        if let Ok(b) = serde_json::from_str::<IdentityBackup>(&text) {
-                                            addr.set(b.alias.clone());
-                                            desc.set(b.description.clone());
-                                            pb.set(Some(b));
-                                        }
+                                    if let Some(text) = result
+                                        && let Ok(b) = serde_json::from_str::<IdentityBackup>(&text)
+                                    {
+                                        addr.set(b.alias.clone());
+                                        desc.set(b.description.clone());
+                                        pb.set(Some(b));
                                     }
                                 }) as Box<dyn FnOnce()>);
                                 reader.set_onloadend(Some(cb.as_ref().unchecked_ref()));
@@ -1063,11 +1047,12 @@ fn copy_to_clipboard(_text: String) {}
 #[allow(non_snake_case)]
 fn ShareContactModal() -> Element {
     let mut share_contact_form = use_context::<Signal<ShareContact>>();
-    let (alias, share_text) = SHARE_PENDING.with(|sp| {
-        sp.borrow()
-            .clone()
-            .unwrap_or_else(|| ("".into(), "".into()))
-    });
+    let share_pending = use_context::<Signal<SharePending>>();
+    let (alias, share_text) = share_pending
+        .read()
+        .0
+        .clone()
+        .unwrap_or_else(|| ("".into(), "".into()));
     let mut copied = use_signal(|| false);
 
     rsx! {
@@ -1121,7 +1106,7 @@ fn ImportContactForm() -> Element {
     let mut description = use_signal(String::new);
     let mut verified = use_signal(|| false);
     let mut error_msg = use_signal(String::new);
-    let mut fingerprint_words: Signal<Option<[String; 6]>> = use_signal(|| None);
+    let mut fingerprint_words: Signal<Option<[&'static str; 6]>> = use_signal(|| None);
 
     let on_paste_change = move |evt: dioxus::prelude::Event<dioxus::html::FormData>| {
         let text = evt.value().clone();
