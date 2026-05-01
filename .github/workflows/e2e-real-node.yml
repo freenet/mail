@@ -9,6 +9,14 @@ on:
   push:
     tags:
       - 'v*'
+  pull_request:
+    # Only run when the harness itself or its inputs change, to keep
+    # PR cost low. Other PRs rely on the standard ui-playwright job.
+    paths:
+      - '.github/workflows/e2e-real-node.yml'
+      - 'scripts/run-isolated-nodes.sh'
+      - 'ui/tests/live-node.spec.ts'
+      - 'Makefile.toml'
   schedule:
     # Nightly at 04:30 UTC.
     - cron: '30 4 * * *'
