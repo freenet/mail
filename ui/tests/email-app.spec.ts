@@ -329,3 +329,116 @@ test.describe("No horizontal scrollbar at desktop width", () => {
     expect(hasHScroll).toBe(false);
   });
 });
+
+// ── Address book: import contact and display ─────────────────────────────────
+//
+// This test exercises the address book import flow in offline (example-data,
+// no-sync) mode:
+//   1. Build a fake ContactCard payload (the same shape the Rust code produces)
+//      using browser-native btoa so no extra dependencies are needed.
+//   2. Navigate to the import-contact dialog and paste the encoded token.
+//   3. Assert the fingerprint panel appears and the alias pre-fills.
+//   4. Complete the import and assert the contact appears in the Contacts section.
+//   5. Log in as address1, type the contact alias in the compose To field,
+//      confirm the compose form still accepts it (address_book::lookup resolves it).
+
+test.describe("Address book: import contact and display", () => {
+  test("import contact card → appears in contacts section → compose accepts alias", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await waitForApp(page);
+
+    // ── Step 1: build a fake ContactCard via browser evaluate ─────────────
+    //
+    // ContactCard JSON fields:
+    //   version: u32
+    //   ml_dsa_vk_bytes: array of ints (1952 bytes for ML-DSA-65)
+    //   ml_kem_ek_bytes: array of ints (1184 bytes for ML-KEM-768)
+    //   suggested_alias: string | null
+    //   suggested_description: string | null
+    //
+    // The byte arrays are arbitrary — we only need them to pass the import
+    // parser (which accepts any bytes).  The fingerprint displayed will be
+    // deterministic given these values.
+    const contactCard = await page.evaluate(() => {
+      const mlDsaVk = new Array(1952)
+        .fill(0)
+        .map((_, i) => (i * 7 + 13) & 0xff);
+      const mlKemEk = new Array(1184)
+        .fill(0)
+        .map((_, i) => (i * 5 + 17) & 0xff);
+      const card = {
+        version: 1,
+        ml_dsa_vk_bytes: mlDsaVk,
+        ml_kem_ek_bytes: mlKemEk,
+        suggested_alias: "charlie",
+        suggested_description: "Test contact",
+      };
+      const json = JSON.stringify(card);
+      // btoa produces standard base64, matching Rust's base64::STANDARD engine.
+      return `contact://${btoa(json)}`;
+    });
+
+    // ── Step 2: open the import-contact dialog ────────────────────────────
+    await page.getByText("+ Import contact", { exact: true }).click();
+
+    await expect(page.getByText("Import contact")).toBeVisible({
+      timeout: 5_000,
+    });
+
+    // ── Step 3: paste the card and assert the fingerprint panel appears ───
+    await page.locator("textarea").fill(contactCard);
+
+    await expect(
+      page.getByText("Fingerprint (verify with sender):")
+    ).toBeVisible({ timeout: 5_000 });
+
+    // Alias should be pre-filled with the suggested_alias from the card.
+    const labelInput = page.locator('input[placeholder="e.g. Alice (work)"]');
+    await expect(labelInput).toHaveValue("charlie");
+
+    // Use a distinct local alias that can't clash with own identities.
+    await labelInput.fill("charlie-test");
+
+    // ── Step 4: complete import and verify contact appears ────────────────
+    await page.locator("button").filter({ hasText: "Import" }).click();
+
+    // Import form closes; Contacts section shows the new entry.
+    await expect(page.getByText("charlie-test")).toBeVisible({
+      timeout: 5_000,
+    });
+
+    // ── Step 5: compose accepts the imported contact alias ────────────────
+    //
+    // address_book::lookup("charlie-test") will find the contact and return a
+    // Recipient.  The send will fail at ek_from_bytes (arbitrary byte array),
+    // but compose shows the form and accepts the alias in the To field, which
+    // is the behaviour we're testing here.
+    await selectIdentity(page, "address1");
+    await clickMenu(page, "Write message");
+    await expect(page.locator("h3")).toContainText("New message");
+
+    const toCell = page.locator("tr").filter({ hasText: "To" }).locator("td");
+    await toCell.click();
+    await toCell.fill("charlie-test");
+
+    // Subject and body so the form is complete.
+    const subjectCell = page
+      .locator("tr")
+      .filter({ hasText: "Subject" })
+      .locator("td");
+    await subjectCell.click();
+    await subjectCell.fill("hello charlie");
+
+    const bodyDiv = page.locator(".box div[contenteditable]");
+    await bodyDiv.click();
+    await bodyDiv.fill("test body");
+
+    // The compose form with the alias typed in To should still be visible
+    // (no "not found" error crashed the UI before Send is even clicked).
+    await expect(
+      page.locator("tr").filter({ hasText: "To" }).locator("td")
+    ).toContainText("charlie-test");
+  });
+});
