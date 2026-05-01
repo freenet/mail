@@ -1,8 +1,10 @@
 /* Main grid — sidebar + content split. */
 
 @layer components {
+  @scope (.fm-app) {
 
-  /* MAIN */
-  .fm-app .main { flex: 1; display: flex; min-height: 0; }
+    /* MAIN */
+    .main { flex: 1; display: flex; min-height: 0; }
 
+  }
 }

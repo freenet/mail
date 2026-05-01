@@ -1,98 +1,100 @@
 /* Compose — veil + sheet (fixed-positioned). */
 
 @layer components {
+  @scope (.fm-app) {
 
-  /* COMPOSE — veil + sheet are fixed-positioned children of .fm-app */
-  .fm-app .veil {
-    position: fixed; inset: 0; z-index: 50;
-    background: rgba(15, 23, 42, 0.18);
-    display: flex; align-items: flex-end; justify-content: flex-end;
-    padding: 22px;
-    animation: fm-veilIn 0.15s ease both;
-  }
-  @keyframes fm-veilIn { from { opacity: 0; } to { opacity: 1; } }
+    /* COMPOSE — veil + sheet are fixed-positioned children of */
+    .veil {
+      position: fixed; inset: 0; z-index: 50;
+      background: rgba(15, 23, 42, 0.18);
+      display: flex; align-items: flex-end; justify-content: flex-end;
+      padding: 22px;
+      animation: fm-veilIn 0.15s ease both;
+    }
+    @keyframes fm-veilIn { from { opacity: 0; } to { opacity: 1; } }
 
-  .fm-app .sheet {
-    width: 510px; max-width: calc(100vw - 44px); max-height: calc(100vh - 100px);
-    background: #fff; border-radius: 12px;
-    box-shadow: var(--sh-lg);
-    display: flex; flex-direction: column;
-    overflow: hidden;
-    animation: fm-sheetUp 0.22s cubic-bezier(0.34, 1.28, 0.64, 1) both;
-  }
-  @keyframes fm-sheetUp {
-    from { opacity: 0; transform: translateY(22px) scale(0.97); }
-    to   { opacity: 1; transform: none; }
-  }
-  .fm-app .sheet-head {
-    display: flex; align-items: center; justify-content: space-between;
-    padding: 14px 18px; border-bottom: 1px solid var(--line2);
-  }
-  .fm-app .sheet-title {
-    font-family: "Fraunces", serif; font-style: italic; font-size: 15px;
-    letter-spacing: -0.025em; color: var(--ink0); font-weight: 400;
-  }
-  .fm-app .sheet-x {
-    appearance: none; border: 0; background: transparent;
-    width: 26px; height: 26px; border-radius: 6px; color: var(--ink3); font-size: 14px;
-  }
-  .fm-app .sheet-x:hover { background: var(--c1); color: var(--ink0); }
+    .sheet {
+      width: 510px; max-width: calc(100vw - 44px); max-height: calc(100vh - 100px);
+      background: #fff; border-radius: 12px;
+      box-shadow: var(--sh-lg);
+      display: flex; flex-direction: column;
+      overflow: hidden;
+      animation: fm-sheetUp 0.22s cubic-bezier(0.34, 1.28, 0.64, 1) both;
+    }
+    @keyframes fm-sheetUp {
+      from { opacity: 0; transform: translateY(22px) scale(0.97); }
+      to   { opacity: 1; transform: none; }
+    }
+    .sheet-head {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 14px 18px; border-bottom: 1px solid var(--line2);
+    }
+    .sheet-title {
+      font-family: "Fraunces", serif; font-style: italic; font-size: 15px;
+      letter-spacing: -0.025em; color: var(--ink0); font-weight: 400;
+    }
+    .sheet-x {
+      appearance: none; border: 0; background: transparent;
+      width: 26px; height: 26px; border-radius: 6px; color: var(--ink3); font-size: 14px;
+    }
+    .sheet-x:hover { background: var(--c1); color: var(--ink0); }
 
-  .fm-app .sheet-field {
-    display: flex; align-items: center; gap: 12px;
-    padding: 11px 18px;
-    border-bottom: 1px solid var(--line2);
-  }
-  .fm-app .field-lbl {
-    font-family: "Geist Mono", monospace; font-size: 8.5px;
-    text-transform: uppercase; letter-spacing: 0.12em; color: var(--ink4);
-    flex: 0 0 30px;
-  }
-  .fm-app .field-input {
-    flex: 1; border: 0; background: transparent;
-    font-size: 13px; color: var(--ink1);
-  }
-  .fm-app .field-input::placeholder { color: var(--ink4); }
+    .sheet-field {
+      display: flex; align-items: center; gap: 12px;
+      padding: 11px 18px;
+      border-bottom: 1px solid var(--line2);
+    }
+    .field-lbl {
+      font-family: "Geist Mono", monospace; font-size: 8.5px;
+      text-transform: uppercase; letter-spacing: 0.12em; color: var(--ink4);
+      flex: 0 0 30px;
+    }
+    .field-input {
+      flex: 1; border: 0; background: transparent;
+      font-size: 13px; color: var(--ink1);
+    }
+    .field-input::placeholder { color: var(--ink4); }
 
-  .fm-app .sheet-recipient-badge {
-    padding: 0 18px 11px;
-    border-bottom: 1px solid var(--line2);
-    display: flex; align-items: center; gap: 8px;
-    font-family: "Geist Mono", monospace; font-size: 9px;
-    margin-top: -1px;
-  }
-  .fm-app .badge {
-    display: inline-flex; align-items: center; gap: 5px;
-    font-family: "Geist Mono", monospace; font-size: 8px;
-    padding: 3px 7px; border-radius: 5px; letter-spacing: 0.04em;
-    text-transform: uppercase;
-  }
-  .fm-app .badge-trust {
-    color: var(--trust); background: var(--trust-bg);
-    border: 1px solid rgba(51, 153, 102, 0.25);
-  }
-  .fm-app .badge-warn {
-    color: var(--unread); background: rgba(217, 119, 6, 0.10);
-    border: 1px solid rgba(217, 119, 6, 0.25);
-  }
-  .fm-app .badge-fp { color: var(--ink3); }
+    .sheet-recipient-badge {
+      padding: 0 18px 11px;
+      border-bottom: 1px solid var(--line2);
+      display: flex; align-items: center; gap: 8px;
+      font-family: "Geist Mono", monospace; font-size: 9px;
+      margin-top: -1px;
+    }
+    .badge {
+      display: inline-flex; align-items: center; gap: 5px;
+      font-family: "Geist Mono", monospace; font-size: 8px;
+      padding: 3px 7px; border-radius: 5px; letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    .badge-trust {
+      color: var(--trust); background: var(--trust-bg);
+      border: 1px solid rgba(51, 153, 102, 0.25);
+    }
+    .badge-warn {
+      color: var(--unread); background: rgba(217, 119, 6, 0.10);
+      border: 1px solid rgba(217, 119, 6, 0.25);
+    }
+    .badge-fp { color: var(--ink3); }
 
-  .fm-app .sheet-body { padding: 14px 18px; }
-  .fm-app .sheet-textarea {
-    width: 100%; min-height: 180px; border: 0; background: transparent; resize: none;
-    font-size: 13.5px; color: var(--ink1); line-height: 1.72;
-  }
-  .fm-app .sheet-textarea::placeholder { color: var(--ink4); font-style: italic; }
+    .sheet-body { padding: 14px 18px; }
+    .sheet-textarea {
+      width: 100%; min-height: 180px; border: 0; background: transparent; resize: none;
+      font-size: 13.5px; color: var(--ink1); line-height: 1.72;
+    }
+    .sheet-textarea::placeholder { color: var(--ink4); font-style: italic; }
 
-  .fm-app .sheet-foot {
-    display: flex; align-items: center; justify-content: space-between; gap: 10px;
-    padding: 13px 18px; border-top: 1px solid var(--line2);
-    background: rgba(241, 245, 249, 0.4);
-  }
-  .fm-app .foot-meta {
-    display: flex; align-items: center; gap: 7px;
-    font-family: "Geist Mono", monospace; font-size: 9px; color: var(--ink3);
-  }
-  .fm-app .foot-actions { display: flex; align-items: center; gap: 8px; }
+    .sheet-foot {
+      display: flex; align-items: center; justify-content: space-between; gap: 10px;
+      padding: 13px 18px; border-top: 1px solid var(--line2);
+      background: rgba(241, 245, 249, 0.4);
+    }
+    .foot-meta {
+      display: flex; align-items: center; gap: 7px;
+      font-family: "Geist Mono", monospace; font-size: 9px; color: var(--ink3);
+    }
+    .foot-actions { display: flex; align-items: center; gap: 8px; }
 
+  }
 }

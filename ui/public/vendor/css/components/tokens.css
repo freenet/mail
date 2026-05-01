@@ -1,65 +1,68 @@
 /* Design tokens + .fm-app root + reset. Loaded first. */
 
 @layer tokens {
+  @scope (.fm-app) {
 
-  /* Freenet Mail redesign — scoped under .fm-app so login + address-book
-     Bulma screens are unaffected. Token block + components ported from
-     design/mailbox/project/Freenet Mail.html (Claude Design handoff). */
+    /* Freenet Mail redesign — @scope (.fm-app) keeps these rules from
+       leaking into the login + address-book .fm-pre surface. Token block
+       + components ported from design/mailbox/project/Freenet Mail.html
+       (Claude Design handoff). */
 
-  .fm-app {
-    /* Surfaces */
-    --c0: #f8fafc;
-    --c1: #f1f5f9;
-    --c2: #e5e7eb;
-    --c3: #cbd5e1;
+    :scope {
+      /* Surfaces */
+      --c0: #f8fafc;
+      --c1: #f1f5f9;
+      --c2: #e5e7eb;
+      --c3: #cbd5e1;
 
-    /* Ink */
-    --ink0: #111827;
-    --ink1: #1f2937;
-    --ink2: #374151;
-    --ink3: #6b7280;
-    --ink4: #9ca3af;
+      /* Ink */
+      --ink0: #111827;
+      --ink1: #1f2937;
+      --ink2: #374151;
+      --ink3: #6b7280;
+      --ink4: #9ca3af;
 
-    /* Accents */
-    --accent: #0066cc;
-    --accent-bg: #eff6ff;
-    --accent-mid: #bfdbfe;
+      /* Accents */
+      --accent: #0066cc;
+      --accent-bg: #eff6ff;
+      --accent-mid: #bfdbfe;
 
-    --trust: #339966;
-    --trust-bg: #dcfce7;
+      --trust: #339966;
+      --trust-bg: #dcfce7;
 
-    --line: rgba(100, 116, 139, 0.18);
-    --line2: rgba(100, 116, 139, 0.10);
+      --line: rgba(100, 116, 139, 0.18);
+      --line2: rgba(100, 116, 139, 0.10);
 
-    --sh-sm: 0 1px 3px rgba(0, 40, 100, 0.06);
-    --sh-lg: 0 20px 60px rgba(0, 40, 100, 0.14), 0 4px 12px rgba(0, 40, 100, 0.06);
+      --sh-sm: 0 1px 3px rgba(0, 40, 100, 0.06);
+      --sh-lg: 0 20px 60px rgba(0, 40, 100, 0.14), 0 4px 12px rgba(0, 40, 100, 0.06);
 
-    --unread: #d97706;
+      --unread: #d97706;
 
-    position: fixed;
-    inset: 0;
-    display: flex;
-    flex-direction: column;
-    background-color: var(--c0);
-    background-image:
-      radial-gradient(ellipse 65% 45% at 12% -8%, rgba(0, 102, 204, 0.055) 0%, transparent 55%),
-      radial-gradient(ellipse 55% 65% at 92% 108%, rgba(51, 153, 102, 0.055) 0%, transparent 50%);
-    background-attachment: fixed;
-    color: var(--ink1);
-    font-family: "DM Sans", system-ui, sans-serif;
-    -webkit-font-smoothing: antialiased;
-    text-rendering: optimizeLegibility;
-    overflow: hidden;
+      position: fixed;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      background-color: var(--c0);
+      background-image:
+        radial-gradient(ellipse 65% 45% at 12% -8%, rgba(0, 102, 204, 0.055) 0%, transparent 55%),
+        radial-gradient(ellipse 55% 65% at 92% 108%, rgba(51, 153, 102, 0.055) 0%, transparent 50%);
+      background-attachment: fixed;
+      color: var(--ink1);
+      font-family: "DM Sans", system-ui, sans-serif;
+      -webkit-font-smoothing: antialiased;
+      text-rendering: optimizeLegibility;
+      overflow: hidden;
+    }
+
+    *,
+    *::before,
+    *::after {
+      box-sizing: border-box;
+    }
+
+    button { font-family: inherit; cursor: default; }
+    input,
+    textarea { font-family: inherit; outline: none; }
+
   }
-
-  .fm-app *,
-  .fm-app *::before,
-  .fm-app *::after {
-    box-sizing: border-box;
-  }
-
-  .fm-app button { font-family: inherit; cursor: default; }
-  .fm-app input,
-  .fm-app textarea { font-family: inherit; outline: none; }
-
 }
