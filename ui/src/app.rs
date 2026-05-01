@@ -17,6 +17,7 @@ use wasm_bindgen::JsValue;
 pub(crate) use login::{Identity, LoginController};
 
 use crate::api::{TryNodeAction, node_response_error_handling};
+use crate::testid;
 use crate::{
     DynError,
     api::WebApiRequestClient,
@@ -765,7 +766,7 @@ fn UserInbox() -> Element {
     let menu_selection = use_context::<Signal<menu::MenuSelection>>();
 
     rsx! {
-        div { class: "fm-app", "data-testid": "fm-app",
+        div { class: "fm-app", "data-testid": testid::FM_APP,
             Topbar {}
             div { class: "main",
                 Sidebar {}
@@ -807,13 +808,13 @@ fn Topbar() -> Element {
                         r#type: "text",
                         placeholder: "Search",
                         value: "{search}",
-                        "data-testid": "fm-search",
+                        "data-testid": testid::FM_SEARCH,
                         oninput: move |ev| { menu_selection.write().set_search(ev.value()); },
                     }
                 }
             }
             div { class: "topbar-right",
-                div { class: "avatar", "data-testid": "fm-avatar", "{alias_initial}" }
+                div { class: "avatar", "data-testid": testid::FM_AVATAR, "{alias_initial}" }
             }
         }
     }
@@ -838,7 +839,7 @@ fn Sidebar() -> Element {
         nav { class: "sidebar",
             button {
                 class: "compose-btn",
-                "data-testid": "fm-compose-btn",
+                "data-testid": testid::FM_COMPOSE_BTN,
                 onclick: move |_| {
                     let mut sel = menu_selection.write();
                     if !sel.is_new_msg() {
@@ -883,7 +884,7 @@ fn Sidebar() -> Element {
                 }
                 button {
                     class: "nav-item",
-                    "data-testid": "fm-logout",
+                    "data-testid": testid::FM_LOGOUT,
                     onclick: move |_| {
                         let mut state = user.write();
                         state.logged = false;
@@ -1040,7 +1041,7 @@ fn MessageList() -> Element {
                 span { class: "list-title", "{folder.label()}" }
                 span { class: "list-count", "{count}" }
             }
-            div { class: "list-scroll", "data-testid": "fm-list",
+            div { class: "list-scroll", "data-testid": testid::FM_LIST,
                 if matches!(folder, menu::Folder::Archive) {
                     if archived_msgs.is_empty() {
                         div { style: "padding:24px 18px; font-family:'Geist Mono',monospace; font-size:10px; letter-spacing:0.1em; text-transform:uppercase; color:var(--ink4);",
@@ -1057,7 +1058,7 @@ fn MessageList() -> Element {
                                 rsx! {
                                     article {
                                         class: "{classes}",
-                                        "data-testid": "fm-archive-card",
+                                        "data-testid": testid::FM_ARCHIVE_CARD,
                                         "data-msg-id": "{mid}",
                                         onclick: move |_| {
                                             menu_selection.write().open_archived(mid);
@@ -1091,7 +1092,7 @@ fn MessageList() -> Element {
                                 rsx! {
                                     article {
                                         class: "{classes}",
-                                        "data-testid": "fm-sent-card",
+                                        "data-testid": testid::FM_SENT_CARD,
                                         "data-sent-id": "{id_for_dom}",
                                         onclick: move |_| {
                                             menu_selection.write().open_sent(id_for_click.clone());
@@ -1128,7 +1129,7 @@ fn MessageList() -> Element {
                                 rsx! {
                                     article {
                                         class: "msg-card",
-                                        "data-testid": "fm-draft-card",
+                                        "data-testid": testid::FM_DRAFT_CARD,
                                         "data-draft-id": "{id_for_dom}",
                                         onclick: move |_| {
                                             menu_selection.write().open_draft(prefill.clone());
@@ -1162,7 +1163,7 @@ fn MessageList() -> Element {
                                 article {
                                     class: "{classes}",
                                     id: "email-inbox-accessor-{id}",
-                                    "data-testid": "fm-msg-card",
+                                    "data-testid": testid::FM_MSG_CARD,
                                     "data-msg-id": "{id}",
                                     onclick: move |_| { menu_selection.write().open_email(id); },
                                     div { class: "msg-row1",
@@ -1313,7 +1314,7 @@ fn OpenArchivedMessage(msg_id: u64, msg: mail_local_state::ArchivedMessage) -> E
             div { class: "toolbar",
                 button {
                     class: "btn btn-primary",
-                    "data-testid": "fm-archive-reply",
+                    "data-testid": testid::FM_ARCHIVE_REPLY,
                     onclick: move |_| {
                         menu_selection.write().open_compose_with(reply_to.to_string(), reply_subj.clone());
                     },
@@ -1324,14 +1325,14 @@ fn OpenArchivedMessage(msg_id: u64, msg: mail_local_state::ArchivedMessage) -> E
                 // mis-promising round-trippable archives.
                 button {
                     class: "btn btn-secondary",
-                    "data-testid": "fm-archive-unarchive",
+                    "data-testid": testid::FM_ARCHIVE_UNARCHIVE,
                     disabled: true,
                     title: "Unarchive requires inbox contract OwnerInsert (#60)",
                     "Unarchive"
                 }
                 button {
                     class: "btn btn-secondary",
-                    "data-testid": "fm-archive-delete",
+                    "data-testid": testid::FM_ARCHIVE_DELETE,
                     onclick: move |_| {
                         if !delete_alias.is_empty() {
                             crate::local_state::local_delete_message(&delete_alias, msg_id);
@@ -1362,7 +1363,7 @@ fn OpenArchivedMessage(msg_id: u64, msg: mail_local_state::ArchivedMessage) -> E
                 div { class: "spacer" }
             }
             div { class: "detail-scroll",
-                div { class: "detail-body", "data-testid": "fm-archive-body",
+                div { class: "detail-body", "data-testid": testid::FM_ARCHIVE_BODY,
                     {
                         content.split("\n\n").map(|para| rsx! {
                             p { "{para}" }
@@ -1420,13 +1421,13 @@ fn OpenSentMessage(msg: mail_local_state::SentMessage) -> Element {
                         span { class: "from-name", "to {to}" }
                         span {
                             class: "from-addr",
-                            "data-testid": "fm-sent-fingerprint",
+                            "data-testid": testid::FM_SENT_FINGERPRINT,
                             "fingerprint: {fingerprint}"
                         }
                     }
                     span {
                         class: "from-time",
-                        "data-testid": "fm-sent-delivery",
+                        "data-testid": testid::FM_SENT_DELIVERY,
                         "{delivery}"
                     }
                 }
@@ -1434,7 +1435,7 @@ fn OpenSentMessage(msg: mail_local_state::SentMessage) -> Element {
             div { class: "toolbar",
                 button {
                     class: "btn btn-primary",
-                    "data-testid": "fm-sent-reply",
+                    "data-testid": testid::FM_SENT_REPLY,
                     onclick: move |_| {
                         menu_selection.write().open_draft(reply_prefill.clone());
                     },
@@ -1442,7 +1443,7 @@ fn OpenSentMessage(msg: mail_local_state::SentMessage) -> Element {
                 }
                 button {
                     class: "btn btn-secondary",
-                    "data-testid": "fm-sent-forward",
+                    "data-testid": testid::FM_SENT_FORWARD,
                     onclick: move |_| {
                         menu_selection.write().open_draft(forward_prefill.clone());
                     },
@@ -1450,7 +1451,7 @@ fn OpenSentMessage(msg: mail_local_state::SentMessage) -> Element {
                 }
                 button {
                     class: "btn btn-secondary",
-                    "data-testid": "fm-sent-resend",
+                    "data-testid": testid::FM_SENT_RESEND,
                     onclick: move |_| {
                         menu_selection.write().open_draft(resend_prefill.clone());
                     },
@@ -1459,7 +1460,7 @@ fn OpenSentMessage(msg: mail_local_state::SentMessage) -> Element {
                 div { class: "spacer" }
             }
             div { class: "detail-scroll",
-                div { class: "detail-body", "data-testid": "fm-sent-body",
+                div { class: "detail-body", "data-testid": testid::FM_SENT_BODY,
                     {
                         body.split("\n\n").map(|para| rsx! {
                             p { "{para}" }
@@ -1567,7 +1568,7 @@ fn OpenMessage(msg: Message) -> Element {
             div { class: "toolbar",
                 button {
                     class: "btn btn-primary",
-                    "data-testid": "fm-reply",
+                    "data-testid": testid::FM_REPLY,
                     onclick: move |_| {
                         menu_selection.write().open_compose_with(reply_to.to_string(), reply_subj.clone());
                     },
@@ -1575,7 +1576,7 @@ fn OpenMessage(msg: Message) -> Element {
                 }
                 button {
                     class: "btn btn-secondary",
-                    "data-testid": "fm-archive",
+                    "data-testid": testid::FM_ARCHIVE,
                     onclick: move |_| {
                         // Archive: stash a local copy in mail-local-state then
                         // remove from the inbox contract. Phase 1 of #47c —
@@ -1624,7 +1625,7 @@ fn OpenMessage(msg: Message) -> Element {
                 }
                 button {
                     class: "btn btn-secondary",
-                    "data-testid": "fm-delete",
+                    "data-testid": testid::FM_DELETE,
                     onclick: move |_| {
                         // Delete: drop any local kept/archived copies AND
                         // remove from the inbox contract. Distinct from
@@ -1689,7 +1690,7 @@ fn ToastView() -> Element {
     let value = toast.read().clone();
     if let Some(text) = value {
         rsx! {
-            div { class: "toast", "data-testid": "fm-toast",
+            div { class: "toast", "data-testid": testid::FM_TOAST,
                 span { class: "pulse-dot" }
                 span { "{text}" }
             }
@@ -1907,7 +1908,7 @@ fn ComposeSheet() -> Element {
         div { class: "veil",
             onclick: move |_| { menu_selection.write().at_new_msg(); },
             div { class: "sheet",
-                "data-testid": "fm-compose-sheet",
+                "data-testid": testid::FM_COMPOSE_SHEET,
                 onclick: move |ev| { ev.stop_propagation(); },
                 div { class: "sheet-head",
                     span { class: "sheet-title", "New message" }
@@ -1992,7 +1993,7 @@ fn ComposeSheet() -> Element {
                         }
                         button {
                             class: "btn btn-primary",
-                            "data-testid": "fm-send",
+                            "data-testid": testid::FM_SEND,
                             onclick: send_msg,
                             "Send"
                         }

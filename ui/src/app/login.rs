@@ -14,6 +14,7 @@ use ml_kem::{DecapsulationKey, EncapsulationKey, MlKem768};
 
 use crate::DynError;
 use crate::app::{ContractType, User, UserId};
+use crate::testid;
 
 use super::{InboxView, NodeAction};
 
@@ -634,7 +635,7 @@ pub(super) fn Identities() -> Element {
         };
 
         rsx! {
-            div { class: "id-row", "data-testid": "fm-id-row", "data-alias": "{alias}",
+            div { class: "id-row", "data-testid": testid::FM_ID_ROW, "data-alias": "{alias}",
                 div { class: "id-orb", "{initial}" }
                 div { class: "id-meta",
                     if let Some(draft) = &*rename_draft.read() {
@@ -642,7 +643,7 @@ pub(super) fn Identities() -> Element {
                         input {
                             class: "input",
                             style: "max-width:240px;",
-                            "data-testid": "fm-rename-input",
+                            "data-testid": testid::FM_RENAME_INPUT,
                             value: "{draft}",
                             oninput: move |evt| { rename_draft.set(Some(evt.value())); },
                         }
@@ -674,7 +675,7 @@ pub(super) fn Identities() -> Element {
                         }
                         button {
                             class: "btn btn-primary",
-                            "data-testid": "fm-rename-submit",
+                            "data-testid": testid::FM_RENAME_SUBMIT,
                             onclick: submit_rename,
                             "Save"
                         }
@@ -682,7 +683,7 @@ pub(super) fn Identities() -> Element {
                         button {
                             class: "icon-btn",
                             title: "Rename this identity",
-                            "data-testid": "fm-id-rename",
+                            "data-testid": testid::FM_ID_RENAME,
                             onclick: {
                                 let current = alias.to_string();
                                 move |_| {
@@ -695,7 +696,7 @@ pub(super) fn Identities() -> Element {
                         button {
                             class: "icon-btn",
                             title: "Export / backup this identity",
-                            "data-testid": "fm-id-backup",
+                            "data-testid": testid::FM_ID_BACKUP,
                             onclick: move |_| {
                                 let backup = IdentityBackup::from_identity(&backup_alias);
                                 if let Ok(json) = serde_json::to_vec_pretty(&backup) {
@@ -708,7 +709,7 @@ pub(super) fn Identities() -> Element {
                         button {
                             class: "icon-btn",
                             title: "Share your address with someone",
-                            "data-testid": "fm-id-share",
+                            "data-testid": testid::FM_ID_SHARE,
                             onclick: move |_| {
                                 let card = crate::app::address_book::ContactCard::from_identity(&share_id);
                                 let fp = card.fingerprint().join("-");
@@ -725,7 +726,7 @@ pub(super) fn Identities() -> Element {
                         }
                         button {
                             class: "btn btn-primary",
-                            "data-testid": "fm-id-open",
+                            "data-testid": testid::FM_ID_OPEN,
                             onclick: move |_| {
                                 user.write().set_logged_id(id);
                                 inbox.write().set_active_id(id);
@@ -756,13 +757,13 @@ pub(super) fn Identities() -> Element {
         div { style: "display:flex; gap:10px; margin-top:18px;",
             button {
                 class: "btn btn-secondary",
-                "data-testid": "fm-id-create",
+                "data-testid": testid::FM_ID_CREATE,
                 onclick: move |_| { create_alias_form.write().0 = true; },
                 "+ Create new identity"
             }
             button {
                 class: "btn btn-ghost",
-                "data-testid": "fm-id-restore",
+                "data-testid": testid::FM_ID_RESTORE,
                 onclick: move |_| { import_backup_form.write().0 = true; },
                 "Restore from backup"
             }
@@ -896,7 +897,7 @@ pub(super) fn CreateAliasForm() -> Element {
                     }
                     button {
                         class: "btn btn-primary btn-lg",
-                        "data-testid": "fm-create-confirm",
+                        "data-testid": testid::FM_CREATE_CONFIRM,
                         onclick: confirm,
                         "Continue to inbox"
                     }
@@ -915,7 +916,7 @@ pub(super) fn CreateAliasForm() -> Element {
                         class: "input",
                         placeholder: "e.g. mira",
                         value: "{alias_input}",
-                        "data-testid": "fm-create-alias-input",
+                        "data-testid": testid::FM_CREATE_ALIAS_INPUT,
                         oninput: move |evt| alias_input.set(evt.value()),
                     }
                     span { class: "field-help", "Used as your local handle. Other people see only your fingerprint." }
@@ -942,7 +943,7 @@ pub(super) fn CreateAliasForm() -> Element {
                     }
                     button {
                         class: "btn btn-primary btn-lg",
-                        "data-testid": "fm-create-submit",
+                        "data-testid": testid::FM_CREATE_SUBMIT,
                         onclick: submit,
                         "Generate"
                     }
@@ -1018,7 +1019,7 @@ fn FirstRunCards() -> Element {
         div { class: "actions",
             button {
                 class: "action-card",
-                "data-testid": "fm-action-create",
+                "data-testid": testid::FM_ACTION_CREATE,
                 onclick: move |_| {
                     import_form.write().0 = false;
                     user.write().identified = true;
@@ -1031,7 +1032,7 @@ fn FirstRunCards() -> Element {
             }
             button {
                 class: "action-card",
-                "data-testid": "fm-action-import",
+                "data-testid": testid::FM_ACTION_IMPORT,
                 onclick: move |_| { import_form.write().0 = true; },
                 span { class: "action-icon", "↥" }
                 span { class: "action-title", "Restore from backup" }
@@ -1083,7 +1084,7 @@ fn ImportForm() -> Element {
                     r#type: "file",
                     accept: ".json",
                     id: "restore-file-input",
-                    "data-testid": "fm-restore-file",
+                    "data-testid": testid::FM_RESTORE_FILE,
                     onchange: move |_| {
                         #[cfg(target_family = "wasm")]
                         {
@@ -1187,7 +1188,7 @@ fn ImportForm() -> Element {
                 }
                 button {
                     class: "btn btn-primary btn-lg",
-                    "data-testid": "fm-restore-submit",
+                    "data-testid": testid::FM_RESTORE_SUBMIT,
                     disabled: parsed_backup.read().is_none(),
                     onclick: move |_| {
                         if let Some(backup) = parsed_backup.read().clone() {
@@ -1285,7 +1286,7 @@ fn ShareContactModal() -> Element {
                 copied.set(false);
             },
             div { class: "modal",
-                "data-testid": "fm-share-modal",
+                "data-testid": testid::FM_SHARE_MODAL,
                 "data-share-text": "{share_text}",
                 onclick: move |ev| { ev.stop_propagation(); },
                 div { class: "modal-head",
@@ -1320,7 +1321,7 @@ fn ShareContactModal() -> Element {
                 div { class: "modal-foot",
                     button {
                         class: "btn btn-secondary",
-                        "data-testid": "fm-share-copy",
+                        "data-testid": testid::FM_SHARE_COPY,
                         onclick: {
                             let share_text = share_text.clone();
                             move |_| {
@@ -1400,7 +1401,7 @@ fn ImportContactForm() -> Element {
                 error_msg.set(String::new());
             },
             div { class: "modal",
-                "data-testid": "fm-import-contact-modal",
+                "data-testid": testid::FM_IMPORT_CONTACT_MODAL,
                 onclick: move |ev| { ev.stop_propagation(); },
                 div { class: "modal-head",
                     span { class: "modal-title", "Import contact" }
@@ -1422,7 +1423,7 @@ fn ImportContactForm() -> Element {
                     }
                     if let Some(ref words) = *fingerprint_words.read() {
                         div { class: "verify-words",
-                            "data-testid": "fm-import-fp",
+                            "data-testid": testid::FM_IMPORT_FP,
                             div { class: "verify-words-label",
                                 span { class: "pulse-dot" }
                                 "Fingerprint (verify with sender)"
@@ -1460,7 +1461,7 @@ fn ImportContactForm() -> Element {
                     if fingerprint_words.read().is_some() {
                         label {
                             class: "{verify_check_class}",
-                            "data-testid": "fm-verify-check",
+                            "data-testid": testid::FM_VERIFY_CHECK,
                             onclick: move |_| {
                                 let v = *verified.read();
                                 verified.set(!v);
@@ -1488,7 +1489,7 @@ fn ImportContactForm() -> Element {
                     button { class: "btn btn-ghost", onclick: cancel, "Cancel" }
                     button {
                         class: "btn btn-primary",
-                        "data-testid": "fm-import-submit",
+                        "data-testid": testid::FM_IMPORT_SUBMIT,
                         disabled: !can_import,
                         onclick: move |_| {
                             let text = paste_text.read().clone();
@@ -1550,7 +1551,7 @@ fn ContactsSection() -> Element {
             span { class: "section-title", "Contacts" }
             button {
                 class: "btn btn-secondary",
-                "data-testid": "fm-contact-import",
+                "data-testid": testid::FM_CONTACT_IMPORT,
                 onclick: move |_| { import_contact_form.write().0 = true; },
                 "+ Import contact"
             }
