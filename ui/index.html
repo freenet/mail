@@ -9,7 +9,23 @@
          allows same-origin (`default-src http://127.0.0.1:7509`), so
          remote CDN stylesheets are blocked. See ui/public/vendor/. -->
     <link rel="stylesheet" href="vendor/css/fonts.css" />
-    <link rel="stylesheet" href="vendor/css/fm-design.css" />
+    <!-- Cascade order: tokens win over components only when components
+         try to redefine them; component layers all sit at the same level
+         and resolve by source order (last loaded wins on a tie). The
+         declaration here is what makes `@layer` semantics explicit so the
+         intent is visible without reading every partial. -->
+    <style>
+      @layer tokens, components;
+    </style>
+    <link rel="stylesheet" href="vendor/css/components/tokens.css" />
+    <link rel="stylesheet" href="vendor/css/components/topbar.css" />
+    <link rel="stylesheet" href="vendor/css/components/main.css" />
+    <link rel="stylesheet" href="vendor/css/components/sidebar.css" />
+    <link rel="stylesheet" href="vendor/css/components/message-list.css" />
+    <link rel="stylesheet" href="vendor/css/components/detail.css" />
+    <link rel="stylesheet" href="vendor/css/components/compose.css" />
+    <link rel="stylesheet" href="vendor/css/components/toast.css" />
+    <link rel="stylesheet" href="vendor/css/components/login.css" />
   </head>
   <body>
     <div id="main"></div>

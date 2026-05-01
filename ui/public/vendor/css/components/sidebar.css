@@ -1,0 +1,87 @@
+/* Sidebar — compose button, folder nav, connection card. */
+
+@layer components {
+  @scope (.fm-app) {
+
+    /* SIDEBAR */
+    .sidebar {
+      width: 218px; flex: 0 0 218px;
+      background: var(--c1);
+      border-right: 1px solid var(--line);
+      display: flex; flex-direction: column;
+      padding: 14px 12px 12px;
+      gap: 12px;
+    }
+    .compose-btn {
+      appearance: none; border: 0;
+      background: var(--ink0); color: #f8fafc;
+      border-radius: 8px; height: 36px;
+      display: flex; align-items: center; justify-content: center; gap: 7px;
+      font-family: "Fraunces", serif; font-style: italic; font-weight: 400;
+      font-size: 14px; letter-spacing: -0.02em;
+      box-shadow: var(--sh-sm);
+      transition: transform .08s ease, background .15s ease;
+    }
+    .compose-btn:hover { background: #000; }
+    .compose-btn:active { transform: translateY(1px); }
+    .compose-btn .pen { font-size: 12px; opacity: .85; }
+
+    .sect-label {
+      font-family: "Geist Mono", monospace; font-size: 7.5px; text-transform: uppercase;
+      letter-spacing: 0.14em; color: var(--ink4);
+      padding: 6px 8px 4px;
+    }
+
+    .nav { display: flex; flex-direction: column; gap: 1px; }
+    .nav-item {
+      appearance: none; border: 0; background: transparent;
+      text-align: left;
+      height: 30px; border-radius: 7px;
+      padding: 0 10px 0 12px;
+      display: flex; align-items: center; gap: 9px;
+      font-size: 13px; letter-spacing: -0.01em; color: var(--ink2);
+      position: relative;
+      transition: background .1s ease, color .1s ease;
+    }
+    .nav-item:hover { background: rgba(255, 255, 255, 0.5); }
+    .nav-item .icon {
+      font-family: "Geist Mono", monospace; font-size: 11px; color: var(--ink3); width: 14px; text-align: center;
+    }
+    .nav-item .label { flex: 1; font-weight: 400; }
+    .nav-item .count { font-family: "Geist Mono", monospace; font-size: 9.5px; color: var(--ink4); }
+    .nav-item.active {
+      background: #fff; color: var(--ink0);
+      box-shadow: var(--sh-sm), inset 2px 0 0 var(--accent);
+      font-weight: 500;
+    }
+    .nav-item.active .icon { color: var(--accent); }
+    .nav-item.active .count { color: var(--ink2); }
+    .nav-item.active .label { font-weight: 500; }
+
+    .sidebar-bottom { margin-top: auto; display: flex; flex-direction: column; gap: 6px; }
+    .conn-card {
+      background: rgba(239, 246, 255, 0.85);
+      border: 1px solid var(--line2);
+      border-radius: 7px;
+      padding: 9px 11px;
+      display: flex; flex-direction: column; gap: 6px;
+    }
+    .conn-row {
+      display: flex; align-items: center; justify-content: space-between;
+      font-family: "Geist Mono", monospace; font-size: 9px; color: var(--ink3);
+    }
+    .conn-row .lbl { display: flex; align-items: center; gap: 6px; }
+    .conn-row .val { color: var(--ink2); }
+    .pulse-dot {
+      width: 5px; height: 5px; border-radius: 50%; background: var(--trust);
+      animation: fm-keypulse 3s ease infinite;
+      flex: 0 0 5px;
+    }
+    @keyframes fm-keypulse {
+      0%   { box-shadow: 0 0 0 0 rgba(51, 153, 102, 0.55); }
+      70%  { box-shadow: 0 0 0 6px rgba(51, 153, 102, 0); }
+      100% { box-shadow: 0 0 0 0 rgba(51, 153, 102, 0); }
+    }
+
+  }
+}
