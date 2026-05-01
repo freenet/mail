@@ -850,7 +850,11 @@ fn MessageList() -> Element {
     let inbox_view = inbox.read();
     let emails = inbox_view.messages.borrow();
     let visible: Vec<Message> = if matches!(folder, menu::Folder::Inbox) {
-        emails.iter().filter(|m| matches_search(m, &search)).cloned().collect()
+        emails
+            .iter()
+            .filter(|m| matches_search(m, &search))
+            .cloned()
+            .collect()
     } else {
         Vec::new()
     };
@@ -908,9 +912,7 @@ fn DetailPanel() -> Element {
     let selected_id = menu_selection.read().email();
     let view = inbox.read();
     let emails = view.messages.borrow();
-    let selected = selected_id.and_then(|id| {
-        emails.iter().find(|m| m.id == id).cloned()
-    });
+    let selected = selected_id.and_then(|id| emails.iter().find(|m| m.id == id).cloned());
 
     if matches!(folder, menu::Folder::Inbox) {
         if let Some(msg) = selected {
