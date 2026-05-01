@@ -357,6 +357,46 @@ webapp. It deliberately doesn't exercise identity creation or
 messaging — see `RELEASING.md` §"Post-release smoke test" for the
 scope and the rationale.
 
+### Automated real-node harness
+
+`ui/tests/live-node.spec.ts` drives the real `use-node` build through
+the AFT permission flow against the isolated 2-node network from
+`scripts/run-isolated-nodes.sh`. One command runs the full pipeline:
+
+```bash
+cargo make test-e2e-real-node
+```
+
+This wipes any prior iso-node state, brings up gw (7510) + peer
+(7511), publishes the webapp to the gw, then runs Playwright with
+`FREENET_EMAIL_BASE_URL` pointing at the published contract URL.
+The spec covers identity creation, reload-persistence, and (gated on
+`FREENET_LIVE_E2E_SEND=1`) the send-via-address-book → AFT permission
+→ inbox UPDATE round trip.
+
+To leave the iso nodes up for inspection after the run:
+
+```bash
+FREENET_E2E_KEEP=1 cargo make test-e2e-real-node
+cargo make iso-nodes-status
+cargo make iso-nodes-down   # when done
+```
+
+The host's permission overlay is driven by polling
+`/permission/pending` on the gateway and POSTing
+`{"index": 0}` to `/permission/{nonce}/respond` — see the
+`startPermissionPump` helper in the spec. This avoids coupling
+to the gateway shell page's overlay HTML.
+
+Log assertions tail `~/freenet-mail-iso/gw/logs/freenet.*.log`
+(override via `FREENET_ISO_GW_LOG_DIR`) and grep for
+`UPDATE_PROPAGATION`, `allocate_token`, and identity-management
+markers. Day-1 AFT cap is dodged by wiping node data per run, so
+single-identity self-send works for the first send of the run.
+
+CI scope: this target is heavy (full freenet network + dx build
++ headed browser) and is intended for tags / nightly, not every PR.
+
 ### Manual E2E checklist (against a local node)
 
 This checklist validates the pieces that unit tests and Playwright

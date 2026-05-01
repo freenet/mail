@@ -431,6 +431,29 @@ fdev --port "$PORT" publish \
     --webapp-metadata "$ROOT/target/webapp/webapp.metadata"
 '''
 
+[tasks.publish-email-iso]
+description = "Publish the test webapp to the isolated 2-node gateway (port 7510)"
+dependencies = ["sign-webapp-test", "build-web-container"]
+script_runner = "bash"
+script = '''
+set -euo pipefail
+ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
+PORT="${FREENET_ISO_GW_PORT:-7510}"
+if [ ! -f "$ROOT/published-contract/contract-id.txt" ]; then
+    echo "error: published-contract/contract-id.txt missing" >&2
+    echo "       run \`cargo make update-published-contract\` first" >&2
+    exit 1
+fi
+contract_id=$(cat "$ROOT/published-contract/contract-id.txt")
+echo "publishing with test contract id $contract_id to iso gateway :$PORT"
+fdev --port "$PORT" publish \
+    --code "$ROOT/published-contract/web_container_contract.wasm" \
+    --parameters "$ROOT/published-contract/webapp.parameters" \
+    contract \
+    --webapp-archive "$ROOT/target/webapp/webapp.tar.xz" \
+    --webapp-metadata "$ROOT/target/webapp/webapp.metadata"
+'''
+
 [tasks.publish-email]
 description = "Publish the production build of the webapp to Freenet"
 dependencies = ["sign-webapp", "build-web-container"]
@@ -607,4 +630,42 @@ description = "Show status of the isolated 2-node Freenet network"
 script_runner = "bash"
 script = '''
 "${CARGO_MAKE_WORKING_DIRECTORY}/scripts/run-isolated-nodes.sh" status
+'''
+
+[tasks.test-e2e-real-node]
+description = "Real-node E2E: wipe iso nodes → publish → run live-node spec → tear down (set FREENET_E2E_KEEP=1 to leave nodes up)"
+dependencies = ["build", "update-published-contract"]
+script_runner = "bash"
+script = '''
+set -euo pipefail
+ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
+ISO_ROOT="${FREENET_E2E_ROOT:-$HOME/freenet-mail-iso}"
+GW_PORT="${FREENET_ISO_GW_PORT:-7510}"
+KEEP="${FREENET_E2E_KEEP:-0}"
+
+cleanup() {
+    if [ "$KEEP" = "1" ]; then
+        echo "FREENET_E2E_KEEP=1 — leaving iso nodes up at $ISO_ROOT"
+    else
+        bash "$ROOT/scripts/run-isolated-nodes.sh" down
+    fi
+}
+trap cleanup EXIT
+
+# Always start from a clean slate so day-1 AFT cap doesn't carry between runs.
+bash "$ROOT/scripts/run-isolated-nodes.sh" wipe
+bash "$ROOT/scripts/run-isolated-nodes.sh" up
+
+# Publish to the iso gateway (port-overridden fdev).
+FREENET_ISO_GW_PORT="$GW_PORT" cargo make publish-email-iso
+
+CONTRACT_ID="$(cat "$ROOT/published-contract/contract-id.txt")"
+BASE_URL="http://127.0.0.1:$GW_PORT/v1/contract/web/$CONTRACT_ID/"
+echo "running live-node spec against $BASE_URL"
+
+cd "$ROOT/ui/tests" && \
+    FREENET_EMAIL_BASE_URL="$BASE_URL" \
+    FREENET_ISO_GW_PORT="$GW_PORT" \
+    FREENET_ISO_GW_LOG_DIR="$ISO_ROOT/gw/logs" \
+    npx playwright test live-node.spec.ts --project=chromium
 '''
