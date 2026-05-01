@@ -2,6 +2,7 @@
 name = "freenet-email-inbox"
 version = "0.0.1"
 edition = "2024"
+license.workspace = true
 publish = false
 
 [dependencies]
