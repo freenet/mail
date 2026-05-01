@@ -587,6 +587,12 @@ mod identity_management {
         alias: &str,
     ) -> Result<(), DynError> {
         crate::log::debug!("deleting contact {alias}");
+        // The delegate stores own identities and contacts in the same
+        // alias-keyed map, so `DeleteIdentity` is the right wire message
+        // for both. Guarding own-identity aliases against accidental
+        // delete is the UI's responsibility (`address_book::remove_contact`
+        // skips `Entry::Own` and the contact list never renders a Remove
+        // button next to an own identity).
         let msg = IdentityMsg::DeleteIdentity {
             alias: alias.to_string(),
         };
@@ -598,7 +604,7 @@ mod identity_management {
 pub(crate) async fn node_comms(
     mut rx: UnboundedReceiver<crate::app::NodeAction>,
     inbox_controller: Signal<crate::app::InboxController>,
-    login_controller: Signal<crate::app::LoginController>,
+    mut login_controller: Signal<crate::app::LoginController>,
     user: Signal<crate::app::User>,
     // todo: refactor: instead of passing this arround,
     // where necessary we could be getting the fresh data via static methods calls to Inbox
@@ -658,6 +664,10 @@ pub(crate) async fn node_comms(
     if let Err(e) = identity_management::create_delegate(&mut req_sender).await {
         crate::log::error(format!("identities delegate register failed: {e}"), None);
     }
+    // Copy any entries from previous delegate hashes (`LEGACY_ID_DELEGATE_HASHES`,
+    // currently empty) into the current delegate. No-op until a future
+    // breaking change populates the slice.
+    crate::app::address_book::migrate_legacy_identities();
     let identities_key = identity_management::load_aliases(&mut req_sender)
         .await
         .unwrap();
@@ -777,8 +787,12 @@ pub(crate) async fn node_comms(
                         format!("failed to store contact {}: {e}", contact.local_alias),
                         None,
                     );
+                } else if let Err(e) = crate::app::address_book::insert_contact(contact) {
+                    crate::log::error(format!("address book rejected contact: {e}"), None);
                 } else {
-                    let _ = crate::app::address_book::insert_contact(contact);
+                    // ContactsSection reads ADDRESS_BOOK directly (not via a
+                    // Signal) so bump the controller to force re-render.
+                    login_controller.write().updated = true;
                 }
             }
             NodeAction::DeleteContact { alias } => {
@@ -788,6 +802,7 @@ pub(crate) async fn node_comms(
                     crate::log::error(format!("failed to delete contact {alias}: {e}"), None);
                 } else {
                     crate::app::address_book::remove_contact(&alias);
+                    login_controller.write().updated = true;
                 }
             }
         }

@@ -112,18 +112,25 @@ pub(crate) fn app() -> Element {
     #[cfg(any(not(feature = "use-node"), feature = "no-sync"))]
     {
         let _ = inbox_controller;
-        let _ = login_controller;
         let _ = inbox_data;
+        let mut login_ctl = login_controller;
         let _sync: Coroutine<NodeAction> =
             use_coroutine(move |mut rx: UnboundedReceiver<NodeAction>| async move {
                 use futures::StreamExt;
                 while let Some(action) = rx.next().await {
+                    // Branches don't compose into a let-chain because
+                    // CreateContact moves `contact` and the match would
+                    // bind it inside a guard.
+                    #[allow(clippy::collapsible_match)]
                     match action {
                         NodeAction::CreateContact { contact } => {
-                            let _ = address_book::insert_contact(contact);
+                            if address_book::insert_contact(contact).is_ok() {
+                                login_ctl.write().updated = true;
+                            }
                         }
                         NodeAction::DeleteContact { alias } => {
                             address_book::remove_contact(&alias);
+                            login_ctl.write().updated = true;
                         }
                         _ => {}
                     }
@@ -955,11 +962,17 @@ fn NewMessageWindow() -> Element {
                                     };
                                 let fp_short = r.fingerprint_short();
                                 rsx! {
-                                    tr {
+                                    tr { "data-testid": "compose-recipient-badge",
                                         th {}
                                         td {
-                                            span { class: "{badge_class} mr-2", "{badge_label}" }
-                                            span { class: "is-family-monospace is-size-7 has-text-grey",
+                                            span {
+                                                class: "{badge_class} mr-2",
+                                                "data-testid": "compose-recipient-badge-label",
+                                                "{badge_label}"
+                                            }
+                                            span {
+                                                class: "is-family-monospace is-size-7 has-text-grey",
+                                                "data-testid": "compose-recipient-fingerprint",
                                                 "fingerprint: {fp_short}"
                                             }
                                         }

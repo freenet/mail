@@ -16,6 +16,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::app::login::Identity;
 
+/// BIP-39 English wordlist (2048 words). Source: bitcoin/bips repo,
+/// `bip-0039/english.txt`. Public domain — no attribution required.
 const BIP39_WORDS: &str = include_str!("bip39_english.txt");
 
 fn wordlist() -> &'static [&'static str] {
@@ -224,7 +226,15 @@ pub fn insert_contact(contact: Contact) -> Result<(), String> {
                     ));
                 }
                 Entry::Contact(c) => {
-                    if c.ml_dsa_vk_bytes != contact.ml_dsa_vk_bytes {
+                    // Allow overwrite only when BOTH key halves match;
+                    // otherwise the alias is taken by a different contact
+                    // and the import must be rejected. Comparing only the
+                    // ML-DSA VK would let a card with a substituted ML-KEM
+                    // key silently overwrite the recipient's encryption
+                    // material under an existing trusted alias.
+                    if c.ml_dsa_vk_bytes != contact.ml_dsa_vk_bytes
+                        || c.ml_kem_ek_bytes != contact.ml_kem_ek_bytes
+                    {
                         return Err(format!(
                             "alias \"{}\" is already used by a different contact",
                             contact.local_alias
@@ -365,18 +375,17 @@ pub fn vk_from_bytes(bytes: &[u8]) -> Result<MlDsaVerifyingKey<MlDsa65>, String>
 // ── Migration scaffolding ─────────────────────────────────────────────────────
 
 /// Hashes of identity-management delegate wasm builds that pre-date this
-/// release.  Empty for now — no production data existed before v1.
-/// Populate when future breaking changes bump the wasm hash again.
-#[allow(dead_code)]
+/// release. Empty for now — no production data existed before v1. Populate
+/// when a future breaking change bumps the wasm hash again, so the next
+/// release can find and migrate identities stored under the prior hash.
 pub const LEGACY_ID_DELEGATE_HASHES: &[&str] = &[];
 
 /// Walk `LEGACY_ID_DELEGATE_HASHES` and copy entries from any legacy delegate
-/// into the current one.  Currently a no-op because the slice is empty.
-///
-/// Implementation note: when future hashes are added, this function should
-/// issue a `GetIdentities` request per legacy hash and, on response, re-issue
-/// `CreateIdentity` to the current delegate for each entry found.
-#[allow(dead_code)]
+/// into the current one. Wired into the app startup path; currently a
+/// no-op because the slice is empty. When future hashes are added, the
+/// implementation should issue a `GetIdentities` request per legacy hash
+/// and, on response, re-issue `CreateIdentity` against the current
+/// delegate for each entry found.
 pub fn migrate_legacy_identities() {
     for _hash in LEGACY_ID_DELEGATE_HASHES {
         // Placeholder: issue GetIdentities to the legacy delegate and
@@ -436,6 +445,97 @@ mod tests {
         let bare = encoded.strip_prefix("contact://").unwrap();
         let decoded = ContactCard::decode(bare).expect("bare base64 should decode");
         assert_eq!(decoded.ml_dsa_vk_bytes, card.ml_dsa_vk_bytes);
+    }
+
+    fn make_contact(alias: &str, vk: u8, ek: u8) -> Contact {
+        Contact {
+            local_alias: alias.into(),
+            description: String::new(),
+            ml_dsa_vk_bytes: vec![vk; 1952],
+            ml_kem_ek_bytes: vec![ek; 1184],
+            verified: false,
+        }
+    }
+
+    #[test]
+    fn insert_contact_rejects_alias_with_different_vk() {
+        // Use a thread-local scope by clearing first.
+        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+        insert_contact(make_contact("bob", 1, 2)).unwrap();
+        let err =
+            insert_contact(make_contact("bob", 3, 2)).expect_err("different VK should be rejected");
+        assert!(err.contains("different contact"), "got: {err}");
+    }
+
+    #[test]
+    fn insert_contact_rejects_alias_with_different_ek() {
+        // Same VK but a substituted EK must also be rejected, otherwise an
+        // attacker who knows the recipient's signing pubkey could swap in
+        // their own encryption key under a trusted alias.
+        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+        insert_contact(make_contact("alice", 4, 5)).unwrap();
+        let err = insert_contact(make_contact("alice", 4, 9))
+            .expect_err("different EK should be rejected");
+        assert!(err.contains("different contact"), "got: {err}");
+    }
+
+    #[test]
+    fn insert_contact_overwrites_when_keys_match() {
+        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+        let mut c = make_contact("carol", 7, 8);
+        insert_contact(c.clone()).unwrap();
+        c.description = "updated".into();
+        c.verified = true;
+        insert_contact(c.clone()).expect("same fingerprint should overwrite");
+        let stored = all_contacts()
+            .into_iter()
+            .find(|x| &*x.local_alias == "carol")
+            .unwrap();
+        assert_eq!(stored.description, "updated");
+        assert!(stored.verified);
+    }
+
+    #[test]
+    fn lookup_finds_inserted_contact() {
+        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+        insert_contact(make_contact("dave", 11, 12)).unwrap();
+        let r = lookup("dave").expect("contact should resolve");
+        assert!(!r.is_own);
+        assert!(!r.verified);
+        assert_eq!(r.ml_dsa_vk_bytes.len(), 1952);
+        assert_eq!(r.ml_kem_ek_bytes.len(), 1184);
+        assert_eq!(
+            r.fingerprint,
+            fingerprint_words(&vec![11; 1952], &vec![12; 1184])
+        );
+    }
+
+    #[test]
+    fn lookup_misses_for_unknown_alias() {
+        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+        assert!(lookup("nobody").is_none());
+    }
+
+    #[test]
+    fn remove_contact_clears_lookup() {
+        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+        insert_contact(make_contact("eve", 13, 14)).unwrap();
+        assert!(lookup("eve").is_some());
+        remove_contact("eve");
+        assert!(lookup("eve").is_none());
+    }
+
+    #[test]
+    fn fingerprint_short_returns_first_two_words_joined() {
+        let card = ContactCard {
+            version: 1,
+            ml_dsa_vk_bytes: vec![17; 1952],
+            ml_kem_ek_bytes: vec![19; 1184],
+            suggested_alias: None,
+            suggested_description: None,
+        };
+        let fp = card.fingerprint();
+        assert_eq!(card.fingerprint_short(), format!("{}-{}", fp[0], fp[1]));
     }
 
     #[test]

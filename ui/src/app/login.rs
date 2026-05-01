@@ -17,7 +17,11 @@ use crate::app::{ContractType, User, UserId};
 
 use super::{InboxView, NodeAction};
 
-const DEFAULT_ID_ICON: &str = "data:image/png;base64,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";
+// Solid grey 48x48 PNG placeholder. The previous data URL committed in
+// this file was not valid base64 (length 2065, not divisible by 4), so
+// every browser silently failed to decode it and rendered the broken-
+// image glyph next to each identity.
+const DEFAULT_ID_ICON: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAADAAAAAwCAIAAADYYG7QAAAANklEQVR42u3OQREAAAwCIPunMKotdntAAtJnIiQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCR0Z4ze4PF0Ch1IAAAAAElFTkSuQmCC";
 
 struct ImportId(bool);
 
@@ -136,7 +140,10 @@ impl Identity {
                         let stored: StoredIdentityKeys = match serde_json::from_slice(&info.key) {
                             Ok(s) => s,
                             Err(e) => {
-                                crate::log::debug!("skipping identity {alias}: bad key bytes: {e}");
+                                crate::log::error(
+                                    format!("skipping identity {alias}: bad key bytes: {e}"),
+                                    None,
+                                );
                                 return;
                             }
                         };
@@ -168,15 +175,21 @@ impl Identity {
                             match serde_json::from_slice(&info.key) {
                                 Ok(s) => s,
                                 Err(e) => {
-                                    crate::log::debug!(
-                                        "skipping contact {alias}: bad key bytes: {e}"
+                                    crate::log::error(
+                                        format!("skipping contact {alias}: bad key bytes: {e}"),
+                                        None,
                                     );
                                     return;
                                 }
                             };
                         let contact = stored
                             .into_contact(alias.clone().into(), info.extra.unwrap_or_default());
-                        let _ = crate::app::address_book::insert_contact(contact);
+                        if let Err(e) = crate::app::address_book::insert_contact(contact) {
+                            crate::log::error(
+                                format!("address book rejected stored contact {alias}: {e}"),
+                                None,
+                            );
+                        }
                     }
                 });
             *aliases = to_add;
@@ -1314,13 +1327,23 @@ fn ContactsSection() -> Element {
                     rsx! {
                         div {
                             class: "media mb-1",
+                            "data-testid": "contact-row",
+                            "data-alias": "{alias_str}",
                             div {
                                 class: "media-content",
                                 p {
                                     class: "is-size-6",
-                                    span { class: "{badge_class} mr-1", "{badge}" }
+                                    span {
+                                        class: "{badge_class} mr-1",
+                                        "data-testid": "contact-verify-badge",
+                                        "{badge}"
+                                    }
                                     strong { "{alias_str}" }
-                                    span { class: "has-text-grey is-size-7 ml-2", "({fp})" }
+                                    span {
+                                        class: "has-text-grey is-size-7 ml-2",
+                                        "data-testid": "contact-fingerprint",
+                                        "({fp})"
+                                    }
                                 }
                                 if !contact.description.is_empty() {
                                     p { class: "is-size-7 has-text-grey", "{contact.description}" }
@@ -1331,14 +1354,15 @@ fn ContactsSection() -> Element {
                                 button {
                                     class: "button is-small is-danger is-light",
                                     title: "Remove contact",
+                                    "data-testid": "contact-remove",
                                     onclick: move |_| {
+                                        // Re-render is triggered by the
+                                        // coroutine handler bumping
+                                        // login_controller AFTER the
+                                        // address_book mutation completes.
                                         actions.send(NodeAction::DeleteContact {
                                             alias: del_alias.clone(),
                                         });
-                                        // Bump the login controller so this section
-                                        // (which reads `all_contacts()` synchronously,
-                                        // not via a Signal) re-renders.
-                                        login_controller.write().updated = true;
                                     },
                                     span { class: "icon is-small", i { class: "fas fa-trash" } }
                                 }

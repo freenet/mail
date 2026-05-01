@@ -403,6 +403,19 @@ test.describe("Address book: import contact and display", () => {
     // Use a distinct local alias that can't clash with own identities.
     await labelInput.fill("charlie-test");
 
+    // The displayed fingerprint must match a value that's deterministic
+    // for the byte arrays above — protects against silent drift in the
+    // BLAKE3-to-words mapping. Computed once in JS via the same algorithm
+    // the Rust code uses (BLAKE3 of vk||ek then six 11-bit windows) is
+    // overkill for the test; instead we capture the value the UI shows
+    // and compare it across the import dialog and the compose badge.
+    const fingerprintPanel = page.locator(".notification.is-info p.is-family-monospace");
+    await expect(fingerprintPanel).toBeVisible({ timeout: 5_000 });
+    const fingerprintText = (await fingerprintPanel.textContent()) ?? "";
+    const fingerprintWords = fingerprintText.trim().split(/\s+/);
+    expect(fingerprintWords).toHaveLength(6);
+    const fingerprintShort = `${fingerprintWords[0]}-${fingerprintWords[1]}`;
+
     // ── Step 4: complete import and verify contact appears ────────────────
     await page.locator("button").filter({ hasText: "Import" }).click();
 
@@ -411,15 +424,21 @@ test.describe("Address book: import contact and display", () => {
       timeout: 5_000,
     });
 
-    // The contact's local label is rendered as a contact card title.
-    const contactRow = page
-      .locator(".card-content")
-      .filter({ hasText: "charlie-test" });
+    // The contact row is identified by data-alias (testid-stable, not by
+    // structural Bulma class names).
+    const contactRow = page.locator('[data-testid="contact-row"][data-alias="charlie-test"]');
     await expect(contactRow).toBeVisible({ timeout: 5_000 });
 
-    // The fingerprint short form (first two BIP-39 words joined by `-`) is
-    // shown next to the alias for disambiguation.
-    await expect(contactRow).toContainText(/[a-z]+-[a-z]+/);
+    // Fingerprint short form shown next to the alias matches what the
+    // import dialog displayed.
+    await expect(
+      contactRow.locator('[data-testid="contact-fingerprint"]')
+    ).toContainText(fingerprintShort);
+
+    // Imported without ticking "verified" → warning badge `⚠`.
+    await expect(
+      contactRow.locator('[data-testid="contact-verify-badge"]')
+    ).toContainText("⚠");
 
     // ── Step 5: compose recognises the contact via the recipient badge ─────
     await selectIdentity(page, "address1");
@@ -430,18 +449,32 @@ test.describe("Address book: import contact and display", () => {
     await toCell.click();
     await toCell.fill("charlie-test");
 
-    // Recipient badge: contact was imported without ticking "verified", so
-    // the warning tag is shown along with the fingerprint line.  This proves
-    // address_book::lookup resolved the typed alias to the imported Contact.
-    await expect(page.locator(".tag.is-warning")).toContainText("unverified", {
-      timeout: 5_000,
-    });
+    // Badge shows `unverified` (not ticked at import) and the same
+    // fingerprint short form as the contact row.
     await expect(
-      page.locator("td").filter({ hasText: "fingerprint:" })
-    ).toBeVisible();
+      page.locator('[data-testid="compose-recipient-badge-label"]')
+    ).toContainText("unverified", { timeout: 5_000 });
+    await expect(
+      page.locator('[data-testid="compose-recipient-fingerprint"]')
+    ).toContainText(fingerprintShort);
 
     // Sanity: typing a non-existent alias removes the badge.
     await toCell.fill("nobody-here");
-    await expect(page.locator(".tag")).toHaveCount(0, { timeout: 2_000 });
+    await expect(
+      page.locator('[data-testid="compose-recipient-badge"]')
+    ).toHaveCount(0, { timeout: 2_000 });
+
+    // ── Step 6: Remove button removes the contact (regression: needs the
+    // login-controller bump in the coroutine to re-render ContactsSection).
+    await clickMenu(page, "Log out");
+    await expect(
+      page.locator('[data-testid="contact-row"][data-alias="charlie-test"]')
+    ).toBeVisible();
+    await page
+      .locator('[data-testid="contact-row"][data-alias="charlie-test"] [data-testid="contact-remove"]')
+      .click();
+    await expect(
+      page.locator('[data-testid="contact-row"][data-alias="charlie-test"]')
+    ).toHaveCount(0, { timeout: 5_000 });
   });
 });
