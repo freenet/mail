@@ -157,6 +157,8 @@ jobs:
       - name: Run Playwright tests
         run: npx playwright test
         working-directory: ./ui/tests
+        env:
+          FREENET_EMAIL_BASE_URL: http://127.0.0.1:8082
 
       - name: Upload Playwright artifacts
         if: failure()
