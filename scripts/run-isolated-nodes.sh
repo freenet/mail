@@ -33,7 +33,32 @@ PEER_PORT_WS=7511
 
 GW_PIDFILE="$ROOT/gw.pid"
 PEER_PIDFILE="$ROOT/peer.pid"
+GW_PGIDFILE="$ROOT/gw.pgid"
+PEER_PGIDFILE="$ROOT/peer.pgid"
 GW_PUBKEY_FILE="$ROOT/gw.pubkey"
+
+# spawn_setsid <pidfile> <pgidfile> <stdout-log> <env-prefix> <cmd...>
+#
+# Spawns cmd in its own POSIX session via perl, so the entire process
+# group can be killed regardless of how freenet re-execs / forks
+# internally. macOS has no /usr/bin/setsid; perl POSIX::setsid does
+# the same thing.
+spawn_setsid() {
+    local pidfile="$1" pgidfile="$2" outlog="$3"
+    shift 3
+    ISO_OUTLOG="$outlog" perl -e '
+        use POSIX;
+        POSIX::setsid() or die "setsid: $!";
+        open STDIN,  "<", "/dev/null";
+        open STDOUT, ">>", $ENV{ISO_OUTLOG} or die $!;
+        open STDERR, ">&STDOUT";
+        exec { $ARGV[0] } @ARGV or die "exec: $!";
+    ' "$@" &
+    local pid=$!
+    echo "$pid" > "$pidfile"
+    # In a setsid-spawned process the pid IS the pgid.
+    echo "$pid" > "$pgidfile"
+}
 
 setup_dirs() {
     mkdir -p "$GW_HOME/Library/Application Support/The-Freenet-Project-Inc.Freenet"
@@ -65,18 +90,17 @@ up() {
         echo "gateway already listening on :$GW_PORT_WS"
     else
         echo "starting gateway on ws://127.0.0.1:$GW_PORT_WS (net :$GW_PORT_NET)"
-        HOME="$GW_HOME" nohup freenet network \
-            --network-port $GW_PORT_NET \
-            --ws-api-port $GW_PORT_WS \
+        HOME="$GW_HOME" spawn_setsid "$GW_PIDFILE" "$GW_PGIDFILE" "$GW_LOGS/stdout.log" \
+            freenet network \
+            --network-port "$GW_PORT_NET" \
+            --ws-api-port "$GW_PORT_WS" \
             --ws-api-address 0.0.0.0 \
             --is-gateway \
             --skip-load-from-network \
             --data-dir "$GW_DATA" \
             --public-network-address 127.0.0.1 \
             --log-dir "$GW_LOGS" \
-            --log-level info \
-            > "$GW_LOGS/stdout.log" 2>&1 &
-        echo $! > "$GW_PIDFILE"
+            --log-level info
         # Wait for gateway to bind ws port + write transport_keypair.
         for _ in $(seq 1 30); do
             if [ -f "$GW_DATA/secrets/transport_keypair" ] && \
@@ -95,17 +119,16 @@ up() {
         echo "peer already listening on :$PEER_PORT_WS"
     else
         echo "starting peer on ws://127.0.0.1:$PEER_PORT_WS (net :$PEER_PORT_NET) → gateway 127.0.0.1:$GW_PORT_NET"
-        HOME="$PEER_HOME" nohup freenet network \
-            --network-port $PEER_PORT_NET \
-            --ws-api-port $PEER_PORT_WS \
+        HOME="$PEER_HOME" spawn_setsid "$PEER_PIDFILE" "$PEER_PGIDFILE" "$PEER_LOGS/stdout.log" \
+            freenet network \
+            --network-port "$PEER_PORT_NET" \
+            --ws-api-port "$PEER_PORT_WS" \
             --ws-api-address 0.0.0.0 \
             --gateway "127.0.0.1:$GW_PORT_NET,$GW_PUBKEY" \
             --skip-load-from-network \
             --data-dir "$PEER_DATA" \
             --log-dir "$PEER_LOGS" \
-            --log-level info \
-            > "$PEER_LOGS/stdout.log" 2>&1 &
-        echo $! > "$PEER_PIDFILE"
+            --log-level info
         for _ in $(seq 1 30); do
             if curl -sf -o /dev/null "http://127.0.0.1:$PEER_PORT_WS/" 2>/dev/null; then
                 break
@@ -126,6 +149,20 @@ up() {
 }
 
 down() {
+    # Kill the entire process group (negative pgid). spawn_setsid puts
+    # each freenet under its own session, so this nukes any
+    # daemonized re-exec, child, or grandchild without relying on
+    # argv-matching (which macOS truncates).
+    for pgidfile in "$GW_PGIDFILE" "$PEER_PGIDFILE"; do
+        if [ -f "$pgidfile" ]; then
+            local pgid
+            pgid=$(cat "$pgidfile")
+            if [ -n "$pgid" ]; then
+                kill -TERM -- "-$pgid" 2>/dev/null || true
+            fi
+            rm -f "$pgidfile"
+        fi
+    done
     if [ -f "$GW_PIDFILE" ]; then
         kill "$(cat "$GW_PIDFILE")" 2>/dev/null || true
         rm -f "$GW_PIDFILE"
