@@ -234,24 +234,130 @@ impl TokenAllocationRecordExt for TokenAllocationRecord {
         key: &MlDsaVerifyingKey<MlDsa65>,
     ) -> Result<(), AllocationError> {
         match self.get_mut_tier(&assignment.tier) {
-            Some(list) => {
-                if list.binary_search(&assignment).is_err() {
-                    match assignment.is_valid(key) {
-                        Ok(_) => {
-                            list.push(assignment);
-                            list.sort_unstable();
-                            Ok(())
-                        }
-                        Err(err) => Err(AllocationError::invalid_assignment(assignment, err)),
+            Some(list) => match list.binary_search(&assignment) {
+                Err(_) => match assignment.is_valid(key) {
+                    Ok(_) => {
+                        list.push(assignment);
+                        list.sort_unstable();
+                        Ok(())
                     }
-                } else {
-                    Err(AllocationError::allocated_slot(&assignment))
+                    Err(err) => Err(AllocationError::invalid_assignment(assignment, err)),
+                },
+                Ok(idx) => {
+                    // `binary_search` matches via the `Ord` impl, which keys
+                    // only on `time_slot` — two distinct assignments that
+                    // happen to share a slot will both compare-equal even
+                    // though `TokenAssignment` implements full structural
+                    // equality on all fields. Distinguish:
+                    //
+                    //   * existing == incoming (byte-identical including
+                    //     signature) → idempotent re-broadcast, return Ok.
+                    //     This is the common case under cross-node propagation
+                    //     where the sender's burn arrives both as the
+                    //     originating UPDATE delta and again as part of the
+                    //     full record state via ResyncResponse, see #72.
+                    //   * existing != incoming → genuine slot collision; the
+                    //     contract's anti-flood guarantee requires rejection.
+                    if list[idx] == assignment {
+                        Ok(())
+                    } else {
+                        Err(AllocationError::allocated_slot(&assignment))
+                    }
                 }
-            }
+            },
             None => {
                 self.insert(assignment.tier, vec![assignment]);
                 Ok(())
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{TimeZone, Utc};
+    use freenet_aft_interface::{DelegateParameters, Tier};
+
+    fn signing_key(seed: u8) -> ml_dsa::SigningKey<ml_dsa::MlDsa65> {
+        DelegateParameters::new([seed; 32]).signing_key()
+    }
+
+    fn verifying_key(seed: u8) -> MlDsaVerifyingKey<MlDsa65> {
+        DelegateParameters::new([seed; 32]).verifying_key()
+    }
+
+    /// Build a signed `TokenAssignment` for unit-testing `append`. Only the
+    /// fields participating in the slot-collision check matter; the record
+    /// id, tier, and assignment_hash are stable per call so two builds with
+    /// the same args produce byte-identical assignments.
+    fn make_assignment(
+        sk: &ml_dsa::SigningKey<ml_dsa::MlDsa65>,
+        vk_seed: u8,
+        tier: Tier,
+        time_slot: chrono::DateTime<Utc>,
+        assignment_hash: [u8; 32],
+    ) -> TokenAssignment {
+        use ml_dsa::signature::Signer;
+        let to_sign = TokenAssignment::signature_content(&time_slot, tier, &assignment_hash);
+        let signature: ml_dsa::Signature<ml_dsa::MlDsa65> = sk.sign(&to_sign);
+        TokenAssignment {
+            tier,
+            time_slot,
+            generator: verifying_key(vk_seed).encode().to_vec(),
+            signature: signature.encode().to_vec(),
+            assignment_hash,
+            token_record: ContractInstanceId::new([7u8; 32]),
+        }
+    }
+
+    /// Regression for #72: a duplicate `append` of a byte-identical
+    /// assignment must succeed (idempotent), not return `allocated_slot`.
+    /// Previously every cross-node delivery wasted a ResyncRequest because
+    /// the sender's burn arrived twice (once via the originating UPDATE
+    /// delta, once via the broadcast/ResyncResponse fan-out) and the second
+    /// arrival was rejected as a slot collision.
+    #[test]
+    fn append_is_idempotent_for_byte_identical_assignment() {
+        let sk = signing_key(0xA1);
+        let vk = verifying_key(0xA1);
+        let slot = Utc.with_ymd_and_hms(2026, 5, 3, 0, 0, 0).unwrap();
+        let assignment = make_assignment(&sk, 0xA1, Tier::Day1, slot, [9u8; 32]);
+
+        let mut record = TokenAllocationRecord::new(std::collections::HashMap::new());
+        record.append(assignment.clone(), &vk).expect("first append");
+        record
+            .append(assignment.clone(), &vk)
+            .expect("second append must be idempotent (#72)");
+
+        // Record still holds exactly one entry — idempotent, not duplicated.
+        let assignments_in_tier: Vec<_> = (&record).into_iter().collect();
+        assert_eq!(assignments_in_tier.len(), 1);
+        assert_eq!(assignments_in_tier[0].1.len(), 1);
+    }
+
+    /// A different assignment occupying the same `time_slot` must still be
+    /// rejected — the anti-flood guarantee depends on it. The idempotency
+    /// fix only covers byte-identical re-broadcast.
+    #[test]
+    fn append_rejects_distinct_assignment_at_same_slot() {
+        let sk = signing_key(0xB2);
+        let vk = verifying_key(0xB2);
+        let slot = Utc.with_ymd_and_hms(2026, 5, 3, 0, 0, 0).unwrap();
+
+        let first = make_assignment(&sk, 0xB2, Tier::Day1, slot, [1u8; 32]);
+        // Same slot, different assignment_hash → byte-different but
+        // compares equal under the slot-only `Ord` impl.
+        let second = make_assignment(&sk, 0xB2, Tier::Day1, slot, [2u8; 32]);
+
+        let mut record = TokenAllocationRecord::new(std::collections::HashMap::new());
+        record.append(first, &vk).expect("first append");
+        let err = record
+            .append(second, &vk)
+            .expect_err("distinct assignment at same slot must be rejected");
+        assert!(
+            format!("{err}").contains("already been allocated"),
+            "expected slot-collision error, got: {err}"
+        );
     }
 }
