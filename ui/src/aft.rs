@@ -354,7 +354,10 @@ impl AftRecords {
         Ok(())
     }
 
-    async fn get_state(client: &mut WebApiRequestClient, key: AftRecord) -> Result<(), DynError> {
+    pub async fn get_state(
+        client: &mut WebApiRequestClient,
+        key: AftRecord,
+    ) -> Result<(), DynError> {
         let request = ContractRequest::Get {
             key: key.into(),
             return_contract_code: false,
@@ -377,4 +380,5 @@ impl AftRecords {
         client.send(request.into()).await?;
         Ok(())
     }
+
 }
