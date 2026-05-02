@@ -433,6 +433,7 @@ mod identity_management {
         inbox_to_id: &mut HashMap<ContractKey, Identity>,
         token_rec_to_id: &mut HashMap<ContractKey, Identity>,
         user: Signal<crate::app::User>,
+        mut login_controller: Signal<crate::app::LoginController>,
     ) {
         let id = identity_management::PENDING_CONFIRMATION
             .with(|pend| pend.borrow_mut().remove(identity_key));
@@ -465,6 +466,10 @@ mod identity_management {
             );
             inbox_to_id.insert(inbox_key, identity.clone());
             token_rec_to_id.insert(aft_rec.unwrap(), identity);
+            // ALIASES is a thread-local RefCell, not a Signal — mutating it
+            // does not wake the Identities component. Bump the controller
+            // so the just-created identity shows without a page reload.
+            login_controller.write().updated = true;
         }
 
         // Send contract subscriptions after identity creation.
@@ -805,6 +810,7 @@ pub(crate) async fn node_comms(
                         inbox_to_id,
                         token_rec_to_id,
                         user,
+                        login_controller,
                     )
                     .await;
                 }
@@ -1293,6 +1299,7 @@ pub(crate) async fn node_comms(
                             inbox_to_id,
                             token_rec_to_id,
                             user,
+                            login_controller,
                         )
                         .await;
                     }
@@ -1327,6 +1334,7 @@ pub(crate) async fn node_comms(
                             inbox_to_id,
                             token_rec_to_id,
                             user,
+                            login_controller,
                         )
                         .await;
                     }
@@ -1377,6 +1385,7 @@ pub(crate) async fn node_comms(
                                 inbox_to_id,
                                 token_rec_to_id,
                                 user,
+                                login_controller,
                             )
                             .await;
                         }
