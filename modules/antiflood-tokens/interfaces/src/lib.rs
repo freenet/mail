@@ -549,16 +549,27 @@ impl TokenAllocationRecord {
     }
 
     pub fn delta(&self, summary: &TokenAllocationSummary) -> TokenAllocationRecord {
-        let mut delta = HashMap::new();
-        for (tier, summary_assignments) in &summary.0 {
-            let mut missing = vec![];
-            if let Some(assigned) = self.tokens_by_tier.get(tier) {
-                for a in assigned {
-                    let ts = a.time_slot.timestamp();
-                    if summary_assignments.binary_search(&ts).is_err() {
-                        missing.push(a.clone());
-                    }
+        // Iterate every tier WE have, not every tier the summary lists, so a
+        // cold-cache peer with an empty summary still receives every
+        // assignment we hold. The previous implementation iterated
+        // `summary.0` and silently produced an empty delta whenever the
+        // summary had no entry for one of our tiers (or was empty entirely),
+        // which contributed to the wasted cross-node round trips around
+        // freenet/mail#71.
+        let mut delta = HashMap::with_capacity(self.tokens_by_tier.len());
+        for (tier, assigned) in &self.tokens_by_tier {
+            let summary_slots = summary.0.get(tier);
+            let mut missing = Vec::with_capacity(assigned.len());
+            for a in assigned {
+                let ts = a.time_slot.timestamp();
+                let already_known = summary_slots
+                    .map(|slots| slots.binary_search(&ts).is_ok())
+                    .unwrap_or(false);
+                if !already_known {
+                    missing.push(a.clone());
                 }
+            }
+            if !missing.is_empty() {
                 delta.insert(*tier, missing);
             }
         }
@@ -990,5 +1001,121 @@ mod boundary_tests {
         let garbage = State::from(vec![0xffu8; 64]);
         let result = TokenAllocationRecord::try_from(garbage);
         assert!(result.is_err(), "expected Err, got {result:?}");
+    }
+
+    // -- Cross-crate wire-shape round-trip tests -------------------------
+    //
+    // The AFT contract decodes Delta payloads as a `TokenAssignment` first
+    // and falls back to a whole `TokenAllocationRecord` because cross-node
+    // propagation occasionally re-wraps the latter under a Delta envelope
+    // (see #71). These tests pin the wire shapes that both decoders
+    // accept, so a regression that drifts the producer side (e.g. the UI
+    // crate switching to a tagged-enum encoding) trips a fast unit test
+    // instead of surfacing as a "missing field tier" error in production
+    // logs.
+
+    fn signing_key(seed: u8) -> ml_dsa::SigningKey<MlDsa65> {
+        DelegateParameters::new([seed; 32]).signing_key()
+    }
+
+    fn make_assignment(seed: u8) -> TokenAssignment {
+        use chrono::TimeZone;
+        use ml_dsa::signature::Signer;
+        let sk = signing_key(seed);
+        let vk = DelegateParameters::new([seed; 32]).verifying_key();
+        let tier = Tier::Day1;
+        let time_slot = chrono::Utc.with_ymd_and_hms(2026, 5, 3, 0, 0, 0).unwrap();
+        let assignment_hash = [seed; 32];
+        let to_sign = TokenAssignment::signature_content(&time_slot, tier, &assignment_hash);
+        let signature: ml_dsa::Signature<MlDsa65> = sk.sign(&to_sign);
+        TokenAssignment {
+            tier,
+            time_slot,
+            generator: vk.encode().to_vec(),
+            signature: signature.encode().to_vec(),
+            assignment_hash,
+            token_record: ContractInstanceId::new([seed; 32]),
+        }
+    }
+
+    /// Sender (`ui/src/aft.rs`) encodes a `TokenAssignment` via
+    /// `serde_json::to_vec`. The contract must decode it via the
+    /// `TryFrom<StateDelta<'_>>` impl. Pin that the round-trip preserves
+    /// every field — a regression that, say, renamed `time_slot` would
+    /// fail this test instead of producing "missing field tier" only at
+    /// runtime under cross-node load.
+    #[test]
+    fn token_assignment_serde_json_round_trip_via_state_delta() {
+        let original = make_assignment(0xA1);
+        let bytes = serde_json::to_vec(&original).expect("serialize");
+        let delta = StateDelta::from(bytes);
+        let decoded = TokenAssignment::try_from(delta).expect("decode");
+        assert_eq!(original, decoded);
+    }
+
+    /// `TokenAllocationRecord` also decodes from a Delta envelope (the
+    /// "delta-as-record" fallback path). Pin the round-trip so the
+    /// fallback decoder stays usable when cross-node propagation re-wraps
+    /// the record. If this regresses, the AFT contract's defensive
+    /// fallback in `update_state` becomes a silent panic.
+    #[test]
+    fn token_allocation_record_serde_round_trip_via_state_delta() {
+        use std::collections::HashMap;
+
+        let assignment = make_assignment(0xC3);
+        let mut tokens = HashMap::new();
+        tokens.insert(Tier::Day1, vec![assignment.clone()]);
+        let original = TokenAllocationRecord::new(tokens);
+
+        // Wire shape is what `TryFrom<StateDelta>` consumes — verify the
+        // record's own `TryFrom<TokenAllocationRecord> for StateDelta`
+        // produces bytes the decoder can parse back into a record with
+        // the same assignments. (`TokenAllocationRecord` doesn't impl
+        // `PartialEq` on the whole struct because of `tokens_by_assignee`,
+        // but each `TokenAssignment` does — so compare via iter.)
+        let delta: StateDelta<'static> = original.clone().try_into().expect("encode");
+        let decoded = TokenAllocationRecord::try_from(delta).expect("decode");
+        let decoded_assignments: Vec<_> = (&decoded)
+            .into_iter()
+            .flat_map(|(_, v)| v.iter().cloned())
+            .collect();
+        assert_eq!(decoded_assignments, vec![assignment.clone()]);
+
+        // Also pin the State round-trip — full state propagation on
+        // cross-node UPDATE goes through the `State` envelope.
+        let state: State<'static> = original.clone().try_into().expect("encode state");
+        let decoded_state = TokenAllocationRecord::try_from(state).expect("decode state");
+        let decoded_state_assignments: Vec<_> = (&decoded_state)
+            .into_iter()
+            .flat_map(|(_, v)| v.iter().cloned())
+            .collect();
+        assert_eq!(decoded_state_assignments, vec![assignment]);
+    }
+
+    /// Cross-crate path: a single `TokenAssignment` encoded by the sender
+    /// (UI crate) must decode via *both* the single-assignment path and
+    /// the whole-record fallback only if it is in the right shape. This
+    /// pins that bare `TokenAssignment` JSON does NOT accidentally parse
+    /// as a `TokenAllocationRecord` (which would corrupt records by
+    /// inserting an empty record) — the fallback path requires the
+    /// record-shaped JSON.
+    #[test]
+    fn assignment_json_does_not_decode_as_allocation_record() {
+        let assignment = make_assignment(0xD4);
+        let bytes = serde_json::to_vec(&assignment).expect("serialize");
+        let delta = StateDelta::from(bytes);
+
+        // Single-assignment decode succeeds.
+        let _: TokenAssignment = TokenAssignment::try_from(delta.clone()).expect("decode");
+
+        // Whole-record decode must FAIL on bare-assignment JSON. If it
+        // ever started succeeding we'd silently merge an empty record on
+        // the contract side and the originally-burned token would
+        // disappear.
+        let as_record = TokenAllocationRecord::try_from(delta);
+        assert!(
+            as_record.is_err(),
+            "bare TokenAssignment JSON must NOT decode as TokenAllocationRecord; got {as_record:?}"
+        );
     }
 }
