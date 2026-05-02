@@ -29,6 +29,9 @@ const ISO_GW_ORIGIN = `http://127.0.0.1:${ISO_GW_PORT}`;
 const GW_LOG_DIR =
   process.env.FREENET_ISO_GW_LOG_DIR ??
   path.join(process.env.HOME ?? "", "freenet-mail-iso/gw/logs");
+const PEER_LOG_DIR =
+  process.env.FREENET_ISO_PEER_LOG_DIR ??
+  path.join(process.env.HOME ?? "", "freenet-mail-iso/peer/logs");
 
 test.describe("Live node E2E", () => {
   test.skip(
@@ -246,6 +249,24 @@ test.describe("Live node E2E", () => {
         "expected token allocation log entry",
       ).toBe(true);
 
+      // Receiver-side delivery assertion: catches the regressions we previously
+      // missed by only checking gw-side UPDATE_PROPAGATION (#71/#72). The
+      // contract on the receiving node either applies the delta cleanly or
+      // logs an "execution error" / "merge_rejected" trace — either of which
+      // means the message did not reach bob's inbox even though the wire
+      // propagation happened. Asserting on the **negative** signals catches
+      // the failure modes we observed during manual QA without requiring a
+      // second browser context to navigate bob's inbox UI (still gated on
+      // shared-delegate-state — see comment above test).
+      const receiverErrors = grepPeerLog(
+        /execution error.*invalid contract update|merge_rejected|delta_apply_failed|missing field `tier`/,
+      );
+      expect(
+        receiverErrors,
+        "expected NO contract-side errors during cross-node delivery " +
+          "(see #71/#72 — slot collision and tier-deser failure modes)",
+      ).toBe(false);
+
       console.log(`send round-trip: ${Date.now() - sendStart}ms`);
     } finally {
       await aliceCtx.close().catch(() => {});
@@ -351,15 +372,28 @@ function startPermissionPump(): () => void {
  * `expect.poll`.
  */
 function grepLog(re: RegExp): boolean {
+  return grepLogDir(GW_LOG_DIR, re);
+}
+
+/**
+ * Same as `grepLog` but targets the peer's freenet log dir. Receiver-side
+ * contract errors (delta apply failures, merge rejections) only appear on
+ * the destination node, not on the gateway.
+ */
+function grepPeerLog(re: RegExp): boolean {
+  return grepLogDir(PEER_LOG_DIR, re);
+}
+
+function grepLogDir(dir: string, re: RegExp): boolean {
   let entries: fs.Dirent[];
   try {
-    entries = fs.readdirSync(GW_LOG_DIR, { withFileTypes: true });
+    entries = fs.readdirSync(dir, { withFileTypes: true });
   } catch {
     return false;
   }
   for (const ent of entries) {
     if (!ent.isFile() || !ent.name.startsWith("freenet.")) continue;
-    const full = path.join(GW_LOG_DIR, ent.name);
+    const full = path.join(dir, ent.name);
     try {
       // Read tail only — full read on a multi-MB log is slow.
       const stat = fs.statSync(full);

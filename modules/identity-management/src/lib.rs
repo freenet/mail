@@ -182,10 +182,16 @@ impl DelegateInterface for IdentityManagement {
                                 params.as_secret_id()
                             ));
                         }
-                        let value = ctx
-                            .get_secret(&secret_key)
-                            .ok_or_else(|| DelegateError::Other("secret not found".into()))?;
-                        let mut manager = IdentityManagement::try_from(value.as_slice())?;
+                        // Lazy-init: the UI fires Init then immediately
+                        // CreateIdentity, but the runtime does not guarantee
+                        // ordered processing of fire-and-forget messages, so
+                        // the first CreateIdentity can race ahead of Init.
+                        // Treat a missing secret as an empty manager rather
+                        // than failing — Init is idempotent so this is safe.
+                        let mut manager = match ctx.get_secret(&secret_key) {
+                            Some(value) => IdentityManagement::try_from(value.as_slice())?,
+                            None => IdentityManagement::default(),
+                        };
                         manager.identities.insert(
                             alias,
                             AliasInfo {
@@ -200,10 +206,11 @@ impl DelegateInterface for IdentityManagement {
                         Ok(vec![])
                     }
                     IdentityMsg::DeleteIdentity { alias } => {
-                        let value = ctx
-                            .get_secret(&secret_key)
-                            .ok_or_else(|| DelegateError::Other("secret not found".into()))?;
-                        let mut manager = IdentityManagement::try_from(value.as_slice())?;
+                        // Lazy-init: see CreateIdentity branch for rationale.
+                        let mut manager = match ctx.get_secret(&secret_key) {
+                            Some(value) => IdentityManagement::try_from(value.as_slice())?,
+                            None => IdentityManagement::default(),
+                        };
                         manager.identities.remove(alias.as_str());
                         let updated = serde_json::to_vec(&manager)
                             .map_err(|e| DelegateError::Deser(format!("{e}")))?;
@@ -211,9 +218,15 @@ impl DelegateInterface for IdentityManagement {
                         Ok(vec![])
                     }
                     IdentityMsg::GetIdentities => {
-                        let value = ctx
-                            .get_secret(&secret_key)
-                            .ok_or_else(|| DelegateError::Other("secret not found".into()))?;
+                        // Lazy-init: see CreateIdentity branch for rationale.
+                        // Return an empty manager when the secret has not
+                        // been seeded yet so the UI can populate it via
+                        // CreateIdentity rather than seeing a hard error.
+                        let value = match ctx.get_secret(&secret_key) {
+                            Some(value) => value,
+                            None => serde_json::to_vec(&IdentityManagement::default())
+                                .map_err(|e| DelegateError::Deser(format!("{e}")))?,
+                        };
                         Ok(vec![OutboundDelegateMsg::ApplicationMessage(
                             ApplicationMessage::new(value),
                         )])

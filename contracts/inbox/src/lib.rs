@@ -458,6 +458,23 @@ impl ContractInterface for Inbox {
         state: State<'static>,
         updates: Vec<UpdateData<'static>>,
     ) -> Result<UpdateModification<'static>, ContractError> {
+        freenet_stdlib::log::info(&format!(
+            "inbox.update_state called: state_size={} updates={}",
+            state.as_ref().len(),
+            updates.len()
+        ));
+        for (i, u) in updates.iter().enumerate() {
+            let kind = match u {
+                UpdateData::State(_) => "State",
+                UpdateData::Delta(_) => "Delta",
+                UpdateData::StateAndDelta { .. } => "StateAndDelta",
+                UpdateData::RelatedState { .. } => "RelatedState",
+                UpdateData::RelatedDelta { .. } => "RelatedDelta",
+                UpdateData::RelatedStateAndDelta { .. } => "RelatedStateAndDelta",
+                _ => "Unknown",
+            };
+            freenet_stdlib::log::info(&format!("  update[{i}]: {kind}"));
+        }
         // fixme: take care of race condition between token alloc record and the assignment
         let mut inbox = Inbox::try_from(&state)?;
         let params = InboxParams::try_from(parameters)?;
@@ -495,7 +512,42 @@ impl ContractInterface for Inbox {
                     let token_record = TokenAllocationRecord::try_from(state)?;
                     allocation_records.insert(related_to, token_record);
                 }
-                _ => unreachable!(),
+                UpdateData::RelatedStateAndDelta {
+                    related_to,
+                    state,
+                    delta,
+                } => {
+                    // Sender's AFT record state inline + the inbox delta
+                    // bundled together. Used by the UI to bypass the
+                    // runtime's RequestRelated → GET orchestration when
+                    // delivering cross-node mail (#80).
+                    let token_record = TokenAllocationRecord::try_from(state)?;
+                    allocation_records.insert(related_to, token_record);
+                    match UpdateInbox::try_from(delta)? {
+                        UpdateInbox::AddMessages { mut messages } => {
+                            for m in &messages {
+                                missing_related.push(m.token_assignment.token_record);
+                            }
+                            new_messages.append(&mut messages);
+                        }
+                        UpdateInbox::RemoveMessages { signature, ids } => {
+                            can_reemove_messages(&params, &signature, ids.iter())?;
+                            rm_messages.extend(ids);
+                        }
+                        UpdateInbox::ModifySettings {
+                            settings,
+                            signature,
+                        } => {
+                            can_update_settings(&params, &signature, &settings)?;
+                            inbox.settings = settings;
+                        }
+                    }
+                }
+                other => {
+                    return Err(ContractError::Other(format!(
+                        "inbox.update_state: unsupported UpdateData variant: {other:?}"
+                    )));
+                }
             }
         }
 
@@ -536,11 +588,26 @@ impl ContractInterface for Inbox {
         state: State<'static>,
         summary: StateSummary<'static>,
     ) -> Result<StateDelta<'static>, ContractError> {
-        // wrong summary representations
         let inbox = Inbox::try_from(&state)?;
         let summary = InboxSummary::try_from(summary)?;
-        let delta = inbox.delta(summary);
-        delta.try_into()
+        let new_messages: Vec<Message> = inbox
+            .messages
+            .into_iter()
+            .filter(|m| !summary.0.contains(&m.token_assignment.assignment_hash))
+            .collect();
+        // The delta must match the wire shape that `update_state`'s
+        // `UpdateData::Delta` arm expects: a `UpdateInbox::AddMessages`
+        // enum, not a bare `Inbox` struct. Serializing the inbox struct
+        // produces `{"messages":[...]}` which the receiver fails to
+        // decode as `UpdateInbox` ("unknown variant `messages`, expected
+        // one of AddMessages, RemoveMessages, ModifySettings"). The
+        // delta producer + consumer must agree on the JSON shape.
+        let delta = UpdateInbox::AddMessages {
+            messages: new_messages,
+        };
+        let serialized = serde_json::to_vec(&delta)
+            .map_err(|err| ContractError::Deser(format!("{err}")))?;
+        Ok(StateDelta::from(serialized))
     }
 }
 

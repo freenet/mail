@@ -301,13 +301,42 @@ impl MessageModel {
         });
 
         if let Some(update) = pending_update {
+            let token_record_id = assignment.token_record;
             let stored = update.msg.to_stored(assignment, &update.sender)?;
             let delta = UpdateInbox::AddMessages {
                 messages: vec![stored],
             };
+            let delta_bytes = serde_json::to_vec(&delta)?;
+            // Bundle the sender's AFT record state alongside the inbox delta
+            // as `RelatedStateAndDelta` so the inbox contract can verify the
+            // burn locally without depending on the runtime's RequestRelated
+            // → GET orchestration (broken end-to-end, see #80).
+            let data = match AftRecords::record_state_for(&update.sender) {
+                Some(record) => {
+                    let related_state = record
+                        .serialized()
+                        .map_err(|e| format!("failed to serialize AFT record state: {e}"))?;
+                    UpdateData::RelatedStateAndDelta {
+                        related_to: token_record_id,
+                        state: related_state.into(),
+                        delta: delta_bytes.into(),
+                    }
+                }
+                None => {
+                    crate::log::error(
+                        format!(
+                            "no local AFT record state for sender `{}`, sending bare delta — \
+                             inbox contract will request it via RequestRelated",
+                            update.sender.alias()
+                        ),
+                        None,
+                    );
+                    UpdateData::Delta(delta_bytes.into())
+                }
+            };
             let request = ContractRequest::Update {
                 key: inbox_contract,
-                data: UpdateData::Delta(serde_json::to_vec(&delta)?.into()),
+                data,
             };
             client.send(request.into()).await?;
             // todo: event after sending, we may fail to update, must keep this in mind in case we receive no confirmation
@@ -821,7 +850,10 @@ impl InboxModel {
         Ok(())
     }
 
-    async fn get_state(client: &mut WebApiRequestClient, key: ContractKey) -> Result<(), DynError> {
+    pub async fn get_state(
+        client: &mut WebApiRequestClient,
+        key: ContractKey,
+    ) -> Result<(), DynError> {
         let request = ContractRequest::Get {
             key: key.into(),
             return_contract_code: false,

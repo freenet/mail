@@ -467,13 +467,31 @@ mod identity_management {
             token_rec_to_id.insert(aft_rec.unwrap(), identity);
         }
 
-        // Send contract subscriptions after identity creation
+        // Send contract subscriptions after identity creation.
         InboxModel::subscribe(&mut client.clone(), inbox_key)
             .await
             .unwrap();
         AftRecords::subscribe(&mut client.clone(), aft_rec.unwrap())
             .await
             .unwrap();
+        // Subscriptions only deliver future updates. If state changed
+        // between identity restoration and subscribe (e.g. another node
+        // already pushed a message into our inbox), the UI would silently
+        // miss it until the next state change. Issue an explicit Get for
+        // current state right after subscribe so any pre-existing
+        // messages surface as a one-shot UpdateNotification(State).
+        if let Err(e) = InboxModel::get_state(&mut client.clone(), inbox_key).await {
+            crate::log::error(
+                format!("inbox catch-up Get after subscribe failed: {e}"),
+                None,
+            );
+        }
+        if let Err(e) = AftRecords::get_state(&mut client.clone(), aft_rec.unwrap()).await {
+            crate::log::error(
+                format!("aft record catch-up Get after subscribe failed: {e}"),
+                None,
+            );
+        }
 
         match identity_management::create_alias_api_call(
             client,
@@ -1011,6 +1029,13 @@ pub(crate) async fn node_comms(
                             inboxes.store(Arc::new(with_new));
                             crate::inbox::InboxModel::set_contract_identity(key, identity.clone());
                         }
+                        // Bump the InboxController signal so Dioxus
+                        // components re-render and pick up the new
+                        // messages from the (non-signal-tracked) inboxes
+                        // ArcSwap. Without this the GetResponse silently
+                        // updates state but the UI keeps showing stale
+                        // counts (#80 receiver-side render gap).
+                        inbox_controller.write().updated = true;
                         inbox_to_id.insert(key, identity);
                     }
                     _ => {
@@ -1190,8 +1215,13 @@ pub(crate) async fn node_comms(
                         },
                     };
                     if let Some(summary) = summary
-                        && let Err(e) =
-                            AftRecords::confirm_allocation(&mut client, *key.id(), summary).await
+                        && let Err(e) = AftRecords::confirm_allocation(
+                            &mut client,
+                            *key.id(),
+                            summary,
+                            Some(identity.clone()),
+                        )
+                        .await
                     {
                         crate::log::error(format!("confirm_allocation failed: {e}"), None);
                     }
