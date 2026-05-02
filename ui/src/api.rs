@@ -1552,6 +1552,10 @@ pub(crate) async fn node_comms(
         }
     }
 
+    let mut pending_sweep =
+        gloo_timers::future::IntervalStream::new(crate::aft::PENDING_ASSIGNMENT_SWEEP_INTERVAL_MS)
+            .fuse();
+
     loop {
         futures::select! {
             r = api.host_responses.next() => {
@@ -1581,6 +1585,27 @@ pub(crate) async fn node_comms(
                     Some(Err((msg, action))) => crate::log::error(format!("{msg}"), Some(action)),
                     Some(Ok(_)) => {}
                     None => panic!("error ch closed"),
+                }
+            }
+            _ = pending_sweep.next() => {
+                // Reap AFT assignments whose `confirm_allocation` never
+                // arrived. Without this the user's send hangs silently;
+                // with it, surfaces as a SendMessage error so the UI can
+                // mark the Sent row failed.
+                let expired = AftRecords::expire_stale(
+                    crate::aft::PENDING_ASSIGNMENT_TIMEOUT_SECS,
+                );
+                for assignment in expired {
+                    crate::log::error(
+                        format!(
+                            "AFT assignment confirmation timed out (>{}s) for tier={} slot={} hash={}",
+                            crate::aft::PENDING_ASSIGNMENT_TIMEOUT_SECS,
+                            assignment.tier,
+                            assignment.time_slot,
+                            bs58::encode(assignment.assignment_hash).into_string(),
+                        ),
+                        Some(TryNodeAction::SendMessage),
+                    );
                 }
             }
         }

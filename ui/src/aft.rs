@@ -56,15 +56,25 @@ thread_local! {
     static PENDING_INBOXES_UPDATES: RefCell<Vec<(InboxContract, AssignmentHash)>> = const { RefCell::new(Vec::new()) };
 }
 
-// FIXME: we should check time to time in the API coroutine if any of the pending assignments
-// have not been verified; if that's the case we may need to request again and cannot guarantee
-// that a message has been delivered
+/// Default timeout for pending AFT confirmations. If the host's
+/// `UpdateResponse` summary doesn't acknowledge the assignment within
+/// this window, `expire_stale` reaps the entry and surfaces an error to
+/// the UI so the user knows the send didn't land. Tuned for the typical
+/// cross-node propagation window (low single-digit seconds) plus
+/// margin for network jitter.
+pub(crate) const PENDING_ASSIGNMENT_TIMEOUT_SECS: i64 = 30;
+
+/// How often the API coroutine checks for stale pending assignments.
+/// Short enough that a stuck send surfaces quickly, long enough that
+/// the WASM scheduler isn't busy on it. The actual user-visible
+/// latency to error is bounded by `PENDING_ASSIGNMENT_TIMEOUT_SECS +
+/// PENDING_ASSIGNMENT_SWEEP_INTERVAL_MS`.
+pub(crate) const PENDING_ASSIGNMENT_SWEEP_INTERVAL_MS: u32 = 5_000;
+
 struct PendingAssignmentRegister {
-    /// time at which the request started
-    #[allow(dead_code)] // TODO: used by the timeout/retry path (see FIXME above)
+    /// Time at which the assignment was queued for confirmation. Reaped by
+    /// `expire_stale` once the timeout elapses.
     start: DateTime<Utc>,
-    // time_slot: DateTime<Utc>,
-    // tier: freenet_aft_interface::Tier,
     record: TokenAssignment,
     inbox: InboxContract,
 }
@@ -112,6 +122,45 @@ impl AftRecords {
         Ok(contract_key)
     }
 
+    /// Drain pending confirmations older than `timeout_secs` and return
+    /// the expired records so the caller can surface the failure to the
+    /// UI. Also clears the matching entry in `PENDING_INBOXES_UPDATES`
+    /// so a retry can re-queue without colliding with a stale entry.
+    ///
+    /// Without this sweep, a `confirm_allocation` that never arrives
+    /// (host crash, network drop, malformed summary) leaves the user's
+    /// send hanging forever with no UI feedback — see #1 in the AFT
+    /// audit.
+    pub fn expire_stale(timeout_secs: i64) -> Vec<TokenAssignment> {
+        let now = Utc::now();
+        let mut expired: Vec<TokenAssignment> = Vec::new();
+        PENDING_CONFIRMED_ASSIGNMENTS.with(|pending| {
+            let mut pending = pending.borrow_mut();
+            for registers in pending.values_mut() {
+                registers.retain(|r| {
+                    let elapsed = now.signed_duration_since(r.start).num_seconds();
+                    if elapsed >= timeout_secs {
+                        expired.push(r.record.clone());
+                        false
+                    } else {
+                        true
+                    }
+                });
+            }
+            pending.retain(|_, v| !v.is_empty());
+        });
+        if !expired.is_empty() {
+            let expired_hashes: HashMap<AssignmentHash, ()> =
+                expired.iter().map(|r| (r.assignment_hash, ())).collect();
+            PENDING_INBOXES_UPDATES.with(|queue| {
+                queue
+                    .borrow_mut()
+                    .retain(|(_, hash)| !expired_hashes.contains_key(hash));
+            });
+        }
+        expired
+    }
+
     pub fn pending_assignment(delegate: AftDelegate, contract: InboxContract) {
         PENDING_TOKEN_ASSIGNMENT.with(|map| {
             let map = &mut *map.borrow_mut();
@@ -139,11 +188,7 @@ impl AftRecords {
                 registers
                     .iter()
                     .position(|r| {
-                        // fixme: the summary should also have the assignment hash
-                        if summary.contains_alloc(r.record.tier, r.record.time_slot) {
-                            return true;
-                        }
-                        false
+                        summary.contains_alloc_hash(r.record.tier, &r.record.assignment_hash)
                     })
                     .map(|idx| registers.remove(idx))
             })
