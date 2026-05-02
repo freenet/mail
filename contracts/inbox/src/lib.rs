@@ -239,9 +239,22 @@ impl Inbox {
         allocation_records: &HashMap<ContractInstanceId, TokenAllocationRecord>,
         messages: Vec<Message>,
     ) -> Result<(), VerificationError> {
-        // FIXME: make sure we are not re-adding old messages by verifying the time is more recent
-        // than last updated
+        // Replay guard: skip messages whose `assignment_hash` is already
+        // in the inbox. Without this, an Update(Delta=AddMessages) with
+        // an old token still passes both signature and
+        // `assignment_exists` checks (the token *was* legitimately
+        // burned), so the same message would be appended again on every
+        // replay — including resurrection of locally-deleted messages.
+        // Mirrors the per-`assignment_hash` dedup in `merge`.
+        let known: HashSet<_> = self
+            .messages
+            .iter()
+            .map(|m| m.token_assignment.assignment_hash)
+            .collect();
         for message in messages {
+            if known.contains(&message.token_assignment.assignment_hash) {
+                continue;
+            }
             let records = allocation_records
                 .get(&message.token_assignment.token_record)
                 .ok_or_else(|| {

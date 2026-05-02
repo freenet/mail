@@ -538,12 +538,14 @@ impl TokenAllocationRecord {
     pub fn summarize(&self) -> TokenAllocationSummary {
         let mut by_tier = HashMap::with_capacity(self.tokens_by_tier.len());
         for (tier, assignments) in &self.tokens_by_tier {
-            let mut assignments_ts = Vec::with_capacity(assignments.len());
+            let mut slots = Vec::with_capacity(assignments.len());
             for a in assignments {
-                let ts = a.time_slot.timestamp();
-                assignments_ts.push(ts);
+                slots.push(SummarySlot {
+                    time_slot: a.time_slot.timestamp(),
+                    assignment_hash: a.assignment_hash,
+                });
             }
-            by_tier.insert(*tier, assignments_ts);
+            by_tier.insert(*tier, slots);
         }
         TokenAllocationSummary(by_tier)
     }
@@ -561,9 +563,8 @@ impl TokenAllocationRecord {
             let summary_slots = summary.0.get(tier);
             let mut missing = Vec::with_capacity(assigned.len());
             for a in assigned {
-                let ts = a.time_slot.timestamp();
                 let already_known = summary_slots
-                    .map(|slots| slots.binary_search(&ts).is_ok())
+                    .map(|slots| slots.iter().any(|s| s.assignment_hash == a.assignment_hash))
                     .unwrap_or(false);
                 if !already_known {
                     missing.push(a.clone());
@@ -655,23 +656,40 @@ impl TryFrom<TokenAllocationRecord> for StateDelta<'static> {
     }
 }
 
+/// One entry of the per-tier allocation summary. Carries the slot
+/// timestamp (for legacy slot-based equality) and the full
+/// `assignment_hash` so callers can match a specific assignment without
+/// false positives on slot collision (#3 in the AFT audit).
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct SummarySlot {
+    pub time_slot: i64,
+    pub assignment_hash: [u8; 32],
+}
+
 #[derive(Debug, Serialize, Deserialize)]
-pub struct TokenAllocationSummary(HashMap<Tier, Vec<i64>>);
+pub struct TokenAllocationSummary(HashMap<Tier, Vec<SummarySlot>>);
 
 impl TokenAllocationSummary {
+    /// True if any slot in `tier` matches `slot` by timestamp. Retained
+    /// for callers that don't have an `assignment_hash` to match against.
     pub fn contains_alloc(&self, tier: Tier, slot: DateTime<Utc>) -> bool {
         self.0
             .get(&tier)
-            .and_then(|assignments| {
-                let slot = slot.timestamp();
-                for ts in assignments {
-                    if *ts == slot {
-                        return Some(());
-                    }
-                }
-                None
+            .map(|slots| {
+                let target = slot.timestamp();
+                slots.iter().any(|s| s.time_slot == target)
             })
-            .is_some()
+            .unwrap_or(false)
+    }
+
+    /// True if any slot in `tier` matches `assignment_hash` exactly.
+    /// Prefer this over `contains_alloc` when binding the summary
+    /// confirmation to a specific in-flight assignment.
+    pub fn contains_alloc_hash(&self, tier: Tier, assignment_hash: &[u8; 32]) -> bool {
+        self.0
+            .get(&tier)
+            .map(|slots| slots.iter().any(|s| &s.assignment_hash == assignment_hash))
+            .unwrap_or(false)
     }
 }
 
@@ -1117,5 +1135,56 @@ mod boundary_tests {
             as_record.is_err(),
             "bare TokenAssignment JSON must NOT decode as TokenAllocationRecord; got {as_record:?}"
         );
+    }
+
+    /// `contains_alloc_hash` must distinguish between two assignments
+    /// that share the same `(tier, time_slot)` but have different
+    /// `assignment_hash` — the legacy `contains_alloc` couldn't, which
+    /// made `confirm_allocation` race-prone when two in-flight
+    /// allocations landed in the same slot before either confirmed.
+    #[test]
+    fn summary_contains_alloc_hash_disambiguates_concurrent_allocs() {
+        use std::collections::HashMap;
+
+        let a = make_assignment(0xA1);
+        // Force a second assignment into the same slot but with a different
+        // `assignment_hash`. (In production this can only happen across
+        // nodes mid-propagation; here we construct it directly.)
+        let mut b = a.clone();
+        b.assignment_hash = [0xB2; 32];
+        assert_eq!(a.tier, b.tier);
+        assert_eq!(a.time_slot, b.time_slot);
+        assert_ne!(a.assignment_hash, b.assignment_hash);
+
+        let mut tokens = HashMap::new();
+        tokens.insert(a.tier, vec![a.clone()]);
+        let record = TokenAllocationRecord::new(tokens);
+        let summary = record.summarize();
+
+        // hash-precise lookup: a is present, b is not.
+        assert!(summary.contains_alloc_hash(a.tier, &a.assignment_hash));
+        assert!(!summary.contains_alloc_hash(b.tier, &b.assignment_hash));
+
+        // legacy slot-only lookup matches both, demonstrating the
+        // false-positive that hash-precise lookup avoids.
+        assert!(summary.contains_alloc(a.tier, a.time_slot));
+        assert!(summary.contains_alloc(b.tier, b.time_slot));
+    }
+
+    /// Pin the wire shape of `TokenAllocationSummary` so the cross-crate
+    /// confirmation path keeps decoding. The shape is
+    /// `{ <Tier>: [{ "time_slot": <i64>, "assignment_hash": [u8; 32] }] }`.
+    #[test]
+    fn summary_wire_shape_round_trips() {
+        let assignment = make_assignment(0xE5);
+        let mut tokens = std::collections::HashMap::new();
+        tokens.insert(assignment.tier, vec![assignment.clone()]);
+        let record = TokenAllocationRecord::new(tokens);
+        let summary = record.summarize();
+
+        let state_summary: StateSummary<'static> = summary.try_into().expect("encode summary");
+        let decoded = TokenAllocationSummary::try_from(state_summary).expect("decode summary");
+        assert!(decoded.contains_alloc_hash(assignment.tier, &assignment.assignment_hash));
+        assert!(decoded.contains_alloc(assignment.tier, assignment.time_slot));
     }
 }

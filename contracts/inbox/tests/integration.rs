@@ -193,6 +193,67 @@ fn update_rejects_token_with_invalid_slot() {
     );
 }
 
+#[test]
+fn update_dedups_replay_of_previously_added_message() {
+    // Replay attack: a valid Update(Delta=AddMessages) with a token
+    // that already burned and landed in the inbox must be a no-op, not
+    // a duplicate append. Without this guard the same `assignment_hash`
+    // can land twice in `inbox.messages` — and a deleted message would
+    // resurrect on the next replay.
+    let owner_sk = make_inbox_keypair();
+    let owner_vk = inbox_verifying_key(&owner_sk);
+    let (gen_sk, gen_vk_bytes) = make_token_generator_keypair();
+    let params = make_params(&owner_vk);
+
+    let token_record_id = token_record_id_for(b"replay-record");
+    let assignment = make_token_assignment(
+        &gen_sk,
+        gen_vk_bytes,
+        Tier::Day1,
+        fixed_valid_slot(),
+        assignment_hash_for(b"replayed-msg"),
+        token_record_id,
+    );
+    let message = make_message(b"opaque-payload".to_vec(), assignment.clone());
+    let record = make_token_record(assignment);
+
+    let initial_state = make_inbox_state(&owner_sk, vec![], Utc::now(), InboxSettings::default());
+
+    // First add: persists.
+    let after_first = unwrap_valid(
+        Inbox::update_state(
+            params.clone(),
+            initial_state,
+            vec![
+                add_messages_delta(vec![message.clone()]),
+                related_state_update(token_record_id, record.clone()),
+            ],
+        )
+        .expect("first add"),
+    );
+
+    // Replay: same delta, same record. Must be a no-op (still 1 msg).
+    let after_replay = unwrap_valid(
+        Inbox::update_state(
+            params,
+            after_first,
+            vec![
+                add_messages_delta(vec![message]),
+                related_state_update(token_record_id, record),
+            ],
+        )
+        .expect("replay add"),
+    );
+
+    let parsed: serde_json::Value =
+        serde_json::from_slice(after_replay.as_ref()).expect("inbox json");
+    assert_eq!(
+        parsed["messages"].as_array().map(|m| m.len()).unwrap_or(0),
+        1,
+        "replayed AddMessages must not duplicate the message"
+    );
+}
+
 // ─── summarize_state / get_state_delta round trip ────────────────────────
 
 #[test]
