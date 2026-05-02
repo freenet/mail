@@ -988,17 +988,51 @@ pub(crate) async fn node_comms(
             HostResponse::ContractResponse(ContractResponse::GetResponse {
                 key, state, ..
             }) => {
+                crate::log::info(format!(
+                    "GetResponse: key={key} state_size={}", state.as_ref().len()
+                ));
                 match inbox_to_id.remove(&key) {
                     Some(identity) => {
+                        crate::log::info(format!(
+                            "GetResponse: matched inbox key={key} alias={}",
+                            identity.alias()
+                        ));
                         // is an inbox contract
-                        let state: StoredInbox = serde_json::from_slice(state.as_ref()).unwrap();
-                        let updated_model = InboxModel::from_state(
+                        let parsed: StoredInbox = match serde_json::from_slice(state.as_ref()) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                crate::log::error(
+                                    format!("GetResponse: StoredInbox deser failed: {e}"),
+                                    None,
+                                );
+                                inbox_to_id.insert(key, identity);
+                                return;
+                            }
+                        };
+                        crate::log::info(format!(
+                            "GetResponse: StoredInbox decoded, {} messages",
+                            parsed.messages.len()
+                        ));
+                        let updated_model = match InboxModel::from_state(
                             Arc::clone(&identity.ml_dsa_signing_key),
                             identity.ml_kem_dk.clone(),
-                            state,
+                            parsed,
                             key,
-                        )
-                        .unwrap();
+                        ) {
+                            Ok(m) => m,
+                            Err(e) => {
+                                crate::log::error(
+                                    format!("GetResponse: InboxModel::from_state failed: {e}"),
+                                    None,
+                                );
+                                inbox_to_id.insert(key, identity);
+                                return;
+                            }
+                        };
+                        crate::log::info(format!(
+                            "GetResponse: InboxModel built, {} decrypted messages",
+                            updated_model.messages.len()
+                        ));
                         let loaded_models = inboxes.load();
                         if let Some(pos) = loaded_models.iter().position(|e| {
                             let x = e.borrow();
