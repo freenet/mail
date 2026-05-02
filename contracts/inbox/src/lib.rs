@@ -719,8 +719,12 @@ mod tests {
         let decoded = UpdateInbox::try_from(delta).expect("decode");
         match decoded {
             UpdateInbox::AddMessages { messages } => assert!(messages.is_empty()),
-            UpdateInbox::RemoveMessages { .. } => panic!("expected AddMessages, got RemoveMessages"),
-            UpdateInbox::ModifySettings { .. } => panic!("expected AddMessages, got ModifySettings"),
+            UpdateInbox::RemoveMessages { .. } => {
+                panic!("expected AddMessages, got RemoveMessages")
+            }
+            UpdateInbox::ModifySettings { .. } => {
+                panic!("expected AddMessages, got ModifySettings")
+            }
         }
     }
 }
