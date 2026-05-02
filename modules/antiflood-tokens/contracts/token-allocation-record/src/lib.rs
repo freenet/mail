@@ -85,10 +85,7 @@ impl ContractInterface for TokenAllocContract {
                                         reason: format!("{err}"),
                                     }
                                 })?;
-                            log_succesful_ver(
-                                &params.generator_public_key,
-                                "update state (delta)",
-                            )
+                            log_succesful_ver(&params.generator_public_key, "update state (delta)")
                         }
                         Err(_) => {
                             let new_assigned_tokens = TokenAllocationRecord::try_from(d)?;

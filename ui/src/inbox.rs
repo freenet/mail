@@ -850,7 +850,10 @@ impl InboxModel {
         Ok(())
     }
 
-    pub async fn get_state(client: &mut WebApiRequestClient, key: ContractKey) -> Result<(), DynError> {
+    pub async fn get_state(
+        client: &mut WebApiRequestClient,
+        key: ContractKey,
+    ) -> Result<(), DynError> {
         let request = ContractRequest::Get {
             key: key.into(),
             return_contract_code: false,
