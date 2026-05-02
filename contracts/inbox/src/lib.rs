@@ -458,6 +458,23 @@ impl ContractInterface for Inbox {
         state: State<'static>,
         updates: Vec<UpdateData<'static>>,
     ) -> Result<UpdateModification<'static>, ContractError> {
+        freenet_stdlib::log::info(&format!(
+            "inbox.update_state called: state_size={} updates={}",
+            state.as_ref().len(),
+            updates.len()
+        ));
+        for (i, u) in updates.iter().enumerate() {
+            let kind = match u {
+                UpdateData::State(_) => "State",
+                UpdateData::Delta(_) => "Delta",
+                UpdateData::StateAndDelta { .. } => "StateAndDelta",
+                UpdateData::RelatedState { .. } => "RelatedState",
+                UpdateData::RelatedDelta { .. } => "RelatedDelta",
+                UpdateData::RelatedStateAndDelta { .. } => "RelatedStateAndDelta",
+                _ => "Unknown",
+            };
+            freenet_stdlib::log::info(&format!("  update[{i}]: {kind}"));
+        }
         // fixme: take care of race condition between token alloc record and the assignment
         let mut inbox = Inbox::try_from(&state)?;
         let params = InboxParams::try_from(parameters)?;
@@ -526,7 +543,11 @@ impl ContractInterface for Inbox {
                         }
                     }
                 }
-                _ => unreachable!(),
+                other => {
+                    return Err(ContractError::Other(format!(
+                        "inbox.update_state: unsupported UpdateData variant: {other:?}"
+                    )));
+                }
             }
         }
 
