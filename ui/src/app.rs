@@ -972,15 +972,19 @@ fn Sidebar() -> Element {
     let inbox = use_context::<Signal<InboxView>>();
     let emails_snapshot: Vec<Message> = inbox.read().messages.borrow().clone();
     let active = menu_selection.read().folder();
-    let (active_alias, active_fp_short) = {
+    let (active_alias, active_fp_short, active_fp_full) = {
         let user_ref = user.read();
         match user_ref.logged_id() {
             Some(id) => {
                 let words =
                     address_book::fingerprint_words(&id.ml_dsa_vk_bytes(), &id.ml_kem_ek_bytes());
-                (id.alias.to_string(), format!("{}-{}", words[0], words[1]))
+                (
+                    id.alias.to_string(),
+                    format!("{}-{}-{}", words[0], words[1], words[2]),
+                    words.join("-"),
+                )
             }
-            None => (String::new(), String::new()),
+            None => (String::new(), String::new(), String::new()),
         }
     };
     // Track local-state generation so Drafts count re-renders when the
@@ -1038,6 +1042,7 @@ fn Sidebar() -> Element {
                             span {
                                 class: "val",
                                 "data-testid": testid::FM_SIDEBAR_FINGERPRINT,
+                                title: "{active_fp_full}",
                                 "{active_fp_short}"
                             }
                         }
@@ -1589,6 +1594,11 @@ fn OpenSentMessage(msg: mail_local_state::SentMessage) -> Element {
     let subject = msg.subject.clone();
     let body = msg.body.clone();
     let fingerprint = msg.recipient_fingerprint.clone();
+    let fingerprint_full = if msg.recipient_fingerprint_full.is_empty() {
+        msg.recipient_fingerprint.clone()
+    } else {
+        msg.recipient_fingerprint_full.clone()
+    };
     let time_full = chrono::DateTime::from_timestamp_millis(msg.sent_at)
         .map(format_time_full)
         .unwrap_or_default();
@@ -1631,6 +1641,7 @@ fn OpenSentMessage(msg: mail_local_state::SentMessage) -> Element {
                         span {
                             class: "from-addr",
                             "data-testid": testid::FM_SENT_FINGERPRINT,
+                            title: "{fingerprint_full}",
                             "fingerprint: {fingerprint}"
                         }
                     }
@@ -1763,14 +1774,17 @@ fn OpenMessage(msg: Message) -> Element {
         }
         crate::inbox::VerificationState::Unverified => ("verif-badge verif-none", "unverified"),
     };
-    let sender_fp_short = if msg.sender_vk.is_empty() {
-        String::new()
+    let (sender_fp_short, sender_fp_full) = if msg.sender_vk.is_empty() {
+        (String::new(), String::new())
     } else {
         // Address-book fingerprint mixes both VK and EK; for messages
         // we only have the sender's VK, so use it twice (the message's
         // unique key here is the VK alone).
         let words = address_book::fingerprint_words(&msg.sender_vk, &msg.sender_vk);
-        format!("{}-{}", words[0], words[1])
+        (
+            format!("{}-{}-{}", words[0], words[1], words[2]),
+            words.join("-"),
+        )
     };
     let show_add_to_ab = matches!(
         verification,
@@ -1804,6 +1818,7 @@ fn OpenMessage(msg: Message) -> Element {
                             span {
                                 class: "from-addr",
                                 "data-testid": testid::FM_DETAIL_FINGERPRINT,
+                                title: "{sender_fp_full}",
                                 "{sender_fp_short}"
                             }
                         } else {
@@ -1984,15 +1999,18 @@ fn ComposeSheet() -> Element {
     let user_alias = user.read().logged_id().unwrap().alias.to_string();
     // "Sending as <fingerprint>" surface (#51) — shows the user which
     // ML-DSA key the outgoing message will be signed under.
-    let sender_fp_short = {
+    let (sender_fp_short, sender_fp_full) = {
         let user_ref = user.read();
         match user_ref.logged_id() {
             Some(id) => {
                 let words =
                     address_book::fingerprint_words(&id.ml_dsa_vk_bytes(), &id.ml_kem_ek_bytes());
-                format!("{}-{}", words[0], words[1])
+                (
+                    format!("{}-{}-{}", words[0], words[1], words[2]),
+                    words.join("-"),
+                )
             }
-            None => String::new(),
+            None => (String::new(), String::new()),
         }
     };
 
@@ -2191,6 +2209,7 @@ fn ComposeSheet() -> Element {
             let sent = mail_local_state::SentMessage {
                 to: to_val.clone(),
                 recipient_fingerprint: recipient.fingerprint_short(),
+                recipient_fingerprint_full: recipient.fingerprint_full(),
                 subject: title_val.clone(),
                 body: content_val.clone(),
                 sent_at: chrono::Utc::now().timestamp_millis(),
@@ -2264,6 +2283,7 @@ fn ComposeSheet() -> Element {
                             class: "from-addr",
                             style: "margin-left:8px;",
                             "data-testid": testid::FM_COMPOSE_SENDING_AS,
+                            title: "{sender_fp_full}",
                             "Sending as: {sender_fp_short}"
                         }
                     }
@@ -2289,6 +2309,7 @@ fn ComposeSheet() -> Element {
                                 ("badge badge-warn", "unverified")
                             };
                         let fp_short = r.fingerprint_short();
+                        let fp_full = r.fingerprint_full();
                         rsx! {
                             div { class: "sheet-recipient-badge", "data-testid": "compose-recipient-badge",
                                 span {
@@ -2299,6 +2320,7 @@ fn ComposeSheet() -> Element {
                                 span {
                                     class: "badge-fp",
                                     "data-testid": "compose-recipient-fingerprint",
+                                    title: "{fp_full}",
                                     "fingerprint: {fp_short}"
                                 }
                             }

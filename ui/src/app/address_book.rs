@@ -121,7 +121,12 @@ impl ContactCard {
     #[allow(dead_code)]
     pub fn fingerprint_short(&self) -> String {
         let fp = self.fingerprint();
-        format!("{}-{}", fp[0], fp[1])
+        format!("{}-{}-{}", fp[0], fp[1], fp[2])
+    }
+
+    #[allow(dead_code)]
+    pub fn fingerprint_full(&self) -> String {
+        self.fingerprint().join("-")
     }
 }
 
@@ -145,7 +150,11 @@ impl Contact {
 
     pub fn fingerprint_short(&self) -> String {
         let fp = self.fingerprint();
-        format!("{}-{}", fp[0], fp[1])
+        format!("{}-{}-{}", fp[0], fp[1], fp[2])
+    }
+
+    pub fn fingerprint_full(&self) -> String {
+        self.fingerprint().join("-")
     }
 }
 
@@ -172,10 +181,17 @@ pub struct Recipient {
 }
 
 impl Recipient {
-    /// First two fingerprint words joined with `-`. Cheap disambiguator
-    /// shown in the compose picker.
+    /// First three fingerprint words joined with `-`. Compact disambiguator
+    /// shown in the compose picker; hover for full six-word value.
     pub fn fingerprint_short(&self) -> String {
-        format!("{}-{}", self.fingerprint[0], self.fingerprint[1])
+        format!(
+            "{}-{}-{}",
+            self.fingerprint[0], self.fingerprint[1], self.fingerprint[2]
+        )
+    }
+
+    pub fn fingerprint_full(&self) -> String {
+        self.fingerprint.join("-")
     }
 }
 
@@ -538,7 +554,7 @@ mod tests {
     }
 
     #[test]
-    fn fingerprint_short_returns_first_two_words_joined() {
+    fn fingerprint_short_returns_first_three_words_joined() {
         let card = ContactCard {
             version: 1,
             ml_dsa_vk_bytes: vec![17; 1952],
@@ -547,7 +563,11 @@ mod tests {
             suggested_description: None,
         };
         let fp = card.fingerprint();
-        assert_eq!(card.fingerprint_short(), format!("{}-{}", fp[0], fp[1]));
+        assert_eq!(
+            card.fingerprint_short(),
+            format!("{}-{}-{}", fp[0], fp[1], fp[2])
+        );
+        assert_eq!(card.fingerprint_full(), fp.join("-"));
     }
 
     #[test]

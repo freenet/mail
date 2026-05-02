@@ -116,6 +116,11 @@ pub struct SentMessage {
     /// Short fingerprint of the recipient's verifying key at send time.
     /// Stored so the Sent UI can show trust info without a contact-book lookup.
     pub recipient_fingerprint: String,
+    /// Full six-word fingerprint of the recipient. Empty for legacy rows
+    /// written before this field existed; UI must fall back to the short
+    /// form for hover/tooltip in that case.
+    #[serde(default)]
+    pub recipient_fingerprint_full: String,
     pub subject: String,
     pub body: String,
     /// Unix millis at send-button click time.
@@ -638,6 +643,7 @@ mod boundary_tests {
             SentMessage {
                 to: "bob".into(),
                 recipient_fingerprint: "AB12".into(),
+                recipient_fingerprint_full: "AB12-CD34-EF56".into(),
                 subject: "hi".into(),
                 body: "yo".into(),
                 sent_at: 42,
