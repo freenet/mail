@@ -989,7 +989,8 @@ pub(crate) async fn node_comms(
                 key, state, ..
             }) => {
                 crate::log::info(format!(
-                    "GetResponse: key={key} state_size={}", state.as_ref().len()
+                    "GetResponse: key={key} state_size={}",
+                    state.as_ref().len()
                 ));
                 match inbox_to_id.remove(&key) {
                     Some(identity) => {

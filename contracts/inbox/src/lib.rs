@@ -620,8 +620,8 @@ impl ContractInterface for Inbox {
         let delta = UpdateInbox::AddMessages {
             messages: new_messages,
         };
-        let serialized = serde_json::to_vec(&delta)
-            .map_err(|err| ContractError::Deser(format!("{err}")))?;
+        let serialized =
+            serde_json::to_vec(&delta).map_err(|err| ContractError::Deser(format!("{err}")))?;
         Ok(StateDelta::from(serialized))
     }
 }
