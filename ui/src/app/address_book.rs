@@ -550,6 +550,26 @@ mod tests {
         assert_eq!(card.fingerprint_short(), format!("{}-{}", fp[0], fp[1]));
     }
 
+    /// Regression for #73 — fingerprint shown to receiver after import
+    /// disagreed with sender's sidebar / share-modal fingerprint. Decoding
+    /// a real card captured during QA must reproduce its `verify:` words
+    /// byte-for-byte.
+    #[test]
+    fn contact_card_fixture_round_trip_fingerprint_matches_verify_line() {
+        let raw = include_str!("bob_card_fixture.txt");
+        let card = ContactCard::decode(raw).expect("fixture decodes");
+        let computed = card.fingerprint().join("-");
+        let verify_line = raw
+            .lines()
+            .next()
+            .and_then(|l| l.strip_prefix("verify: "))
+            .expect("fixture starts with `verify: …`");
+        assert_eq!(
+            computed, verify_line,
+            "card fingerprint must match the verify line embedded in the share text",
+        );
+    }
+
     #[test]
     fn contact_card_decode_share_text_with_verify_line() {
         // The Share modal copies a multi-line blob: a `verify:` line for
