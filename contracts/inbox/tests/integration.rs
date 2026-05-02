@@ -241,13 +241,18 @@ fn summarize_then_delta_yields_only_new_messages() {
         .expect("get_state_delta against empty summary");
     let delta_full_json: serde_json::Value =
         serde_json::from_slice(delta_full.as_ref()).expect("delta json");
+    // `get_state_delta` produces an `UpdateInbox::AddMessages` enum so the
+    // wire shape matches what `update_state`'s `Delta` arm decodes. Bare
+    // `Inbox` struct serialization was the previous shape and would fail
+    // cross-node delta apply with "unknown variant `messages`".
     assert_eq!(
-        delta_full_json["messages"]
+        delta_full_json["AddMessages"]["messages"]
             .as_array()
             .map(|m| m.len())
             .unwrap_or(0),
         1,
-        "delta against an empty summary should contain every existing message"
+        "delta against an empty summary should contain every existing message \
+         (shape: {{\"AddMessages\":{{\"messages\":[...]}}}})"
     );
 
     // The summary itself should be non-empty (one entry).
