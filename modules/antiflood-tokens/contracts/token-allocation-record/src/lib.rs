@@ -65,20 +65,51 @@ impl ContractInterface for TokenAllocContract {
                     log_succesful_ver(&params.generator_public_key, "update state (state)")
                 }
                 UpdateData::Delta(d) => {
-                    let new_assigned_token = TokenAssignment::try_from(d)?;
-                    assigned_tokens
-                        .append(new_assigned_token, &verifying_key)
-                        .map_err(|err| {
-                            tracing::error!("{err}");
-                            log_verification_err(
+                    // Cross-node propagation occasionally re-wraps a full
+                    // TokenAllocationRecord (multi-assignment) as a Delta —
+                    // see freenet/mail#71. Try the single-assignment shape
+                    // first (the sender's intent at ui/src/aft.rs), then
+                    // fall back to whole-record merge so we don't reject
+                    // legitimate state under a Delta envelope.
+                    match TokenAssignment::try_from(d.clone()) {
+                        Ok(new_assigned_token) => {
+                            assigned_tokens
+                                .append(new_assigned_token, &verifying_key)
+                                .map_err(|err| {
+                                    tracing::error!("{err}");
+                                    log_verification_err(
+                                        &params.generator_public_key,
+                                        "update state (delta)",
+                                    );
+                                    ContractError::InvalidUpdateWithInfo {
+                                        reason: format!("{err}"),
+                                    }
+                                })?;
+                            log_succesful_ver(
                                 &params.generator_public_key,
                                 "update state (delta)",
-                            );
-                            ContractError::InvalidUpdateWithInfo {
-                                reason: format!("{err}"),
-                            }
-                        })?;
-                    log_succesful_ver(&params.generator_public_key, "update state (delta)")
+                            )
+                        }
+                        Err(_) => {
+                            let new_assigned_tokens = TokenAllocationRecord::try_from(d)?;
+                            assigned_tokens
+                                .merge(new_assigned_tokens, &verifying_key)
+                                .map_err(|err| {
+                                    tracing::error!("{err}");
+                                    log_verification_err(
+                                        &params.generator_public_key,
+                                        "update state (delta-as-record)",
+                                    );
+                                    ContractError::InvalidUpdateWithInfo {
+                                        reason: format!("{err}"),
+                                    }
+                                })?;
+                            log_succesful_ver(
+                                &params.generator_public_key,
+                                "update state (delta-as-record)",
+                            )
+                        }
+                    }
                 }
                 UpdateData::StateAndDelta { state, delta } => {
                     let new_assigned_tokens = TokenAllocationRecord::try_from(state)?;
