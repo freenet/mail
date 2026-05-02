@@ -588,11 +588,26 @@ impl ContractInterface for Inbox {
         state: State<'static>,
         summary: StateSummary<'static>,
     ) -> Result<StateDelta<'static>, ContractError> {
-        // wrong summary representations
         let inbox = Inbox::try_from(&state)?;
         let summary = InboxSummary::try_from(summary)?;
-        let delta = inbox.delta(summary);
-        delta.try_into()
+        let new_messages: Vec<Message> = inbox
+            .messages
+            .into_iter()
+            .filter(|m| !summary.0.contains(&m.token_assignment.assignment_hash))
+            .collect();
+        // The delta must match the wire shape that `update_state`'s
+        // `UpdateData::Delta` arm expects: a `UpdateInbox::AddMessages`
+        // enum, not a bare `Inbox` struct. Serializing the inbox struct
+        // produces `{"messages":[...]}` which the receiver fails to
+        // decode as `UpdateInbox` ("unknown variant `messages`, expected
+        // one of AddMessages, RemoveMessages, ModifySettings"). The
+        // delta producer + consumer must agree on the JSON shape.
+        let delta = UpdateInbox::AddMessages {
+            messages: new_messages,
+        };
+        let serialized = serde_json::to_vec(&delta)
+            .map_err(|err| ContractError::Deser(format!("{err}")))?;
+        Ok(StateDelta::from(serialized))
     }
 }
 

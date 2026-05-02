@@ -1029,6 +1029,13 @@ pub(crate) async fn node_comms(
                             inboxes.store(Arc::new(with_new));
                             crate::inbox::InboxModel::set_contract_identity(key, identity.clone());
                         }
+                        // Bump the InboxController signal so Dioxus
+                        // components re-render and pick up the new
+                        // messages from the (non-signal-tracked) inboxes
+                        // ArcSwap. Without this the GetResponse silently
+                        // updates state but the UI keeps showing stale
+                        // counts (#80 receiver-side render gap).
+                        inbox_controller.write().updated = true;
                         inbox_to_id.insert(key, identity);
                     }
                     _ => {
