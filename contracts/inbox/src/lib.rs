@@ -495,6 +495,37 @@ impl ContractInterface for Inbox {
                     let token_record = TokenAllocationRecord::try_from(state)?;
                     allocation_records.insert(related_to, token_record);
                 }
+                UpdateData::RelatedStateAndDelta {
+                    related_to,
+                    state,
+                    delta,
+                } => {
+                    // Sender's AFT record state inline + the inbox delta
+                    // bundled together. Used by the UI to bypass the
+                    // runtime's RequestRelated → GET orchestration when
+                    // delivering cross-node mail (#80).
+                    let token_record = TokenAllocationRecord::try_from(state)?;
+                    allocation_records.insert(related_to, token_record);
+                    match UpdateInbox::try_from(delta)? {
+                        UpdateInbox::AddMessages { mut messages } => {
+                            for m in &messages {
+                                missing_related.push(m.token_assignment.token_record);
+                            }
+                            new_messages.append(&mut messages);
+                        }
+                        UpdateInbox::RemoveMessages { signature, ids } => {
+                            can_reemove_messages(&params, &signature, ids.iter())?;
+                            rm_messages.extend(ids);
+                        }
+                        UpdateInbox::ModifySettings {
+                            settings,
+                            signature,
+                        } => {
+                            can_update_settings(&params, &signature, &settings)?;
+                            inbox.settings = settings;
+                        }
+                    }
+                }
                 _ => unreachable!(),
             }
         }

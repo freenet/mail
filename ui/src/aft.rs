@@ -119,10 +119,19 @@ impl AftRecords {
         })
     }
 
+    /// Returns the locally-cached AFT record state for the given identity, if any.
+    /// Used by `MessageModel::finish_sending` to bundle the sender's AFT
+    /// record state alongside the inbox UPDATE delta as `RelatedStateAndDelta`,
+    /// bypassing the runtime's broken RequestRelated orchestration (#80).
+    pub fn record_state_for(identity: &Identity) -> Option<TokenAllocationRecord> {
+        RECORDS.with(|recs| recs.borrow().get(identity).cloned())
+    }
+
     pub async fn confirm_allocation(
         client: &mut WebApiRequestClient,
         aft_record: AftRecordId,
         summary: TokenAllocationSummary,
+        sender: Option<Identity>,
     ) -> Result<(), DynError> {
         let Some(confirmed) = PENDING_CONFIRMED_ASSIGNMENTS.with(|pending| {
             let pending = &mut *pending.borrow_mut();
@@ -141,6 +150,32 @@ impl AftRecords {
         }) else {
             return Ok(());
         };
+        // Optimistically append the freshly-minted assignment to the local
+        // RECORDS cache so `MessageModel::finish_sending` can bundle the
+        // post-burn state inline with the inbox UPDATE as
+        // `RelatedStateAndDelta` (see freenet/mail#80). Without this the
+        // local cache still reflects the pre-burn state and the receiving
+        // inbox contract sees an empty AFT record, rejecting the message.
+        if let Some(sender) = sender {
+            RECORDS.with(|recs| {
+                let mut recs = recs.borrow_mut();
+                let entry = recs
+                    .entry(sender)
+                    .or_insert_with(|| TokenAllocationRecord::new(HashMap::new()));
+                let tier = confirmed.record.tier;
+                let mut assignments = entry
+                    .get_tier(&tier)
+                    .map(|s| s.to_vec())
+                    .unwrap_or_default();
+                if !assignments
+                    .iter()
+                    .any(|a| a.assignment_hash == confirmed.record.assignment_hash)
+                {
+                    assignments.push(confirmed.record.clone());
+                    entry.insert(tier, assignments);
+                }
+            });
+        }
         // we have a valid token now, so we can update the inbox contract
         MessageModel::finish_sending(client, confirmed.record, confirmed.inbox).await?;
         Ok(())

@@ -1190,8 +1190,13 @@ pub(crate) async fn node_comms(
                         },
                     };
                     if let Some(summary) = summary
-                        && let Err(e) =
-                            AftRecords::confirm_allocation(&mut client, *key.id(), summary).await
+                        && let Err(e) = AftRecords::confirm_allocation(
+                            &mut client,
+                            *key.id(),
+                            summary,
+                            Some(identity.clone()),
+                        )
+                        .await
                     {
                         crate::log::error(format!("confirm_allocation failed: {e}"), None);
                     }
