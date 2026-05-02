@@ -325,7 +325,9 @@ mod tests {
         let assignment = make_assignment(&sk, 0xA1, Tier::Day1, slot, [9u8; 32]);
 
         let mut record = TokenAllocationRecord::new(std::collections::HashMap::new());
-        record.append(assignment.clone(), &vk).expect("first append");
+        record
+            .append(assignment.clone(), &vk)
+            .expect("first append");
         record
             .append(assignment.clone(), &vk)
             .expect("second append must be idempotent (#72)");
