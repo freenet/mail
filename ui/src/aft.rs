@@ -380,5 +380,4 @@ impl AftRecords {
         client.send(request.into()).await?;
         Ok(())
     }
-
 }
