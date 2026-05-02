@@ -119,14 +119,6 @@ impl AftRecords {
         })
     }
 
-    /// Returns the locally-cached AFT record state for the given identity, if any.
-    /// Used by `MessageModel::finish_sending` to bundle the sender's AFT
-    /// record state alongside the inbox UPDATE delta as `RelatedStateAndDelta`,
-    /// bypassing the runtime's broken RequestRelated orchestration (#80).
-    pub fn record_state_for(identity: &Identity) -> Option<TokenAllocationRecord> {
-        RECORDS.with(|recs| recs.borrow().get(identity).cloned())
-    }
-
     pub async fn confirm_allocation(
         client: &mut WebApiRequestClient,
         aft_record: AftRecordId,
@@ -151,11 +143,13 @@ impl AftRecords {
             return Ok(());
         };
         // Optimistically append the freshly-minted assignment to the local
-        // RECORDS cache so `MessageModel::finish_sending` can bundle the
-        // post-burn state inline with the inbox UPDATE as
-        // `RelatedStateAndDelta` (see freenet/mail#80). Without this the
-        // local cache still reflects the pre-burn state and the receiving
-        // inbox contract sees an empty AFT record, rejecting the message.
+        // RECORDS cache so subsequent local reads (e.g. UI counters of
+        // remaining tokens, dev-mode introspection) reflect the post-burn
+        // state without having to wait for the AFT contract update to
+        // round-trip back through SubscribeResponse. Cross-node delivery
+        // does not depend on this cache anymore — runtime PR #4007 lets
+        // the inbox contract's `update_state` requires(AFT) signal resolve
+        // via `fetch_related_via_network` on the receiver side.
         if let Some(sender) = sender {
             RECORDS.with(|recs| {
                 let mut recs = recs.borrow_mut();
