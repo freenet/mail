@@ -686,4 +686,41 @@ mod tests {
         assert!(is_valid == ValidateResult::Valid);
         Ok(())
     }
+
+    /// Cross-crate wire-shape pin for `UpdateInbox`: the sender (UI crate
+    /// `ui/src/inbox.rs::MessageModel::finish_sending`) encodes `Delta`
+    /// payloads as `UpdateInbox::AddMessages`. The contract's `Delta` arm
+    /// in `update_state` decodes via `UpdateInbox::try_from(StateDelta)`.
+    /// `get_state_delta` must produce JSON in that same shape so the
+    /// receiver-side delta apply on a cross-node `BroadcastTo` fan-out
+    /// can decode it without falling through to the unknown-variant
+    /// error path.
+    ///
+    /// The shape is `{"AddMessages":{"messages":[...]}}` (Serde's default
+    /// externally-tagged enum). Bare `{"messages":[...]}` (the previous
+    /// `Inbox`-struct serialization) decodes as
+    /// `Err("unknown variant `messages`, expected one of AddMessages,
+    /// RemoveMessages, ModifySettings")` and was the bug behind the
+    /// cross-node delta apply failure documented in
+    /// `get_state_delta`'s comment block.
+    #[test]
+    fn update_inbox_round_trips_through_state_delta() {
+        let payload = UpdateInbox::AddMessages { messages: vec![] };
+        let bytes = serde_json::to_vec(&payload).expect("encode");
+        // Pin the wire shape — the JSON must contain the externally-tagged
+        // discriminant so the decoder can route to the right variant.
+        assert!(
+            bytes.starts_with(br#"{"AddMessages""#),
+            "UpdateInbox::AddMessages must serialize as externally-tagged enum; \
+             got: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let delta = StateDelta::from(bytes);
+        let decoded = UpdateInbox::try_from(delta).expect("decode");
+        match decoded {
+            UpdateInbox::AddMessages { messages } => assert!(messages.is_empty()),
+            UpdateInbox::RemoveMessages { .. } => panic!("expected AddMessages, got RemoveMessages"),
+            UpdateInbox::ModifySettings { .. } => panic!("expected AddMessages, got ModifySettings"),
+        }
+    }
 }
