@@ -448,7 +448,8 @@ test.describe("Address book: import contact and display", () => {
       .locator(".verify-word .w")
       .allTextContents();
     expect(fingerprintWords).toHaveLength(6);
-    const fingerprintShort = `${fingerprintWords[0]}-${fingerprintWords[1]}`;
+    const fingerprintShort = `${fingerprintWords[0]}-${fingerprintWords[1]}-${fingerprintWords[2]}`;
+    const fingerprintFull = fingerprintWords.join("-");
 
     // ── Step 4: complete import and verify contact appears ────────────────
     await page.locator('[data-testid="fm-import-submit"]').click();
@@ -465,6 +466,9 @@ test.describe("Address book: import contact and display", () => {
     await expect(
       contactRow.locator('[data-testid="contact-fingerprint"]'),
     ).toContainText(fingerprintShort);
+    await expect(
+      contactRow.locator('[data-testid="contact-fingerprint"]'),
+    ).toHaveAttribute("title", fingerprintFull);
 
     await expect(
       contactRow.locator('[data-testid="contact-verify-badge"]'),
@@ -1133,21 +1137,31 @@ test.describe("Sender trust badge (#51)", () => {
 
     const label = page.locator('[data-testid="fm-compose-sending-as"]');
     await expect(label).toHaveCount(1);
-    // "Sending as: <two-word fingerprint>".
-    await expect(label).toHaveText(/^Sending as: [a-z]+-[a-z]+$/);
+    // "Sending as: <three-word fingerprint>".
+    await expect(label).toHaveText(/^Sending as: [a-z]+-[a-z]+-[a-z]+$/);
+    // Tooltip exposes the full six-word fingerprint.
+    await expect(label).toHaveAttribute(
+      "title",
+      /^[a-z]+-[a-z]+-[a-z]+-[a-z]+-[a-z]+-[a-z]+$/,
+    );
   });
 });
 
 test.describe("Sidebar fingerprint (#48)", () => {
-  test("sidebar shows two-word fingerprint for active identity", async ({ page }) => {
+  test("sidebar shows three-word fingerprint for active identity", async ({ page }) => {
     await page.goto("/");
     await waitForApp(page);
     await selectIdentity(page, "address1");
 
     const fp = page.locator('[data-testid="fm-sidebar-fingerprint"]');
     await expect(fp).toHaveCount(1);
-    // Two BIP-39 words joined by `-`, lowercase a-z only.
-    await expect(fp).toHaveText(/^[a-z]+-[a-z]+$/);
+    // Three BIP-39 words joined by `-`, lowercase a-z only.
+    await expect(fp).toHaveText(/^[a-z]+-[a-z]+-[a-z]+$/);
+    // Hover tooltip carries the full six-word fingerprint.
+    await expect(fp).toHaveAttribute(
+      "title",
+      /^[a-z]+-[a-z]+-[a-z]+-[a-z]+-[a-z]+-[a-z]+$/,
+    );
   });
 
   test("fingerprint changes when switching identities", async ({ page }) => {

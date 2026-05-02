@@ -1569,6 +1569,7 @@ fn ContactsSection() -> Element {
                     {
                         let alias_str = contact.local_alias.to_string();
                         let fp_short = contact.fingerprint_short();
+                        let fp_full = contact.fingerprint_full();
                         let del_alias = alias_str.clone();
                         let verified = contact.verified;
                         let description = contact.description.clone();
@@ -1583,6 +1584,7 @@ fn ContactsSection() -> Element {
                                     }
                                     span { class: "contact-fp",
                                         "data-testid": "contact-fingerprint",
+                                        title: "{fp_full}",
                                         "{fp_short}"
                                     }
                                 }
