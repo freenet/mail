@@ -549,16 +549,27 @@ impl TokenAllocationRecord {
     }
 
     pub fn delta(&self, summary: &TokenAllocationSummary) -> TokenAllocationRecord {
-        let mut delta = HashMap::new();
-        for (tier, summary_assignments) in &summary.0 {
-            let mut missing = vec![];
-            if let Some(assigned) = self.tokens_by_tier.get(tier) {
-                for a in assigned {
-                    let ts = a.time_slot.timestamp();
-                    if summary_assignments.binary_search(&ts).is_err() {
-                        missing.push(a.clone());
-                    }
+        // Iterate every tier WE have, not every tier the summary lists, so a
+        // cold-cache peer with an empty summary still receives every
+        // assignment we hold. The previous implementation iterated
+        // `summary.0` and silently produced an empty delta whenever the
+        // summary had no entry for one of our tiers (or was empty entirely),
+        // which contributed to the wasted cross-node round trips around
+        // freenet/mail#71.
+        let mut delta = HashMap::with_capacity(self.tokens_by_tier.len());
+        for (tier, assigned) in &self.tokens_by_tier {
+            let summary_slots = summary.0.get(tier);
+            let mut missing = Vec::with_capacity(assigned.len());
+            for a in assigned {
+                let ts = a.time_slot.timestamp();
+                let already_known = summary_slots
+                    .map(|slots| slots.binary_search(&ts).is_ok())
+                    .unwrap_or(false);
+                if !already_known {
+                    missing.push(a.clone());
                 }
+            }
+            if !missing.is_empty() {
                 delta.insert(*tier, missing);
             }
         }

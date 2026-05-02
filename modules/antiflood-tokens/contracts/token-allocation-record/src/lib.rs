@@ -1,5 +1,6 @@
 use freenet_aft_interface::{
-    AllocationError, TokenAllocationRecord, TokenAssignment, TokenDelegateParameters,
+    AllocationError, TokenAllocationRecord, TokenAllocationSummary, TokenAssignment,
+    TokenDelegateParameters,
 };
 use freenet_stdlib::prelude::*;
 use ml_dsa::{MlDsa65, VerifyingKey as MlDsaVerifyingKey};
@@ -159,12 +160,28 @@ impl ContractInterface for TokenAllocContract {
     fn get_state_delta(
         _parameters: Parameters<'static>,
         state: State<'static>,
-        _summary: StateSummary<'static>,
+        summary: StateSummary<'static>,
     ) -> Result<StateDelta<'static>, ContractError> {
         let assigned_tokens = TokenAllocationRecord::try_from(state)?;
-        // FIXME: this will be broken because problem with node
-        //let delta = assigned_tokens.delta(&summary);
-        assigned_tokens.try_into()
+        // The previous implementation returned the whole record on every
+        // request because `delta()` was disabled with a "FIXME: broken
+        // because problem with node" comment. That meant cross-node
+        // broadcast always sent the full record — which the receiver's
+        // `update_state` Delta arm decoded via the "delta-as-record"
+        // fallback, hit a slot collision on the sender's already-known
+        // assignments, and forced a wasted ResyncRequest round-trip on
+        // every send (#71, #72).
+        //
+        // Decoding the summary failure is non-fatal — we still need to
+        // return *something* the caller can decode — so on a malformed
+        // summary fall through to the whole record, matching the legacy
+        // behavior that the ecosystem learned to accept via the
+        // "delta-as-record" fallback in `update_state`.
+        let delta_record = match TokenAllocationSummary::try_from(summary) {
+            Ok(parsed) => assigned_tokens.delta(&parsed),
+            Err(_) => assigned_tokens,
+        };
+        delta_record.try_into()
     }
 }
 
@@ -361,5 +378,60 @@ mod tests {
             format!("{err}").contains("already been allocated"),
             "expected slot-collision error, got: {err}"
         );
+    }
+
+    /// Regression for #71: `get_state_delta` previously returned the
+    /// whole record on every call (FIXME-disabled `delta()`). With a
+    /// summary that already covers the existing assignments, the delta
+    /// must be empty so cross-node broadcast doesn't re-send known state
+    /// (which then triggered the slot-collision noise + ResyncRequest
+    /// fallback round-trip on every send).
+    #[test]
+    fn get_state_delta_returns_only_new_assignments_vs_summary() {
+        use chrono::TimeZone;
+        let sk = signing_key(0xC3);
+        let vk = verifying_key(0xC3);
+        let params: Parameters<'static> = TokenDelegateParameters::new(&vk)
+            .try_into()
+            .expect("params");
+
+        let slot = Utc.with_ymd_and_hms(2026, 5, 3, 0, 0, 0).unwrap();
+        let assignment = make_assignment(&sk, 0xC3, Tier::Day1, slot, [9u8; 32]);
+
+        let mut tokens = std::collections::HashMap::new();
+        tokens.insert(Tier::Day1, vec![assignment.clone()]);
+        let record = TokenAllocationRecord::new(tokens);
+        let state: State<'static> = record.clone().try_into().expect("state");
+
+        // Summary that already contains the assignment — delta must be empty.
+        let summary: StateSummary<'static> = record.summarize().try_into().expect("summary");
+        let delta = TokenAllocContract::get_state_delta(params.clone(), state.clone(), summary)
+            .expect("get_state_delta with full summary");
+        let decoded_delta = TokenAllocationRecord::try_from(delta).expect("decode delta");
+        let assignments_in_delta: Vec<_> = (&decoded_delta)
+            .into_iter()
+            .flat_map(|(_, v)| v.iter().cloned())
+            .collect();
+        assert!(
+            assignments_in_delta.is_empty(),
+            "delta against a summary covering all assignments must be empty; \
+             got {} assignments",
+            assignments_in_delta.len()
+        );
+
+        // Empty summary — delta must contain the assignment so cold-cache
+        // peers can still catch up. Build one via an empty record's
+        // `summarize()` (no public constructor on the summary type).
+        let empty_record = TokenAllocationRecord::new(std::collections::HashMap::new());
+        let empty_summary: StateSummary<'static> =
+            empty_record.summarize().try_into().expect("empty summary");
+        let delta_full =
+            TokenAllocContract::get_state_delta(params, state, empty_summary).expect("delta");
+        let decoded_full = TokenAllocationRecord::try_from(delta_full).expect("decode full delta");
+        let full_assignments: Vec<_> = (&decoded_full)
+            .into_iter()
+            .flat_map(|(_, v)| v.iter().cloned())
+            .collect();
+        assert_eq!(full_assignments, vec![assignment]);
     }
 }
