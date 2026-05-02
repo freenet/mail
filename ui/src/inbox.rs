@@ -301,42 +301,21 @@ impl MessageModel {
         });
 
         if let Some(update) = pending_update {
-            let token_record_id = assignment.token_record;
             let stored = update.msg.to_stored(assignment, &update.sender)?;
             let delta = UpdateInbox::AddMessages {
                 messages: vec![stored],
             };
             let delta_bytes = serde_json::to_vec(&delta)?;
-            // Bundle the sender's AFT record state alongside the inbox delta
-            // as `RelatedStateAndDelta` so the inbox contract can verify the
-            // burn locally without depending on the runtime's RequestRelated
-            // → GET orchestration (broken end-to-end, see #80).
-            let data = match AftRecords::record_state_for(&update.sender) {
-                Some(record) => {
-                    let related_state = record
-                        .serialized()
-                        .map_err(|e| format!("failed to serialize AFT record state: {e}"))?;
-                    UpdateData::RelatedStateAndDelta {
-                        related_to: token_record_id,
-                        state: related_state.into(),
-                        delta: delta_bytes.into(),
-                    }
-                }
-                None => {
-                    crate::log::error(
-                        format!(
-                            "no local AFT record state for sender `{}`, sending bare delta — \
-                             inbox contract will request it via RequestRelated",
-                            update.sender.alias()
-                        ),
-                        None,
-                    );
-                    UpdateData::Delta(delta_bytes.into())
-                }
-            };
+            // Send a bare `UpdateData::Delta` and let the runtime resolve
+            // the inbox contract's `update_state` requires(AFT record)
+            // signal via `fetch_related_via_network`. This relies on
+            // freenet-core PR #4006 (validate-side) + PR #4007
+            // (update-side) — without those the receiver's
+            // `update_state` errors with MissingRelated and the broadcast
+            // bounces through ResyncRequest recovery, see #80.
             let request = ContractRequest::Update {
                 key: inbox_contract,
-                data,
+                data: UpdateData::Delta(delta_bytes.into()),
             };
             client.send(request.into()).await?;
             // todo: event after sending, we may fail to update, must keep this in mind in case we receive no confirmation
