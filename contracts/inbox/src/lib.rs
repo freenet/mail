@@ -319,10 +319,25 @@ impl Inbox {
     }
 
     fn merge(&mut self, other: Self) -> Result<(), ContractError> {
-        if self.messages.is_empty() && self.last_update < other.last_update {
-            for m in other.messages {
+        // Accept any incoming messages we don't already have. The previous
+        // gate (`self.messages.is_empty() && self.last_update < other.last_update`)
+        // silently dropped the merge whenever both sides had a default
+        // `last_update` of 0 — which is the common case because
+        // `update_state` never advances `last_update` (the time::now() call
+        // is gated out for wasm). That meant cross-node state-sync via
+        // ResyncResponse never landed messages on the recipient.
+        let known: HashSet<_> = self
+            .messages
+            .iter()
+            .map(|m| m.token_assignment.assignment_hash)
+            .collect();
+        for m in other.messages {
+            if !known.contains(&m.token_assignment.assignment_hash) {
                 self.add_message(m)?;
             }
+        }
+        if other.last_update > self.last_update {
+            self.last_update = other.last_update;
         }
         Ok(())
     }
@@ -605,8 +620,8 @@ impl ContractInterface for Inbox {
         let delta = UpdateInbox::AddMessages {
             messages: new_messages,
         };
-        let serialized = serde_json::to_vec(&delta)
-            .map_err(|err| ContractError::Deser(format!("{err}")))?;
+        let serialized =
+            serde_json::to_vec(&delta).map_err(|err| ContractError::Deser(format!("{err}")))?;
         Ok(StateDelta::from(serialized))
     }
 }
