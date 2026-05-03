@@ -1558,7 +1558,9 @@ fn VerifyContactModal() -> Element {
     let mut confirmed = use_signal(|| false);
 
     let pending = verify_pending.read().0.clone();
-    let Some(contact) = pending else { return rsx! {}; };
+    let Some(contact) = pending else {
+        return rsx! {};
+    };
     let alias_str = contact.local_alias.to_string();
     let words = contact.fingerprint();
 
