@@ -436,7 +436,7 @@ impl IdentityBackup {
 /// Creates a `Blob`, wraps it in an object URL, synthesises a temporary
 /// `<a download>` element, clicks it, then revokes the URL.
 #[cfg(target_family = "wasm")]
-fn trigger_browser_download(filename: &str, json_bytes: &[u8]) {
+pub(crate) fn trigger_browser_download(filename: &str, json_bytes: &[u8]) {
     use wasm_bindgen::JsCast;
     use web_sys::{Blob, BlobPropertyBag, HtmlAnchorElement, Url, js_sys};
 
@@ -482,26 +482,26 @@ fn trigger_browser_download(filename: &str, json_bytes: &[u8]) {
 }
 
 #[cfg(not(target_family = "wasm"))]
-fn trigger_browser_download(_filename: &str, _json_bytes: &[u8]) {}
+pub(crate) fn trigger_browser_download(_filename: &str, _json_bytes: &[u8]) {}
 
-struct ImportBackup(bool);
+pub(crate) struct ImportBackup(pub(crate) bool);
 
-struct ShareContact(bool);
+pub(crate) struct ShareContact(pub(crate) bool);
 
 /// Pending share-card data passed from the click handler to
 /// `ShareContactModal` via context.
 #[derive(Default, Clone)]
-struct SharePending {
-    data: Option<SharePendingData>,
+pub(crate) struct SharePending {
+    pub(crate) data: Option<SharePendingData>,
 }
 
 #[derive(Clone)]
-struct SharePendingData {
-    alias: String,
-    share_text: String,
+pub(crate) struct SharePendingData {
+    pub(crate) alias: String,
+    pub(crate) share_text: String,
 }
 
-struct ImportContact(bool);
+pub(crate) struct ImportContact(pub(crate) bool);
 
 /// Carries the `Contact` whose verified flag the user is about to flip.
 /// `None` while the modal is closed; populated by the row-level Verify
