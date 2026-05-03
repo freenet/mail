@@ -264,7 +264,7 @@ impl InboxView {
         }
     }
 
-    fn set_active_id(&mut self, user: UserId) {
+    pub(crate) fn set_active_id(&mut self, user: UserId) {
         let mut id = self.active_id.borrow_mut();
         *id = user;
     }
@@ -608,7 +608,7 @@ impl User {
         self.active_id.and_then(|id| self.identities.get(id.0))
     }
 
-    fn set_logged_id(&mut self, id: UserId) {
+    pub(crate) fn set_logged_id(&mut self, id: UserId) {
         assert!(id.0 < self.identities.len());
         self.active_id = Some(id);
     }
