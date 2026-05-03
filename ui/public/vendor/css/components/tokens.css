@@ -65,4 +65,62 @@
     textarea { font-family: inherit; outline: none; }
 
   }
+
+  /* Theme overrides driven by data-theme attr on .fm-app. The Settings UI
+     writes theme to mail_local_state.GlobalSettings.appearance.theme;
+     ui/src/app.rs sets the attr at render time. */
+  .fm-app[data-theme="dark"] {
+    --c0: #0b1220;
+    --c1: #111a2e;
+    --c2: #1f2a44;
+    --c3: #2c3a5a;
+    --ink0: #f1f5f9;
+    --ink1: #e2e8f0;
+    --ink2: #cbd5e1;
+    --ink3: #94a3b8;
+    --ink4: #64748b;
+    --accent: #3b82f6;
+    --accent-bg: #1e293b;
+    --accent-mid: #1d4ed8;
+    --trust: #22c55e;
+    --trust-bg: #14532d;
+    --line: rgba(148, 163, 184, 0.18);
+    --line2: rgba(148, 163, 184, 0.10);
+    --unread: #fbbf24;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    .fm-app[data-theme="system"] {
+      --c0: #0b1220;
+      --c1: #111a2e;
+      --c2: #1f2a44;
+      --c3: #2c3a5a;
+      --ink0: #f1f5f9;
+      --ink1: #e2e8f0;
+      --ink2: #cbd5e1;
+      --ink3: #94a3b8;
+      --ink4: #64748b;
+      --accent: #3b82f6;
+      --accent-bg: #1e293b;
+      --accent-mid: #1d4ed8;
+      --trust: #22c55e;
+      --trust-bg: #14532d;
+      --line: rgba(148, 163, 184, 0.18);
+      --line2: rgba(148, 163, 184, 0.10);
+      --unread: #fbbf24;
+    }
+  }
+
+  /* Density override: compact tightens row spacing in lists. */
+  .fm-app[data-density="compact"] .msg-list-row,
+  .fm-app[data-density="compact"] .fm-msg-row {
+    padding-top: 6px;
+    padding-bottom: 6px;
+  }
+
+  /* Serif subject lines opt-out: when class absent, force sans on subject. */
+  .fm-app:not(.serif-subjects) .msg-subject,
+  .fm-app:not(.serif-subjects) .fm-msg-subject {
+    font-family: "DM Sans", system-ui, sans-serif;
+  }
 }

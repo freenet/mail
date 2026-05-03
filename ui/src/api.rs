@@ -66,7 +66,14 @@ impl WebApi {
             "https:" => "wss",
             _ => "ws",
         };
-        let url = format!("{scheme}://{host}/v1/contract/command?encodingProtocol=native");
+        // GlobalSettings.advanced.custom_relay overrides the default
+        // gateway-served WS endpoint. Empty string disables the override.
+        let advanced = crate::local_state::global_settings().advanced;
+        let url = if advanced.custom_relay && !advanced.custom_relay_url.trim().is_empty() {
+            advanced.custom_relay_url.trim().to_string()
+        } else {
+            format!("{scheme}://{host}/v1/contract/command?encodingProtocol=native")
+        };
         let conn = web_sys::WebSocket::new(&url).unwrap();
         let (send_host_responses, host_responses) = futures::channel::mpsc::unbounded();
         let (send_half, requests) = futures::channel::mpsc::unbounded();
