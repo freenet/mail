@@ -25,7 +25,10 @@ on:
 
 jobs:
   check-drift:
-    runs-on: ubuntu-latest
+    # ubicloud-standard-8 — rebuilding the published contract from
+    # source involves a full wasm32 compile of the web-container +
+    # webapp, same compile-bound profile as build.yml.
+    runs-on: ubicloud-standard-8
     steps:
       - uses: actions/checkout@v4
         with:

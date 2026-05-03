@@ -11,7 +11,11 @@ env:
 
 jobs:
   build-and-test:
-    runs-on: ubuntu-latest
+    # ubicloud-standard-8 mirrors freenet-core's CI runner choice for the
+    # heavy Rust + WASM compile path. ~3× faster wall-clock vs the free
+    # ubuntu-latest tier (which queues unpredictably and lacks the cores
+    # to parallelise the workspace build).
+    runs-on: ubicloud-standard-8
     steps:
       - uses: actions/checkout@v4
         with:
@@ -92,7 +96,7 @@ jobs:
         run: cargo make test-inbox
 
   ui-playwright-tests:
-    runs-on: ubuntu-latest
+    runs-on: ubicloud-standard-8
     needs: build-and-test
     steps:
       - uses: actions/checkout@v4

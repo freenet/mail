@@ -30,7 +30,10 @@ env:
 
 jobs:
   e2e-real-node:
-    runs-on: ubuntu-latest
+    # ubicloud-standard-8 — full Freenet network + dx build + headed
+    # browser. The free tier's 2 cores struggle with the parallel build
+    # and frequently push the run past the timeout.
+    runs-on: ubicloud-standard-8
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
