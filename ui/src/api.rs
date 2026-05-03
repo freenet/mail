@@ -1120,22 +1120,41 @@ pub(crate) async fn node_comms(
                                 )
                                 .unwrap();
                                 let loaded_models = inboxes.load();
-                                let mut found = false;
+                                let mut pending = Some(updated_model);
                                 for inbox in loaded_models.as_slice() {
                                     if inbox.clone().borrow().key == key {
                                         let mut inbox = (**inbox).borrow_mut();
                                         let controller = &mut *inbox_controller.write();
                                         controller.updated = true;
-                                        inbox.merge(updated_model);
+                                        inbox.merge(pending.take().unwrap());
                                         crate::log::debug!(
                                             "updated inbox {key} with {} messages",
                                             inbox.messages.len()
                                         );
-                                        found = true;
                                         break;
                                     }
                                 }
-                                assert!(found);
+                                // If the notification arrived before the
+                                // initial GetResponse populated `inboxes`,
+                                // fall back to inserting the model rather
+                                // than panicking. The previous
+                                // `assert!(found)` froze the UI silently
+                                // — the cross-node "bob receives" path
+                                // (#45) routinely hits this race because
+                                // peer-side state push can outrun the
+                                // post-subscribe Get round trip.
+                                if let Some(updated_model) = pending {
+                                    let mut with_new = (***loaded_models).to_vec();
+                                    std::mem::drop(loaded_models);
+                                    with_new.push(Rc::new(RefCell::new(updated_model)));
+                                    #[allow(clippy::arc_with_non_send_sync)]
+                                    inboxes.store(Arc::new(with_new));
+                                    inbox_controller.write().updated = true;
+                                    crate::inbox::InboxModel::set_contract_identity(
+                                        key,
+                                        identity.clone(),
+                                    );
+                                }
                                 inbox_to_id.insert(key, identity);
                             }
                             UpdateData::State(state) => {
@@ -1149,22 +1168,32 @@ pub(crate) async fn node_comms(
                                 )
                                 .unwrap();
                                 let loaded_models = inboxes.load();
-                                let mut found = false;
+                                let mut pending = Some(updated_model);
                                 for inbox in loaded_models.as_slice() {
                                     if inbox.clone().borrow().key == key {
                                         let mut inbox = (**inbox).borrow_mut();
                                         let controller = &mut *inbox_controller.write();
                                         controller.updated = true;
-                                        *inbox = updated_model;
+                                        *inbox = pending.take().unwrap();
                                         crate::log::debug!(
                                             "updated inbox {key} (whole state) with {} messages",
                                             inbox.messages.len()
                                         );
-                                        found = true;
                                         break;
                                     }
                                 }
-                                assert!(found);
+                                if let Some(updated_model) = pending {
+                                    let mut with_new = (***loaded_models).to_vec();
+                                    std::mem::drop(loaded_models);
+                                    with_new.push(Rc::new(RefCell::new(updated_model)));
+                                    #[allow(clippy::arc_with_non_send_sync)]
+                                    inboxes.store(Arc::new(with_new));
+                                    inbox_controller.write().updated = true;
+                                    crate::inbox::InboxModel::set_contract_identity(
+                                        key,
+                                        identity.clone(),
+                                    );
+                                }
                                 inbox_to_id.insert(key, identity);
                             }
                             // UpdateData::StateAndDelta { .. } => {
