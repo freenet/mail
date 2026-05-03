@@ -27,6 +27,7 @@ use crate::{
 
 pub(crate) mod address_book;
 pub(crate) mod login;
+pub(crate) mod settings;
 
 // In-memory mailbox for offline (`example-data`, `!use-node`) mode.
 // Messages composed via `send_message` are stored here keyed by
@@ -774,6 +775,37 @@ mod menu {
         pub draft_id: Option<String>,
     }
 
+    /// Which Settings screen is open. `None` means the mailbox is showing.
+    #[derive(Default, Clone, Copy, PartialEq, Eq, Debug)]
+    pub(super) enum SettingsScreen {
+        #[default]
+        Account,
+        Privacy,
+        Aft,
+        Inbox,
+        Contacts,
+        Appearance,
+        Advanced,
+    }
+
+    impl SettingsScreen {
+        pub fn label(self) -> &'static str {
+            match self {
+                Self::Account => "Account & profile",
+                Self::Privacy => "Privacy & security",
+                Self::Aft => "Anti-Flood (AFT)",
+                Self::Inbox => "Inbox & folders",
+                Self::Contacts => "Contacts",
+                Self::Appearance => "Appearance",
+                Self::Advanced => "Advanced & Diagnostics",
+            }
+        }
+
+        pub fn is_global(self) -> bool {
+            matches!(self, Self::Appearance | Self::Advanced)
+        }
+    }
+
     #[derive(Default)]
     pub(super) struct MenuSelection {
         folder: Folder,
@@ -783,6 +815,7 @@ mod menu {
         new_msg: bool,
         search: String,
         compose_prefill: Option<ComposePrefill>,
+        settings: Option<SettingsScreen>,
     }
 
     impl MenuSelection {
@@ -877,6 +910,20 @@ mod menu {
         pub fn set_search(&mut self, q: String) {
             self.search = q;
         }
+
+        pub fn settings(&self) -> Option<SettingsScreen> {
+            self.settings
+        }
+
+        pub fn open_settings(&mut self, screen: SettingsScreen) {
+            self.settings = Some(screen);
+            self.new_msg = false;
+            self.compose_prefill = None;
+        }
+
+        pub fn close_settings(&mut self) {
+            self.settings = None;
+        }
     }
 }
 
@@ -909,6 +956,7 @@ fn UserInbox() -> Element {
     use_context_provider(|| Signal::new(Option::<String>::None));
 
     let menu_selection = use_context::<Signal<menu::MenuSelection>>();
+    let settings_open = menu_selection.read().settings().is_some();
 
     rsx! {
         div { class: "fm-app", "data-testid": testid::FM_APP,
@@ -917,6 +965,9 @@ fn UserInbox() -> Element {
                 Sidebar {}
                 MessageList {}
                 DetailPanel {}
+            }
+            if settings_open {
+                { settings::SettingsShell() }
             }
             if menu_selection.read().is_new_msg() {
                 ComposeSheet {}
@@ -959,6 +1010,21 @@ fn Topbar() -> Element {
                 }
             }
             div { class: "topbar-right",
+                button {
+                    class: "fm-icon-btn fm-set-icon",
+                    "aria-label": "Settings",
+                    title: "Settings",
+                    "data-testid": testid::FM_SETTINGS_BTN,
+                    onclick: move |_| {
+                        let mut sel = menu_selection.write();
+                        if sel.settings().is_some() {
+                            sel.close_settings();
+                        } else {
+                            sel.open_settings(menu::SettingsScreen::Account);
+                        }
+                    },
+                    "⚙"
+                }
                 div { class: "avatar", "data-testid": testid::FM_AVATAR, "{alias_initial}" }
             }
         }
