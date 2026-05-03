@@ -958,8 +958,30 @@ fn UserInbox() -> Element {
     let menu_selection = use_context::<Signal<menu::MenuSelection>>();
     let settings_open = menu_selection.read().settings().is_some();
 
+    let _local_gen = crate::local_state::GENERATION.load(std::sync::atomic::Ordering::Relaxed);
+    let appearance = crate::local_state::global_settings().appearance;
+    let theme_attr = match appearance.theme {
+        ::mail_local_state::Theme::System => "system",
+        ::mail_local_state::Theme::Light => "light",
+        ::mail_local_state::Theme::Dark => "dark",
+    };
+    let density_attr = match appearance.density {
+        ::mail_local_state::Density::Comfortable => "comfortable",
+        ::mail_local_state::Density::Compact => "compact",
+    };
+    let serif_class = if appearance.serif_subjects {
+        " serif-subjects"
+    } else {
+        ""
+    };
+    let app_class = format!("fm-app{serif_class}");
+
     rsx! {
-        div { class: "fm-app", "data-testid": testid::FM_APP,
+        div {
+            class: "{app_class}",
+            "data-testid": testid::FM_APP,
+            "data-theme": theme_attr,
+            "data-density": density_attr,
             Topbar {}
             div { class: "main",
                 Sidebar {}
@@ -1223,6 +1245,8 @@ fn MessageList() -> Element {
         .logged_id()
         .map(|id| id.alias.to_string())
         .unwrap_or_default();
+    let inbox_settings = crate::local_state::global_settings().inbox;
+    let privacy_prefs = crate::local_state::identity_settings_for(&active_alias).privacy;
     let visible: Vec<Message> = if matches!(folder, menu::Folder::Inbox) {
         let mut v: Vec<Message> = emails
             .iter()
@@ -1234,6 +1258,30 @@ fn MessageList() -> Element {
             .filter(|m| !crate::local_state::is_archived(&active_alias, m.id))
             .filter(|m| !crate::local_state::is_deleted(&active_alias, m.id))
             .filter(|m| matches_search(m, &search))
+            // IdentityPrivacyPrefs.hide_unsigned: drop rows whose signature
+            // didn't validate. Sender-vk empty also counts as unsigned.
+            .filter(|m| {
+                if !privacy_prefs.hide_unsigned {
+                    return true;
+                }
+                m.signature_valid && !m.sender_vk.is_empty()
+            })
+            // GlobalSettings.inbox.quarantine_unknown: when set, hide rows
+            // from senders not in the verified address book. Until a
+            // dedicated Quarantine folder ships, "hide" is the safe
+            // interpretation — visible drops, count drops, no surface.
+            .filter(|m| {
+                if !inbox_settings.quarantine_unknown {
+                    return true;
+                }
+                if m.sender_vk.is_empty() {
+                    return false;
+                }
+                matches!(
+                    address_book::contact_by_vk(&m.sender_vk),
+                    Some(c) if c.verified
+                )
+            })
             .cloned()
             .collect();
         // Newest first (#49). Sender-stamped time is what the design assumes.
@@ -1242,7 +1290,9 @@ fn MessageList() -> Element {
     } else {
         Vec::new()
     };
-    let drafts: Vec<(String, mail_local_state::Draft)> = if matches!(folder, menu::Folder::Drafts) {
+    let drafts: Vec<(String, mail_local_state::Draft)> = if matches!(folder, menu::Folder::Drafts)
+        || (matches!(folder, menu::Folder::Inbox) && inbox_settings.drafts_in_inbox)
+    {
         let mut d = crate::local_state::drafts_for(&active_alias);
         // Newest first.
         d.sort_by_key(|b| std::cmp::Reverse(b.1.updated_at));
@@ -1270,6 +1320,7 @@ fn MessageList() -> Element {
         menu::Folder::Drafts => drafts.len(),
         menu::Folder::Sent => sent_msgs.len(),
         menu::Folder::Archive => archived_msgs.len(),
+        menu::Folder::Inbox if inbox_settings.drafts_in_inbox => visible.len() + drafts.len(),
         _ => visible.len(),
     };
     let selected_sent_id = menu_selection.read().sent_id().map(str::to_string);
@@ -1410,11 +1461,48 @@ fn MessageList() -> Element {
                             })
                         }
                     }
-                } else if visible.is_empty() {
+                } else if visible.is_empty() && drafts.is_empty() {
                     div { style: "padding:24px 18px; font-family:'Geist Mono',monospace; font-size:10px; letter-spacing:0.1em; text-transform:uppercase; color:var(--ink4);",
                         "No messages"
                     }
                 } else {
+                    // GlobalSettings.inbox.drafts_in_inbox = true → drafts
+                    // render at top of Inbox alongside received messages.
+                    if matches!(folder, menu::Folder::Inbox) && inbox_settings.drafts_in_inbox {
+                        {
+                            drafts.iter().map(|(id, d)| {
+                                let to_disp = if d.to.is_empty() { "(no recipient)".to_string() } else { d.to.clone() };
+                                let subj_disp = if d.subject.is_empty() { "(no subject)".to_string() } else { d.subject.clone() };
+                                let preview = d.body.clone();
+                                let time_short = chrono::DateTime::from_timestamp_millis(d.updated_at)
+                                    .map(format_time_short)
+                                    .unwrap_or_default();
+                                let prefill = menu::ComposePrefill {
+                                    to: d.to.clone(),
+                                    subject: d.subject.clone(),
+                                    body: d.body.clone(),
+                                    draft_id: Some(id.clone()),
+                                };
+                                let id_for_dom = id.clone();
+                                rsx! {
+                                    article {
+                                        class: "msg-card",
+                                        "data-testid": testid::FM_DRAFT_CARD,
+                                        "data-draft-id": "{id_for_dom}",
+                                        onclick: move |_| {
+                                            menu_selection.write().open_draft(prefill.clone());
+                                        },
+                                        div { class: "msg-row1",
+                                            span { class: "msg-sender", "Draft → {to_disp}" }
+                                            span { class: "msg-time", "{time_short}" }
+                                        }
+                                        div { class: "msg-subj", "{subj_disp}" }
+                                        div { class: "msg-prev", "{preview}" }
+                                    }
+                                }
+                            })
+                        }
+                    }
                     {
                         visible.into_iter().map(|email| {
                             let id = email.id;
@@ -2190,6 +2278,20 @@ fn ComposeSheet() -> Element {
                 return;
             }
         };
+        // IdentityPrivacyPrefs.verify_on_send: refuse to send if the
+        // address-book contact has not been confirmed by the user. Own-
+        // identity sends bypass (no verification required to message self).
+        let id_privacy = crate::local_state::identity_settings_for(&alias).privacy;
+        if id_privacy.verify_on_send && !recipient.verified && !recipient.is_own {
+            crate::log::error(
+                format!("verify_on_send is on; recipient `{to_val}` is not a verified contact"),
+                Some(TryNodeAction::GetAlias),
+            );
+            toast.set(Some(format!(
+                "Recipient `{to_val}` is not verified. Verify the fingerprint in Contacts before sending."
+            )));
+            return;
+        }
         let recipient_ek = match address_book::ek_from_bytes(&recipient.ml_kem_ek_bytes) {
             Ok(ek) => ek,
             Err(e) => {
@@ -2211,7 +2313,22 @@ fn ComposeSheet() -> Element {
             }
         };
         let title_val = title.read().clone();
-        let content_val = content.read().clone();
+        let mut content_val = content.read().clone();
+
+        // IdentitySettings.auto_sign + signature: append a separator + the
+        // signature block when enabled and the user hasn't already pasted
+        // the signature into the body. Idempotent against re-send/forward.
+        let id_settings = crate::local_state::identity_settings_for(&alias);
+        if id_settings.auto_sign && !id_settings.signature.trim().is_empty() {
+            let sig = id_settings.signature.trim_end();
+            if !content_val.contains(sig) {
+                if !content_val.ends_with('\n') {
+                    content_val.push('\n');
+                }
+                content_val.push_str("\n-- \n");
+                content_val.push_str(sig);
+            }
+        }
 
         // Derive the recipient's inbox key BEFORE moving `recipient_vk` into
         // `send_message` so we can pair the eventual UpdateResponse back to

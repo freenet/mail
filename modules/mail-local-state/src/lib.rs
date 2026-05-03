@@ -329,7 +329,12 @@ impl Default for AppearanceSettings {
 }
 
 /// Inbox-folder settings (global). Govern UI grouping / quarantine behavior.
-#[derive(Deserialize, Serialize, PartialEq, Eq, Debug, Clone)]
+///
+/// Both fields default to `false`. `quarantine_unknown=true` would silently
+/// hide every unsigned/legacy inbound message until the user verifies the
+/// sender, which is hostile for first-run UX; users who want strict
+/// quarantine flip the toggle in Settings > Inbox.
+#[derive(Deserialize, Serialize, PartialEq, Eq, Debug, Clone, Default)]
 pub struct InboxSettings {
     /// Show drafts inline in the inbox list rather than only in the
     /// Drafts folder.
@@ -337,15 +342,6 @@ pub struct InboxSettings {
     /// Move messages from senders not in the address book into a
     /// quarantine folder instead of the inbox.
     pub quarantine_unknown: bool,
-}
-
-impl Default for InboxSettings {
-    fn default() -> Self {
-        Self {
-            drafts_in_inbox: false,
-            quarantine_unknown: true,
-        }
-    }
 }
 
 /// Advanced / node-connection settings.
@@ -909,7 +905,7 @@ mod boundary_tests {
         let s: LocalState = serde_json::from_slice(json).expect("should deserialise");
         assert!(matches!(s.settings.appearance.theme, Theme::System));
         assert!(s.settings.appearance.serif_subjects);
-        assert!(s.settings.inbox.quarantine_unknown);
+        assert!(!s.settings.inbox.quarantine_unknown);
         assert!(!s.settings.advanced.custom_relay);
     }
 
