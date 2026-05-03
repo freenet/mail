@@ -12,8 +12,8 @@ use std::cell::RefCell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use mail_local_state::{
-    ArchivedMessage, DeliveryState, Draft, KeptMessage, LocalState, LocalStateMsg, MessageId,
-    SentMessage,
+    ArchivedMessage, DeliveryState, Draft, GlobalSettings, IdentitySettings, KeptMessage,
+    LocalState, LocalStateMsg, MessageId, SentMessage,
 };
 
 thread_local! {
@@ -86,6 +86,14 @@ pub(crate) fn kept_for(alias: &str) -> Vec<(MessageId, KeptMessage)> {
             .collect(),
         None => Vec::new(),
     })
+}
+
+pub(crate) fn identity_settings_for(alias: &str) -> IdentitySettings {
+    SNAPSHOT.with(|s| s.borrow().identity_settings(alias))
+}
+
+pub(crate) fn global_settings() -> GlobalSettings {
+    SNAPSHOT.with(|s| s.borrow().global_settings().clone())
 }
 
 #[cfg(feature = "use-node")]
@@ -268,6 +276,25 @@ mod wire {
         )
         .await
     }
+
+    pub(crate) async fn set_identity_settings(
+        client: &mut WebApiRequestClient,
+        alias: String,
+        settings: IdentitySettings,
+    ) -> Result<(), DynError> {
+        send_msg(
+            client,
+            &LocalStateMsg::SetIdentitySettings { alias, settings },
+        )
+        .await
+    }
+
+    pub(crate) async fn set_global_settings(
+        client: &mut WebApiRequestClient,
+        settings: GlobalSettings,
+    ) -> Result<(), DynError> {
+        send_msg(client, &LocalStateMsg::SetGlobalSettings { settings }).await
+    }
 }
 
 #[cfg(feature = "use-node")]
@@ -394,6 +421,73 @@ pub(crate) fn local_mark_read(alias: &str, msg_id: MessageId, kept: KeptMessage)
         entry.kept.insert(msg_id.to_string(), kept);
     });
     bump();
+}
+
+pub(crate) fn local_set_identity_settings(alias: &str, settings: IdentitySettings) {
+    SNAPSHOT.with(|s| {
+        let mut state = s.borrow_mut();
+        state
+            .aliases_mut()
+            .entry(alias.to_string())
+            .or_default()
+            .settings = settings;
+    });
+    bump();
+}
+
+pub(crate) fn local_set_global_settings(settings: GlobalSettings) {
+    SNAPSHOT.with(|s| {
+        *s.borrow_mut().global_settings_mut() = settings;
+    });
+    bump();
+}
+
+/// Apply a per-identity settings change everywhere: optimistically patch the
+/// in-memory snapshot for an immediate UI re-render, then (under `use-node`)
+/// fire-and-forget the delegate dispatch so the value persists. Errors from
+/// the dispatch are logged via `crate::log` but don't fail the call — the
+/// local snapshot is the source of truth for the current session and the
+/// delegate write is best-effort.
+pub(crate) fn persist_identity_settings(alias: String, settings: IdentitySettings) {
+    local_set_identity_settings(&alias, settings.clone());
+    #[cfg(feature = "use-node")]
+    {
+        let Some(client) = crate::api::WEB_API_SENDER.get() else {
+            return;
+        };
+        let mut client = client.clone();
+        dioxus::prelude::spawn(async move {
+            if let Err(e) = wire::set_identity_settings(&mut client, alias, settings).await {
+                crate::log::error(format!("set_identity_settings failed: {e}"), None);
+            }
+        });
+    }
+    #[cfg(not(feature = "use-node"))]
+    {
+        let _ = (alias, settings);
+    }
+}
+
+/// Apply a global settings change everywhere; same shape as
+/// [`persist_identity_settings`].
+pub(crate) fn persist_global_settings(settings: GlobalSettings) {
+    local_set_global_settings(settings.clone());
+    #[cfg(feature = "use-node")]
+    {
+        let Some(client) = crate::api::WEB_API_SENDER.get() else {
+            return;
+        };
+        let mut client = client.clone();
+        dioxus::prelude::spawn(async move {
+            if let Err(e) = wire::set_global_settings(&mut client, settings).await {
+                crate::log::error(format!("set_global_settings failed: {e}"), None);
+            }
+        });
+    }
+    #[cfg(not(feature = "use-node"))]
+    {
+        let _ = settings;
+    }
 }
 
 pub(crate) fn new_draft_id() -> String {

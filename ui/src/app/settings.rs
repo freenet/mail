@@ -1,20 +1,56 @@
 //! Settings shell — full-screen takeover inside `.fm-app`. Ported from
 //! the Claude Design handoff bundle (`mail-config-ui-design`).
 //!
-//! Scope of this module: visual + interaction parity with the prototype,
-//! wired to the real active identity for the keys/profile cards. Most
-//! per-screen toggles are still local `Signal<...>` state — persistence
-//! to IndexedDB / contract is a fast-follow.
+//! Persistence: settings live in the `mail-local-state` delegate's
+//! encrypted secret store (same stash as drafts / sent / read-tracking,
+//! never broadcast to the network). Each on-change handler issues
+//! `local_state::persist_identity_settings` / `persist_global_settings`,
+//! which optimistically patches the in-memory snapshot for an immediate
+//! re-render and fires a fire-and-forget delegate dispatch under
+//! `use-node`. Under `example-data,no-sync` the dispatch is a no-op.
 //!
 //! Mobile (`.fm-m*`) classes from the prototype are intentionally not
 //! ported in this pass; first cut is desktop-only.
 
+use std::sync::atomic::Ordering;
+
 use dioxus::prelude::*;
+use mail_local_state::{
+    Density, GlobalSettings, IdentityPrivacyPrefs, IdentitySettings, InboxSettings, Theme,
+};
 
 use crate::app::User;
 use crate::app::address_book;
 use crate::app::menu;
+use crate::local_state;
 use crate::testid;
+
+/// Read the identity-settings bucket for the active identity. Re-runs when
+/// `local_state::GENERATION` advances, so an external refresh of the
+/// snapshot (e.g. delegate `GetAll` reply) re-renders dependent screens.
+fn use_identity_settings() -> (String, IdentitySettings) {
+    let user = use_context::<Signal<User>>();
+    let alias = user
+        .read()
+        .logged_id()
+        .map(|id| id.alias.to_string())
+        .unwrap_or_default();
+    let alias_for_memo = alias.clone();
+    let settings = use_memo(move || {
+        // Subscribe to GENERATION so this re-runs on snapshot mutation.
+        let _gen = local_state::GENERATION.load(Ordering::Relaxed);
+        local_state::identity_settings_for(&alias_for_memo)
+    });
+    (alias, settings())
+}
+
+fn use_global_settings() -> GlobalSettings {
+    let settings = use_memo(move || {
+        let _gen = local_state::GENERATION.load(Ordering::Relaxed);
+        local_state::global_settings()
+    });
+    settings()
+}
 
 #[allow(non_snake_case)]
 pub(crate) fn SettingsShell() -> Element {
@@ -208,18 +244,15 @@ fn SettingRow(
 }
 
 #[component]
-fn Toggle(on: Signal<bool>) -> Element {
-    let cls = if on() { "fm-toggle on" } else { "fm-toggle" };
+fn Toggle(on: bool, ontoggle: EventHandler<()>) -> Element {
+    let cls = if on { "fm-toggle on" } else { "fm-toggle" };
     rsx! {
         button {
             class: "{cls}",
             r#type: "button",
             role: "switch",
-            "aria-checked": "{on()}",
-            onclick: move |_| {
-                let v = on();
-                on.clone().set(!v);
-            },
+            "aria-checked": "{on}",
+            onclick: move |_| ontoggle.call(()),
         }
     }
 }
@@ -286,13 +319,36 @@ fn ScrAccount() -> Element {
         })
         .unwrap_or_default();
 
-    let display_name = use_signal(String::new);
-    let signature = use_signal(|| String::from("Sent from a node I trust."));
-    let auto_sign = use_signal(|| true);
+    let (alias_key, ident) = use_identity_settings();
+    let display_name = ident.display_name.clone();
+    let signature = ident.signature.clone();
+    let auto_sign = ident.auto_sign;
     // Backups not yet wired — treat every identity as un-backed-up so the
     // amber banner shows. Real value will read from a per-identity local
     // record once #51 lands.
     let backed_up = false;
+
+    let alias_key_dn = alias_key.clone();
+    let ident_dn = ident.clone();
+    let on_display_name = move |ev: Event<FormData>| {
+        let mut next = ident_dn.clone();
+        next.display_name = ev.value();
+        local_state::persist_identity_settings(alias_key_dn.clone(), next);
+    };
+    let alias_key_sig = alias_key.clone();
+    let ident_sig = ident.clone();
+    let on_signature = move |ev: Event<FormData>| {
+        let mut next = ident_sig.clone();
+        next.signature = ev.value();
+        local_state::persist_identity_settings(alias_key_sig.clone(), next);
+    };
+    let alias_key_as = alias_key.clone();
+    let ident_as = ident.clone();
+    let on_auto_sign = move |_| {
+        let mut next = ident_as.clone();
+        next.auto_sign = !next.auto_sign;
+        local_state::persist_identity_settings(alias_key_as.clone(), next);
+    };
 
     rsx! {
         div { class: "fm-set-inner",
@@ -325,9 +381,9 @@ fn ScrAccount() -> Element {
                     control: rsx! {
                         input {
                             class: "fm-input",
-                            value: "{display_name()}",
+                            value: "{display_name}",
                             style: "width: 180px",
-                            oninput: move |ev| display_name.clone().set(ev.value()),
+                            oninput: on_display_name,
                         }
                     },
                 }
@@ -338,15 +394,15 @@ fn ScrAccount() -> Element {
                     control: rsx! {
                         textarea {
                             class: "fm-textarea",
-                            value: "{signature()}",
-                            oninput: move |ev| signature.clone().set(ev.value()),
+                            value: "{signature}",
+                            oninput: on_signature,
                         }
                     },
                 }
                 SettingRow {
                     label: "Append signature to new messages",
                     help: "Disable per-message in the compose footer.",
-                    control: rsx! { Toggle { on: auto_sign } },
+                    control: rsx! { Toggle { on: auto_sign, ontoggle: on_auto_sign } },
                 }
             }
             Card {
@@ -426,10 +482,26 @@ fn ScrAccount() -> Element {
 
 #[allow(non_snake_case)]
 fn ScrPrivacy() -> Element {
-    let verify_on_send = use_signal(|| true);
-    let hide_unsigned = use_signal(|| false);
-    let pad_length = use_signal(|| true);
-    let read_receipts = use_signal(|| false);
+    let (alias_key, ident) = use_identity_settings();
+    let priv_now = ident.privacy.clone();
+    let verify_on_send = priv_now.verify_on_send;
+    let hide_unsigned = priv_now.hide_unsigned;
+    let pad_length = priv_now.pad_length;
+    let read_receipts = priv_now.read_receipts;
+
+    let mk_toggle = move |mutate: fn(&mut IdentityPrivacyPrefs)| {
+        let alias_key = alias_key.clone();
+        let ident = ident.clone();
+        move |_| {
+            let mut next = ident.clone();
+            mutate(&mut next.privacy);
+            local_state::persist_identity_settings(alias_key.clone(), next);
+        }
+    };
+    let on_verify = mk_toggle(|p| p.verify_on_send = !p.verify_on_send);
+    let on_hide_unsigned = mk_toggle(|p| p.hide_unsigned = !p.hide_unsigned);
+    let on_pad = mk_toggle(|p| p.pad_length = !p.pad_length);
+    let on_receipts = mk_toggle(|p| p.read_receipts = !p.read_receipts);
     rsx! {
         div { class: "fm-set-inner",
             p { class: "fm-set-lede",
@@ -439,12 +511,12 @@ fn ScrPrivacy() -> Element {
                 SettingRow {
                     label: "Require known key to send",
                     help: "Block compose to recipients whose ML-DSA-65 key isn't in your known-keys set. Forces you to verify out-of-band first.",
-                    control: rsx! { Toggle { on: verify_on_send } },
+                    control: rsx! { Toggle { on: verify_on_send, ontoggle: on_verify } },
                 }
                 SettingRow {
                     label: "Hide unsigned messages",
                     help: "Move messages with no ML-DSA signature directly to a quarantine folder.",
-                    control: rsx! { Toggle { on: hide_unsigned } },
+                    control: rsx! { Toggle { on: hide_unsigned, ontoggle: on_hide_unsigned } },
                 }
                 SettingRow {
                     label: "Auto-accept new keys",
@@ -464,12 +536,12 @@ fn ScrPrivacy() -> Element {
                 SettingRow {
                     label: "Share read receipts",
                     help: "Senders see when you opened the message. Off by default; off is the unlinkable option.",
-                    control: rsx! { Toggle { on: read_receipts } },
+                    control: rsx! { Toggle { on: read_receipts, ontoggle: on_receipts } },
                 }
                 SettingRow {
                     label: "Pad message length",
                     help: "Round ciphertext size to fixed buckets so observers can't infer content size. Adds ~5% bandwidth.",
-                    control: rsx! { Toggle { on: pad_length } },
+                    control: rsx! { Toggle { on: pad_length, ontoggle: on_pad } },
                 }
             }
             Card {
@@ -514,12 +586,43 @@ fn ScrAft() -> Element {
         ("Mid2", "10K", "/ day", "Power tier. Requires reputation."),
     ];
 
-    let selected_tier = use_signal(|| "Mid1".to_string());
-    let allow_known = use_signal(|| true);
-    let allow_anon = use_signal(|| false);
-    let bounce = use_signal(|| {
-        String::from("Recipient requires Mid1 or higher to send. (https://freenet.org/aft)")
-    });
+    let (alias_key, ident) = use_identity_settings();
+    let aft_now = ident.aft.clone();
+    let selected_tier = aft_now.required_tier.clone();
+    let allow_known = aft_now.allow_known;
+    let allow_anon = aft_now.allow_anon;
+    let bounce = aft_now.bounce_message.clone();
+
+    let alias_key_t = alias_key.clone();
+    let ident_t = ident.clone();
+    let on_tier = move |new_tier: String| {
+        let mut next = ident_t.clone();
+        next.aft.required_tier = new_tier;
+        local_state::persist_identity_settings(alias_key_t.clone(), next);
+    };
+    let alias_key_k = alias_key.clone();
+    let ident_k = ident.clone();
+    let on_allow_known = move |_| {
+        let mut next = ident_k.clone();
+        next.aft.allow_known = !next.aft.allow_known;
+        local_state::persist_identity_settings(alias_key_k.clone(), next);
+    };
+    let alias_key_a = alias_key.clone();
+    let ident_a = ident.clone();
+    let on_allow_anon = move |_| {
+        let mut next = ident_a.clone();
+        next.aft.allow_anon = !next.aft.allow_anon;
+        local_state::persist_identity_settings(alias_key_a.clone(), next);
+    };
+    let alias_key_b = alias_key.clone();
+    let ident_b = ident.clone();
+    let on_bounce = move |ev: Event<FormData>| {
+        let mut next = ident_b.clone();
+        next.aft.bounce_message = ev.value();
+        local_state::persist_identity_settings(alias_key_b.clone(), next);
+    };
+    // Silence unused-variable warnings when only one of the two refs is read.
+    let _ = (&aft_now, &alias_key);
 
     rsx! {
         div { class: "fm-set-inner",
@@ -583,15 +686,16 @@ fn ScrAft() -> Element {
                     for (id, rate, per, help) in tiers.iter() {
                         {
                             let id_str = id.to_string();
-                            let active = selected_tier() == id_str;
+                            let active = selected_tier == id_str;
                             let cls = if active { "fm-tier is-active" } else { "fm-tier" };
+                            let on_tier_click = on_tier.clone();
                             rsx! {
                                 button {
                                     key: "{id}",
                                     class: "{cls}",
                                     r#type: "button",
                                     style: "all: unset; display: flex; flex-direction: column; gap: 4px; cursor: default; border: 1px solid var(--line); border-radius: 11px; padding: 12px 12px 10px; background: #fff;",
-                                    onclick: move |_| selected_tier.clone().set(id_str.clone()),
+                                    onclick: move |_| on_tier_click(id_str.clone()),
                                     div { class: "fm-tier-name", "{id}" }
                                     div { class: "fm-tier-rate",
                                         "{rate}"
@@ -610,24 +714,31 @@ fn ScrAft() -> Element {
                 SettingRow {
                     label: "Minimum tier",
                     help: "Tighten this if you're seeing spam. Loosen it if you're being bounced from senders who don't carry your floor.",
-                    control: rsx! {
-                        select { class: "fm-select",
-                            option { value: "Min1", "Min1" }
-                            option { value: "Min2", selected: true, "Min2" }
-                            option { value: "Mid1", "Mid1" }
-                            option { value: "Mid2", "Mid2" }
+                    control: {
+                        let on_tier_select = on_tier.clone();
+                        let cur = selected_tier.clone();
+                        rsx! {
+                            select {
+                                class: "fm-select",
+                                value: "{cur}",
+                                onchange: move |ev| on_tier_select(ev.value()),
+                                option { value: "Min1", "Min1" }
+                                option { value: "Min2", "Min2" }
+                                option { value: "Mid1", "Mid1" }
+                                option { value: "Mid2", "Mid2" }
+                            }
                         }
                     },
                 }
                 SettingRow {
                     label: "Allow lower tiers from known contacts",
                     help: "People in your address book bypass the tier floor.",
-                    control: rsx! { Toggle { on: allow_known } },
+                    control: rsx! { Toggle { on: allow_known, ontoggle: on_allow_known } },
                 }
                 SettingRow {
                     label: "Allow no-tier (anonymous)",
                     help: "Off by default. Recommended only for public dropboxes.",
-                    control: rsx! { Toggle { on: allow_anon } },
+                    control: rsx! { Toggle { on: allow_anon, ontoggle: on_allow_anon } },
                 }
                 SettingRow {
                     label: "Bounce message",
@@ -636,8 +747,8 @@ fn ScrAft() -> Element {
                     control: rsx! {
                         textarea {
                             class: "fm-textarea",
-                            value: "{bounce()}",
-                            oninput: move |ev| bounce.clone().set(ev.value()),
+                            value: "{bounce}",
+                            oninput: on_bounce,
                         }
                     },
                 }
@@ -648,8 +759,20 @@ fn ScrAft() -> Element {
 
 #[allow(non_snake_case)]
 fn ScrInbox() -> Element {
-    let drafts_in_inbox = use_signal(|| false);
-    let quarantine_unknown = use_signal(|| true);
+    let g = use_global_settings();
+    let drafts_in_inbox = g.inbox.drafts_in_inbox;
+    let quarantine_unknown = g.inbox.quarantine_unknown;
+
+    let mk_global_toggle = move |mutate: fn(&mut InboxSettings)| {
+        let g = g.clone();
+        move |_| {
+            let mut next = g.clone();
+            mutate(&mut next.inbox);
+            local_state::persist_global_settings(next);
+        }
+    };
+    let on_drafts_in_inbox = mk_global_toggle(|i| i.drafts_in_inbox = !i.drafts_in_inbox);
+    let on_quarantine = mk_global_toggle(|i| i.quarantine_unknown = !i.quarantine_unknown);
     rsx! {
         div { class: "fm-set-inner",
             p { class: "fm-set-lede", "How messages move through this inbox." }
@@ -680,7 +803,7 @@ fn ScrInbox() -> Element {
                 SettingRow {
                     label: "Show drafts in Inbox",
                     help: "Off: drafts stay in Drafts only. On: surface them in Inbox above the unread band.",
-                    control: rsx! { Toggle { on: drafts_in_inbox } },
+                    control: rsx! { Toggle { on: drafts_in_inbox, ontoggle: on_drafts_in_inbox } },
                 }
             }
             Card {
@@ -689,7 +812,7 @@ fn ScrInbox() -> Element {
                 SettingRow {
                     label: "Hold messages with unknown keys",
                     help: "Land them in Quarantine instead of Inbox. You'll see a count badge.",
-                    control: rsx! { Toggle { on: quarantine_unknown } },
+                    control: rsx! { Toggle { on: quarantine_unknown, ontoggle: on_quarantine } },
                 }
                 SettingRow {
                     label: "Auto-delete from Quarantine after",
@@ -823,7 +946,43 @@ fn ScrContacts() -> Element {
 
 #[allow(non_snake_case)]
 fn ScrAppearance() -> Element {
-    let serif_subjects = use_signal(|| true);
+    let g = use_global_settings();
+    let serif_subjects = g.appearance.serif_subjects;
+    let theme_value = match g.appearance.theme {
+        Theme::System => "auto",
+        Theme::Light => "light",
+        Theme::Dark => "dark",
+    };
+    let density_value = match g.appearance.density {
+        Density::Comfortable => "comfortable",
+        Density::Compact => "compact",
+    };
+
+    let g_theme = g.clone();
+    let on_theme = move |ev: Event<FormData>| {
+        let mut next = g_theme.clone();
+        next.appearance.theme = match ev.value().as_str() {
+            "light" => Theme::Light,
+            "dark" => Theme::Dark,
+            _ => Theme::System,
+        };
+        local_state::persist_global_settings(next);
+    };
+    let g_density = g.clone();
+    let on_density = move |ev: Event<FormData>| {
+        let mut next = g_density.clone();
+        next.appearance.density = match ev.value().as_str() {
+            "compact" => Density::Compact,
+            _ => Density::Comfortable,
+        };
+        local_state::persist_global_settings(next);
+    };
+    let g_serif = g.clone();
+    let on_serif = move |_| {
+        let mut next = g_serif.clone();
+        next.appearance.serif_subjects = !next.appearance.serif_subjects;
+        local_state::persist_global_settings(next);
+    };
     rsx! {
         div { class: "fm-set-inner",
             p { class: "fm-set-lede", "Visual settings shared across every identity on this device." }
@@ -832,8 +991,11 @@ fn ScrAppearance() -> Element {
                     label: "Color theme",
                     help: "Dark theme matches the system; nothing is themed per identity.",
                     control: rsx! {
-                        select { class: "fm-select",
-                            option { value: "auto", selected: true, "auto" }
+                        select {
+                            class: "fm-select",
+                            value: "{theme_value}",
+                            onchange: on_theme,
+                            option { value: "auto", "auto" }
                             option { value: "light", "light" }
                             option { value: "dark", "dark" }
                         }
@@ -843,9 +1005,11 @@ fn ScrAppearance() -> Element {
                     label: "Density",
                     help: "Affects row height and padding throughout the mailbox.",
                     control: rsx! {
-                        select { class: "fm-select",
+                        select {
+                            class: "fm-select",
+                            value: "{density_value}",
+                            onchange: on_density,
                             option { value: "compact", "compact" }
-                            option { value: "cozy", selected: true, "cozy" }
                             option { value: "comfortable", "comfortable" }
                         }
                     },
@@ -853,7 +1017,7 @@ fn ScrAppearance() -> Element {
                 SettingRow {
                     label: "Subjects in serif",
                     help: "Off: subjects render in DM Sans like the rest of the UI.",
-                    control: rsx! { Toggle { on: serif_subjects } },
+                    control: rsx! { Toggle { on: serif_subjects, ontoggle: on_serif } },
                 }
             }
             Card { title: "Typography",
@@ -875,7 +1039,14 @@ fn ScrAppearance() -> Element {
 
 #[allow(non_snake_case)]
 fn ScrAdvanced() -> Element {
-    let custom_relay = use_signal(|| false);
+    let g = use_global_settings();
+    let custom_relay = g.advanced.custom_relay;
+    let g_relay = g.clone();
+    let on_custom_relay = move |_| {
+        let mut next = g_relay.clone();
+        next.advanced.custom_relay = !next.advanced.custom_relay;
+        local_state::persist_global_settings(next);
+    };
     let log: &[(&str, &str, &str)] = &[
         (
             "14:32:01",
@@ -916,7 +1087,7 @@ fn ScrAdvanced() -> Element {
                 SettingRow {
                     label: "Use custom relay",
                     help: "By default we connect to the local Freenet node. Override only if you know what you're doing.",
-                    control: rsx! { Toggle { on: custom_relay } },
+                    control: rsx! { Toggle { on: custom_relay, ontoggle: on_custom_relay } },
                 }
             }
             Card {

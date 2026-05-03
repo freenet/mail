@@ -154,6 +154,101 @@ pub struct KeptMessage {
     pub kept_at: i64,
 }
 
+/// Per-identity AFT preferences. The required tier and the allow-known /
+/// allow-anonymous flags govern which incoming messages this identity will
+/// accept; `bounce_message` is shown to senders whose tier is below the
+/// requirement (the chain itself just refuses; the bounce text is informational
+/// and rendered locally on the sender side via the address book).
+#[derive(Deserialize, Serialize, PartialEq, Eq, Debug, Clone)]
+pub struct IdentityAftPrefs {
+    /// Minimum tier the identity will accept. Stored as the canonical
+    /// freenet-aft-interface tier name (`Min1`, `Min2`, `Mid1`, `Mid2`,
+    /// `Max1`, `Max2`).
+    pub required_tier: String,
+    /// Accept messages from contacts in the address book regardless of tier.
+    pub allow_known: bool,
+    /// Accept messages from senders not in the address book.
+    pub allow_anon: bool,
+    /// Optional bounce message shown to senders below the required tier.
+    pub bounce_message: String,
+}
+
+impl Default for IdentityAftPrefs {
+    fn default() -> Self {
+        Self {
+            required_tier: "Mid1".to_string(),
+            allow_known: true,
+            allow_anon: false,
+            bounce_message: String::new(),
+        }
+    }
+}
+
+/// Per-identity privacy preferences. Govern client-side composition and
+/// display behavior; nothing here is enforced by the chain.
+#[derive(Deserialize, Serialize, PartialEq, Eq, Debug, Clone)]
+pub struct IdentityPrivacyPrefs {
+    /// Verify the recipient's signing key against the address book before
+    /// sending. Refuse to compose if the verifying key has changed since
+    /// import.
+    pub verify_on_send: bool,
+    /// Hide unsigned / unverifiable inbound messages from the inbox list.
+    pub hide_unsigned: bool,
+    /// Pad outgoing ciphertexts to a length-class boundary to reduce
+    /// linkability of message size.
+    pub pad_length: bool,
+    /// Send a read receipt automatically when an inbox row is opened.
+    pub read_receipts: bool,
+}
+
+impl Default for IdentityPrivacyPrefs {
+    fn default() -> Self {
+        Self {
+            verify_on_send: true,
+            hide_unsigned: false,
+            pad_length: true,
+            read_receipts: false,
+        }
+    }
+}
+
+/// Per-identity settings: the parts of Settings that are scoped to a single
+/// alias rather than to the whole device.
+#[derive(Deserialize, Serialize, PartialEq, Eq, Debug, Clone)]
+pub struct IdentitySettings {
+    /// Display name shown to recipients alongside the alias. Empty means
+    /// "use the alias verbatim".
+    #[serde(default)]
+    pub display_name: String,
+    /// Signature appended to outgoing messages. Empty means no signature.
+    #[serde(default)]
+    pub signature: String,
+    /// Whether to append the signature automatically. If false, the user
+    /// has to opt in per-message in the compose form.
+    #[serde(default = "default_true")]
+    pub auto_sign: bool,
+    #[serde(default)]
+    pub aft: IdentityAftPrefs,
+    #[serde(default)]
+    pub privacy: IdentityPrivacyPrefs,
+}
+
+impl Default for IdentitySettings {
+    fn default() -> Self {
+        Self {
+            display_name: String::new(),
+            signature: String::new(),
+            auto_sign: true,
+            aft: IdentityAftPrefs::default(),
+            privacy: IdentityPrivacyPrefs::default(),
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
 /// Per-alias local state: drafts, the set of read message ids, a local
 /// snapshot of those messages so the UI can keep displaying them after the
 /// inbox contract has evicted them, and outgoing-message snapshots for the
@@ -178,11 +273,105 @@ pub struct AliasState {
     /// by the number of messages the user has touched.
     #[serde(default)]
     pub deleted: Vec<MessageId>,
+    /// Per-identity Settings buckets (Account, Privacy, AFT). `#[serde(default)]`
+    /// so older serialized state without this field still loads.
+    #[serde(default)]
+    pub settings: IdentitySettings,
+}
+
+/// UI theme preference. `System` follows the OS dark/light setting.
+#[derive(Deserialize, Serialize, PartialEq, Eq, Debug, Clone, Copy, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Theme {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+/// UI density preference. Controls row spacing in the inbox list.
+#[derive(Deserialize, Serialize, PartialEq, Eq, Debug, Clone, Copy, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Density {
+    #[default]
+    Comfortable,
+    Compact,
+}
+
+/// Appearance settings (global, not per-identity).
+#[derive(Deserialize, Serialize, PartialEq, Eq, Debug, Clone)]
+pub struct AppearanceSettings {
+    #[serde(default)]
+    pub theme: Theme,
+    #[serde(default)]
+    pub density: Density,
+    /// Render subject lines in the serif display face.
+    #[serde(default = "default_true")]
+    pub serif_subjects: bool,
+}
+
+impl Default for AppearanceSettings {
+    fn default() -> Self {
+        Self {
+            theme: Theme::default(),
+            density: Density::default(),
+            serif_subjects: true,
+        }
+    }
+}
+
+/// Inbox-folder settings (global). Govern UI grouping / quarantine behavior.
+#[derive(Deserialize, Serialize, PartialEq, Eq, Debug, Clone)]
+pub struct InboxSettings {
+    /// Show drafts inline in the inbox list rather than only in the
+    /// Drafts folder.
+    pub drafts_in_inbox: bool,
+    /// Move messages from senders not in the address book into a
+    /// quarantine folder instead of the inbox.
+    pub quarantine_unknown: bool,
+}
+
+impl Default for InboxSettings {
+    fn default() -> Self {
+        Self {
+            drafts_in_inbox: false,
+            quarantine_unknown: true,
+        }
+    }
+}
+
+/// Advanced / node-connection settings.
+#[derive(Deserialize, Serialize, PartialEq, Eq, Debug, Clone, Default)]
+pub struct AdvancedSettings {
+    /// Use a non-default Freenet node WebSocket endpoint. When false the
+    /// UI talks to the bundled host page's relay.
+    #[serde(default)]
+    pub custom_relay: bool,
+    /// Optional override URL for the Freenet node WebSocket. Used only
+    /// when `custom_relay` is true.
+    #[serde(default)]
+    pub custom_relay_url: String,
+}
+
+/// Global (device-scoped) settings buckets.
+#[derive(Deserialize, Serialize, PartialEq, Eq, Debug, Clone, Default)]
+pub struct GlobalSettings {
+    #[serde(default)]
+    pub appearance: AppearanceSettings,
+    #[serde(default)]
+    pub inbox: InboxSettings,
+    #[serde(default)]
+    pub advanced: AdvancedSettings,
 }
 
 #[derive(Deserialize, Serialize, Debug, Default)]
 pub struct LocalState {
     aliases: HashMap<Alias, AliasState>,
+    /// Device-scoped Settings (Appearance, Inbox/Folders, Advanced).
+    /// `#[serde(default)]` so older serialized state without this field
+    /// still loads.
+    #[serde(default)]
+    settings: GlobalSettings,
 }
 
 impl LocalState {
@@ -237,6 +426,27 @@ impl LocalState {
         self.aliases
             .get(alias)
             .is_some_and(|s| s.deleted.contains(&id))
+    }
+
+    /// Per-identity settings for `alias`. Returns `IdentitySettings::default()`
+    /// for unknown aliases — callers don't need to special-case absence.
+    pub fn identity_settings(&self, alias: &str) -> IdentitySettings {
+        self.aliases
+            .get(alias)
+            .map(|s| s.settings.clone())
+            .unwrap_or_default()
+    }
+
+    /// Device-scoped settings.
+    pub fn global_settings(&self) -> &GlobalSettings {
+        &self.settings
+    }
+
+    /// Mutable global settings. Same caveat as `aliases_mut`: only the UI
+    /// optimistic-update path goes through this; the delegate owns the
+    /// canonical state.
+    pub fn global_settings_mut(&mut self) -> &mut GlobalSettings {
+        &mut self.settings
     }
 }
 
@@ -311,6 +521,19 @@ pub enum LocalStateMsg {
     DeleteMessage {
         alias: Alias,
         msg_id: MessageId,
+    },
+    /// Replace the per-identity Settings bucket for `alias`. The whole
+    /// bucket is sent rather than diffed: the bucket is small (a few
+    /// flags + two strings) and last-write-wins is the right semantic for
+    /// UI-driven preference edits.
+    SetIdentitySettings {
+        alias: Alias,
+        settings: IdentitySettings,
+    },
+    /// Replace the device-scoped Settings (Appearance / Inbox / Advanced).
+    /// Same last-write-wins rationale as `SetIdentitySettings`.
+    SetGlobalSettings {
+        settings: GlobalSettings,
     },
     /// Returns the entire `LocalState` JSON via an `ApplicationMessage`
     /// response. UI filters per active alias.
@@ -463,6 +686,18 @@ impl DelegateInterface for LocalState {
                         {
                             sent.delivery_state = ds;
                         }
+                        store(ctx, &secret_key, &state)?;
+                        Ok(vec![])
+                    }
+                    LocalStateMsg::SetIdentitySettings { alias, settings } => {
+                        let mut state = load_or_default(ctx, &secret_key)?;
+                        state.aliases.entry(alias).or_default().settings = settings;
+                        store(ctx, &secret_key, &state)?;
+                        Ok(vec![])
+                    }
+                    LocalStateMsg::SetGlobalSettings { settings } => {
+                        let mut state = load_or_default(ctx, &secret_key)?;
+                        state.settings = settings;
                         store(ctx, &secret_key, &state)?;
                         Ok(vec![])
                     }
@@ -632,6 +867,92 @@ mod boundary_tests {
         let archived: Vec<_> = back.archived_of("alice").collect();
         assert_eq!(archived.len(), 1);
         assert_eq!(archived[0].1.content.as_str(), "stash");
+    }
+
+    /// `AliasState` written before the Settings feature deserialises with
+    /// default `settings` (Mid1, allow-known on, signature off, etc.).
+    /// Pre-Settings state must keep loading.
+    #[test]
+    fn alias_state_missing_settings_defaults_loaded() {
+        let json = br#"{"drafts":{},"read":[],"kept":{},"sent":{},"archived":{},"deleted":[]}"#;
+        let s: AliasState = serde_json::from_slice(json).expect("should deserialise");
+        assert_eq!(s.settings.aft.required_tier, "Mid1");
+        assert!(s.settings.aft.allow_known);
+        assert!(!s.settings.aft.allow_anon);
+        assert!(s.settings.privacy.verify_on_send);
+        assert!(s.settings.auto_sign);
+    }
+
+    /// `LocalState` written before the global-Settings feature deserialises
+    /// with default appearance / inbox / advanced.
+    #[test]
+    fn local_state_missing_settings_defaults_loaded() {
+        let json = br#"{"aliases":{}}"#;
+        let s: LocalState = serde_json::from_slice(json).expect("should deserialise");
+        assert!(matches!(s.settings.appearance.theme, Theme::System));
+        assert!(s.settings.appearance.serif_subjects);
+        assert!(s.settings.inbox.quarantine_unknown);
+        assert!(!s.settings.advanced.custom_relay);
+    }
+
+    #[test]
+    fn round_trip_identity_settings() {
+        let mut state = LocalState::default();
+        let alias = state.aliases.entry("alice".into()).or_default();
+        alias.settings = IdentitySettings {
+            display_name: "Alice in Wonderland".into(),
+            signature: "— A".into(),
+            auto_sign: false,
+            aft: IdentityAftPrefs {
+                required_tier: "Mid2".into(),
+                allow_known: true,
+                allow_anon: true,
+                bounce_message: "rate-limited".into(),
+            },
+            privacy: IdentityPrivacyPrefs {
+                verify_on_send: false,
+                hide_unsigned: true,
+                pad_length: false,
+                read_receipts: true,
+            },
+        };
+        let bytes = serde_json::to_vec(&state).unwrap();
+        let back = LocalState::try_from(bytes.as_slice()).unwrap();
+        let s = back.identity_settings("alice");
+        assert_eq!(s.display_name, "Alice in Wonderland");
+        assert!(!s.auto_sign);
+        assert_eq!(s.aft.required_tier, "Mid2");
+        assert!(s.aft.allow_anon);
+        assert!(s.privacy.hide_unsigned);
+    }
+
+    #[test]
+    fn round_trip_global_settings() {
+        let mut state = LocalState::default();
+        *state.global_settings_mut() = GlobalSettings {
+            appearance: AppearanceSettings {
+                theme: Theme::Dark,
+                density: Density::Compact,
+                serif_subjects: false,
+            },
+            inbox: InboxSettings {
+                drafts_in_inbox: true,
+                quarantine_unknown: false,
+            },
+            advanced: AdvancedSettings {
+                custom_relay: true,
+                custom_relay_url: "ws://localhost:7510".into(),
+            },
+        };
+        let bytes = serde_json::to_vec(&state).unwrap();
+        let back = LocalState::try_from(bytes.as_slice()).unwrap();
+        let g = back.global_settings();
+        assert!(matches!(g.appearance.theme, Theme::Dark));
+        assert!(matches!(g.appearance.density, Density::Compact));
+        assert!(!g.appearance.serif_subjects);
+        assert!(g.inbox.drafts_in_inbox);
+        assert!(g.advanced.custom_relay);
+        assert_eq!(g.advanced.custom_relay_url, "ws://localhost:7510");
     }
 
     #[test]
