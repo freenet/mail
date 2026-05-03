@@ -503,6 +503,13 @@ struct SharePendingData {
 
 struct ImportContact(bool);
 
+/// Carries the `Contact` whose verified flag the user is about to flip.
+/// `None` while the modal is closed; populated by the row-level Verify
+/// button. Holding the full `Contact` here (rather than just the alias)
+/// avoids a second lookup against `ADDRESS_BOOK` when we re-send it.
+#[derive(Clone, Default)]
+struct VerifyContactPending(Option<crate::app::address_book::Contact>);
+
 #[derive(Debug, Clone)]
 pub struct LoginController {
     pub updated: bool,
@@ -521,6 +528,7 @@ pub(super) fn IdentifiersList() -> Element {
     use_context_provider(|| Signal::new(ShareContact(false)));
     use_context_provider(|| Signal::new(SharePending::default()));
     use_context_provider(|| Signal::new(ImportContact(false)));
+    use_context_provider(|| Signal::new(VerifyContactPending::default()));
     // ImportForm is shared between the hub flow (toggled by ImportBackup
     // here) and the first-run flow (toggled by ImportId in
     // GetOrCreateIdentity). Provide both contexts so the same component
@@ -530,6 +538,7 @@ pub(super) fn IdentifiersList() -> Element {
     let import_backup_form = use_context::<Signal<ImportBackup>>();
     let share_contact_form = use_context::<Signal<ShareContact>>();
     let import_contact_form = use_context::<Signal<ImportContact>>();
+    let verify_contact_pending = use_context::<Signal<VerifyContactPending>>();
 
     rsx! {
         div { class: "fm-pre",
@@ -551,6 +560,9 @@ pub(super) fn IdentifiersList() -> Element {
             }
             if import_contact_form.read().0 {
                 ImportContactForm {}
+            }
+            if verify_contact_pending.read().0.is_some() {
+                VerifyContactModal {}
             }
         }
     }
@@ -1534,10 +1546,112 @@ fn ImportContactForm() -> Element {
     }
 }
 
+/// Confirm-verification modal. Re-renders the existing six-word
+/// fingerprint and asks the user to tick the same checkbox the import
+/// flow uses. On submit, re-creates the contact with `verified = true`,
+/// reusing the delegate's overwrite-on-same-keys semantics so no new
+/// op type is needed (issue #87).
+#[allow(non_snake_case)]
+fn VerifyContactModal() -> Element {
+    let mut verify_pending = use_context::<Signal<VerifyContactPending>>();
+    let actions = use_coroutine_handle::<NodeAction>();
+    let mut confirmed = use_signal(|| false);
+
+    let pending = verify_pending.read().0.clone();
+    let Some(contact) = pending else {
+        return rsx! {};
+    };
+    let alias_str = contact.local_alias.to_string();
+    let words = contact.fingerprint();
+
+    let close = move |_| {
+        verify_pending.write().0 = None;
+        confirmed.set(false);
+    };
+    let check_class = if *confirmed.read() {
+        "verify-check checked"
+    } else {
+        "verify-check"
+    };
+
+    rsx! {
+        div { class: "veil",
+            onclick: close,
+            div { class: "modal",
+                "data-testid": testid::FM_VERIFY_CONTACT_MODAL,
+                onclick: move |ev| { ev.stop_propagation(); },
+                div { class: "modal-head",
+                    span { class: "modal-title", "Mark contact verified" }
+                    button { class: "modal-x", onclick: close, "✕" }
+                }
+                div { class: "modal-body",
+                    p { class: "field-help", style: "margin: -4px 0 14px;",
+                        "Confirm these six words with {alias_str} through a separate channel — phone, in person, Signal, anything but this app."
+                    }
+                    div { class: "verify-words",
+                        div { class: "verify-words-label",
+                            span { class: "pulse-dot" }
+                            "Fingerprint"
+                        }
+                        div { class: "verify-words-grid",
+                            {
+                                words.iter().enumerate().map(|(i, w)| rsx! {
+                                    div { class: "verify-word",
+                                        span { class: "num", "{i + 1:02}" }
+                                        span { class: "w", "{w}" }
+                                    }
+                                })
+                            }
+                        }
+                    }
+                    label {
+                        class: "{check_class}",
+                        "data-testid": testid::FM_VERIFY_CHECK,
+                        onclick: move |_| {
+                            let v = *confirmed.read();
+                            confirmed.set(!v);
+                        },
+                        div { class: "verify-box",
+                            span { class: "tick", "✓" }
+                        }
+                        div { class: "verify-text",
+                            span { class: "verify-headline",
+                                "I verified these six words with {alias_str}"
+                            }
+                        }
+                    }
+                }
+                div { class: "modal-foot",
+                    button { class: "btn btn-ghost", onclick: close, "Cancel" }
+                    {
+                        let submit_contact = contact.clone();
+                        rsx! {
+                            button {
+                                class: "btn btn-primary",
+                                "data-testid": testid::FM_VERIFY_CONTACT_SUBMIT,
+                                disabled: !*confirmed.read(),
+                                onclick: move |_| {
+                                    let mut updated = submit_contact.clone();
+                                    updated.verified = true;
+                                    actions.send(NodeAction::CreateContact { contact: updated });
+                                    verify_pending.write().0 = None;
+                                    confirmed.set(false);
+                                },
+                                "Mark verified"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Address book section showing all imported contacts.
 #[allow(non_snake_case)]
 fn ContactsSection() -> Element {
     let mut import_contact_form = use_context::<Signal<ImportContact>>();
+    let mut verify_pending = use_context::<Signal<VerifyContactPending>>();
     let actions = use_coroutine_handle::<NodeAction>();
     let contacts = crate::app::address_book::all_contacts();
     let mut login_controller = use_context::<Signal<LoginController>>();
@@ -1597,6 +1711,22 @@ fn ContactsSection() -> Element {
                                     span { class: "badge badge-warn",
                                         "data-testid": "contact-verify-badge",
                                         "⚠ unverified"
+                                    }
+                                }
+                                if !verified {
+                                    {
+                                        let pending_contact = contact.clone();
+                                        rsx! {
+                                            button {
+                                                class: "btn btn-ghost btn-xs",
+                                                title: "Confirm fingerprint with sender and mark verified",
+                                                "data-testid": testid::FM_CONTACT_VERIFY,
+                                                onclick: move |_| {
+                                                    verify_pending.write().0 = Some(pending_contact.clone());
+                                                },
+                                                "Verify"
+                                            }
+                                        }
                                     }
                                 }
                                 button {

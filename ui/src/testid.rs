@@ -95,6 +95,9 @@ pub(crate) const FM_CONTACT_IMPORT: &str = "fm-contact-import";
 pub(crate) const FM_IMPORT_CONTACT_MODAL: &str = "fm-import-contact-modal";
 pub(crate) const FM_IMPORT_FP: &str = "fm-import-fp";
 pub(crate) const FM_IMPORT_SUBMIT: &str = "fm-import-submit";
+pub(crate) const FM_CONTACT_VERIFY: &str = "fm-contact-verify";
+pub(crate) const FM_VERIFY_CONTACT_MODAL: &str = "fm-verify-contact-modal";
+pub(crate) const FM_VERIFY_CONTACT_SUBMIT: &str = "fm-verify-contact-submit";
 
 // Settings
 pub(crate) const FM_SETTINGS_BTN: &str = "fm-settings-btn";
@@ -174,6 +177,9 @@ mod tests {
             ("fmSettingsShell", super::FM_SETTINGS_SHELL),
             ("fmSettingsBack", super::FM_SETTINGS_BACK),
             ("fmSettingsNavItem", super::FM_SETTINGS_NAV_ITEM),
+            ("fmContactVerify", super::FM_CONTACT_VERIFY),
+            ("fmVerifyContactModal", super::FM_VERIFY_CONTACT_MODAL),
+            ("fmVerifyContactSubmit", super::FM_VERIFY_CONTACT_SUBMIT),
         ];
         assert_eq!(
             json.len(),

@@ -745,6 +745,75 @@ test.describe("Import contact verify-check (#52)", () => {
       row.locator('[data-testid="contact-verify-badge"]'),
     ).toContainText("✓");
   });
+
+  // Regression for #87 — promote an unverified contact via the row's
+  // Verify button. The row had no escape from `⚠ unverified` short of
+  // delete-and-reimport, which also dropped the local description.
+  test("Verify button promotes an unverified contact in place (#87)", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await waitForApp(page);
+
+    const contactCard = await page.evaluate(() => {
+      const mlDsaVk = new Array(1952)
+        .fill(0)
+        .map((_, i) => (i * 17 + 31) & 0xff);
+      const mlKemEk = new Array(1184)
+        .fill(0)
+        .map((_, i) => (i * 19 + 37) & 0xff);
+      const card = {
+        version: 1,
+        ml_dsa_vk_bytes: mlDsaVk,
+        ml_kem_ek_bytes: mlKemEk,
+        suggested_alias: "echo",
+        suggested_description: "Verify-after-import test",
+      };
+      return `verify: foo-bar-baz-qux-quux-corge\ncontact://${btoa(
+        JSON.stringify(card),
+      )}`;
+    });
+
+    // Import without ticking the verify checkbox.
+    await page.locator('[data-testid="fm-contact-import"]').click();
+    const importModal = page.locator('[data-testid="fm-import-contact-modal"]');
+    await importModal.locator("textarea").fill(contactCard);
+    await page
+      .locator('input[placeholder="e.g. Alice (work)"]')
+      .fill("echo-test");
+    await page.locator('[data-testid="fm-import-submit"]').click();
+
+    const row = page.locator(
+      '[data-testid="contact-row"][data-alias="echo-test"]',
+    );
+    await expect(row).toBeVisible({ timeout: 5_000 });
+    await expect(
+      row.locator('[data-testid="contact-verify-badge"]'),
+    ).toContainText("⚠");
+
+    // Row exposes a Verify button only while the badge is amber.
+    await row.locator('[data-testid="fm-contact-verify"]').click();
+
+    const verifyModal = page.locator('[data-testid="fm-verify-contact-modal"]');
+    await expect(verifyModal).toBeVisible({ timeout: 5_000 });
+
+    // Submit is disabled until the same six-word checkbox is ticked.
+    const submit = page.locator('[data-testid="fm-verify-contact-submit"]');
+    await expect(submit).toBeDisabled();
+    await page.locator('[data-testid="fm-verify-check"]').click();
+    await expect(submit).toBeEnabled();
+    await submit.click();
+
+    // Modal closes, badge flips to green ✓, and the Verify button is
+    // gone (only rendered for unverified rows).
+    await expect(verifyModal).toBeHidden();
+    await expect(
+      row.locator('[data-testid="contact-verify-badge"]'),
+    ).toContainText("✓", { timeout: 5_000 });
+    await expect(row.locator('[data-testid="fm-contact-verify"]')).toHaveCount(
+      0,
+    );
+  });
 });
 
 test.describe("Restore backup card (#52)", () => {

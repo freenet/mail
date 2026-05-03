@@ -3,44 +3,35 @@
   "fmAvatar": "fm-avatar",
   "fmLogout": "fm-logout",
   "fmSearch": "fm-search",
-
   "fmComposeBtn": "fm-compose-btn",
-
   "fmList": "fm-list",
   "fmMsgCard": "fm-msg-card",
   "fmMsgTime": "fm-msg-time",
   "fmDraftCard": "fm-draft-card",
   "fmSentCard": "fm-sent-card",
   "fmArchiveCard": "fm-archive-card",
-
   "fmDetailTime": "fm-detail-time",
   "fmDetailFingerprint": "fm-detail-fingerprint",
   "fmDetailVerif": "fm-detail-verif",
   "fmAddToAb": "fm-add-to-ab",
   "fmComposeSendingAs": "fm-compose-sending-as",
   "fmSidebarFingerprint": "fm-sidebar-fingerprint",
-
   "fmReply": "fm-reply",
   "fmDelete": "fm-delete",
   "fmArchive": "fm-archive",
-
   "fmSentBody": "fm-sent-body",
   "fmSentDelivery": "fm-sent-delivery",
   "fmSentFingerprint": "fm-sent-fingerprint",
   "fmSentForward": "fm-sent-forward",
   "fmSentReply": "fm-sent-reply",
   "fmSentResend": "fm-sent-resend",
-
   "fmArchiveBody": "fm-archive-body",
   "fmArchiveDelete": "fm-archive-delete",
   "fmArchiveReply": "fm-archive-reply",
   "fmArchiveUnarchive": "fm-archive-unarchive",
-
   "fmComposeSheet": "fm-compose-sheet",
   "fmSend": "fm-send",
-
   "fmToast": "fm-toast",
-
   "fmActionCreate": "fm-action-create",
   "fmActionImport": "fm-action-import",
   "fmCreateAliasInput": "fm-create-alias-input",
@@ -49,7 +40,6 @@
   "fmVerifyCheck": "fm-verify-check",
   "fmRestoreFile": "fm-restore-file",
   "fmRestoreSubmit": "fm-restore-submit",
-
   "fmIdRow": "fm-id-row",
   "fmIdOpen": "fm-id-open",
   "fmIdCreate": "fm-id-create",
@@ -70,5 +60,9 @@
   "fmSettingsBtn": "fm-settings-btn",
   "fmSettingsShell": "fm-settings-shell",
   "fmSettingsBack": "fm-settings-back",
-  "fmSettingsNavItem": "fm-settings-nav-item"
+  "fmSettingsNavItem": "fm-settings-nav-item",
+
+  "fmContactVerify": "fm-contact-verify",
+  "fmVerifyContactModal": "fm-verify-contact-modal",
+  "fmVerifyContactSubmit": "fm-verify-contact-submit"
 }
