@@ -242,8 +242,14 @@ test.describe("Live node E2E", () => {
       await aliceApp.locator('[data-testid="fm-import-submit"]').click();
 
       // ── Alice composes + sends to bob ───────────────────────────
+      // `.first()` defends against duplicate id-rows after the
+      // create-identity reload fallback in `createIdentity` (the
+      // delegate-echoed alias and the locally-created one can both
+      // surface briefly post-reload). Either row points at the same
+      // identity, so opening the first is correct.
       await aliceApp
         .locator('[data-testid="fm-id-row"][data-alias="alice"] [data-testid="fm-id-open"]')
+        .first()
         .click();
       await aliceApp.locator('[data-testid="fm-compose-btn"]').click();
       const aliceSheet = aliceApp.locator('[data-testid="fm-compose-sheet"]');
@@ -270,10 +276,10 @@ test.describe("Live node E2E", () => {
           timeout: 60_000,
         })
         .toBe(true);
-      expect(
-        grepLog(/allocate_token|token allocated/),
-        "expected token allocation log entry",
-      ).toBe(true);
+      // (No `allocate_token` log assertion: that string is never emitted
+      // by freenet-core or the AFT delegate. The wire-level UPDATE_PROPAGATION
+      // poll above plus the bob-inbox visibility assertion below cover the
+      // user-visible behavior we actually care about.)
 
       // ── Bob opens his inbox and sees alice's message ────────────
       // Canonical "bob receives" assertion. Catches every failure mode
@@ -283,6 +289,7 @@ test.describe("Live node E2E", () => {
       // inbox staying empty is the user-visible signal.
       await bobApp
         .locator('[data-testid="fm-id-row"][data-alias="bob"] [data-testid="fm-id-open"]')
+        .first()
         .click();
       await expect(
         bobApp.getByText(/hello bob/i),
