@@ -162,8 +162,10 @@ pub struct KeptMessage {
 #[derive(Deserialize, Serialize, PartialEq, Eq, Debug, Clone)]
 pub struct IdentityAftPrefs {
     /// Minimum tier the identity will accept. Stored as the canonical
-    /// freenet-aft-interface tier name (`Min1`, `Min2`, `Mid1`, `Mid2`,
-    /// `Max1`, `Max2`).
+    /// freenet-aft-interface tier name. The full set is enumerated by
+    /// `freenet_aft_interface::Tier` (`Min1`, `Min5`, `Min10`, `Min30`,
+    /// `Hour1`, `Hour3`, `Hour6`, `Hour12`, `Day1`, `Day7`, `Day15`,
+    /// `Day30`, `Day90`, `Day180`, `Day365`).
     pub required_tier: String,
     /// Accept messages from contacts in the address book regardless of tier.
     pub allow_known: bool,
@@ -176,7 +178,7 @@ pub struct IdentityAftPrefs {
 impl Default for IdentityAftPrefs {
     fn default() -> Self {
         Self {
-            required_tier: "Mid1".to_string(),
+            required_tier: "Day1".to_string(),
             allow_known: true,
             allow_anon: false,
             bounce_message: String::new(),
@@ -231,6 +233,11 @@ pub struct IdentitySettings {
     pub aft: IdentityAftPrefs,
     #[serde(default)]
     pub privacy: IdentityPrivacyPrefs,
+    /// Unix millis of the most recent successful key-bundle export. `None`
+    /// means the identity has never been backed up on this device — the
+    /// Settings UI surfaces an amber banner in that case.
+    #[serde(default)]
+    pub last_backup_at: Option<i64>,
 }
 
 impl Default for IdentitySettings {
@@ -241,6 +248,7 @@ impl Default for IdentitySettings {
             auto_sign: true,
             aft: IdentityAftPrefs::default(),
             privacy: IdentityPrivacyPrefs::default(),
+            last_backup_at: None,
         }
     }
 }
@@ -869,14 +877,24 @@ mod boundary_tests {
         assert_eq!(archived[0].1.content.as_str(), "stash");
     }
 
+    /// `IdentitySettings` written before the `last_backup_at` field landed
+    /// loads with `last_backup_at = None`. Verifies the new field is
+    /// additive, not a breaking change.
+    #[test]
+    fn identity_settings_missing_last_backup_defaults_none() {
+        let json = br#"{"display_name":"","signature":"","auto_sign":true,"aft":{"required_tier":"Day1","allow_known":true,"allow_anon":false,"bounce_message":""},"privacy":{"verify_on_send":true,"hide_unsigned":false,"pad_length":true,"read_receipts":false}}"#;
+        let s: IdentitySettings = serde_json::from_slice(json).expect("should deserialise");
+        assert_eq!(s.last_backup_at, None);
+    }
+
     /// `AliasState` written before the Settings feature deserialises with
-    /// default `settings` (Mid1, allow-known on, signature off, etc.).
+    /// default `settings` (Day1, allow-known on, signature off, etc.).
     /// Pre-Settings state must keep loading.
     #[test]
     fn alias_state_missing_settings_defaults_loaded() {
         let json = br#"{"drafts":{},"read":[],"kept":{},"sent":{},"archived":{},"deleted":[]}"#;
         let s: AliasState = serde_json::from_slice(json).expect("should deserialise");
-        assert_eq!(s.settings.aft.required_tier, "Mid1");
+        assert_eq!(s.settings.aft.required_tier, "Day1");
         assert!(s.settings.aft.allow_known);
         assert!(!s.settings.aft.allow_anon);
         assert!(s.settings.privacy.verify_on_send);
@@ -915,6 +933,7 @@ mod boundary_tests {
                 pad_length: false,
                 read_receipts: true,
             },
+            last_backup_at: Some(1_700_000_000_000),
         };
         let bytes = serde_json::to_vec(&state).unwrap();
         let back = LocalState::try_from(bytes.as_slice()).unwrap();
@@ -924,6 +943,7 @@ mod boundary_tests {
         assert_eq!(s.aft.required_tier, "Mid2");
         assert!(s.aft.allow_anon);
         assert!(s.privacy.hide_unsigned);
+        assert_eq!(s.last_backup_at, Some(1_700_000_000_000));
     }
 
     #[test]

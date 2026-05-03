@@ -55,7 +55,8 @@ fn use_global_settings() -> GlobalSettings {
 #[allow(non_snake_case)]
 pub(crate) fn SettingsShell() -> Element {
     let mut menu_selection = use_context::<Signal<menu::MenuSelection>>();
-    let user = use_context::<Signal<User>>();
+    let mut user = use_context::<Signal<User>>();
+    let mut inbox = use_context::<Signal<crate::app::InboxView>>();
 
     let screen = menu_selection
         .read()
@@ -77,10 +78,23 @@ pub(crate) fn SettingsShell() -> Element {
             [words[0], words[1], words[2]]
         })
         .unwrap_or([""; 3]);
-    let _fp_short = format!(
-        "{} · {} · {}",
-        fp_short_segs[0], fp_short_segs[1], fp_short_segs[2]
-    );
+
+    let mut switcher_open = use_signal(|| false);
+
+    // Snapshot the identity list so the popover renders something stable
+    // even if the User signal changes while it's open.
+    let switcher_rows: Vec<(crate::app::UserId, String, String)> = user
+        .read()
+        .identities
+        .iter()
+        .map(|id| {
+            let words =
+                address_book::fingerprint_words(&id.ml_dsa_vk_bytes(), &id.ml_kem_ek_bytes());
+            let fp = format!("{} · {} · {}", words[0], words[1], words[2]);
+            (id.id, id.alias.to_string(), fp)
+        })
+        .collect();
+    let active_user_id = user.read().logged_id().map(|i| i.id);
 
     rsx! {
         div { class: "fm-settings", "data-testid": testid::FM_SETTINGS_SHELL,
@@ -93,13 +107,64 @@ pub(crate) fn SettingsShell() -> Element {
                     "Back to mailbox"
                 }
                 div { class: "fm-set-title", "Settings" }
-                div { class: "fm-set-ident",
+                button {
+                    class: "fm-set-ident",
+                    style: "all: unset; display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 8px; cursor: pointer;",
+                    "data-testid": "fm-settings-ident-switcher",
+                    "aria-haspopup": "listbox",
+                    "aria-expanded": "{switcher_open()}",
+                    onclick: move |_| {
+                        let cur = *switcher_open.read();
+                        switcher_open.set(!cur);
+                    },
                     span { class: "fm-set-ident-av", "{initial}" }
                     div { class: "fm-set-ident-text",
                         span { class: "fm-set-ident-name", "{alias}" }
                         span { class: "fm-set-ident-meta", "{fp_short_segs[0]} · {fp_short_segs[1]}…" }
                     }
                     span { class: "fm-set-ident-caret", "▾" }
+                }
+                if switcher_open() {
+                    div {
+                        class: "fm-set-ident-pop",
+                        role: "listbox",
+                        style: "border: 1px solid var(--line); border-radius: 10px; background: #fff; box-shadow: 0 8px 24px rgba(0,0,0,0.08); margin: 4px 0 12px; overflow: hidden;",
+                        for (uid, row_alias, fp) in switcher_rows.iter() {
+                            {
+                                let uid = *uid;
+                                let is_active = active_user_id == Some(uid);
+                                let row_alias_owned = row_alias.clone();
+                                let row_initial = row_alias_owned
+                                    .chars()
+                                    .next()
+                                    .map(|c| c.to_string())
+                                    .unwrap_or_else(|| "·".into());
+                                let row_fp = fp.clone();
+                                let bg = if is_active { "var(--bg-soft)" } else { "#fff" };
+                                let style = format!(
+                                    "all: unset; display: flex; gap: 10px; align-items: center; width: 100%; padding: 8px 12px; cursor: pointer; background: {bg};",
+                                );
+                                rsx! {
+                                    button {
+                                        key: "{uid:?}",
+                                        role: "option",
+                                        "aria-selected": "{is_active}",
+                                        style: "{style}",
+                                        onclick: move |_| {
+                                            user.write().set_logged_id(uid);
+                                            inbox.write().set_active_id(uid);
+                                            switcher_open.set(false);
+                                        },
+                                        span { class: "fm-set-ident-av", "{row_initial}" }
+                                        div { style: "display: flex; flex-direction: column;",
+                                            span { style: "font-weight: 500;", "{row_alias_owned}" }
+                                            span { style: "font-family: 'Geist Mono', monospace; font-size: 11px; color: var(--ink3);", "{row_fp}" }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
                 NavBlock { current: screen }
             }
@@ -323,10 +388,14 @@ fn ScrAccount() -> Element {
     let display_name = ident.display_name.clone();
     let signature = ident.signature.clone();
     let auto_sign = ident.auto_sign;
-    // Backups not yet wired — treat every identity as un-backed-up so the
-    // amber banner shows. Real value will read from a per-identity local
-    // record once #51 lands.
-    let backed_up = false;
+    let last_backup_at = ident.last_backup_at;
+    let backed_up = last_backup_at.is_some();
+    let last_backup_label = match last_backup_at {
+        Some(ms) => chrono::DateTime::from_timestamp_millis(ms)
+            .map(|dt| dt.format("%Y-%m-%d %H:%M UTC").to_string())
+            .unwrap_or_else(|| format!("{ms}")),
+        None => "Never".to_string(),
+    };
 
     let alias_key_dn = alias_key.clone();
     let ident_dn = ident.clone();
@@ -350,6 +419,36 @@ fn ScrAccount() -> Element {
         local_state::persist_identity_settings(alias_key_as.clone(), next);
     };
 
+    // Back-up: serialise the active identity to JSON, trigger a browser
+    // download, then stamp `last_backup_at` so the amber banner stops
+    // showing and the "Last backup" row updates.
+    let user_for_backup = user;
+    let alias_key_bk = alias_key.clone();
+    let ident_bk = ident.clone();
+    let on_backup = move |_| {
+        let Some(active) = user_for_backup.read().logged_id().cloned() else {
+            return;
+        };
+        let backup = crate::app::login::IdentityBackup::from_identity(&active);
+        let Ok(json) = serde_json::to_vec_pretty(&backup) else {
+            return;
+        };
+        let fname = format!("freenet-identity-{}.json", &*active.alias);
+        crate::app::login::trigger_browser_download(&fname, &json);
+        let mut next = ident_bk.clone();
+        next.last_backup_at = Some(chrono::Utc::now().timestamp_millis());
+        local_state::persist_identity_settings(alias_key_bk.clone(), next);
+    };
+
+    // Restore: route through the existing import-backup modal; close
+    // settings so the modal is visible over the login pane.
+    let mut menu_selection = use_context::<Signal<menu::MenuSelection>>();
+    let mut import_backup = use_context::<Signal<crate::app::login::ImportBackup>>();
+    let on_restore = move |_| {
+        menu_selection.write().close_settings();
+        import_backup.write().0 = true;
+    };
+
     rsx! {
         div { class: "fm-set-inner",
             p { class: "fm-set-lede",
@@ -363,7 +462,11 @@ fn ScrAccount() -> Element {
                         " If you lose this browser's storage, the keys go with it. There is no server-side recovery."
                     }
                     div { class: "fm-banner-actions",
-                        button { class: "fm-btn-primary", "Back up now" }
+                        button {
+                            class: "fm-btn-primary",
+                            onclick: on_backup.clone(),
+                            "Back up now"
+                        }
                     }
                 }
             }
@@ -412,46 +515,21 @@ fn ScrAccount() -> Element {
                     div { class: "fm-key-card",
                         div { class: "fm-key-card-head",
                             span { class: "fm-key-card-name", "ML-DSA-65 · signing" }
-                            span { class: "fm-key-card-tag", "verified" }
                         }
                         div { style: "display: flex; gap: 14px; align-items: center;",
                             FpGrid { seed: vk_seed.clone() }
                             div { class: "fm-key-card-fp", "{fp_short}" }
                         }
-                        div { class: "fm-key-card-foot",
-                            div { class: "fm-key-meta-list",
-                                span { "rotates ", span { class: "v", "never" } }
-                            }
-                            div { class: "fm-key-actions",
-                                button { class: "fm-btn-secondary", "Show full key" }
-                                button { class: "fm-btn-secondary", "Copy" }
-                            }
-                        }
                     }
                     div { class: "fm-key-card",
                         div { class: "fm-key-card-head",
                             span { class: "fm-key-card-name", "ML-KEM-768 · encryption" }
-                            span { class: "fm-key-card-tag", "verified" }
                         }
                         div { style: "display: flex; gap: 14px; align-items: center;",
                             FpGrid { seed: format!("{vk_seed}-kem") }
                             div { class: "fm-key-card-fp", "{fp_kem_short}" }
                         }
-                        div { class: "fm-key-card-foot",
-                            div { class: "fm-key-meta-list",
-                                span { "rotates ", span { class: "v", "on demand" } }
-                            }
-                            div { class: "fm-key-actions",
-                                button { class: "fm-btn-secondary", "Show full key" }
-                                button { class: "fm-btn-secondary", "Rotate" }
-                            }
-                        }
                     }
-                }
-                div { class: "fm-sub-row",
-                    span { class: "label", "Fingerprint" }
-                    span { class: "v", "{fp_short}" }
-                    button { class: "fm-btn-secondary", "Show QR" }
                 }
             }
             Card {
@@ -459,21 +537,25 @@ fn ScrAccount() -> Element {
                 sub: "Backups are an encrypted bundle of both keys. There's no server-side recovery; lose this and the alias is gone.",
                 SettingRow {
                     label: "Last backup",
-                    help: "No backup on record. Export one before relying on this identity.",
-                    control: rsx! { button { class: "fm-btn-primary", "Back up now" } },
+                    help: last_backup_label.clone(),
+                    control: rsx! {
+                        button {
+                            class: "fm-btn-primary",
+                            onclick: on_backup,
+                            "Back up now"
+                        }
+                    },
                 }
                 SettingRow {
                     label: "Restore from backup",
                     help: "Replaces the active identity's keys. The current keys will be unrecoverable after this.",
-                    control: rsx! { button { class: "fm-btn-secondary", "Restore…" } },
-                }
-            }
-            Card {
-                title: "Danger zone",
-                SettingRow {
-                    label: "Delete this identity",
-                    help: "Wipes the keypair from this browser. There is no recovery. If you have a backup, you can restore it elsewhere.",
-                    control: rsx! { button { class: "fm-btn-danger", "Delete identity…" } },
+                    control: rsx! {
+                        button {
+                            class: "fm-btn-secondary",
+                            onclick: on_restore,
+                            "Restore…"
+                        }
+                    },
                 }
             }
         }
@@ -518,17 +600,6 @@ fn ScrPrivacy() -> Element {
                     help: "Move messages with no ML-DSA signature directly to a quarantine folder.",
                     control: rsx! { Toggle { on: hide_unsigned, ontoggle: on_hide_unsigned } },
                 }
-                SettingRow {
-                    label: "Auto-accept new keys",
-                    help: "When does a sender's key get pinned as 'known' without an explicit verify?",
-                    control: rsx! {
-                        select { class: "fm-select",
-                            option { value: "never", "Never (manual only)" }
-                            option { value: "known", selected: true, "Only from known senders" }
-                            option { value: "any", "On first message" }
-                        }
-                    },
-                }
             }
             Card {
                 title: "Linkability",
@@ -544,48 +615,35 @@ fn ScrPrivacy() -> Element {
                     control: rsx! { Toggle { on: pad_length, ontoggle: on_pad } },
                 }
             }
-            Card {
-                title: "Identity delegate",
-                sub: "The contract that resolves your alias to keys.",
-                SettingRow {
-                    label: "Delegate",
-                    help: "identity-management/8c4a… · refreshed 4 min ago",
-                    control: rsx! { button { class: "fm-btn-secondary", "Refresh" } },
-                }
-            }
         }
     }
 }
 
+/// One row per real `freenet_aft_interface::Tier`. The "rate" column is
+/// derived from the tier name (1 token per N time-unit) — there is no
+/// `tokens_per_period` getter on the enum, so the period text is encoded
+/// here rather than in `freenet-aft-interface` to keep the AFT crate from
+/// taking on UI vocabulary.
+const TIER_ROWS: &[(&str, &str)] = &[
+    ("Min1", "1 / minute"),
+    ("Min5", "1 / 5 minutes"),
+    ("Min10", "1 / 10 minutes"),
+    ("Min30", "1 / 30 minutes"),
+    ("Hour1", "1 / hour"),
+    ("Hour3", "1 / 3 hours"),
+    ("Hour6", "1 / 6 hours"),
+    ("Hour12", "1 / 12 hours"),
+    ("Day1", "1 / day"),
+    ("Day7", "1 / 7 days"),
+    ("Day15", "1 / 15 days"),
+    ("Day30", "1 / 30 days"),
+    ("Day90", "1 / 90 days"),
+    ("Day180", "1 / 180 days"),
+    ("Day365", "1 / year"),
+];
+
 #[allow(non_snake_case)]
 fn ScrAft() -> Element {
-    let used: u32 = 47;
-    let cap: u32 = 365;
-    let pct = used as f32 / cap as f32;
-    let fill_class = if pct > 0.8 {
-        "fm-quota-fill warn"
-    } else {
-        "fm-quota-fill"
-    };
-    let pct_pct = (pct * 100.0).round() as u32;
-
-    let history: [(&str, f32); 7] = [
-        ("MON", 0.18),
-        ("TUE", 0.45),
-        ("WED", 0.31),
-        ("THU", 0.62),
-        ("FRI", 0.92),
-        ("SAT", 0.08),
-        ("SUN", 0.13),
-    ];
-
-    let tiers: [(&str, &str, &str, &str); 4] = [
-        ("Min1", "3", "/ day", "Lowest tier. Casual identities."),
-        ("Min2", "30", "/ day", "Default. Most users sit here."),
-        ("Mid1", "365", "/ day", "Heavy use. Mailing lists, devs."),
-        ("Mid2", "10K", "/ day", "Power tier. Requires reputation."),
-    ];
-
     let (alias_key, ident) = use_identity_settings();
     let aft_now = ident.aft.clone();
     let selected_tier = aft_now.required_tier.clone();
@@ -621,69 +679,17 @@ fn ScrAft() -> Element {
         next.aft.bounce_message = ev.value();
         local_state::persist_identity_settings(alias_key_b.clone(), next);
     };
-    // Silence unused-variable warnings when only one of the two refs is read.
-    let _ = (&aft_now, &alias_key);
 
     rsx! {
         div { class: "fm-set-inner",
             p { class: "fm-set-lede",
-                "Anti-Flood Tokens rate-limit the network without a server. Recipients require senders to hold a token of at least the recipient's chosen tier. You set both: what you require, and what you carry."
+                "Anti-Flood Tokens rate-limit the network without a server. Recipients require senders to hold a token of at least the recipient's chosen tier. Pick the floor your inbox accepts."
             }
             Card {
-                title: "Today's quota",
-                sub: "Tokens you've used to send. Resets at local midnight.",
-                div { class: "fm-quota",
-                    div { class: "fm-quota-head",
-                        div {
-                            div { class: "fm-quota-num",
-                                "{used} "
-                                span { class: "of", "/" }
-                                " "
-                                span { class: "denom", "{cap}" }
-                            }
-                            div { class: "fm-quota-label", style: "margin-top: 6px",
-                                "Mid1 · 365 / day"
-                            }
-                        }
-                        div { style: "text-align: right",
-                            div { class: "fm-quota-label", "resets in" }
-                            div { style: "font-family: 'Geist Mono', monospace; font-size: 13px; margin-top: 2px;",
-                                "09:28:11"
-                            }
-                        }
-                    }
-                    div { class: "fm-quota-bar",
-                        div { class: "{fill_class}", style: "width: {pct * 100.0}%" }
-                    }
-                    div { class: "fm-quota-foot",
-                        span { "0" }
-                        span { "{pct_pct}% used" }
-                        span { "{cap}" }
-                    }
-                }
-                div { class: "fm-spark",
-                    for (day, v) in history.iter() {
-                        div { key: "{day}", class: "fm-spark-row",
-                            span { class: "day", "{day}" }
-                            span { class: "fm-spark-track",
-                                span { class: "fm-spark-fill", style: "width: {v * 100.0}%" }
-                            }
-                            span { class: "val", "{(v * cap as f32) as u32}" }
-                        }
-                    }
-                }
-                div { class: "fm-sub-row",
-                    span { class: "label", "Notify at" }
-                    span { class: "v", "80% used (toast) · 95% used (modal)" }
-                    span { style: "flex: 1" }
-                    button { class: "fm-btn-secondary", "Edit thresholds" }
-                }
-            }
-            Card {
-                title: "Your tier",
-                sub: "The cap your local node mints against. Higher tiers cost reputation; lower tiers throttle.",
+                title: "Required tier for incoming mail",
+                sub: "Senders must hold a token of this tier or higher to land in your inbox. Lower-tier sends are refused by the inbox contract.",
                 div { class: "fm-tier-grid",
-                    for (id, rate, per, help) in tiers.iter() {
+                    for (id, rate) in TIER_ROWS.iter() {
                         {
                             let id_str = id.to_string();
                             let active = selected_tier == id_str;
@@ -694,14 +700,10 @@ fn ScrAft() -> Element {
                                     key: "{id}",
                                     class: "{cls}",
                                     r#type: "button",
-                                    style: "all: unset; display: flex; flex-direction: column; gap: 4px; cursor: default; border: 1px solid var(--line); border-radius: 11px; padding: 12px 12px 10px; background: #fff;",
+                                    style: "all: unset; display: flex; flex-direction: column; gap: 4px; cursor: pointer; border: 1px solid var(--line); border-radius: 11px; padding: 12px 12px 10px; background: #fff;",
                                     onclick: move |_| on_tier_click(id_str.clone()),
                                     div { class: "fm-tier-name", "{id}" }
-                                    div { class: "fm-tier-rate",
-                                        "{rate}"
-                                        span { class: "unit", " {per}" }
-                                    }
-                                    div { class: "fm-tier-help", "{help}" }
+                                    div { class: "fm-tier-rate", "{rate}" }
                                 }
                             }
                         }
@@ -709,27 +711,7 @@ fn ScrAft() -> Element {
                 }
             }
             Card {
-                title: "Required tier for incoming mail",
-                sub: "Senders must hold a token of this tier or higher to land in your inbox. Lower-tier sends bounce.",
-                SettingRow {
-                    label: "Minimum tier",
-                    help: "Tighten this if you're seeing spam. Loosen it if you're being bounced from senders who don't carry your floor.",
-                    control: {
-                        let on_tier_select = on_tier.clone();
-                        let cur = selected_tier.clone();
-                        rsx! {
-                            select {
-                                class: "fm-select",
-                                value: "{cur}",
-                                onchange: move |ev| on_tier_select(ev.value()),
-                                option { value: "Min1", "Min1" }
-                                option { value: "Min2", "Min2" }
-                                option { value: "Mid1", "Mid1" }
-                                option { value: "Mid2", "Mid2" }
-                            }
-                        }
-                    },
-                }
+                title: "Trust overrides",
                 SettingRow {
                     label: "Allow lower tiers from known contacts",
                     help: "People in your address book bypass the tier floor.",
@@ -778,29 +760,6 @@ fn ScrInbox() -> Element {
             p { class: "fm-set-lede", "How messages move through this inbox." }
             Card { title: "Folders",
                 SettingRow {
-                    label: "Auto-archive after",
-                    help: "Read messages move from Inbox to Archive after this delay. Local rule; doesn't notify the sender.",
-                    control: rsx! {
-                        select { class: "fm-select",
-                            option { value: "never", selected: true, "Never" }
-                            option { value: "7d", "7 days" }
-                            option { value: "30d", "30 days" }
-                            option { value: "90d", "90 days" }
-                        }
-                    },
-                }
-                SettingRow {
-                    label: "Sent retention",
-                    help: "How long to keep sent messages. Sent items also count against your contract storage.",
-                    control: rsx! {
-                        select { class: "fm-select",
-                            option { value: "forever", selected: true, "Forever" }
-                            option { value: "1y", "1 year" }
-                            option { value: "30d", "30 days" }
-                        }
-                    },
-                }
-                SettingRow {
                     label: "Show drafts in Inbox",
                     help: "Off: drafts stay in Drafts only. On: surface them in Inbox above the unread band.",
                     control: rsx! { Toggle { on: drafts_in_inbox, ontoggle: on_drafts_in_inbox } },
@@ -814,42 +773,6 @@ fn ScrInbox() -> Element {
                     help: "Land them in Quarantine instead of Inbox. You'll see a count badge.",
                     control: rsx! { Toggle { on: quarantine_unknown, ontoggle: on_quarantine } },
                 }
-                SettingRow {
-                    label: "Auto-delete from Quarantine after",
-                    help: "Messages here never count against unread. They burn no token from you on receipt.",
-                    control: rsx! {
-                        select { class: "fm-select",
-                            option { value: "7d", "7 days" }
-                            option { value: "14d", selected: true, "14 days" }
-                            option { value: "30d", "30 days" }
-                            option { value: "never", "Never" }
-                        }
-                    },
-                }
-            }
-            Card { title: "Compose defaults",
-                SettingRow {
-                    label: "Save drafts every",
-                    help: "Drafts are written to local IndexedDB only. Lose the browser, lose the draft.",
-                    control: rsx! {
-                        select { class: "fm-select",
-                            option { value: "off", "off" }
-                            option { value: "10s", selected: true, "10s" }
-                            option { value: "30s", "30s" }
-                            option { value: "60s", "60s" }
-                        }
-                    },
-                }
-                SettingRow {
-                    label: "Default reply behavior",
-                    help: "Reply-all is unusual on Freenet — most threads are 1:1.",
-                    control: rsx! {
-                        select { class: "fm-select",
-                            option { value: "reply", selected: true, "Reply (sender only)" }
-                            option { value: "all", "Reply all" }
-                        }
-                    },
-                }
             }
         }
     }
@@ -857,87 +780,130 @@ fn ScrInbox() -> Element {
 
 #[allow(non_snake_case)]
 fn ScrContacts() -> Element {
-    // Stub list — replaced when we wire to the real address book signal.
-    let contacts: &[(&str, &str, &str, &str, &str, &str)] = &[
-        ("alice.freenet", "a", "known", "Mid1", "ce11d8a93f02", ""),
-        (
-            "ian.freenet",
-            "i",
-            "known",
-            "Min2",
-            "7afd220e9c11",
-            "@ml-kem co-author",
-        ),
-        (
-            "freenet-aft",
-            "f",
-            "known",
-            "Mid2",
-            "system",
-            "AFT mint daemon",
-        ),
-        ("kex-bot", "k", "unknown", "Min2", "3f2a1c80de7b", ""),
-        ("ml-dsa-test", "m", "unsigned", "Min1", "9911aa00bb22", ""),
-    ];
+    // Subscribe to address-book changes. The address book bumps an internal
+    // generation when contacts are added / removed; treat the trash button
+    // as an explicit re-render trigger.
+    let mut tick = use_signal(|| 0u32);
+    let mut search = use_signal(String::new);
+
+    let mut menu_selection = use_context::<Signal<menu::MenuSelection>>();
+    let mut import_contact_form = use_context::<Signal<crate::app::login::ImportContact>>();
+    let mut share_contact_form = use_context::<Signal<crate::app::login::ShareContact>>();
+    let mut share_pending = use_context::<Signal<crate::app::login::SharePending>>();
+    let user = use_context::<Signal<User>>();
+
+    let on_import = move |_| {
+        menu_selection.write().close_settings();
+        import_contact_form.write().0 = true;
+    };
+    let on_share = move |_| {
+        let Some(active) = user.read().logged_id().cloned() else {
+            return;
+        };
+        let card = address_book::ContactCard::from_identity(&active);
+        let fp = card.fingerprint().join("-");
+        let share_text = format!("verify: {}\n{}", fp, card.encode());
+        share_pending.set(crate::app::login::SharePending {
+            data: Some(crate::app::login::SharePendingData {
+                alias: active.alias.to_string(),
+                share_text,
+            }),
+        });
+        menu_selection.write().close_settings();
+        share_contact_form.write().0 = true;
+    };
+
+    let needle = search.read().to_lowercase();
+    let _ = tick.read(); // re-run the memo when `tick` bumps.
+    let contacts: Vec<address_book::Contact> = address_book::all_contacts()
+        .into_iter()
+        .filter(|c| {
+            if needle.is_empty() {
+                return true;
+            }
+            c.local_alias.to_lowercase().contains(&needle)
+                || c.fingerprint_short().to_lowercase().contains(&needle)
+                || c.description.to_lowercase().contains(&needle)
+        })
+        .collect();
+
     rsx! {
         div { class: "fm-set-inner",
             p { class: "fm-set-lede",
-                "Your address book. Names you've assigned, trust levels you've accepted, and the tier each contact runs at."
+                "Your address book. Imported via contact cards or share links; identified by their post-quantum fingerprint."
             }
             Card {
                 div { style: "display: flex; align-items: center; gap: 8px; padding: 12px 16px; border-bottom: 1px solid var(--line2);",
-                    input { class: "fm-input", placeholder: "Search contacts, fingerprints…", style: "flex: 1" }
-                    select { class: "fm-select",
-                        option { value: "all", "All trust levels" }
-                        option { value: "known", "Known only" }
-                        option { value: "unknown", "Unknown" }
-                        option { value: "unsigned", "Unsigned" }
+                    input {
+                        class: "fm-input",
+                        placeholder: "Search contacts, fingerprints…",
+                        style: "flex: 1",
+                        value: "{search.read()}",
+                        oninput: move |ev| search.set(ev.value()),
                     }
-                    button { class: "fm-btn-secondary", "Import…" }
-                    button { class: "fm-btn-primary", "Share my card" }
+                    button {
+                        class: "fm-btn-secondary",
+                        onclick: on_import,
+                        "Import…"
+                    }
+                    button {
+                        class: "fm-btn-primary",
+                        onclick: on_share,
+                        "Share my card"
+                    }
                 }
                 div { class: "fm-contact-list",
-                    for (alias, initial, trust, tier, fp, label) in contacts.iter() {
-                        div { key: "{alias}", class: "fm-contact-row",
-                            span { class: "fm-contact-av", "{initial}" }
-                            span { class: "fm-contact-name",
-                                span { class: "alias", "{alias}" }
-                                span { class: "fp", "…{fp}" }
-                                if !label.is_empty() {
-                                    span {
-                                        style: "font-style: italic; color: var(--ink3); font-size: 11.5px; margin-left: 8px;",
-                                        "· {label}"
+                    if contacts.is_empty() {
+                        div { style: "padding: 24px 16px; color: var(--ink3); text-align: center;",
+                            if needle.is_empty() {
+                                "No contacts yet. Use Import… to paste a contact card."
+                            } else {
+                                "No contacts match this search."
+                            }
+                        }
+                    }
+                    for c in contacts.iter() {
+                        {
+                            let alias = c.local_alias.clone();
+                            let initial = alias
+                                .chars()
+                                .next()
+                                .map(|ch| ch.to_string())
+                                .unwrap_or_else(|| "·".into());
+                            let fp_short = c.fingerprint_short();
+                            let fp_full = c.fingerprint_full();
+                            let trust_class = if c.verified { "known" } else { "unknown" };
+                            let trust_label = if c.verified { "verified" } else { "imported" };
+                            let label = c.description.clone();
+                            let alias_for_remove: String = alias.to_string();
+                            rsx! {
+                                div { key: "{alias}", class: "fm-contact-row",
+                                    span { class: "fm-contact-av", "{initial}" }
+                                    span { class: "fm-contact-name",
+                                        span { class: "alias", "{alias}" }
+                                        span { class: "fp", title: "{fp_full}", "{fp_short}" }
+                                        if !label.is_empty() {
+                                            span {
+                                                style: "font-style: italic; color: var(--ink3); font-size: 11.5px; margin-left: 8px;",
+                                                "· {label}"
+                                            }
+                                        }
+                                    }
+                                    span { class: "fm-contact-trust {trust_class}", "{trust_label}" }
+                                    button {
+                                        class: "fm-btn-secondary",
+                                        style: "height: 26px; padding: 0 9px; font-size: 11px;",
+                                        onclick: move |_| {
+                                            address_book::remove_contact(&alias_for_remove);
+                                            let prev = *tick.read();
+                                            tick.set(prev + 1);
+                                        },
+                                        "Remove"
                                     }
                                 }
                             }
-                            span { class: "fm-contact-trust {trust}", "{trust}" }
-                            span { class: "fm-contact-tier", "{tier}" }
-                            button { class: "fm-btn-secondary", style: "height: 26px; padding: 0 9px; font-size: 11px;", "Edit" }
                         }
                     }
-                }
-            }
-            Card { title: "Defaults for new contacts",
-                SettingRow {
-                    label: "Trust on first message",
-                    help: "Sets the starting trust level when someone new sends you a verifiable signed message.",
-                    control: rsx! {
-                        select { class: "fm-select",
-                            option { value: "unknown", selected: true, "unknown" }
-                            option { value: "known", "known" }
-                        }
-                    },
-                }
-                SettingRow {
-                    label: "Format for share-my-card",
-                    help: "What gets copied when you click 'Share my card'.",
-                    control: rsx! {
-                        select { class: "fm-select",
-                            option { value: "contact-uri", selected: true, "contact:// URI (default)" }
-                            option { value: "qr", "QR code" }
-                            option { value: "vcard", "vCard 4.0" }
-                        }
-                    },
                 }
             }
         }
@@ -1020,118 +986,79 @@ fn ScrAppearance() -> Element {
                     control: rsx! { Toggle { on: serif_subjects, ontoggle: on_serif } },
                 }
             }
-            Card { title: "Typography",
-                SettingRow {
-                    label: "UI font size",
-                    help: "13.5px is the design default. 15 is recommended for small displays.",
-                    control: rsx! {
-                        select { class: "fm-select",
-                            option { value: "12", "12" }
-                            option { value: "13.5", selected: true, "13.5" }
-                            option { value: "15", "15" }
-                        }
-                    },
-                }
-            }
         }
     }
+}
+
+/// Read the WebSocket host the UI is currently talking to. The page is
+/// served from the same origin as the gateway (see `ui/src/api.rs`), so
+/// `window.location.host` is the live answer. Falls back to "—" off-WASM
+/// or if the call errors.
+fn current_ws_host() -> String {
+    #[cfg(target_family = "wasm")]
+    {
+        if let Some(window) = web_sys::window()
+            && let Ok(host) = window.location().host()
+        {
+            return host;
+        }
+    }
+    "—".to_string()
 }
 
 #[allow(non_snake_case)]
 fn ScrAdvanced() -> Element {
     let g = use_global_settings();
     let custom_relay = g.advanced.custom_relay;
-    let g_relay = g.clone();
+    let custom_relay_url = g.advanced.custom_relay_url.clone();
+
+    let g_toggle = g.clone();
     let on_custom_relay = move |_| {
-        let mut next = g_relay.clone();
+        let mut next = g_toggle.clone();
         next.advanced.custom_relay = !next.advanced.custom_relay;
         local_state::persist_global_settings(next);
     };
-    let log: &[(&str, &str, &str)] = &[
-        (
-            "14:32:01",
-            "info",
-            "ws connected · 127.0.0.1:7509 · 12ms rtt",
-        ),
-        ("14:32:01", "ok", "inbox contract resolved · 8f3c…d8a93f02"),
-        ("14:31:48", "info", "aft mint cap reached daily quota check"),
-        (
-            "14:31:46",
-            "ok",
-            "burned 1 token · msg sent to alice.freenet",
-        ),
-        ("14:30:12", "warn", "delegate stale (4m); refreshing"),
-        ("14:30:13", "ok", "delegate ok · ml-dsa-65 verified"),
-        (
-            "14:28:55",
-            "info",
-            "web-container hash matches contract-id.txt",
-        ),
-        (
-            "14:28:54",
-            "info",
-            "boot · ui v0.1.4-pre-alpha · wasm 1.4MB",
-        ),
-    ];
+    let g_url = g.clone();
+    let on_custom_relay_url = move |ev: Event<FormData>| {
+        let mut next = g_url.clone();
+        next.advanced.custom_relay_url = ev.value();
+        local_state::persist_global_settings(next);
+    };
+
+    let host = current_ws_host();
+
     rsx! {
         div { class: "fm-set-inner",
             p { class: "fm-set-lede",
-                "Network plumbing, logs, factory reset. Most users will never come here."
+                "Network plumbing. Most users will never come here."
             }
             Card { title: "Node connection",
                 SettingRow {
-                    label: "Local node",
-                    help: "127.0.0.1:7509 · ML-KEM · ML-DSA · WebSocket alive",
-                    control: rsx! { button { class: "fm-btn-secondary", "Reconnect" } },
-                }
-                SettingRow {
-                    label: "Use custom relay",
-                    help: "By default we connect to the local Freenet node. Override only if you know what you're doing.",
-                    control: rsx! { Toggle { on: custom_relay, ontoggle: on_custom_relay } },
-                }
-            }
-            Card {
-                title: "Storage",
-                sub: "Everything is local to this browser. Encrypted on disk only by the OS.",
-                SettingRow {
-                    label: "IndexedDB usage",
-                    help: "Messages, drafts, address book.",
+                    label: "Page origin",
+                    help: "The host this UI was served from. The default WebSocket connects back to the same origin so the gateway's same-origin check passes.",
                     control: rsx! {
-                        span { style: "font-family: 'Geist Mono', monospace; font-size: 11px; color: var(--ink2);", "14.2 MB / 80 MB" }
+                        span { style: "font-family: 'Geist Mono', monospace; font-size: 11.5px; color: var(--ink2);", "{host}" }
                     },
                 }
                 SettingRow {
-                    label: "Clear local cache",
-                    help: "Wipes cached contract state. Forces a full re-sync. Does not touch keys or messages.",
-                    control: rsx! { button { class: "fm-btn-secondary", "Clear cache" } },
+                    label: "Use custom relay",
+                    help: "Override the default WebSocket URL. Takes effect on next reload.",
+                    control: rsx! { Toggle { on: custom_relay, ontoggle: on_custom_relay } },
                 }
-            }
-            Card {
-                title: "Diagnostics",
-                sub: "Last 8 events from this session. Useful when filing issues.",
-                div { class: "fm-term",
-                    for (i, (ts, lvl, txt)) in log.iter().enumerate() {
-                        div { key: "{i}",
-                            span { class: "ts", "{ts}" }
-                            " "
-                            span { class: "lvl-{lvl}", "{lvl.to_uppercase()}" }
-                            " "
-                            span { "{txt}" }
-                        }
+                if custom_relay {
+                    SettingRow {
+                        label: "Relay URL",
+                        help: "Full ws:// or wss:// URL of a Freenet gateway. Empty falls back to the page origin.",
+                        control: rsx! {
+                            input {
+                                class: "fm-input",
+                                style: "width: 320px",
+                                placeholder: "ws://127.0.0.1:7510",
+                                value: "{custom_relay_url}",
+                                oninput: on_custom_relay_url,
+                            }
+                        },
                     }
-                }
-                div { class: "fm-sub-row",
-                    span { class: "label", "Build" }
-                    span { class: "v", "ui v0.1.4-pre-alpha · wasm 1.4 MB" }
-                    span { style: "flex: 1" }
-                    button { class: "fm-btn-secondary", "Copy report" }
-                }
-            }
-            Card { title: "Danger zone",
-                SettingRow {
-                    label: "Factory reset",
-                    help: "Deletes all identities, contacts, messages, and the address book from this browser. Irreversible.",
-                    control: rsx! { button { class: "fm-btn-danger", "Reset everything…" } },
                 }
             }
         }
