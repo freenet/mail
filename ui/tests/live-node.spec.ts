@@ -25,13 +25,26 @@ import { APP_NAME } from "./app-name";
 // HTML; the HTTP API is the contract.
 
 const ISO_GW_PORT = parseInt(process.env.FREENET_ISO_GW_PORT ?? "7510", 10);
+const ISO_PEER_PORT = parseInt(process.env.FREENET_ISO_PEER_PORT ?? "7511", 10);
 const ISO_GW_ORIGIN = `http://127.0.0.1:${ISO_GW_PORT}`;
+const ISO_PEER_ORIGIN = `http://127.0.0.1:${ISO_PEER_PORT}`;
 const GW_LOG_DIR =
   process.env.FREENET_ISO_GW_LOG_DIR ??
   path.join(process.env.HOME ?? "", "freenet-mail-iso/gw/logs");
 const PEER_LOG_DIR =
   process.env.FREENET_ISO_PEER_LOG_DIR ??
   path.join(process.env.HOME ?? "", "freenet-mail-iso/peer/logs");
+
+// FREENET_EMAIL_BASE_URL points at the gw (`http://127.0.0.1:7510/v1/contract/web/<id>/`).
+// Derive the contract id so we can build a peer-side URL for the
+// cross-node test — peer (7511) caches + serves the same contract id
+// once requested.
+const BASE_URL = process.env.FREENET_EMAIL_BASE_URL ?? "";
+const CONTRACT_ID_MATCH = BASE_URL.match(/\/v1\/contract\/web\/([^/]+)\//);
+const CONTRACT_ID = CONTRACT_ID_MATCH ? CONTRACT_ID_MATCH[1] : "";
+const PEER_BASE_URL = CONTRACT_ID
+  ? `${ISO_PEER_ORIGIN}/v1/contract/web/${CONTRACT_ID}/`
+  : "";
 
 test.describe("Live node E2E", () => {
   test.skip(
@@ -159,43 +172,49 @@ test.describe("Live node E2E", () => {
     }
   });
 
-  // Cross-identity send via two browser contexts on the same gateway.
-  // Currently gated: the identity-management delegate is keyed by the
-  // webapp's hardcoded params blob, so two browser contexts share a
-  // single IdentityManagement state on the gateway. Bob's keypair
-  // ends up in alice's ADDRESS_BOOK as Entry::Own, and the import
-  // flow rejects "your own card". The workaround is delegate-level
-  // per-user isolation (different params per context), which is a
-  // larger change tracked separately. Until then this test runs only
-  // when the user opts in via FREENET_LIVE_E2E_SEND so the harness
-  // surfaces the regression for #38/#39/#40 manually but doesn't
-  // gate CI on a known-broken assumption.
-  test("ada → bob via address book → AFT permission → inbox UPDATE", async ({
+  // Cross-node send: alice on gw (7510), bob on peer (7511). Each
+  // node has its own identity-management delegate state, so bob's
+  // keypair stays on the peer and never lands in alice's ADDRESS_BOOK
+  // as Entry::Own — the failure mode that previously gated test 2
+  // behind FREENET_LIVE_E2E_SEND was specific to two browser contexts
+  // on the SAME gateway, which is now an unsupported configuration
+  // for cross-node verification.
+  //
+  // The harness scaffolding (per-node permission pumps, peer URL
+  // derivation from FREENET_EMAIL_BASE_URL) lands here; the
+  // end-to-end "bob receives" assertion is gated on
+  // FREENET_LIVE_E2E_SEND while we debug residual flake (AFT prompt
+  // not consistently surfacing within the 60s window during the
+  // contact-import → send → permission round-trip on a fresh iso).
+  // See #81 follow-up.
+  test("alice → bob across nodes: send + receive end-to-end (#81)", async ({
     browser,
   }) => {
     test.skip(
       !process.env.FREENET_LIVE_E2E_SEND,
-      "send flow blocked on shared identity-management delegate state " +
-        "across browser contexts (see comment); set FREENET_LIVE_E2E_SEND=1 " +
-        "to attempt anyway",
+      "cross-node send still under harness debug; set FREENET_LIVE_E2E_SEND=1 to run",
     );
-    const stopPermissionPump = startPermissionPump();
+    test.skip(
+      !PEER_BASE_URL,
+      "cross-node test requires FREENET_EMAIL_BASE_URL to include the contract id",
+    );
+    const stopGwPump = startPermissionPump(ISO_GW_ORIGIN);
+    const stopPeerPump = startPermissionPump(ISO_PEER_ORIGIN);
     const aliceCtx = await browser.newContext();
     const bobCtx = await browser.newContext();
     const alicePage = await aliceCtx.newPage();
     const bobPage = await bobCtx.newPage();
 
     try {
-      // Bring both browsers up to the freshly-published webapp.
-      await Promise.all([alicePage.goto(""), bobPage.goto("")]);
-
-      // ── Create alice + bob in parallel ──────────────────────────
-      // Use "ada" not "alice": test 1 already minted alice on this
-      // node state, and the identity-management delegate keys aliases
-      // by name — two different keypairs registering under the same
-      // alias on the same node would collide.
+      // alice → gw (uses Playwright `baseURL`); bob → peer (explicit
+      // URL to the same contract id served by the peer node).
       await Promise.all([
-        createIdentity(alicePage, "ada"),
+        alicePage.goto(""),
+        bobPage.goto(PEER_BASE_URL),
+      ]);
+
+      await Promise.all([
+        createIdentity(alicePage, "alice"),
         createIdentity(bobPage, "bob"),
       ]);
 
@@ -210,44 +229,40 @@ test.describe("Live node E2E", () => {
       );
       await shareModal.locator(".modal-x").click();
 
-      // ── Ada imports bob ─────────────────────────────────────────
-      const adaApp = alicePage.frameLocator("iframe#app");
-      await adaApp.locator('[data-testid="fm-contact-import"]').click();
-      const importModal = adaApp.locator('[data-testid="fm-import-contact-modal"]');
+      // ── Alice imports bob ───────────────────────────────────────
+      const aliceApp = alicePage.frameLocator("iframe#app");
+      await aliceApp.locator('[data-testid="fm-contact-import"]').click();
+      const importModal = aliceApp.locator(
+        '[data-testid="fm-import-contact-modal"]',
+      );
       await importModal.locator("textarea").fill(bobCard);
-      await adaApp
+      await aliceApp
         .locator('input[placeholder="e.g. Alice (work)"]')
         .fill("bob");
-      await adaApp.locator('[data-testid="fm-import-submit"]').click();
+      await aliceApp.locator('[data-testid="fm-import-submit"]').click();
 
-      // ── Ada composes + sends to bob ─────────────────────────────
-      // Click the redesigned id-row's Open-inbox button instead of
-      // matching the alias text alone (now non-clickable label text).
-      await adaApp
-        .locator('[data-testid="fm-id-row"][data-alias="ada"] [data-testid="fm-id-open"]')
+      // ── Alice composes + sends to bob ───────────────────────────
+      await aliceApp
+        .locator('[data-testid="fm-id-row"][data-alias="alice"] [data-testid="fm-id-open"]')
         .click();
-      // Redesigned shell: open the compose sheet via the sidebar's
-      // "New message" button, then drive the real <input>/<textarea>
-      // fields. The recipient badge under the To input renders the
-      // fingerprint short form once `address_book::lookup` resolves.
-      await adaApp.locator('[data-testid="fm-compose-btn"]').click();
-      const adaSheet = adaApp.locator('[data-testid="fm-compose-sheet"]');
-      await adaSheet
+      await aliceApp.locator('[data-testid="fm-compose-btn"]').click();
+      const aliceSheet = aliceApp.locator('[data-testid="fm-compose-sheet"]');
+      await aliceSheet
         .locator('input[placeholder="alias or address"]')
         .fill("bob");
       await expect(
-        adaApp.getByTestId("compose-recipient-fingerprint"),
+        aliceApp.getByTestId("compose-recipient-fingerprint"),
         "fingerprint badge resolves for bob",
       ).toBeVisible({ timeout: 15_000 });
-      await adaSheet.locator('input[placeholder="subject"]').fill("hello bob");
-      await adaSheet.locator("textarea.sheet-textarea").fill("body text");
+      await aliceSheet
+        .locator('input[placeholder="subject"]')
+        .fill("hello bob");
+      await aliceSheet.locator("textarea.sheet-textarea").fill("body text");
 
       const sendStart = Date.now();
-      await adaApp.locator('[data-testid="fm-send"]').click();
+      await aliceSheet.locator('[data-testid="fm-send"]').click();
 
-      // PR #38: send must spawn_forever. PR #39: AFT resume after
-      // UserResponse. PR #40: defensive UpdateResponse summary deser.
-      // All three failure modes surface as "no inbox UPDATE on gw".
+      // ── Wire-level: gw shows the UPDATE got broadcast ───────────
       await expect
         .poll(() => grepLog(/UPDATE_PROPAGATION|inbox.*updated/), {
           message:
@@ -255,52 +270,51 @@ test.describe("Live node E2E", () => {
           timeout: 60_000,
         })
         .toBe(true);
-
-      // Sanity: token allocation actually ran.
       expect(
         grepLog(/allocate_token|token allocated/),
         "expected token allocation log entry",
       ).toBe(true);
 
-      // Receiver-side delivery assertion: catches the regressions we previously
-      // missed by only checking gw-side UPDATE_PROPAGATION (#71/#72). The
-      // contract on the receiving node either applies the delta cleanly or
-      // logs an "execution error" / "merge_rejected" trace — either of which
-      // means the message did not reach bob's inbox even though the wire
-      // propagation happened. Asserting on the **negative** signals catches
-      // the failure modes we observed during manual QA without requiring a
-      // second browser context to navigate bob's inbox UI (still gated on
-      // shared-delegate-state — see comment above test).
+      // ── Bob opens his inbox and sees alice's message ────────────
+      // Canonical "bob receives" assertion. Catches every failure mode
+      // a wire-level UPDATE_PROPAGATION grep alone misses (#71 tier
+      // deser, #72 slot collision, #80 missing-related, core #4003
+      // panic): regardless of which layer eats the message, bob's
+      // inbox staying empty is the user-visible signal.
+      await bobApp
+        .locator('[data-testid="fm-id-row"][data-alias="bob"] [data-testid="fm-id-open"]')
+        .click();
+      await expect(
+        bobApp.getByText(/hello bob/i),
+        "bob's inbox must show alice's message subject",
+      ).toBeVisible({ timeout: 60_000 });
+
+      // Negative log asserts — same as before. These add diagnostic
+      // value (when the positive assert fails, the log grep tells
+      // which layer failed) but the positive bob-receives check is
+      // the gate.
       const receiverErrors = grepPeerLog(
         /execution error.*invalid contract update|merge_rejected|delta_apply_failed|missing field `tier`/,
       );
       expect(
         receiverErrors,
-        "expected NO contract-side errors during cross-node delivery " +
-          "(see #71/#72 — slot collision and tier-deser failure modes)",
+        "expected NO contract-side errors during cross-node delivery (#71/#72)",
       ).toBe(false);
-
-      // Regression for #80 (cross-node UPDATE blocked by missing
-      // related contract) + freenet/freenet-core#4003 (executor task
-      // panic on unknown UpdateData variant). Either signal kills
-      // delivery silently — wire propagation looks fine, but the
-      // receiver's contract apply path bails. Grep both the gateway
-      // (sender side, where the executor died in the original repro)
-      // and the peer (receiver side, where missing-related shows up).
       expect(
         grepLog(/task .* panicked|missing related contract/),
-        "no panic / missing-related on gateway (regression for #80 + core #4003)",
+        "no panic / missing-related on gateway (#80 + core #4003)",
       ).toBe(false);
       expect(
         grepPeerLog(/task .* panicked|missing related contract/),
-        "no panic / missing-related on peer (regression for #80 + core #4003)",
+        "no panic / missing-related on peer (#80 + core #4003)",
       ).toBe(false);
 
       console.log(`send round-trip: ${Date.now() - sendStart}ms`);
     } finally {
       await aliceCtx.close().catch(() => {});
       await bobCtx.close().catch(() => {});
-      stopPermissionPump();
+      stopGwPump();
+      stopPeerPump();
     }
   });
 });
@@ -354,39 +368,39 @@ interface PendingPrompt {
  * does the same, but we run headless against the gateway origin
  * (no shell JS in the test page), so the harness has to drive it.
  *
+ * Defaults to the iso gateway origin; pass an explicit origin (e.g.
+ * the peer at 7511) when running cross-node tests.
+ *
  * Returns a stop function that clears the interval.
  */
-function startPermissionPump(): () => void {
+function startPermissionPump(origin: string = ISO_GW_ORIGIN): () => void {
   const seen = new Set<string>();
   const tick = async () => {
     try {
-      const res = await fetch(`${ISO_GW_ORIGIN}/permission/pending`, {
-        headers: { Origin: ISO_GW_ORIGIN },
+      const res = await fetch(`${origin}/permission/pending`, {
+        headers: { Origin: origin },
       });
       if (!res.ok) return;
       const prompts = (await res.json()) as PendingPrompt[];
       for (const p of prompts) {
         if (seen.has(p.nonce)) continue;
         seen.add(p.nonce);
-        const r = await fetch(
-          `${ISO_GW_ORIGIN}/permission/${p.nonce}/respond`,
-          {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              Origin: ISO_GW_ORIGIN,
-            },
-            body: JSON.stringify({ index: 0 }),
+        const r = await fetch(`${origin}/permission/${p.nonce}/respond`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Origin: origin,
           },
-        );
+          body: JSON.stringify({ index: 0 }),
+        });
         if (!r.ok) {
           console.error(
-            `permission respond failed nonce=${p.nonce} status=${r.status}`,
+            `permission respond failed origin=${origin} nonce=${p.nonce} status=${r.status}`,
           );
         }
       }
     } catch {
-      // Pump is best-effort; the gateway can churn briefly during
+      // Pump is best-effort; the node can churn briefly during
       // delegate registration. Errors here surface as test timeouts
       // on the actual assertion.
     }
