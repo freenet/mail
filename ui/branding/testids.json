@@ -65,5 +65,10 @@
   "fmContactImport": "fm-contact-import",
   "fmImportContactModal": "fm-import-contact-modal",
   "fmImportFp": "fm-import-fp",
-  "fmImportSubmit": "fm-import-submit"
+  "fmImportSubmit": "fm-import-submit",
+
+  "fmSettingsBtn": "fm-settings-btn",
+  "fmSettingsShell": "fm-settings-shell",
+  "fmSettingsBack": "fm-settings-back",
+  "fmSettingsNavItem": "fm-settings-nav-item"
 }

@@ -96,6 +96,12 @@ pub(crate) const FM_IMPORT_CONTACT_MODAL: &str = "fm-import-contact-modal";
 pub(crate) const FM_IMPORT_FP: &str = "fm-import-fp";
 pub(crate) const FM_IMPORT_SUBMIT: &str = "fm-import-submit";
 
+// Settings
+pub(crate) const FM_SETTINGS_BTN: &str = "fm-settings-btn";
+pub(crate) const FM_SETTINGS_SHELL: &str = "fm-settings-shell";
+pub(crate) const FM_SETTINGS_BACK: &str = "fm-settings-back";
+pub(crate) const FM_SETTINGS_NAV_ITEM: &str = "fm-settings-nav-item";
+
 #[cfg(test)]
 mod tests {
     /// Guard against drift between the Rust constants in this module and
@@ -164,6 +170,10 @@ mod tests {
             ("fmImportContactModal", super::FM_IMPORT_CONTACT_MODAL),
             ("fmImportFp", super::FM_IMPORT_FP),
             ("fmImportSubmit", super::FM_IMPORT_SUBMIT),
+            ("fmSettingsBtn", super::FM_SETTINGS_BTN),
+            ("fmSettingsShell", super::FM_SETTINGS_SHELL),
+            ("fmSettingsBack", super::FM_SETTINGS_BACK),
+            ("fmSettingsNavItem", super::FM_SETTINGS_NAV_ITEM),
         ];
         assert_eq!(
             json.len(),
