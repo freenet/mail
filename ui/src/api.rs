@@ -1555,6 +1555,11 @@ pub(crate) async fn node_comms(
                 }
             }
             HostResponse::Ok => {}
+            HostResponse::ContractResponse(ContractResponse::SubscribeResponse { .. }) => {
+                // Confirms a subscription bookkeeping ack; nothing to drive
+                // off it on the UI side. Logging produces a noisy "message
+                // not handled" line every time we subscribe to inbox/AFT.
+            }
             other => {
                 crate::log::error(format!("message not handled: {other:?}"), None);
             }
