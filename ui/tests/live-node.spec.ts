@@ -83,34 +83,16 @@ test.describe("Live node E2E", () => {
       await app.locator('[data-testid="fm-create-submit"]').click();
       await app.locator('[data-testid="fm-create-confirm"]').click();
 
-      // Identity should appear in the list within a reasonable window.
-      // First-run keygen on real PQ primitives takes a few seconds;
-      // delegate Init + GetIdentities adds a node round-trip.
-      //
-      // Known race: the create handler dispatches CreateIdentity to
-      // the identity-management delegate but the UI re-render relies
-      // on the delegate response landing back through set_aliases +
-      // login_controller.updated. If the delegate response is in
-      // flight at the wait deadline, the identity is committed on the
-      // node but the home view still shows the empty list. A reload
-      // forces a GetIdentities round-trip and resolves the lag — same
-      // remediation a user would do, much faster than extending the
-      // initial timeout.
+      // Regression for #76: identity must appear without a manual
+      // reload. PR #88 fixed `LoginController.updated` not firing on
+      // CreateIdentity. The reload-tolerant fallback this test used
+      // to carry hid the bug — assert directly that alice is visible
+      // within the first-run keygen + delegate round-trip window.
       const alice = app.locator('[data-testid="fm-id-row"][data-alias="alice"]');
-      try {
-        await expect(alice).toBeVisible({ timeout: 15_000 });
-      } catch {
-        await page.reload();
-        await expect(
-          page.frameLocator("iframe#app").locator(".brand-name").first(),
-        ).toContainText(APP_NAME, { timeout: 60_000 });
-        await expect(
-          page
-            .frameLocator("iframe#app")
-            .locator('[data-testid="fm-id-row"][data-alias="alice"]'),
-          "alice should appear in identity list (after reload fallback)",
-        ).toBeVisible({ timeout: 30_000 });
-      }
+      await expect(
+        alice,
+        "alice must appear without reload (regression for #76)",
+      ).toBeVisible({ timeout: 30_000 });
 
       // ── Step 2: reload-persistence (covers PR #37) ────────────────
       await page.reload();
@@ -141,6 +123,34 @@ test.describe("Live node E2E", () => {
           },
         )
         .toBe(true);
+
+      // ── Step 4: regression for #78 (Init/CreateIdentity race) ─────
+      // The lazy-init delegate fix (6757631) treats a missing secret
+      // as `IdentityManagement::default()`, so a CreateIdentity that
+      // wins the race against Init must NOT log `secret not found`
+      // anymore. Symptom on regression: identity appears to commit
+      // but then doesn't persist; gateway log is the canonical
+      // signal.
+      expect(
+        grepLog(/secret not found/),
+        "no `secret not found` (regression for #78 — Init/CreateIdentity race)",
+      ).toBe(false);
+
+      // ── Step 5: regression for #77 (export download blocked) ──────
+      // The gateway-served webapp lives inside an iframe whose sandbox
+      // omitted `allow-downloads` until freenet-core#4008. Programmatic
+      // `<a download>` clicks were silently blocked by Chromium, so
+      // `fm-id-backup` looked like a no-op. The fix is in the gw shell
+      // HTML; this test asserts the download path actually fires.
+      const downloadPromise = page.waitForEvent("download", { timeout: 5_000 });
+      await appAfterReload
+        .locator('[data-testid="fm-id-row"][data-alias="alice"] [data-testid="fm-id-backup"]')
+        .click();
+      const download = await downloadPromise;
+      expect(
+        download.suggestedFilename(),
+        "backup filename matches freenet-identity-<alias>.json (regression for #77)",
+      ).toMatch(/freenet-identity-.+\.json/);
     } finally {
       stopPermissionPump();
     }
@@ -265,6 +275,22 @@ test.describe("Live node E2E", () => {
         receiverErrors,
         "expected NO contract-side errors during cross-node delivery " +
           "(see #71/#72 — slot collision and tier-deser failure modes)",
+      ).toBe(false);
+
+      // Regression for #80 (cross-node UPDATE blocked by missing
+      // related contract) + freenet/freenet-core#4003 (executor task
+      // panic on unknown UpdateData variant). Either signal kills
+      // delivery silently — wire propagation looks fine, but the
+      // receiver's contract apply path bails. Grep both the gateway
+      // (sender side, where the executor died in the original repro)
+      // and the peer (receiver side, where missing-related shows up).
+      expect(
+        grepLog(/task .* panicked|missing related contract/),
+        "no panic / missing-related on gateway (regression for #80 + core #4003)",
+      ).toBe(false);
+      expect(
+        grepPeerLog(/task .* panicked|missing related contract/),
+        "no panic / missing-related on peer (regression for #80 + core #4003)",
       ).toBe(false);
 
       console.log(`send round-trip: ${Date.now() - sendStart}ms`);
