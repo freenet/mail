@@ -59,6 +59,9 @@ interface TestIds {
   fmImportContactModal: string;
   fmImportFp: string;
   fmImportSubmit: string;
+  fmContactVerify: string;
+  fmVerifyContactModal: string;
+  fmVerifyContactSubmit: string;
 }
 
 export const TID: TestIds = JSON.parse(
