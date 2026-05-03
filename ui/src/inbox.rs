@@ -558,11 +558,7 @@ pub(crate) struct InboxModel {
 }
 
 impl InboxModel {
-    pub async fn load_all(
-        client: &mut WebApiRequestClient,
-        contracts: &[Identity],
-        contract_to_id: &mut HashMap<InboxContract, Identity>,
-    ) {
+    pub async fn load_all(client: &mut WebApiRequestClient, contracts: &[Identity]) {
         async fn subscribe(
             client: &mut WebApiRequestClient,
             contract_key: &ContractKey,
@@ -603,28 +599,18 @@ impl InboxModel {
                     return;
                 }
             };
-            if !contract_to_id.contains_key(&contract_key) {
+            // INBOX_TO_ID is the single source of truth for routing
+            // inbox UpdateNotifications back to an Identity. Subscribe
+            // populates it synchronously before the network round trip
+            // so peer-side state pushes that race the GetResponse can
+            // still find their owner.
+            let already = INBOX_TO_ID.with(|map| map.borrow().contains_key(&contract_key));
+            if !already {
                 let res = subscribe(&mut client, &contract_key, identity).await;
                 node_response_error_handling(client.clone().into(), res, TryNodeAction::LoadInbox)
                     .await;
             }
-            // Insert into the passed HashMap synchronously so the
-            // UpdateNotification handler can route incoming inbox state
-            // to the right identity even before InboxModel::load (an
-            // async ws round-trip) returns. Without this, a fresh
-            // post-reload state push from the network races load() and
-            // gets dropped because the lookup misses the map. Hit symptom
-            // is bug #45 — bob's inbox doesn't show alice's message
-            // until a hard reload, because the reload is what eventually
-            // populates inbox_to_id.
-            contract_to_id
-                .entry(contract_key)
-                .or_insert_with(|| identity.clone());
-            let res = InboxModel::load(&mut client, identity)
-                .await
-                .inspect(|key| {
-                    contract_to_id.entry(*key).or_insert(identity.clone());
-                });
+            let res = InboxModel::load(&mut client, identity).await;
             node_response_error_handling(client.into(), res.map(|_| ()), TryNodeAction::LoadInbox)
                 .await;
         }

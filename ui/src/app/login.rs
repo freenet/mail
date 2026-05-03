@@ -194,27 +194,21 @@ impl Identity {
                         let ml_kem_dk = stored.ml_kem_dk();
                         let alias: Rc<str> = alias.into();
                         let id = UserId::new();
-                        let vk_bytes = Identity::derive_vk_bytes(ml_dsa_signing_key.as_ref());
-                        let ek_bytes = Identity::derive_ek_bytes(&ml_kem_dk);
-                        let identity = Identity {
+                        let identity = Identity::new(
+                            alias.clone(),
                             id,
-                            ml_dsa_signing_key: Arc::clone(&ml_dsa_signing_key),
-                            ml_kem_dk: ml_kem_dk.clone(),
-                            description: String::default(),
-                            alias: alias.clone(),
-                            ek_bytes: ek_bytes.clone(),
-                            vk_bytes: vk_bytes.clone(),
-                        };
+                            String::default(),
+                            Arc::clone(&ml_dsa_signing_key),
+                            ml_kem_dk.clone(),
+                        );
                         user.write().identities.push(identity.clone());
-                        let full = Identity {
-                            alias: alias.clone(),
+                        let full = Identity::new(
+                            alias.clone(),
                             id,
-                            description: info.extra.unwrap_or_default(),
+                            info.extra.unwrap_or_default(),
                             ml_dsa_signing_key,
                             ml_kem_dk,
-                            ek_bytes,
-                            vk_bytes,
-                        };
+                        );
                         crate::app::address_book::register_identity(&full);
                         to_add.push(full);
                         identities.push(identity);

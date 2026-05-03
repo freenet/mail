@@ -8,7 +8,7 @@ use futures::SinkExt;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use crate::DynError;
-use crate::app::{ContractType, InboxController};
+use crate::app::ContractType;
 
 type ClientRequester = UnboundedSender<ClientRequest<'static>>;
 type HostResponses = UnboundedReceiver<Result<HostResponse, ClientError>>;
@@ -437,7 +437,6 @@ mod identity_management {
     pub(super) async fn alias_creation(
         client: &mut WebApiRequestClient,
         identity_key: &[u8],
-        inbox_to_id: &mut HashMap<ContractKey, Identity>,
         token_rec_to_id: &mut HashMap<ContractKey, Identity>,
         user: Signal<crate::app::User>,
         mut login_controller: Signal<crate::app::LoginController>,
@@ -471,7 +470,7 @@ mod identity_management {
                 inbox_key,
                 user,
             );
-            inbox_to_id.insert(inbox_key, identity.clone());
+            crate::inbox::InboxModel::set_contract_identity(inbox_key, identity.clone());
             token_rec_to_id.insert(aft_rec.unwrap(), identity);
             // ALIASES is a thread-local RefCell, not a Signal — mutating it
             // does not wake the Identities component. Bump the controller
@@ -676,13 +675,9 @@ mod identity_management {
 #[cfg(feature = "use-node")]
 pub(crate) async fn node_comms(
     mut rx: UnboundedReceiver<crate::app::NodeAction>,
-    inbox_controller: Signal<crate::app::InboxController>,
     login_controller: Signal<crate::app::LoginController>,
     user: Signal<crate::app::User>,
-    // todo: refactor: instead of passing this arround,
-    // where necessary we could be getting the fresh data via static methods calls to Inbox
-    // and store the information there in thread locals
-    mut inboxes: crate::app::InboxesData,
+    inboxes: crate::app::InboxesData,
 ) {
     // todo don't unwrap inside this function, propagate errors to the UI somehow
     use freenet_email_inbox::Inbox as StoredInbox;
@@ -712,7 +707,6 @@ pub(crate) async fn node_comms(
             .to_vec()
     }
 
-    let mut inbox_contract_to_id = HashMap::new();
     let mut token_contract_to_id = HashMap::new();
     let mut api = WebApi::new()
         .map_err(|err| {
@@ -724,8 +718,7 @@ pub(crate) async fn node_comms(
     let mut req_sender = api.sender_half();
     {
         let contracts = user.read().identities.clone();
-        crate::inbox::InboxModel::load_all(&mut req_sender, &contracts, &mut inbox_contract_to_id)
-            .await;
+        crate::inbox::InboxModel::load_all(&mut req_sender, &contracts).await;
         crate::aft::AftRecords::load_all(&mut req_sender, &contracts, &mut token_contract_to_id)
             .await;
     }
@@ -770,7 +763,6 @@ pub(crate) async fn node_comms(
     async fn handle_action(
         req: NodeAction,
         api: &WebApi,
-        inbox_to_id: &mut HashMap<ContractKey, Identity>,
         token_rec_to_id: &mut HashMap<ContractKey, Identity>,
         user: Signal<crate::app::User>,
         mut login_controller: Signal<crate::app::LoginController>,
@@ -788,7 +780,7 @@ pub(crate) async fn node_comms(
                         .await;
                     }
                     Ok(key) => {
-                        inbox_to_id.entry(key).or_insert(*identity);
+                        InboxModel::set_contract_identity(key, *identity);
                     }
                 }
             }
@@ -814,7 +806,6 @@ pub(crate) async fn node_comms(
                     identity_management::alias_creation(
                         &mut client,
                         &identity_key,
-                        inbox_to_id,
                         token_rec_to_id,
                         user,
                         login_controller,
@@ -924,10 +915,8 @@ pub(crate) async fn node_comms(
 
     async fn handle_response(
         res: Result<HostResponse, ClientError>,
-        inbox_to_id: &mut HashMap<ContractKey, Identity>,
         token_rec_to_id: &mut HashMap<ContractKey, Identity>,
-        inboxes: &mut InboxesData,
-        mut inbox_controller: dioxus::prelude::Signal<InboxController>,
+        mut inboxes: InboxesData,
         mut login_controller: dioxus::prelude::Signal<crate::app::LoginController>,
         user: Signal<crate::app::User>,
     ) {
@@ -940,10 +929,9 @@ pub(crate) async fn node_comms(
                         // FIXME: handle the different possible errors
                         match e {
                             RequestError::ContractError(ContractError::Update { key, .. }) => {
-                                if token_rec_to_id.get(key).is_some() {
+                                if let Some(id) = token_rec_to_id.get(key) {
                                     // FIXME: in case this is for a token record which is PENDING_CONFIRMED_ASSIGNMENTS
                                     // we should reject that pending assignment
-                                    let id = token_rec_to_id.get(key).unwrap();
                                     let alias = id.alias();
                                     crate::log::error(
                                         format!(
@@ -951,10 +939,9 @@ pub(crate) async fn node_comms(
                                         ),
                                         None,
                                     );
-                                } else if inbox_to_id.get(key).is_some() {
+                                } else if let Some(id) = InboxModel::contract_identity(key) {
                                     // FIXME: in case this is for an inbox contract we were trying to update, this means that
                                     // the message wasn't sent and should propgate that to the UI
-                                    let id = inbox_to_id.get(key).unwrap();
                                     let alias = id.alias();
                                     crate::log::error(
                                         format!(
@@ -1005,13 +992,12 @@ pub(crate) async fn node_comms(
                     "GetResponse: key={key} state_size={}",
                     state.as_ref().len()
                 ));
-                match inbox_to_id.remove(&key) {
+                match InboxModel::contract_identity(&key) {
                     Some(identity) => {
                         crate::log::info(format!(
                             "GetResponse: matched inbox key={key} alias={}",
                             identity.alias()
                         ));
-                        // is an inbox contract
                         let parsed: StoredInbox = match serde_json::from_slice(state.as_ref()) {
                             Ok(v) => v,
                             Err(e) => {
@@ -1019,7 +1005,6 @@ pub(crate) async fn node_comms(
                                     format!("GetResponse: StoredInbox deser failed: {e}"),
                                     None,
                                 );
-                                inbox_to_id.insert(key, identity);
                                 return;
                             }
                         };
@@ -1039,7 +1024,6 @@ pub(crate) async fn node_comms(
                                     format!("GetResponse: InboxModel::from_state failed: {e}"),
                                     None,
                                 );
-                                inbox_to_id.insert(key, identity);
                                 return;
                             }
                         };
@@ -1047,44 +1031,24 @@ pub(crate) async fn node_comms(
                             "GetResponse: InboxModel built, {} decrypted messages",
                             updated_model.messages.len()
                         ));
-                        let loaded_models = inboxes.load();
-                        if let Some(pos) = loaded_models.iter().position(|e| {
-                            let x = e.borrow();
-                            x.key == key
-                        }) {
+                        let mut models = inboxes.0.write();
+                        if let Some(pos) = models.iter().position(|e| e.borrow().key == key) {
                             crate::log::debug!(
                                 "loaded inbox {key} with {} messages",
                                 updated_model.messages.len()
                             );
-                            let mut current = (*loaded_models[pos]).borrow_mut();
-                            *current = updated_model;
+                            *models[pos].borrow_mut() = updated_model;
                         } else {
-                            crate::log::debug!("loaded inbox {key}");
-                            let mut with_new = (***loaded_models).to_vec();
-                            std::mem::drop(loaded_models);
-                            with_new.push(Rc::new(RefCell::new(updated_model)));
+                            models.push(Rc::new(RefCell::new(updated_model)));
                             crate::log::debug!(
                                 "loaded inboxes: {keys}",
-                                keys = {
-                                    with_new
-                                        .iter()
-                                        .map(|i| format!("{}", i.borrow().key))
-                                        .collect::<Vec<_>>()
-                                        .join(", ")
-                                }
+                                keys = models
+                                    .iter()
+                                    .map(|i| format!("{}", i.borrow().key))
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
                             );
-                            #[allow(clippy::arc_with_non_send_sync)] // see InboxesData definition
-                            inboxes.store(Arc::new(with_new));
-                            crate::inbox::InboxModel::set_contract_identity(key, identity.clone());
                         }
-                        // Bump the InboxController signal so Dioxus
-                        // components re-render and pick up the new
-                        // messages from the (non-signal-tracked) inboxes
-                        // ArcSwap. Without this the GetResponse silently
-                        // updates state but the UI keeps showing stale
-                        // counts (#80 receiver-side render gap).
-                        inbox_controller.write().updated = true;
-                        inbox_to_id.insert(key, identity);
                     }
                     _ => {
                         match token_rec_to_id.remove(&key) {
@@ -1113,7 +1077,7 @@ pub(crate) async fn node_comms(
                 key,
                 update,
             }) => {
-                match inbox_to_id.remove(&key) {
+                match InboxModel::contract_identity(&key) {
                     Some(identity) => {
                         match update {
                             UpdateData::Delta(delta) => {
@@ -1126,43 +1090,22 @@ pub(crate) async fn node_comms(
                                     key,
                                 )
                                 .unwrap();
-                                let loaded_models = inboxes.load();
-                                let mut pending = Some(updated_model);
-                                for inbox in loaded_models.as_slice() {
-                                    if inbox.clone().borrow().key == key {
-                                        let mut inbox = (**inbox).borrow_mut();
-                                        let controller = &mut *inbox_controller.write();
-                                        controller.updated = true;
-                                        inbox.merge(pending.take().unwrap());
-                                        crate::log::debug!(
-                                            "updated inbox {key} with {} messages",
-                                            inbox.messages.len()
-                                        );
-                                        break;
-                                    }
-                                }
-                                // If the notification arrived before the
-                                // initial GetResponse populated `inboxes`,
-                                // fall back to inserting the model rather
-                                // than panicking. The previous
-                                // `assert!(found)` froze the UI silently
-                                // — the cross-node "bob receives" path
-                                // (#45) routinely hits this race because
-                                // peer-side state push can outrun the
-                                // post-subscribe Get round trip.
-                                if let Some(updated_model) = pending {
-                                    let mut with_new = (***loaded_models).to_vec();
-                                    std::mem::drop(loaded_models);
-                                    with_new.push(Rc::new(RefCell::new(updated_model)));
-                                    #[allow(clippy::arc_with_non_send_sync)]
-                                    inboxes.store(Arc::new(with_new));
-                                    inbox_controller.write().updated = true;
-                                    crate::inbox::InboxModel::set_contract_identity(
-                                        key,
-                                        identity.clone(),
+                                let mut models = inboxes.0.write();
+                                if let Some(pos) =
+                                    models.iter().position(|e| e.borrow().key == key)
+                                {
+                                    let mut inbox = models[pos].borrow_mut();
+                                    inbox.merge(updated_model);
+                                    crate::log::debug!(
+                                        "updated inbox {key} with {} messages",
+                                        inbox.messages.len()
                                     );
+                                } else {
+                                    // Notification raced the initial GetResponse;
+                                    // insert as a fresh entry. Replaces the
+                                    // assert!(found) panic from earlier (#45).
+                                    models.push(Rc::new(RefCell::new(updated_model)));
                                 }
-                                inbox_to_id.insert(key, identity);
                             }
                             UpdateData::State(state) => {
                                 let delta: StoredInbox =
@@ -1174,38 +1117,20 @@ pub(crate) async fn node_comms(
                                     key,
                                 )
                                 .unwrap();
-                                let loaded_models = inboxes.load();
-                                let mut pending = Some(updated_model);
-                                for inbox in loaded_models.as_slice() {
-                                    if inbox.clone().borrow().key == key {
-                                        let mut inbox = (**inbox).borrow_mut();
-                                        let controller = &mut *inbox_controller.write();
-                                        controller.updated = true;
-                                        *inbox = pending.take().unwrap();
-                                        crate::log::debug!(
-                                            "updated inbox {key} (whole state) with {} messages",
-                                            inbox.messages.len()
-                                        );
-                                        break;
-                                    }
-                                }
-                                if let Some(updated_model) = pending {
-                                    let mut with_new = (***loaded_models).to_vec();
-                                    std::mem::drop(loaded_models);
-                                    with_new.push(Rc::new(RefCell::new(updated_model)));
-                                    #[allow(clippy::arc_with_non_send_sync)]
-                                    inboxes.store(Arc::new(with_new));
-                                    inbox_controller.write().updated = true;
-                                    crate::inbox::InboxModel::set_contract_identity(
-                                        key,
-                                        identity.clone(),
+                                let mut models = inboxes.0.write();
+                                if let Some(pos) =
+                                    models.iter().position(|e| e.borrow().key == key)
+                                {
+                                    let mut inbox = models[pos].borrow_mut();
+                                    *inbox = updated_model;
+                                    crate::log::debug!(
+                                        "updated inbox {key} (whole state) with {} messages",
+                                        inbox.messages.len()
                                     );
+                                } else {
+                                    models.push(Rc::new(RefCell::new(updated_model)));
                                 }
-                                inbox_to_id.insert(key, identity);
                             }
-                            // UpdateData::StateAndDelta { .. } => {
-                            //     crate::log::error("recieved update state delta", None);
-                            // }
                             _ => unreachable!(),
                         }
                     }
@@ -1332,7 +1257,6 @@ pub(crate) async fn node_comms(
                         identity_management::alias_creation(
                             &mut client,
                             &private_key,
-                            inbox_to_id,
                             token_rec_to_id,
                             user,
                             login_controller,
@@ -1367,7 +1291,6 @@ pub(crate) async fn node_comms(
                         identity_management::alias_creation(
                             &mut client,
                             &private_key,
-                            inbox_to_id,
                             token_rec_to_id,
                             user,
                             login_controller,
@@ -1418,7 +1341,6 @@ pub(crate) async fn node_comms(
                             identity_management::alias_creation(
                                 &mut client,
                                 &key,
-                                inbox_to_id,
                                 token_rec_to_id,
                                 user,
                                 login_controller,
@@ -1474,12 +1396,7 @@ pub(crate) async fn node_comms(
                                         // delegate registration on this session
                                         // (so assign_token finds it).
                                         if !new_ids.is_empty() {
-                                            InboxModel::load_all(
-                                                &mut client,
-                                                &new_ids,
-                                                inbox_to_id,
-                                            )
-                                            .await;
+                                            InboxModel::load_all(&mut client, &new_ids).await;
                                             AftRecords::load_all(
                                                 &mut client,
                                                 &new_ids,
@@ -1612,10 +1529,8 @@ pub(crate) async fn node_comms(
                 let Some(res) = r else { panic!("async action ch closed") };
                 handle_response(
                     res,
-                    &mut inbox_contract_to_id,
                     &mut token_contract_to_id,
-                    &mut inboxes,
-                    inbox_controller,
+                    inboxes,
                     login_controller,
                     user
                 )
@@ -1623,7 +1538,7 @@ pub(crate) async fn node_comms(
             }
             req = rx.next() => {
                 let Some(req) = req else { panic!("async action ch closed") };
-                handle_action(req, &api, &mut inbox_contract_to_id, &mut token_contract_to_id, user, login_controller).await;
+                handle_action(req, &api, &mut token_contract_to_id, user, login_controller).await;
             }
             req = api.requests.next() => {
                 let Some(req) = req else { panic!("request ch closed") };

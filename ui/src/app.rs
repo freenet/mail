@@ -5,7 +5,6 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::{borrow::Cow, cell::RefCell, rc::Rc};
 
-use arc_swap::ArcSwap;
 use chrono::Utc;
 use dioxus::prelude::*;
 use freenet_stdlib::prelude::ContractKey;
@@ -99,11 +98,9 @@ impl Display for ContractType {
 pub(crate) fn app() -> Element {
     use_context_provider(|| Signal::new(login::LoginController::new()));
     let login_controller = use_context::<Signal<login::LoginController>>();
-    // Initialize and fetch shared state for User, InboxController, and InboxView
+    // Initialize and fetch shared state for User and InboxView.
     use_context_provider(|| Signal::new(User::new()));
     let user = use_context::<Signal<User>>();
-    use_context_provider(|| Signal::new(InboxController::new()));
-    let inbox_controller = use_context::<Signal<InboxController>>();
     use_context_provider(|| Signal::new(InboxView::new()));
     let inbox = use_context::<Signal<InboxView>>();
     use_context_provider(InboxesData::new);
@@ -112,20 +109,16 @@ pub(crate) fn app() -> Element {
     #[cfg(all(feature = "use-node", not(feature = "no-sync")))]
     {
         let _sync: Coroutine<NodeAction> = use_coroutine(move |rx| {
-            let inbox_controller = inbox_controller;
             let login_controller = login_controller;
             let user = user;
-            let inbox_data = inbox_data.clone();
-            let fut =
-                crate::api::node_comms(rx, inbox_controller, login_controller, user, inbox_data)
-                    .map(|_| Ok(JsValue::NULL));
+            let fut = crate::api::node_comms(rx, login_controller, user, inbox_data)
+                .map(|_| Ok(JsValue::NULL));
             let _ = wasm_bindgen_futures::future_to_promise(fut);
             async {}.boxed_local()
         });
     }
     #[cfg(any(not(feature = "use-node"), feature = "no-sync"))]
     {
-        let _ = inbox_controller;
         let _ = inbox_data;
         let mut login_ctl = login_controller;
         let _sync: Coroutine<NodeAction> =
@@ -197,25 +190,20 @@ pub(crate) fn app() -> Element {
     }
 }
 
-#[derive(Clone)]
-// `Arc<ArcSwap<..>>` over `Rc<RefCell<InboxModel>>` is intentional: the UI is
-// single-threaded (wasm) and `ArcSwap` requires `Arc`, so the non-Send inner
-// type is load-bearing and can't be swapped for an `Rc`.
-#[allow(clippy::arc_with_non_send_sync)]
-pub(crate) struct InboxesData(Arc<ArcSwap<Vec<Rc<RefCell<InboxModel>>>>>);
+/// Reactive store of loaded inbox models. Mirror of freenet-river's
+/// `ROOMS` Signal pattern (issue #101). Wrapping a `Signal` rather than
+/// an `ArcSwap` means component reads (`inboxes.read()`) auto-subscribe
+/// for re-render on writes — no separate bump-signal needed.
+#[derive(Clone, Copy)]
+pub(crate) struct InboxesData(pub(crate) Signal<Vec<Rc<RefCell<InboxModel>>>>);
 
 impl InboxesData {
-    #[allow(clippy::arc_with_non_send_sync)]
     pub fn new() -> Self {
-        Self(Arc::new(ArcSwap::from_pointee(vec![])))
+        Self(Signal::new(vec![]))
     }
-}
 
-impl std::ops::Deref for InboxesData {
-    type Target = Arc<ArcSwap<Vec<Rc<RefCell<InboxModel>>>>>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
+    pub fn snapshot(&self) -> Vec<Rc<RefCell<InboxModel>>> {
+        self.0.read().clone()
     }
 }
 
@@ -224,11 +212,6 @@ pub struct InboxView {
     active_id: Rc<RefCell<UserId>>,
     /// loaded messages for the currently selected `active_id`
     messages: Rc<RefCell<Vec<Message>>>,
-}
-
-#[derive(Debug, Clone)]
-pub struct InboxController {
-    pub updated: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -247,12 +230,6 @@ impl std::ops::Deref for UserId {
 
     fn deref(&self) -> &Self::Target {
         &self.0
-    }
-}
-
-impl InboxController {
-    pub fn new() -> Self {
-        Self { updated: false }
     }
 }
 
@@ -401,7 +378,7 @@ impl InboxView {
         #[cfg(not(all(feature = "example-data", not(feature = "use-node"))))]
         {
             // FIXME: indexing by id fails cause all not aliases inboxes has been loaded initially
-            let inbox_data = inbox_data.load_full();
+            let inbox_data = inbox_data.snapshot();
             let mut inbox = inbox_data[**self.active_id.borrow()].borrow_mut();
             inbox.remove_messages(client, ids)
         }
@@ -1164,14 +1141,13 @@ fn Sidebar() -> Element {
 #[allow(non_snake_case)]
 fn MessageList() -> Element {
     let inbox = use_context::<Signal<InboxView>>();
-    let mut controller = use_context::<Signal<InboxController>>();
     let inbox_data = use_context::<InboxesData>();
     let mut menu_selection = use_context::<Signal<menu::MenuSelection>>();
     let user = use_context::<Signal<User>>();
 
     {
         let current_active_id: UserId = user.read().active_id.unwrap();
-        let all_data = inbox_data.load_full();
+        let all_data = inbox_data.snapshot();
         if let Some((current_model, id)) = all_data.iter().find_map(|ib| {
             crate::log::debug!("trying to get identity for {key}", key = &ib.borrow().key);
             let id = crate::inbox::InboxModel::contract_identity(&ib.borrow().key).unwrap();
@@ -1223,10 +1199,6 @@ fn MessageList() -> Element {
             }
             crate::log::debug!("active id: {:?}; emails number: {}", id.alias, emails.len());
         }
-    }
-
-    if controller.read().updated {
-        controller.write().updated = false;
     }
 
     DELAYED_ACTIONS.with(|queue| {
@@ -1868,7 +1840,7 @@ fn OpenMessage(msg: Message) -> Element {
 
     let result = inbox
         .write()
-        .mark_as_read(client.clone(), &email_id, inbox_data.clone())
+        .mark_as_read(client.clone(), &email_id, inbox_data)
         .unwrap();
     DELAYED_ACTIONS.with(|queue| {
         queue.borrow_mut().push(result);
@@ -1951,9 +1923,9 @@ fn OpenMessage(msg: Message) -> Element {
     );
 
     let archive_client = client.clone();
-    let archive_inbox_data = inbox_data.clone();
+    let archive_inbox_data = inbox_data;
     let delete_client = client.clone();
-    let delete_inbox_data = inbox_data.clone();
+    let delete_inbox_data = inbox_data;
     let active_alias = user
         .read()
         .logged_id()
@@ -2062,7 +2034,7 @@ fn OpenMessage(msg: Message) -> Element {
                         }
                         let result = inbox
                             .write()
-                            .remove_messages(archive_client.clone(), &[id], archive_inbox_data.clone())
+                            .remove_messages(archive_client.clone(), &[id], archive_inbox_data)
                             .unwrap();
                         DELAYED_ACTIONS.with(|queue| { queue.borrow_mut().push(result); });
                         menu_selection.write().at_inbox_list();
@@ -2100,7 +2072,7 @@ fn OpenMessage(msg: Message) -> Element {
                         }
                         let result = inbox
                             .write()
-                            .remove_messages(delete_client.clone(), &[id], delete_inbox_data.clone())
+                            .remove_messages(delete_client.clone(), &[id], delete_inbox_data)
                             .unwrap();
                         DELAYED_ACTIONS.with(|queue| { queue.borrow_mut().push(result); });
                         menu_selection.write().at_inbox_list();
