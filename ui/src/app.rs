@@ -566,20 +566,20 @@ impl User {
         });
 
         let identities = vec![
-            Identity {
-                alias: "address1".into(),
-                id: UserId(0),
-                description: "Mock identity (example-data)".into(),
-                ml_dsa_signing_key: ml_dsa0,
-                ml_kem_dk: ml_kem_dk0,
-            },
-            Identity {
-                alias: "address2".into(),
-                id: UserId(1),
-                description: "Mock identity (example-data)".into(),
-                ml_dsa_signing_key: ml_dsa1,
-                ml_kem_dk: ml_kem_dk1,
-            },
+            Identity::new(
+                "address1".into(),
+                UserId(0),
+                "Mock identity (example-data)".into(),
+                ml_dsa0,
+                ml_kem_dk0,
+            ),
+            Identity::new(
+                "address2".into(),
+                UserId(1),
+                "Mock identity (example-data)".into(),
+                ml_dsa1,
+                ml_kem_dk1,
+            ),
         ];
         // Register with the shared ALIASES store so IdentifiersList
         // (which reads from ALIASES, not User.identities) sees them.
@@ -954,6 +954,11 @@ fn matches_search(m: &Message, q: &str) -> bool {
 fn UserInbox() -> Element {
     use_context_provider(|| Signal::new(menu::MenuSelection::default()));
     use_context_provider(|| Signal::new(Option::<String>::None));
+    // SettingsShell.AccountIdentity reads `Signal<ImportBackup>` to drive
+    // its Restore action through the same modal as the login pane. The
+    // login flow also provides this; we re-provide here so Settings can
+    // be opened from inside the inbox without the login pane in scope.
+    use_context_provider(|| Signal::new(crate::app::login::ImportBackup(false)));
 
     let menu_selection = use_context::<Signal<menu::MenuSelection>>();
     let settings_open = menu_selection.read().settings().is_some();
