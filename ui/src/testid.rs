@@ -40,6 +40,7 @@ pub(crate) const FM_COMPOSE_SENDING_AS: &str = "fm-compose-sending-as";
 
 // Sidebar
 pub(crate) const FM_SIDEBAR_FINGERPRINT: &str = "fm-sidebar-fingerprint";
+pub(crate) const FM_SIDEBAR_CONTACTS: &str = "fm-sidebar-contacts";
 
 // Detail / open message
 pub(crate) const FM_REPLY: &str = "fm-reply";
@@ -134,6 +135,7 @@ mod tests {
             ("fmAddToAb", super::FM_ADD_TO_AB),
             ("fmComposeSendingAs", super::FM_COMPOSE_SENDING_AS),
             ("fmSidebarFingerprint", super::FM_SIDEBAR_FINGERPRINT),
+            ("fmSidebarContacts", super::FM_SIDEBAR_CONTACTS),
             ("fmReply", super::FM_REPLY),
             ("fmDelete", super::FM_DELETE),
             ("fmArchive", super::FM_ARCHIVE),
