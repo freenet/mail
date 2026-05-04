@@ -758,6 +758,7 @@ mod menu {
         #[default]
         Account,
         Privacy,
+        #[cfg(feature = "wip-settings")]
         Aft,
         Inbox,
         Contacts,
@@ -770,6 +771,7 @@ mod menu {
             match self {
                 Self::Account => "Account & profile",
                 Self::Privacy => "Privacy & security",
+                #[cfg(feature = "wip-settings")]
                 Self::Aft => "Anti-Flood (AFT)",
                 Self::Inbox => "Inbox & folders",
                 Self::Contacts => "Contacts",
