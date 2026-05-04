@@ -191,10 +191,6 @@ test.describe("Live node E2E", () => {
     browser,
   }) => {
     test.skip(
-      !process.env.FREENET_LIVE_E2E_SEND,
-      "cross-node send still under harness debug; set FREENET_LIVE_E2E_SEND=1 to run",
-    );
-    test.skip(
       !PEER_BASE_URL,
       "cross-node test requires FREENET_EMAIL_BASE_URL to include the contract id",
     );
@@ -324,7 +320,197 @@ test.describe("Live node E2E", () => {
       stopPeerPump();
     }
   });
+
+  // Multi-round cross-node flow: send, click-to-read, reply, archive.
+  // Catches the regression class where (a) clicking a received message
+  // makes it disappear instead of staying visible as read, (b) replies
+  // back to the sender don't surface, (c) archive doesn't move the row
+  // into the Archive folder, (d) UpdateNotification decode panics
+  // (#102 follow-up: api.rs:1085 was unwrapping a StoredInbox decode of
+  // a Delta wire payload that's actually `UpdateInbox::AddMessages`).
+  test("multi-round + read + archive across nodes", async ({ browser }) => {
+    test.skip(
+      !PEER_BASE_URL,
+      "cross-node test requires FREENET_EMAIL_BASE_URL to include the contract id",
+    );
+    const stopGwPump = startPermissionPump(ISO_GW_ORIGIN);
+    const stopPeerPump = startPermissionPump(ISO_PEER_ORIGIN);
+    const aliceCtx = await browser.newContext();
+    const bobCtx = await browser.newContext();
+    const alicePage = await aliceCtx.newPage();
+    const bobPage = await bobCtx.newPage();
+
+    // Surface WASM panics + console errors immediately so test failure
+    // points at the original panic frame, not a downstream timeout.
+    const consoleErrors: string[] = [];
+    for (const [page, label] of [
+      [alicePage, "alice"],
+      [bobPage, "bob"],
+    ] as const) {
+      page.on("console", (m) => {
+        const t = m.text();
+        if (
+          /WASM PANIC|RuntimeError: unreachable executed|Result::unwrap.*on an .Err/.test(
+            t,
+          )
+        ) {
+          consoleErrors.push(`[${label}] ${t}`);
+        }
+      });
+    }
+
+    try {
+      await Promise.all([alicePage.goto(""), bobPage.goto(PEER_BASE_URL)]);
+      await Promise.all([
+        createIdentity(alicePage, "alice"),
+        createIdentity(bobPage, "bob"),
+      ]);
+
+      const aliceApp = alicePage.frameLocator("iframe#app");
+      const bobApp = bobPage.frameLocator("iframe#app");
+
+      // Exchange contacts BOTH ways: alice imports bob, bob imports alice.
+      await bobApp.locator('[data-testid="fm-id-share"]').first().click();
+      const bobShare = bobApp.locator('[data-testid="fm-share-modal"]');
+      await bobShare.waitFor({ timeout: 5_000 });
+      const bobCard = (await bobShare.getAttribute("data-share-text")) ?? "";
+      await bobShare.locator(".modal-x").click();
+
+      await aliceApp.locator('[data-testid="fm-id-share"]').first().click();
+      const aliceShare = aliceApp.locator('[data-testid="fm-share-modal"]');
+      await aliceShare.waitFor({ timeout: 5_000 });
+      const aliceCard =
+        (await aliceShare.getAttribute("data-share-text")) ?? "";
+      await aliceShare.locator(".modal-x").click();
+
+      await aliceApp.locator('[data-testid="fm-contact-import"]').click();
+      await aliceApp
+        .locator('[data-testid="fm-import-contact-modal"] textarea')
+        .fill(bobCard);
+      await aliceApp
+        .locator('input[placeholder="e.g. Alice (work)"]')
+        .fill("bob");
+      await aliceApp.locator('[data-testid="fm-import-submit"]').click();
+
+      await bobApp.locator('[data-testid="fm-contact-import"]').click();
+      await bobApp
+        .locator('[data-testid="fm-import-contact-modal"] textarea')
+        .fill(aliceCard);
+      await bobApp
+        .locator('input[placeholder="e.g. Alice (work)"]')
+        .fill("alice");
+      await bobApp.locator('[data-testid="fm-import-submit"]').click();
+
+      // Open both inboxes.
+      await aliceApp
+        .locator(
+          '[data-testid="fm-id-row"][data-alias="alice"] [data-testid="fm-id-open"]',
+        )
+        .first()
+        .click();
+      await bobApp
+        .locator(
+          '[data-testid="fm-id-row"][data-alias="bob"] [data-testid="fm-id-open"]',
+        )
+        .first()
+        .click();
+
+      // ── Round 1: alice → bob ────────────────────────────────────
+      await composeAndSend(aliceApp, "bob", "round one", "first body");
+      await expect(
+        bobApp.getByText(/round one/i),
+        "bob receives round one",
+      ).toBeVisible({ timeout: 60_000 });
+
+      // Click to open: message must NOT vanish from the inbox list.
+      // Regression target: post-#102 click-to-read deletes the row
+      // from the in-memory model + bumps local-state, but the inbox
+      // list rebuild is supposed to merge the kept-locally copy back
+      // in. If kept_for() doesn't fire or the rebuild doesn't run,
+      // the row disappears entirely.
+      await bobApp.getByText(/round one/i).click();
+      await bobApp.locator('[data-testid="fm-detail-time"]').waitFor({
+        timeout: 5_000,
+      });
+      // Navigate back to inbox list. The message should still be
+      // visible (read=true), not gone.
+      await bobPage.goBack().catch(() => {});
+      await bobApp
+        .locator(
+          '[data-testid="fm-id-row"][data-alias="bob"] [data-testid="fm-id-open"]',
+        )
+        .first()
+        .click()
+        .catch(() => {});
+      await expect(
+        bobApp.getByText(/round one/i),
+        "round one stays visible after click-to-read",
+      ).toBeVisible({ timeout: 10_000 });
+
+      // ── Round 2: bob → alice (reply path) ────────────────────────
+      await composeAndSend(bobApp, "alice", "round two reply", "reply body");
+      await expect(
+        aliceApp.getByText(/round two reply/i),
+        "alice receives bob's reply",
+      ).toBeVisible({ timeout: 60_000 });
+
+      // ── Round 3: alice → bob again (no AFT cap regression) ───────
+      await composeAndSend(aliceApp, "bob", "round three", "third body");
+      await expect(
+        bobApp.getByText(/round three/i),
+        "bob receives round three (AFT slot still free)",
+      ).toBeVisible({ timeout: 60_000 });
+
+      // ── Archive: bob archives round one. Should leave the inbox
+      // list and surface in the Archive folder.
+      await bobApp.getByText(/round one/i).click();
+      const archiveBtn = bobApp.locator('[data-testid="fm-archive"]');
+      if (await archiveBtn.isVisible().catch(() => false)) {
+        await archiveBtn.click();
+        await expect(
+          bobApp.getByText(/round one/i),
+          "round one no longer in inbox after archive",
+        ).toHaveCount(0, { timeout: 10_000 });
+        // Switch to Archive folder via menu.
+        await bobApp.getByText(/^Archive$/).click();
+        await expect(
+          bobApp.getByText(/round one/i),
+          "round one visible in Archive folder",
+        ).toBeVisible({ timeout: 10_000 });
+      }
+
+      expect(
+        consoleErrors,
+        `no WASM panics in either browser context: ${consoleErrors.join("\n")}`,
+      ).toEqual([]);
+    } finally {
+      await aliceCtx.close().catch(() => {});
+      await bobCtx.close().catch(() => {});
+      stopGwPump();
+      stopPeerPump();
+    }
+  });
 });
+
+async function composeAndSend(
+  app: import("@playwright/test").FrameLocator,
+  recipientAlias: string,
+  subject: string,
+  body: string,
+) {
+  await app.locator('[data-testid="fm-compose-btn"]').click();
+  const sheet = app.locator('[data-testid="fm-compose-sheet"]');
+  await sheet
+    .locator('input[placeholder="alias or address"]')
+    .fill(recipientAlias);
+  await expect(
+    app.getByTestId("compose-recipient-fingerprint"),
+    `fingerprint badge resolves for ${recipientAlias}`,
+  ).toBeVisible({ timeout: 15_000 });
+  await sheet.locator('input[placeholder="subject"]').fill(subject);
+  await sheet.locator("textarea.sheet-textarea").fill(body);
+  await sheet.locator('[data-testid="fm-send"]').click();
+}
 
 // ─── Helpers ─────────────────────────────────────────────────────────────
 

@@ -1662,16 +1662,9 @@ fn OpenArchivedMessage(msg_id: u64, msg: mail_local_state::ArchivedMessage) -> E
                     },
                     "Reply"
                 }
-                // Unarchive lives behind issue #60 (inbox contract OwnerInsert
-                // variant). Disabled here so the affordance is visible without
-                // mis-promising round-trippable archives.
-                button {
-                    class: "btn btn-secondary",
-                    "data-testid": testid::FM_ARCHIVE_UNARCHIVE,
-                    disabled: true,
-                    title: "Unarchive requires inbox contract OwnerInsert (#60)",
-                    "Unarchive"
-                }
+                // Unarchive intentionally hidden: blocked on inbox contract
+                // OwnerInsert (#60). Showing a no-op button is more confusing
+                // than no affordance at all.
                 button {
                     class: "btn btn-secondary",
                     "data-testid": testid::FM_ARCHIVE_DELETE,

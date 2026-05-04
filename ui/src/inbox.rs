@@ -697,23 +697,6 @@ impl InboxModel {
         }
     }
 
-    pub fn merge(&mut self, other: InboxModel) {
-        for m in other.messages {
-            if !self
-                .messages
-                .iter()
-                .any(|c| c.content.time == m.content.time)
-            {
-                self.add_received_message(
-                    m.content,
-                    m.token_assignment,
-                    m.sender_vk,
-                    m.signature_valid,
-                );
-            }
-        }
-    }
-
     // TODO: only used when an inbox is created first time when putting the contract
     #[allow(dead_code)]
     fn to_state(&self) -> Result<State<'static>, DynError> {
@@ -771,6 +754,45 @@ impl InboxModel {
             key,
             messages,
         })
+    }
+
+    /// Apply an `UpdateInbox` delta received via UpdateNotification (or
+    /// the cross-node UPDATE_PROPAGATION path) to this in-memory model.
+    /// Decrypts AddMessages and de-dups by `token_assignment.assignment_hash`;
+    /// drops RemoveMessages by hash; ignores ModifySettings (sender-only).
+    pub fn apply_delta(&mut self, ml_kem_dk: &DecapsulationKey<MlKem768>, delta: UpdateInbox) {
+        match delta {
+            UpdateInbox::AddMessages { messages } => {
+                for m in messages {
+                    let hash = m.token_assignment.assignment_hash;
+                    if self
+                        .messages
+                        .iter()
+                        .any(|c| c.token_assignment.assignment_hash == hash)
+                    {
+                        continue;
+                    }
+                    let content = DecryptedMessage::from_stored(ml_kem_dk, m.content.clone());
+                    let signature_valid =
+                        verify_message_signature(&m.content, &m.sender_vk, &m.signature);
+                    self.add_received_message(
+                        content,
+                        m.token_assignment,
+                        m.sender_vk,
+                        signature_valid,
+                    );
+                }
+            }
+            UpdateInbox::RemoveMessages { ids, .. } => {
+                let drop: HashSet<TokenAssignmentHash> = HashSet::from_iter(ids);
+                self.messages
+                    .retain(|m| !drop.contains(&m.token_assignment.assignment_hash));
+            }
+            UpdateInbox::ModifySettings { .. } => {
+                // Settings deltas come from this identity only; ignore on
+                // the receive path.
+            }
+        }
     }
 
     /// This only affects in-memory messages, changes are not persisted.

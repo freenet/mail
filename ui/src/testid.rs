@@ -58,7 +58,6 @@ pub(crate) const FM_SENT_RESEND: &str = "fm-sent-resend";
 pub(crate) const FM_ARCHIVE_BODY: &str = "fm-archive-body";
 pub(crate) const FM_ARCHIVE_DELETE: &str = "fm-archive-delete";
 pub(crate) const FM_ARCHIVE_REPLY: &str = "fm-archive-reply";
-pub(crate) const FM_ARCHIVE_UNARCHIVE: &str = "fm-archive-unarchive";
 
 // Compose
 pub(crate) const FM_COMPOSE_SHEET: &str = "fm-compose-sheet";
@@ -146,7 +145,6 @@ mod tests {
             ("fmArchiveBody", super::FM_ARCHIVE_BODY),
             ("fmArchiveDelete", super::FM_ARCHIVE_DELETE),
             ("fmArchiveReply", super::FM_ARCHIVE_REPLY),
-            ("fmArchiveUnarchive", super::FM_ARCHIVE_UNARCHIVE),
             ("fmComposeSheet", super::FM_COMPOSE_SHEET),
             ("fmSend", super::FM_SEND),
             ("fmToast", super::FM_TOAST),
