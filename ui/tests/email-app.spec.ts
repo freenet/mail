@@ -1094,9 +1094,11 @@ test.describe("Archive folder (#47c)", () => {
     await expect(page.locator(".detail-subj")).toContainText(
       "Welcome to the offline preview",
     );
-    // Unarchive is wired but disabled until #60 lands.
+    // Unarchive button is intentionally hidden (not just disabled)
+    // until #60 lands — the dead affordance was confusing per user
+    // feedback. Assert it's absent rather than disabled.
     const unarchive = page.locator('[data-testid="fm-archive-unarchive"]');
-    await expect(unarchive).toBeDisabled();
+    await expect(unarchive).toHaveCount(0);
   });
 
   test("Delete from Inbox does not produce an Archive entry", async ({
