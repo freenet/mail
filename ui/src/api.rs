@@ -1081,29 +1081,39 @@ pub(crate) async fn node_comms(
                     Some(identity) => {
                         match update {
                             UpdateData::Delta(delta) => {
-                                let delta: StoredInbox =
-                                    serde_json::from_slice(delta.as_ref()).unwrap();
-                                let updated_model = InboxModel::from_state(
-                                    Arc::clone(&identity.ml_dsa_signing_key),
-                                    identity.ml_kem_dk.clone(),
-                                    delta,
-                                    key,
-                                )
-                                .unwrap();
-                                let mut models = inboxes.0.write();
-                                if let Some(pos) = models.iter().position(|e| e.borrow().key == key)
-                                {
-                                    let mut inbox = models[pos].borrow_mut();
-                                    inbox.merge(updated_model);
-                                    crate::log::debug!(
-                                        "updated inbox {key} with {} messages",
-                                        inbox.messages.len()
-                                    );
-                                } else {
-                                    // Notification raced the initial GetResponse;
-                                    // insert as a fresh entry. Replaces the
-                                    // assert!(found) panic from earlier (#45).
-                                    models.push(Rc::new(RefCell::new(updated_model)));
+                                match serde_json::from_slice::<freenet_email_inbox::UpdateInbox>(
+                                    delta.as_ref(),
+                                ) {
+                                    Ok(parsed) => {
+                                        let models = inboxes.0.write();
+                                        if let Some(pos) =
+                                            models.iter().position(|e| e.borrow().key == key)
+                                        {
+                                            let mut inbox = models[pos].borrow_mut();
+                                            inbox.apply_delta(&identity.ml_kem_dk, parsed);
+                                            crate::log::debug!(
+                                                "applied delta to inbox {key} -> {} messages",
+                                                inbox.messages.len()
+                                            );
+                                        } else {
+                                            // Notification raced GetResponse: a
+                                            // Delta on its own can't materialise
+                                            // the inbox (no settings, no key on
+                                            // the wire). The follow-up
+                                            // GetResponse will populate it.
+                                            crate::log::debug!(
+                                                "UpdateNotification(Delta) before GetResponse for {key}; dropping"
+                                            );
+                                        }
+                                    }
+                                    Err(e) => {
+                                        crate::log::error(
+                                            format!(
+                                                "UpdateNotification: failed to decode UpdateInbox delta for {key}: {e}"
+                                            ),
+                                            None,
+                                        );
+                                    }
                                 }
                             }
                             UpdateData::State(state) => {
