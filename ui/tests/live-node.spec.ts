@@ -46,6 +46,11 @@ const PEER_BASE_URL = CONTRACT_ID
   ? `${ISO_PEER_ORIGIN}/v1/contract/web/${CONTRACT_ID}/`
   : "";
 
+// Iso harness wipes state per make-task invocation, but Playwright
+// retries reuse the same iso net — second attempt collides with the
+// first run's AFT slot / identity-management state. Keep this spec
+// single-shot; flake is a real bug, not a transient.
+test.describe.configure({ retries: 0 });
 test.describe("Live node E2E", () => {
   test.skip(
     !process.env.FREENET_EMAIL_BASE_URL?.includes("/v1/contract/web/"),
@@ -239,6 +244,15 @@ test.describe("Live node E2E", () => {
       await aliceApp
         .locator('input[placeholder="e.g. Alice (work)"]')
         .fill("bob");
+      // Tick the "I verified these six words" checkbox so the contact
+      // is stored verified. `verify_on_send` defaults to true, so an
+      // unverified import silently rejects the send (toast: "Recipient
+      // is not verified") and bob never receives — root cause of the
+      // harness-only failure tracked in #105. Checkbox renders only
+      // after `fingerprint_words` resolves from the card.
+      const verifyCheck = aliceApp.locator('[data-testid="fm-verify-check"]');
+      await verifyCheck.waitFor({ timeout: 15_000 });
+      await verifyCheck.click();
       await aliceApp.locator('[data-testid="fm-import-submit"]').click();
 
       // ── Alice composes + sends to bob ───────────────────────────
@@ -404,6 +418,11 @@ test.describe("Live node E2E", () => {
       await aliceApp
         .locator('input[placeholder="e.g. Alice (work)"]')
         .fill("bob");
+      // verify_on_send defaults true; tick checkbox so import is verified
+      // (#105 root cause: silent send rejection on unverified contact).
+      const aliceVerify = aliceApp.locator('[data-testid="fm-verify-check"]');
+      await aliceVerify.waitFor({ timeout: 15_000 });
+      await aliceVerify.click();
       await aliceApp.locator('[data-testid="fm-import-submit"]').click();
 
       await bobApp.locator('[data-testid="fm-contact-import"]').click();
@@ -413,6 +432,9 @@ test.describe("Live node E2E", () => {
       await bobApp
         .locator('input[placeholder="e.g. Alice (work)"]')
         .fill("alice");
+      const bobVerify = bobApp.locator('[data-testid="fm-verify-check"]');
+      await bobVerify.waitFor({ timeout: 15_000 });
+      await bobVerify.click();
       await bobApp.locator('[data-testid="fm-import-submit"]').click();
 
       // Open both inboxes.
