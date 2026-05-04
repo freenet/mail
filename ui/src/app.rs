@@ -1097,6 +1097,19 @@ fn Sidebar() -> Element {
                         })
                 }
             }
+            div { class: "sect-label", "People" }
+            div { class: "nav",
+                button {
+                    class: "nav-item",
+                    "data-testid": testid::FM_SIDEBAR_CONTACTS,
+                    onclick: move |_| {
+                        menu_selection.write().open_settings(menu::SettingsScreen::Contacts);
+                    },
+                    span { class: "icon", "☺" }
+                    span { class: "label", "Contacts" }
+                    span { class: "count", "" }
+                }
+            }
             div { class: "sidebar-bottom",
                 div { class: "conn-card",
                     div { class: "conn-row",
