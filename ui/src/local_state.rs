@@ -9,8 +9,9 @@
 //! `LocalState` value (`AliasState` keyed by alias string).
 
 use std::cell::RefCell;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::collections::HashSet;
 
+use dioxus::prelude::*;
 use mail_local_state::{
     ArchivedMessage, DeliveryState, Draft, GlobalSettings, IdentitySettings, KeptMessage,
     LocalState, LocalStateMsg, MessageId, SentMessage,
@@ -21,17 +22,42 @@ thread_local! {
     /// each `GetAll` response; mutations in the UI optimistically patch this
     /// copy and also send the corresponding `LocalStateMsg` to the delegate.
     static SNAPSHOT: RefCell<LocalState> = RefCell::new(LocalState::default());
+
+    /// Draft ids the UI has optimistically deleted. Stale `replace_snapshot`
+    /// echoes — e.g. an in-flight `save_draft` whose response lands after the
+    /// `delete_draft` was issued — would otherwise resurrect them. Kept until
+    /// the delegate echoes a snapshot that no longer contains the id (#107).
+    /// Key: (alias, draft_id).
+    static DELETED_DRAFTS: RefCell<HashSet<(String, String)>> = RefCell::new(HashSet::new());
 }
 
-/// Bumped on every snapshot mutation. Components that read drafts/read-state
-/// gate a `use_memo` on this value to know when to re-pull from `SNAPSHOT`.
-pub(crate) static GENERATION: AtomicUsize = AtomicUsize::new(0);
+/// Bumped on every snapshot mutation. Components read this signal so Dioxus
+/// subscribes them to changes; reading via `()` (call) registers the dep.
+/// Why GlobalSignal vs AtomicUsize: an Atomic.load() from a component does not
+/// register a reactive dependency, so kept/read/draft mutations did not trigger
+/// re-render until something else dirtied the component (issue #106).
+pub(crate) static GENERATION: GlobalSignal<usize> = Signal::global(|| 0);
 
 fn bump() {
-    GENERATION.fetch_add(1, Ordering::Relaxed);
+    *GENERATION.write() += 1;
 }
 
 pub(crate) fn replace_snapshot(new: LocalState) {
+    let mut new = new;
+    DELETED_DRAFTS.with(|tombs| {
+        let mut tombs = tombs.borrow_mut();
+        tombs.retain(|(alias, draft_id)| {
+            // If incoming snapshot still contains the draft, an older
+            // `save_draft` won the race; strip it and keep the tombstone.
+            // If it's gone, the `delete_draft` echo has caught up — drop it.
+            if let Some(state) = new.aliases_mut().get_mut(alias)
+                && state.drafts.remove(draft_id).is_some()
+            {
+                return true;
+            }
+            false
+        });
+    });
     SNAPSHOT.with(|s| *s.borrow_mut() = new);
     bump();
 }
@@ -331,6 +357,11 @@ pub(crate) fn local_delete_draft(alias: &str, id: &str) {
         if let Some(entry) = state.aliases_mut().get_mut(alias) {
             entry.drafts.remove(id);
         }
+    });
+    // Tombstone protects against a stale `save_draft` echo that would
+    // otherwise re-add this draft via `replace_snapshot` (#107).
+    DELETED_DRAFTS.with(|t| {
+        t.borrow_mut().insert((alias.to_string(), id.to_string()));
     });
     bump();
 }

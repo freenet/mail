@@ -12,8 +12,6 @@
 //! Mobile (`.fm-m*`) classes from the prototype are intentionally not
 //! ported in this pass; first cut is desktop-only.
 
-use std::sync::atomic::Ordering;
-
 use dioxus::prelude::*;
 use mail_local_state::{
     Density, GlobalSettings, IdentityPrivacyPrefs, IdentitySettings, InboxSettings, Theme,
@@ -38,7 +36,7 @@ fn use_identity_settings() -> (String, IdentitySettings) {
     let alias_for_memo = alias.clone();
     let settings = use_memo(move || {
         // Subscribe to GENERATION so this re-runs on snapshot mutation.
-        let _gen = local_state::GENERATION.load(Ordering::Relaxed);
+        let _gen = local_state::GENERATION();
         local_state::identity_settings_for(&alias_for_memo)
     });
     (alias, settings())
@@ -46,7 +44,7 @@ fn use_identity_settings() -> (String, IdentitySettings) {
 
 fn use_global_settings() -> GlobalSettings {
     let settings = use_memo(move || {
-        let _gen = local_state::GENERATION.load(Ordering::Relaxed);
+        let _gen = local_state::GENERATION();
         local_state::global_settings()
     });
     settings()
