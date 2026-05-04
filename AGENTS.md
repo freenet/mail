@@ -316,6 +316,15 @@ unless you're reproducing a specific upstream change.
 
 ## End-to-end testing
 
+### QA inventory
+
+`docs/qa/manual-test-inventory.md` is the source of truth for what's
+covered automatically vs what needs manual exercise. Consult it before
+merging non-trivial UI/contract changes and update it when a test is
+added or removed. The `freenet-mail-qa` skill at
+`.claude/skills/freenet-mail-qa/SKILL.md` instructs agents on when and
+how to use the matrix.
+
 ### Automated (Playwright)
 
 The Playwright suite at `ui/tests/` tests the UI in offline mode
