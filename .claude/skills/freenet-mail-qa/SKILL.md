@@ -55,6 +55,33 @@ delete the row if the behavior is gone.
 Iso harness is heavy (~5–10 min, full freenet net + dx build + headed
 browser). Don't run on every change — gate to tags / nightly.
 
+## WIP settings gating
+
+Settings controls whose backend isn't fully wired live behind the
+`wip-settings` cargo feature (off by default). When you add or modify
+a Settings control:
+
+1. **Has a real consumer in non-Settings code?** Ship it ungated. Verify
+   by grepping the persisted field name across `ui/src/` excluding
+   `settings.rs` — if zero hits, it's WIP.
+2. **No consumer yet?** Gate with `#[cfg(feature = "wip-settings")]` on
+   the enum variant / route / nav entry / locals / SettingRow rsx
+   block. Cite the blocking issue (#69, #85, etc.) in the surrounding
+   comment.
+3. **Backend just landed?** Drop the gate, add row to the matrix as
+   `manual` (with recipe) or `auto` (with test link).
+
+Verify all three configs build clean before pushing:
+
+```bash
+cargo check -p freenet-email-ui
+cargo check -p freenet-email-ui --features wip-settings
+cargo check -p freenet-email-ui --no-default-features --features example-data,no-sync
+```
+
+The matrix's "Settings" section flags WIP rows with `(gated behind
+\`wip-settings\`)` and status `blocked` + the issue link.
+
 ## Anti-patterns
 
 - **Don't** add a test that requires `--features example-data,no-sync` for

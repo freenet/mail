@@ -121,15 +121,28 @@ manual gap by adding a test, flip status to `auto` and link the test.
 
 ### Settings
 
+WIP controls (AFT screen, read_receipts, pad_length, display_name) are
+gated behind the `wip-settings` cargo feature and hidden in default
+builds. Build with `--features wip-settings` to surface them. See the
+"WIP settings gating" section in the `freenet-mail-qa` skill for the
+add/remove protocol.
+
 | Behavior | Status | Test / recipe |
 |---|---|---|
 | Identity privacy: verify_on_send toggle | manual | Settings → Privacy, toggle, send to unverified contact, confirm send proceeds vs blocks |
 | Identity privacy: hide_unsigned toggle | manual | Toggle, observe Inbox |
-| Identity privacy: quarantine_unknown toggle | manual | Toggle, observe Inbox |
+| Inbox: drafts_in_inbox toggle | manual | Settings → Inbox, toggle, observe Drafts surface in Inbox folder |
+| Inbox: quarantine_unknown toggle | manual | Toggle, observe Inbox filters unknown senders |
 | Auto-sign + signature persists | manual | Set, send, reload, send again, confirm sig still appended |
-| Appearance: density / theme | manual | Settings → Appearance, change density/theme, confirm UI reflects |
-| Inbox global settings | manual | Settings → Inbox, change retention / fetch options, confirm |
+| Appearance: theme switch (data-theme attr) | manual | Settings → Appearance, change theme, confirm `.fm-app[data-theme]` reflects |
+| Appearance: density (data-density attr) | manual | Change density, confirm `.fm-app[data-density]` reflects + row heights change |
+| Appearance: serif_subjects toggle | manual | Toggle, confirm subjects flip font |
+| Advanced: custom relay URL takes effect on reload | manual | Set custom_relay + URL, reload, WS connects to that URL |
 | Settings round-trip across reload | manual | Set value, reload, value persists |
+| WIP: AFT tier picker (gated) | blocked | Issue #85 — recipient inbox params not configurable |
+| WIP: read receipts toggle (gated) | blocked | Issue #69 — feature not implemented |
+| WIP: pad_length toggle (gated) | blocked | No implementation; gated until designed |
+| WIP: display_name field (gated) | blocked | No consumer of the field; gated until wired into Sent/Inbox surfaces |
 
 ### Layout / chrome
 
