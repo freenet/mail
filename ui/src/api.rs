@@ -1091,8 +1091,7 @@ pub(crate) async fn node_comms(
                                 )
                                 .unwrap();
                                 let mut models = inboxes.0.write();
-                                if let Some(pos) =
-                                    models.iter().position(|e| e.borrow().key == key)
+                                if let Some(pos) = models.iter().position(|e| e.borrow().key == key)
                                 {
                                     let mut inbox = models[pos].borrow_mut();
                                     inbox.merge(updated_model);
@@ -1118,8 +1117,7 @@ pub(crate) async fn node_comms(
                                 )
                                 .unwrap();
                                 let mut models = inboxes.0.write();
-                                if let Some(pos) =
-                                    models.iter().position(|e| e.borrow().key == key)
+                                if let Some(pos) = models.iter().position(|e| e.borrow().key == key)
                                 {
                                     let mut inbox = models[pos].borrow_mut();
                                     *inbox = updated_model;
