@@ -940,7 +940,7 @@ fn UserInbox() -> Element {
     let menu_selection = use_context::<Signal<menu::MenuSelection>>();
     let settings_open = menu_selection.read().settings().is_some();
 
-    let _local_gen = crate::local_state::GENERATION.load(std::sync::atomic::Ordering::Relaxed);
+    let _local_gen = crate::local_state::GENERATION();
     let appearance = crate::local_state::global_settings().appearance;
     let theme_attr = match appearance.theme {
         ::mail_local_state::Theme::System => "system",
@@ -1059,7 +1059,7 @@ fn Sidebar() -> Element {
     };
     // Track local-state generation so Drafts count re-renders when the
     // user types into the compose sheet (autosave bumps `GENERATION`).
-    let _local_gen = crate::local_state::GENERATION.load(std::sync::atomic::Ordering::Relaxed);
+    let _local_gen = crate::local_state::GENERATION();
     rsx! {
         nav { class: "sidebar",
             button {
@@ -1226,7 +1226,7 @@ fn MessageList() -> Element {
     let selected_id = menu_selection.read().email();
     // Touch the local-state generation so this component re-renders when
     // drafts are added/removed.
-    let _local_gen = crate::local_state::GENERATION.load(std::sync::atomic::Ordering::Relaxed);
+    let _local_gen = crate::local_state::GENERATION();
 
     let inbox_view = inbox.read();
     let emails = inbox_view.messages.borrow();
@@ -1542,7 +1542,7 @@ fn DetailPanel() -> Element {
     let view = inbox.read();
     let emails = view.messages.borrow();
     let selected = selected_id.and_then(|id| emails.iter().find(|m| m.id == id).cloned());
-    let _local_gen = crate::local_state::GENERATION.load(std::sync::atomic::Ordering::Relaxed);
+    let _local_gen = crate::local_state::GENERATION();
 
     if matches!(folder, menu::Folder::Inbox) {
         if let Some(msg) = selected {
