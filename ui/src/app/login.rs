@@ -71,26 +71,63 @@ pub(crate) struct Identity {
     pub ml_dsa_signing_key: Arc<MlDsaSigningKey<MlDsa65>>,
     /// ML-KEM-768 decapsulation key for message decryption.
     pub ml_kem_dk: DecapsulationKey<MlKem768>,
+    /// Cached encoded ML-KEM-768 encapsulation key bytes (1184 bytes), computed
+    /// once at construction. Avoids re-deriving from `ml_kem_dk` on every read,
+    /// which surfaced as a fingerprint mismatch (#100): two reads from the same
+    /// logical identity could return different bytes after `Clone`, so the
+    /// share-modal six-word display and the contact:// token disagreed.
+    ek_bytes: Vec<u8>,
+    /// Cached encoded ML-DSA-65 verifying key bytes (1952 bytes), computed once
+    /// at construction. Same rationale as `ek_bytes` — keeps the public-key
+    /// view of the identity stable across clones and call sites.
+    vk_bytes: Vec<u8>,
 }
 
 impl Identity {
-    /// Encoded ML-DSA-65 verifying key bytes (1952 bytes). Stable, unique per
-    /// identity, and cheap-to-compute; used as the identity correlator in
-    /// `HashMap` / `PartialEq` contexts that previously keyed by RSA.
-    pub(crate) fn ml_dsa_vk_bytes(&self) -> Vec<u8> {
+    fn derive_vk_bytes(ml_dsa_signing_key: &MlDsaSigningKey<MlDsa65>) -> Vec<u8> {
         use ml_dsa::signature::Keypair;
-        self.ml_dsa_signing_key
-            .as_ref()
-            .verifying_key()
-            .encode()
-            .to_vec()
+        ml_dsa_signing_key.verifying_key().encode().to_vec()
     }
 
-    /// Encoded ML-KEM-768 encapsulation key bytes (1184 bytes). Public
-    /// key half of `ml_kem_dk`; senders use it to encrypt to this identity.
-    pub(crate) fn ml_kem_ek_bytes(&self) -> Vec<u8> {
+    fn derive_ek_bytes(ml_kem_dk: &DecapsulationKey<MlKem768>) -> Vec<u8> {
         use ml_kem::kem::KeyExport;
-        self.ml_kem_dk.encapsulation_key().to_bytes().to_vec()
+        ml_kem_dk.encapsulation_key().to_bytes().to_vec()
+    }
+
+    /// Build an `Identity` with derived `vk_bytes` / `ek_bytes` cached. Use this
+    /// instead of the struct literal so the public-key views are computed once
+    /// and stay consistent across clones (#100).
+    pub(crate) fn new(
+        alias: Rc<str>,
+        id: UserId,
+        description: String,
+        ml_dsa_signing_key: Arc<MlDsaSigningKey<MlDsa65>>,
+        ml_kem_dk: DecapsulationKey<MlKem768>,
+    ) -> Self {
+        let vk_bytes = Self::derive_vk_bytes(ml_dsa_signing_key.as_ref());
+        let ek_bytes = Self::derive_ek_bytes(&ml_kem_dk);
+        Self {
+            alias,
+            id,
+            description,
+            ml_dsa_signing_key,
+            ml_kem_dk,
+            ek_bytes,
+            vk_bytes,
+        }
+    }
+
+    /// Encoded ML-DSA-65 verifying key bytes (1952 bytes). Stable, unique per
+    /// identity; used as the identity correlator in `HashMap` / `PartialEq`
+    /// contexts that previously keyed by RSA.
+    pub(crate) fn ml_dsa_vk_bytes(&self) -> Vec<u8> {
+        self.vk_bytes.clone()
+    }
+
+    /// Encoded ML-KEM-768 encapsulation key bytes (1184 bytes). Public key half
+    /// of `ml_kem_dk`; senders use it to encrypt to this identity.
+    pub(crate) fn ml_kem_ek_bytes(&self) -> Vec<u8> {
+        self.ek_bytes.clone()
     }
 }
 
@@ -102,6 +139,8 @@ impl Clone for Identity {
             description: self.description.clone(),
             ml_dsa_signing_key: Arc::clone(&self.ml_dsa_signing_key),
             ml_kem_dk: self.ml_kem_dk.clone(),
+            ek_bytes: self.ek_bytes.clone(),
+            vk_bytes: self.vk_bytes.clone(),
         }
     }
 }
@@ -155,21 +194,21 @@ impl Identity {
                         let ml_kem_dk = stored.ml_kem_dk();
                         let alias: Rc<str> = alias.into();
                         let id = UserId::new();
-                        let identity = Identity {
+                        let identity = Identity::new(
+                            alias.clone(),
                             id,
-                            ml_dsa_signing_key: Arc::clone(&ml_dsa_signing_key),
-                            ml_kem_dk: ml_kem_dk.clone(),
-                            description: String::default(),
-                            alias: alias.clone(),
-                        };
+                            String::default(),
+                            Arc::clone(&ml_dsa_signing_key),
+                            ml_kem_dk.clone(),
+                        );
                         user.write().identities.push(identity.clone());
-                        let full = Identity {
-                            alias: alias.clone(),
+                        let full = Identity::new(
+                            alias.clone(),
                             id,
-                            description: info.extra.unwrap_or_default(),
+                            info.extra.unwrap_or_default(),
                             ml_dsa_signing_key,
                             ml_kem_dk,
-                        };
+                        );
                         crate::app::address_book::register_identity(&full);
                         to_add.push(full);
                         identities.push(identity);
@@ -214,12 +253,16 @@ impl Identity {
         inbox_key: ContractKey,
         mut user: Signal<crate::app::User>,
     ) -> Identity {
+        let vk_bytes = Identity::derive_vk_bytes(ml_dsa_signing_key.as_ref());
+        let ek_bytes = Identity::derive_ek_bytes(&ml_kem_dk);
         let identity = Identity {
             alias: alias.clone(),
             id: UserId::new(),
             description: description.clone(),
             ml_dsa_signing_key: Arc::clone(&ml_dsa_signing_key),
             ml_kem_dk: ml_kem_dk.clone(),
+            ek_bytes: ek_bytes.clone(),
+            vk_bytes: vk_bytes.clone(),
         };
         crate::inbox::InboxModel::set_contract_identity(inbox_key, identity.clone());
         user.write().identities.push(identity.clone());
@@ -231,6 +274,8 @@ impl Identity {
                 description,
                 ml_dsa_signing_key,
                 ml_kem_dk,
+                ek_bytes,
+                vk_bytes,
             };
             crate::app::address_book::register_identity(&full);
             aliases.push(full);

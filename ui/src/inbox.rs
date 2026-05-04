@@ -558,11 +558,7 @@ pub(crate) struct InboxModel {
 }
 
 impl InboxModel {
-    pub async fn load_all(
-        client: &mut WebApiRequestClient,
-        contracts: &[Identity],
-        contract_to_id: &mut HashMap<InboxContract, Identity>,
-    ) {
+    pub async fn load_all(client: &mut WebApiRequestClient, contracts: &[Identity]) {
         async fn subscribe(
             client: &mut WebApiRequestClient,
             contract_key: &ContractKey,
@@ -603,16 +599,18 @@ impl InboxModel {
                     return;
                 }
             };
-            if !contract_to_id.contains_key(&contract_key) {
+            // INBOX_TO_ID is the single source of truth for routing
+            // inbox UpdateNotifications back to an Identity. Subscribe
+            // populates it synchronously before the network round trip
+            // so peer-side state pushes that race the GetResponse can
+            // still find their owner.
+            let already = INBOX_TO_ID.with(|map| map.borrow().contains_key(&contract_key));
+            if !already {
                 let res = subscribe(&mut client, &contract_key, identity).await;
                 node_response_error_handling(client.clone().into(), res, TryNodeAction::LoadInbox)
                     .await;
             }
-            let res = InboxModel::load(&mut client, identity)
-                .await
-                .inspect(|key| {
-                    contract_to_id.entry(*key).or_insert(identity.clone());
-                });
+            let res = InboxModel::load(&mut client, identity).await;
             node_response_error_handling(client.into(), res.map(|_| ()), TryNodeAction::LoadInbox)
                 .await;
         }
