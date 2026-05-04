@@ -12,7 +12,6 @@
 //! Mobile (`.fm-m*`) classes from the prototype are intentionally not
 //! ported in this pass; first cut is desktop-only.
 
-
 use dioxus::prelude::*;
 use mail_local_state::{
     Density, GlobalSettings, IdentityPrivacyPrefs, IdentitySettings, InboxSettings, Theme,
