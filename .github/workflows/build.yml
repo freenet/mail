@@ -168,7 +168,22 @@ jobs:
 
       - name: Install Playwright browser system deps (cached hit)
         if: steps.cache-playwright.outputs.cache-hit == 'true'
-        run: npx playwright install-deps chromium
+        timeout-minutes: 15
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          # Retry up to 3× with per-attempt timeout — apt mirror on
+          # ubicloud runners has hung this step for >1h on occasion.
+          # Fail fast (4min/attempt) and surface the apt error rather
+          # than blocking the run.
+          for i in 1 2 3; do
+            if timeout 240 npx playwright install-deps chromium; then
+              exit 0
+            fi
+            echo "attempt $i failed, retrying"
+            sleep 10
+          done
+          exit 1
         working-directory: ./ui/tests
 
       - name: Build UI in offline mode
