@@ -9,7 +9,7 @@
 //! `LocalState` value (`AliasState` keyed by alias string).
 
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use dioxus::prelude::*;
 use mail_local_state::{
@@ -29,6 +29,16 @@ thread_local! {
     /// the delegate echoes a snapshot that no longer contains the id (#107).
     /// Key: (alias, draft_id).
     static DELETED_DRAFTS: RefCell<HashSet<(String, String)>> = RefCell::new(HashSet::new());
+
+    /// Optimistic `local_mark_read` writes that haven't yet round-tripped
+    /// through the delegate. A stale `GetAll` echo that lands BEFORE the
+    /// `MarkRead` write was persisted would otherwise clobber them, and
+    /// the inbox-list rebuild path (`kept_for`) would return empty — the
+    /// row evaporates from the UI even though the contract has already
+    /// evicted it (#113). Held until an echo includes the kept entry.
+    /// Key: (alias, msg_id_string).
+    static PENDING_KEPT: RefCell<HashMap<(String, String), KeptMessage>> =
+        RefCell::new(HashMap::new());
 }
 
 /// Bumped on every snapshot mutation. Components read this signal so Dioxus
@@ -62,6 +72,27 @@ pub(crate) fn replace_snapshot(new: LocalState) {
                 return true;
             }
             false
+        });
+    });
+    PENDING_KEPT.with(|pending| {
+        let mut pending = pending.borrow_mut();
+        pending.retain(|(alias, msg_id), kept| {
+            let entry = new.aliases_mut().entry(alias.clone()).or_default();
+            if entry.kept.contains_key(msg_id) {
+                // Delegate echo includes this kept entry — `MarkRead`
+                // round-tripped, drop the optimistic stash.
+                return false;
+            }
+            // Stale echo — re-merge the optimistic write so `kept_for`
+            // keeps surfacing the row. Also re-apply `read=true` so the
+            // inbox list shows the row as read on the next rebuild.
+            entry.kept.insert(msg_id.clone(), kept.clone());
+            if let Ok(parsed) = msg_id.parse::<MessageId>()
+                && !entry.read.contains(&parsed)
+            {
+                entry.read.push(parsed);
+            }
+            true
         });
     });
     SNAPSHOT.with(|s| *s.borrow_mut() = new);
@@ -420,6 +451,13 @@ pub(crate) fn local_archive_message(alias: &str, msg_id: MessageId, archived: Ar
         }
         entry.archived.insert(msg_id.to_string(), archived);
     });
+    // Archive supersedes a pending kept tombstone — drop it so a stale
+    // echo doesn't re-insert the kept entry under the archived row.
+    PENDING_KEPT.with(|pending| {
+        pending
+            .borrow_mut()
+            .remove(&(alias.to_string(), msg_id.to_string()));
+    });
     bump();
 }
 
@@ -445,6 +483,12 @@ pub(crate) fn local_delete_message(alias: &str, msg_id: MessageId) {
             entry.deleted.push(msg_id);
         }
     });
+    // Same as archive: delete supersedes a pending kept tombstone.
+    PENDING_KEPT.with(|pending| {
+        pending
+            .borrow_mut()
+            .remove(&(alias.to_string(), msg_id.to_string()));
+    });
     bump();
 }
 
@@ -455,7 +499,15 @@ pub(crate) fn local_mark_read(alias: &str, msg_id: MessageId, kept: KeptMessage)
         if !entry.read.contains(&msg_id) {
             entry.read.push(msg_id);
         }
-        entry.kept.insert(msg_id.to_string(), kept);
+        entry.kept.insert(msg_id.to_string(), kept.clone());
+    });
+    // Tombstone the optimistic write until the delegate echoes back a
+    // snapshot that includes it — guards against the #113 race where a
+    // stale `GetAll` reply lands before `MarkRead` persists.
+    PENDING_KEPT.with(|pending| {
+        pending
+            .borrow_mut()
+            .insert((alias.to_string(), msg_id.to_string()), kept);
     });
     bump();
 }
@@ -630,17 +682,21 @@ mod tests {
         assert!(is_read("alice", 5));
     }
 
+    fn fresh_pending() {
+        PENDING_KEPT.with(|p| p.borrow_mut().clear());
+    }
+
     /// The race in #113: delegate echo arrives BEFORE `local_mark_read`
     /// has had time to dispatch + persist its write. Echoed snapshot
-    /// has no kept entry → `replace_snapshot` clobbers the optimistic
-    /// write → `kept_for` returns empty. This test pins the failure
-    /// mode so a future fix (e.g. merging optimistic kept entries
-    /// back in on replace, like `DELETED_DRAFTS` does for drafts) has
-    /// a regression target.
+    /// has no kept entry → without the `PENDING_KEPT` tombstone path,
+    /// `replace_snapshot` would clobber the optimistic write and
+    /// `kept_for` would return empty. With the tombstone, the entry
+    /// survives the stale echo and surfaces on the next inbox-list
+    /// rebuild.
     #[test]
-    #[ignore = "documents the #113 race; fails today by design"]
     fn replace_snapshot_does_not_clobber_optimistic_kept() {
         fresh_snapshot();
+        fresh_pending();
         local_mark_read("alice", 9, kept("bob", "optimistic"));
 
         // Stale delegate echo — alice exists but kept is empty.
@@ -656,6 +712,88 @@ mod tests {
             entries.len(),
             1,
             "optimistic kept entry must survive a stale echo (#113)",
+        );
+        assert_eq!(entries[0].0, 9);
+        assert!(is_read("alice", 9), "read flag re-applied after merge");
+    }
+
+    /// Once the delegate echoes a snapshot that includes the kept entry,
+    /// the `PENDING_KEPT` tombstone is dropped — subsequent stale echoes
+    /// (e.g. an in-flight `GetAll` from before the `MarkRead` round-trip)
+    /// no longer re-insert the entry. Pins the lifecycle so the
+    /// tombstone doesn't leak forever and resurrect deleted entries.
+    #[test]
+    fn pending_kept_drops_after_delegate_echo_includes_entry() {
+        fresh_snapshot();
+        fresh_pending();
+        local_mark_read("alice", 11, kept("bob", "transient"));
+
+        // Authoritative echo — delegate has the kept entry.
+        let mut echoed = LocalState::default();
+        let entry = echoed
+            .aliases_mut()
+            .entry("alice".to_string())
+            .or_default();
+        entry.kept.insert("11".to_string(), kept("bob", "transient"));
+        entry.read.push(11);
+        replace_snapshot(echoed);
+
+        // Now a second, *older* echo arrives that lacks the entry —
+        // simulating a network reorder. Without the tombstone drop,
+        // we'd resurrect the kept row indefinitely.
+        let mut stale = LocalState::default();
+        stale.aliases_mut().entry("alice".to_string()).or_default();
+        replace_snapshot(stale);
+
+        assert!(
+            kept_for("alice").is_empty(),
+            "tombstone must be dropped once delegate confirms the entry",
+        );
+    }
+
+    /// Archive supersedes kept — the pending tombstone for a freshly
+    /// read message must drop when the user archives it, otherwise a
+    /// later stale echo would re-insert the kept row alongside the
+    /// archived one.
+    #[test]
+    fn local_archive_drops_pending_kept_tombstone() {
+        fresh_snapshot();
+        fresh_pending();
+        local_mark_read("alice", 13, kept("bob", "read then archive"));
+        local_archive_message(
+            "alice",
+            13,
+            ArchivedMessage {
+                from: "bob".into(),
+                title: "read then archive".into(),
+                content: "body".into(),
+                archived_at: 1,
+            },
+        );
+
+        let stale = LocalState::default();
+        replace_snapshot(stale);
+
+        assert!(
+            kept_for("alice").is_empty(),
+            "archived message must not be re-merged as kept on stale echo",
+        );
+    }
+
+    /// Same shape as the archive test but for deletion.
+    #[test]
+    fn local_delete_drops_pending_kept_tombstone() {
+        fresh_snapshot();
+        fresh_pending();
+        local_mark_read("alice", 17, kept("bob", "read then delete"));
+        local_delete_message("alice", 17);
+
+        let stale = LocalState::default();
+        replace_snapshot(stale);
+
+        assert!(
+            kept_for("alice").is_empty(),
+            "deleted message must not be re-merged as kept on stale echo",
         );
     }
 }
