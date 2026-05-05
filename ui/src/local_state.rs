@@ -669,10 +669,7 @@ mod tests {
 
         // Simulate delegate echo with the kept entry persisted.
         let mut echoed = LocalState::default();
-        let entry = echoed
-            .aliases_mut()
-            .entry("alice".to_string())
-            .or_default();
+        let entry = echoed.aliases_mut().entry("alice".to_string()).or_default();
         entry.read.push(5);
         entry.kept.insert("5".to_string(), kept("bob", "kept"));
         replace_snapshot(echoed);
@@ -701,10 +698,7 @@ mod tests {
 
         // Stale delegate echo — alice exists but kept is empty.
         let mut echoed = LocalState::default();
-        echoed
-            .aliases_mut()
-            .entry("alice".to_string())
-            .or_default();
+        echoed.aliases_mut().entry("alice".to_string()).or_default();
         replace_snapshot(echoed);
 
         let entries = kept_for("alice");
@@ -730,11 +724,10 @@ mod tests {
 
         // Authoritative echo — delegate has the kept entry.
         let mut echoed = LocalState::default();
-        let entry = echoed
-            .aliases_mut()
-            .entry("alice".to_string())
-            .or_default();
-        entry.kept.insert("11".to_string(), kept("bob", "transient"));
+        let entry = echoed.aliases_mut().entry("alice".to_string()).or_default();
+        entry
+            .kept
+            .insert("11".to_string(), kept("bob", "transient"));
         entry.read.push(11);
         replace_snapshot(echoed);
 
