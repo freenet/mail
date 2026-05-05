@@ -55,7 +55,7 @@ jobs:
             ~/.cargo/bin/fdev
             ~/.cargo/bin/dx
             ~/.cargo/bin/freenet
-          key: ${{ runner.os }}-cargo-bins-e2e-fnet-v0.2.50-dx-0.7.3-v1
+          key: ${{ runner.os }}-cargo-bins-e2e-fnet-v0.2.54-dx-0.7.3-v1
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -89,7 +89,7 @@ jobs:
           # The matching version is the freenet-core release tag — fdev
           # crates.io versions (0.3.x) don't track 1:1 and don't carry
           # binstall metadata, so we go direct to the release artifact.
-          REL="v0.2.50"
+          REL="v0.2.54"
           BASE="https://github.com/freenet/freenet-core/releases/download/${REL}"
           mkdir -p "$HOME/.cargo/bin"
           for bin in fdev freenet; do
@@ -138,7 +138,7 @@ jobs:
         working-directory: ./ui/tests
 
       - name: Block freenet auto-update GitHub probe
-        # The pinned `freenet` binary (0.2.50) polls
+        # The pinned `freenet` binary (0.2.54) polls
         # https://api.github.com/repos/freenet/freenet-core/releases/latest
         # ~30s into startup and gracefully shuts down if a newer release
         # exists. That race kills the iso gateway mid-test on any PR
