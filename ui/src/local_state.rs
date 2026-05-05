@@ -39,7 +39,13 @@ thread_local! {
 pub(crate) static GENERATION: GlobalSignal<usize> = Signal::global(|| 0);
 
 fn bump() {
-    *GENERATION.write() += 1;
+    // GlobalSignal::write() requires a live Dioxus runtime. The unit
+    // tests in this module exercise the SNAPSHOT round-trip without
+    // mounting a Dioxus app, so guard the bump and skip it when no
+    // runtime is present.
+    if dioxus::core::Runtime::try_current().is_some() {
+        *GENERATION.write() += 1;
+    }
 }
 
 pub(crate) fn replace_snapshot(new: LocalState) {
@@ -527,4 +533,129 @@ pub(crate) fn new_draft_id() -> String {
 
 pub(crate) fn new_sent_id() -> String {
     uuid::Uuid::new_v4().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mail_local_state::KeptMessage;
+
+    fn fresh_snapshot() {
+        SNAPSHOT.with(|s| *s.borrow_mut() = LocalState::default());
+    }
+
+    fn kept(from: &str, title: &str) -> KeptMessage {
+        KeptMessage {
+            from: from.into(),
+            title: title.into(),
+            content: "body".into(),
+            kept_at: 0,
+        }
+    }
+
+    /// Regression for #113: `local_mark_read` must make the row visible
+    /// to the inbox-list rebuild path (`kept_for`) immediately, before
+    /// any delegate echo. The UI relies on this so that clicking a
+    /// message that is then evicted from the live contract still
+    /// surfaces the row in the Inbox folder as `read=true`.
+    #[test]
+    fn local_mark_read_round_trips_via_kept_for() {
+        fresh_snapshot();
+        local_mark_read("alice", 42, kept("bob", "round one"));
+
+        let entries = kept_for("alice");
+        assert_eq!(entries.len(), 1, "exactly one kept entry");
+        let (mid, k) = &entries[0];
+        assert_eq!(*mid, 42);
+        assert_eq!(k.title, "round one");
+        assert!(is_read("alice", 42), "marked read");
+    }
+
+    /// `kept_for` must isolate by alias — bob's read state is NOT
+    /// visible from alice's Inbox.
+    #[test]
+    fn kept_for_is_alias_scoped() {
+        fresh_snapshot();
+        local_mark_read("alice", 1, kept("bob", "for alice"));
+        local_mark_read("bob", 2, kept("alice", "for bob"));
+
+        let alice = kept_for("alice");
+        let bob = kept_for("bob");
+        assert_eq!(alice.len(), 1);
+        assert_eq!(alice[0].0, 1);
+        assert_eq!(bob.len(), 1);
+        assert_eq!(bob[0].0, 2);
+    }
+
+    /// Idempotent: marking the same message read twice produces a
+    /// single kept entry, not duplicates. The live UI path runs
+    /// `OpenMessage` on every render, which re-fires `local_mark_read`
+    /// — that must be a no-op on second call.
+    #[test]
+    fn local_mark_read_is_idempotent() {
+        fresh_snapshot();
+        local_mark_read("alice", 7, kept("bob", "once"));
+        local_mark_read("alice", 7, kept("bob", "twice"));
+
+        let entries = kept_for("alice");
+        assert_eq!(entries.len(), 1, "single kept entry after repeat call");
+        assert_eq!(entries[0].1.title, "twice", "latest kept payload wins");
+    }
+
+    /// `replace_snapshot` (delegate `GetAll` echo) must NOT clobber
+    /// kept entries that the UI optimistically wrote. In the bug for
+    /// #113, the local_mark_read entry only lives in SNAPSHOT until
+    /// the delegate write round-trips; if the delegate's echoed
+    /// snapshot omits it, the UI loses the row. This test pins the
+    /// expected behavior: incoming snapshot wins, so the delegate
+    /// MUST contain the persisted entry by the time it echoes back.
+    /// Pure round-trip — confirms the data path, not the timing.
+    #[test]
+    fn replace_snapshot_preserves_kept_when_delegate_includes_it() {
+        fresh_snapshot();
+        local_mark_read("alice", 5, kept("bob", "kept"));
+
+        // Simulate delegate echo with the kept entry persisted.
+        let mut echoed = LocalState::default();
+        let entry = echoed
+            .aliases_mut()
+            .entry("alice".to_string())
+            .or_default();
+        entry.read.push(5);
+        entry.kept.insert("5".to_string(), kept("bob", "kept"));
+        replace_snapshot(echoed);
+
+        let entries = kept_for("alice");
+        assert_eq!(entries.len(), 1, "kept entry survives delegate echo");
+        assert!(is_read("alice", 5));
+    }
+
+    /// The race in #113: delegate echo arrives BEFORE `local_mark_read`
+    /// has had time to dispatch + persist its write. Echoed snapshot
+    /// has no kept entry → `replace_snapshot` clobbers the optimistic
+    /// write → `kept_for` returns empty. This test pins the failure
+    /// mode so a future fix (e.g. merging optimistic kept entries
+    /// back in on replace, like `DELETED_DRAFTS` does for drafts) has
+    /// a regression target.
+    #[test]
+    #[ignore = "documents the #113 race; fails today by design"]
+    fn replace_snapshot_does_not_clobber_optimistic_kept() {
+        fresh_snapshot();
+        local_mark_read("alice", 9, kept("bob", "optimistic"));
+
+        // Stale delegate echo — alice exists but kept is empty.
+        let mut echoed = LocalState::default();
+        echoed
+            .aliases_mut()
+            .entry("alice".to_string())
+            .or_default();
+        replace_snapshot(echoed);
+
+        let entries = kept_for("alice");
+        assert_eq!(
+            entries.len(),
+            1,
+            "optimistic kept entry must survive a stale echo (#113)",
+        );
+    }
 }

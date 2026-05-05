@@ -357,10 +357,31 @@ test.describe("Live node E2E", () => {
     );
     const stopGwPump = startPermissionPump(ISO_GW_ORIGIN);
     const stopPeerPump = startPermissionPump(ISO_PEER_ORIGIN);
+    // Per-context tracing — captures DOM snapshots, console messages, and
+    // network activity for both browser contexts. Saved alongside other
+    // playwright artifacts so #113 (kept_for rebuild miss after click-
+    // to-read) can be diagnosed from CI logs without local repro.
     const aliceCtx = await browser.newContext();
     const bobCtx = await browser.newContext();
+    await aliceCtx.tracing.start({ screenshots: true, snapshots: true });
+    await bobCtx.tracing.start({ screenshots: true, snapshots: true });
     const alicePage = await aliceCtx.newPage();
     const bobPage = await bobCtx.newPage();
+    // Mirror every console message verbatim into the test log so that
+    // crash-time error_context.md captures what each side saw — narrows
+    // down whether the row vanished due to a wasm panic, a delegate
+    // dispatch failure, or a quiet `kept_for` returning empty.
+    for (const [page, label] of [
+      [alicePage, "alice"],
+      [bobPage, "bob"],
+    ] as const) {
+      page.on("console", (m) => {
+        console.log(`[console:${label}:${m.type()}] ${m.text()}`);
+      });
+      page.on("pageerror", (e) => {
+        console.log(`[pageerror:${label}] ${e.message}`);
+      });
+    }
 
     // Surface WASM panics + console errors immediately so test failure
     // points at the original panic frame, not a downstream timeout.
@@ -514,6 +535,16 @@ test.describe("Live node E2E", () => {
         `no WASM panics in either browser context: ${consoleErrors.join("\n")}`,
       ).toEqual([]);
     } finally {
+      // Stop + persist traces before context close so they survive
+      // even when the test fails mid-flow. Filenames land under
+      // test-results/ so they're picked up by the e2e-real-node CI
+      // artifact upload step.
+      await aliceCtx.tracing
+        .stop({ path: "test-results/multi-round-alice-trace.zip" })
+        .catch(() => {});
+      await bobCtx.tracing
+        .stop({ path: "test-results/multi-round-bob-trace.zip" })
+        .catch(() => {});
       await aliceCtx.close().catch(() => {});
       await bobCtx.close().catch(() => {});
       stopGwPump();
