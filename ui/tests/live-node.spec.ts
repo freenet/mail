@@ -155,23 +155,17 @@ test.describe("Live node E2E", () => {
       ).toBe(false);
 
       // ── Step 5: regression for #77 (export download blocked) ──────
-      // Gated on FREENET_HAS_DOWNLOAD_FIX. The CI-pinned freenet
-      // binary (v0.2.50 / v0.2.51) predates freenet-core#4008
-      // (`allow-downloads` in iframe sandbox). Set the env var locally
-      // when running against a build that includes #4008, or wait for
-      // the next freenet release tag and bump the pin in build.yml +
-      // e2e-real-node.yml.
-      if (process.env.FREENET_HAS_DOWNLOAD_FIX) {
-        const downloadPromise = page.waitForEvent("download", { timeout: 5_000 });
-        await appAfterReload
-          .locator('[data-testid="fm-id-row"][data-alias="alice"] [data-testid="fm-id-backup"]')
-          .click();
-        const download = await downloadPromise;
-        expect(
-          download.suggestedFilename(),
-          "backup filename matches freenet-identity-<alias>.json (regression for #77)",
-        ).toMatch(/freenet-identity-.+\.json/);
-      }
+      // freenet-core#4008 (`allow-downloads` in iframe sandbox) shipped
+      // in v0.2.54.
+      const downloadPromise = page.waitForEvent("download", { timeout: 5_000 });
+      await appAfterReload
+        .locator('[data-testid="fm-id-row"][data-alias="alice"] [data-testid="fm-id-backup"]')
+        .click();
+      const download = await downloadPromise;
+      expect(
+        download.suggestedFilename(),
+        "backup filename matches freenet-identity-<alias>.json (regression for #77)",
+      ).toMatch(/freenet-identity-.+\.json/);
     } finally {
       stopPermissionPump();
     }

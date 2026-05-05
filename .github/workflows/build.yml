@@ -39,7 +39,7 @@ jobs:
             ~/.cargo/bin/cargo-binstall
             ~/.cargo/bin/fdev
             ~/.cargo/bin/dx
-          key: ${{ runner.os }}-cargo-bins-fnet-v0.2.50-dx-0.7.3-v1
+          key: ${{ runner.os }}-cargo-bins-fnet-v0.2.54-dx-0.7.3-v1
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -71,7 +71,7 @@ jobs:
         # fdev's crates.io versions don't carry binstall metadata; the
         # matching freenet-core release tag is what ships the binary.
         run: |
-          REL="v0.2.50"
+          REL="v0.2.54"
           BASE="https://github.com/freenet/freenet-core/releases/download/${REL}"
           mkdir -p "$HOME/.cargo/bin"
           curl -fsSL "${BASE}/fdev-x86_64-unknown-linux-musl.tar.gz" \
