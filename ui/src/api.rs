@@ -1517,8 +1517,7 @@ pub(crate) async fn node_comms(
                                         format!("token assignment failure: {reason}"),
                                         Some(TryNodeAction::SendMessage),
                                     );
-                                    let drained =
-                                        AftRecords::drain_pending_for_delegate(&key);
+                                    let drained = AftRecords::drain_pending_for_delegate(&key);
                                     for (inbox_key, _hash) in drained {
                                         crate::inbox::fail_pending_sent_for_inbox(
                                             &mut client,

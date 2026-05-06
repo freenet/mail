@@ -189,16 +189,12 @@ impl AftRecords {
     pub fn drain_pending_for_delegate(
         delegate: &AftDelegate,
     ) -> Vec<(InboxContract, AssignmentHash)> {
-        let inboxes = PENDING_TOKEN_ASSIGNMENT.with(|map| {
-            map.borrow_mut()
-                .remove(delegate)
-                .unwrap_or_default()
-        });
+        let inboxes = PENDING_TOKEN_ASSIGNMENT
+            .with(|map| map.borrow_mut().remove(delegate).unwrap_or_default());
         if inboxes.is_empty() {
             return Vec::new();
         }
-        let inbox_set: HashMap<InboxContract, ()> =
-            inboxes.iter().map(|c| (*c, ())).collect();
+        let inbox_set: HashMap<InboxContract, ()> = inboxes.iter().map(|c| (*c, ())).collect();
         PENDING_INBOXES_UPDATES.with(|queue| {
             let mut queue = queue.borrow_mut();
             let drained: Vec<(InboxContract, AssignmentHash)> = queue
@@ -538,10 +534,8 @@ mod tests {
     fn drain_pending_for_delegate_returns_and_clears_queued_entries() {
         // Use a synthetic DelegateKey + InboxContract; both are opaque
         // 32-byte ids from the test's perspective.
-        let delegate_key = DelegateKey::new(
-            [9u8; 32],
-            freenet_stdlib::prelude::CodeHash::new([3u8; 32]),
-        );
+        let delegate_key =
+            DelegateKey::new([9u8; 32], freenet_stdlib::prelude::CodeHash::new([3u8; 32]));
         let inbox_id = ContractInstanceId::new([42u8; 32]);
         let inbox_code_hash = freenet_stdlib::prelude::CodeHash::new([5u8; 32]);
         let inbox_key = ContractKey::from_id_and_code(inbox_id, inbox_code_hash);
@@ -573,14 +567,10 @@ mod tests {
     /// delegate could clear out unrelated pending sends.
     #[test]
     fn drain_pending_for_delegate_unknown_delegate_is_noop() {
-        let known_delegate = DelegateKey::new(
-            [2u8; 32],
-            freenet_stdlib::prelude::CodeHash::new([1u8; 32]),
-        );
-        let unknown_delegate = DelegateKey::new(
-            [9u8; 32],
-            freenet_stdlib::prelude::CodeHash::new([8u8; 32]),
-        );
+        let known_delegate =
+            DelegateKey::new([2u8; 32], freenet_stdlib::prelude::CodeHash::new([1u8; 32]));
+        let unknown_delegate =
+            DelegateKey::new([9u8; 32], freenet_stdlib::prelude::CodeHash::new([8u8; 32]));
         let inbox_id = ContractInstanceId::new([55u8; 32]);
         let inbox_code_hash = freenet_stdlib::prelude::CodeHash::new([6u8; 32]);
         let inbox_key = ContractKey::from_id_and_code(inbox_id, inbox_code_hash);

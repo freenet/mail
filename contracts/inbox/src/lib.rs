@@ -71,11 +71,7 @@ impl InboxParams {
     }
 
     /// Constructor that sets the recipient anti-flood policy explicitly.
-    pub fn new(
-        vk: &MlDsaVerifyingKey<MlDsa65>,
-        required_tier: Tier,
-        max_age_secs: u64,
-    ) -> Self {
+    pub fn new(vk: &MlDsaVerifyingKey<MlDsa65>, required_tier: Tier, max_age_secs: u64) -> Self {
         Self {
             pub_key: vk.encode().to_vec(),
             required_tier,
@@ -183,7 +179,10 @@ enum VerificationError {
     /// Token tier does not match `InboxParams.required_tier`. The
     /// recipient inbox refuses tokens minted at any other tier so the
     /// policy is authenticated by `hash(code, params)`.
-    PolicyTierMismatch { expected: Tier, got: Tier },
+    PolicyTierMismatch {
+        expected: Tier,
+        got: Tier,
+    },
 }
 
 fn decode_token_generator_vk(encoded: &[u8]) -> Option<MlDsaVerifyingKey<MlDsa65>> {
