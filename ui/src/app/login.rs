@@ -193,7 +193,21 @@ impl Identity {
                         let ml_dsa_signing_key = stored.ml_dsa_signing_key();
                         let ml_kem_dk = stored.ml_kem_dk();
                         let alias: Rc<str> = alias.into();
-                        let id = UserId::new();
+                        // Dedup user.identities by alias name. ALIASES is
+                        // rebuilt wholesale (see `*aliases = to_add` below),
+                        // but user.identities is a Signal Vec that only
+                        // gets appended — without this guard a delegate
+                        // echo after `set_alias` doubles the row. When
+                        // replacing, reuse the existing slot's UserId so
+                        // it stays consistent with the slot index that
+                        // `set_logged_id` asserts against. See #114.
+                        let existing_id = user
+                            .read()
+                            .identities
+                            .iter()
+                            .find(|i| i.alias == alias)
+                            .map(|i| i.id);
+                        let id = existing_id.unwrap_or_else(UserId::new);
                         let identity = Identity::new(
                             alias.clone(),
                             id,
@@ -201,11 +215,6 @@ impl Identity {
                             Arc::clone(&ml_dsa_signing_key),
                             ml_kem_dk.clone(),
                         );
-                        // Dedup user.identities by alias name. ALIASES is
-                        // rebuilt wholesale (see `*aliases = to_add` below),
-                        // but user.identities is a Signal Vec that only
-                        // gets appended — without this guard a delegate
-                        // echo after `set_alias` doubles the row. See #114.
                         {
                             let mut user_w = user.write();
                             if let Some(slot) =
@@ -269,9 +278,28 @@ impl Identity {
     ) -> Identity {
         let vk_bytes = Identity::derive_vk_bytes(ml_dsa_signing_key.as_ref());
         let ek_bytes = Identity::derive_ek_bytes(&ml_kem_dk);
+        // Dedup by alias name. If a stale GetIdentities echo (or
+        // example-data seeding) already populated `alias`, replace
+        // the entry in place instead of pushing a duplicate. The
+        // delegate is single-valued per alias name (HashMap insert
+        // overwrites), so the old VK is already gone server-side —
+        // surfacing two rows in the UI is the bug. See #114.
+        //
+        // CRITICAL: when replacing, reuse the existing slot's UserId.
+        // `User::set_logged_id` asserts `id.0 < identities.len()` and
+        // `logged_id()` indexes by `id.0`, so the UserId has to match
+        // the slot index. Generating a fresh `UserId::new()` and then
+        // replacing slot 0 produces UserId(N) where N >= len() and
+        // panics on subsequent login. See #81 followup verification.
+        let existing_id = user
+            .read()
+            .identities
+            .iter()
+            .find(|i| i.alias == alias)
+            .map(|i| i.id);
         let identity = Identity {
             alias: alias.clone(),
-            id: UserId::new(),
+            id: existing_id.unwrap_or_else(UserId::new),
             description: description.clone(),
             ml_dsa_signing_key: Arc::clone(&ml_dsa_signing_key),
             ml_kem_dk: ml_kem_dk.clone(),
@@ -279,12 +307,6 @@ impl Identity {
             vk_bytes: vk_bytes.clone(),
         };
         crate::inbox::InboxModel::set_contract_identity(inbox_key, identity.clone());
-        // Dedup by alias name. If a stale GetIdentities echo (or
-        // example-data seeding) already populated `alias`, replace
-        // the entry in place instead of pushing a duplicate. The
-        // delegate is single-valued per alias name (HashMap insert
-        // overwrites), so the old VK is already gone server-side —
-        // surfacing two rows in the UI is the bug. See #114.
         {
             let mut user_w = user.write();
             if let Some(slot) = user_w.identities.iter_mut().find(|i| i.alias == alias) {
