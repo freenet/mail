@@ -67,6 +67,13 @@ pub(crate) struct Identity {
     pub alias: Rc<str>,
     pub id: UserId,
     pub description: String,
+    /// AFT tier hashed into this identity's `InboxParams` — the recipient
+    /// policy senders must mint at. Frozen for the inbox lifetime
+    /// because changing it rotates the contract id (#85).
+    pub required_tier: freenet_aft_interface::Tier,
+    /// `max_age_secs` half of the recipient policy. Same lifetime
+    /// constraints as `required_tier`.
+    pub max_age_secs: u64,
     /// ML-DSA-65 signing key for inbox state authorisation and AFT token signing.
     pub ml_dsa_signing_key: Arc<MlDsaSigningKey<MlDsa65>>,
     /// ML-KEM-768 decapsulation key for message decryption.
@@ -104,12 +111,37 @@ impl Identity {
         ml_dsa_signing_key: Arc<MlDsaSigningKey<MlDsa65>>,
         ml_kem_dk: DecapsulationKey<MlKem768>,
     ) -> Self {
+        Self::new_with_policy(
+            alias,
+            id,
+            description,
+            ml_dsa_signing_key,
+            ml_kem_dk,
+            freenet_aft_interface::Tier::Day1,
+            freenet_email_inbox::DEFAULT_MAX_AGE_SECS,
+        )
+    }
+
+    /// Construct an `Identity` with explicit anti-flood policy. The
+    /// policy is part of `InboxParams`, so picking it here determines
+    /// the inbox contract id and cannot change later (#85).
+    pub(crate) fn new_with_policy(
+        alias: Rc<str>,
+        id: UserId,
+        description: String,
+        ml_dsa_signing_key: Arc<MlDsaSigningKey<MlDsa65>>,
+        ml_kem_dk: DecapsulationKey<MlKem768>,
+        required_tier: freenet_aft_interface::Tier,
+        max_age_secs: u64,
+    ) -> Self {
         let vk_bytes = Self::derive_vk_bytes(ml_dsa_signing_key.as_ref());
         let ek_bytes = Self::derive_ek_bytes(&ml_kem_dk);
         Self {
             alias,
             id,
             description,
+            required_tier,
+            max_age_secs,
             ml_dsa_signing_key,
             ml_kem_dk,
             ek_bytes,
@@ -137,6 +169,8 @@ impl Clone for Identity {
             alias: self.alias.clone(),
             id: self.id,
             description: self.description.clone(),
+            required_tier: self.required_tier,
+            max_age_secs: self.max_age_secs,
             ml_dsa_signing_key: Arc::clone(&self.ml_dsa_signing_key),
             ml_kem_dk: self.ml_kem_dk.clone(),
             ek_bytes: self.ek_bytes.clone(),
@@ -301,6 +335,8 @@ impl Identity {
             alias: alias.clone(),
             id: existing_id.unwrap_or_else(UserId::new),
             description: description.clone(),
+            required_tier: freenet_aft_interface::Tier::Day1,
+            max_age_secs: freenet_email_inbox::DEFAULT_MAX_AGE_SECS,
             ml_dsa_signing_key: Arc::clone(&ml_dsa_signing_key),
             ml_kem_dk: ml_kem_dk.clone(),
             ek_bytes: ek_bytes.clone(),
@@ -321,6 +357,8 @@ impl Identity {
                 alias: alias.clone(),
                 id: identity.id,
                 description,
+                required_tier: identity.required_tier,
+                max_age_secs: identity.max_age_secs,
                 ml_dsa_signing_key,
                 ml_kem_dk,
                 ek_bytes,
@@ -946,6 +984,8 @@ pub(super) fn CreateAliasForm() -> Element {
             alias: alias.clone(),
             ml_dsa_key: ml_dsa.clone(),
             contract_type: ContractType::InboxContract,
+            required_tier: freenet_aft_interface::Tier::Day1,
+            max_age_secs: freenet_email_inbox::DEFAULT_MAX_AGE_SECS,
         });
         actions.send(NodeAction::CreateDelegate {
             alias: alias.clone(),
@@ -955,6 +995,8 @@ pub(super) fn CreateAliasForm() -> Element {
             alias: alias.clone(),
             ml_dsa_key: ml_dsa.clone(),
             contract_type: ContractType::AFTContract,
+            required_tier: freenet_aft_interface::Tier::Day1,
+            max_age_secs: freenet_email_inbox::DEFAULT_MAX_AGE_SECS,
         });
         actions.send(NodeAction::CreateIdentity {
             alias,
@@ -1338,6 +1380,8 @@ fn ImportForm() -> Element {
                                 alias: alias.clone(),
                                 ml_dsa_key: ml_dsa.clone(),
                                 contract_type: ContractType::InboxContract,
+                                required_tier: freenet_aft_interface::Tier::Day1,
+                                max_age_secs: freenet_email_inbox::DEFAULT_MAX_AGE_SECS,
                             });
                             actions.send(NodeAction::CreateDelegate {
                                 alias: alias.clone(),
@@ -1347,6 +1391,8 @@ fn ImportForm() -> Element {
                                 alias: alias.clone(),
                                 ml_dsa_key: ml_dsa.clone(),
                                 contract_type: ContractType::AFTContract,
+                                required_tier: freenet_aft_interface::Tier::Day1,
+                                max_age_secs: freenet_email_inbox::DEFAULT_MAX_AGE_SECS,
                             });
                             actions.send(NodeAction::CreateIdentity {
                                 alias,

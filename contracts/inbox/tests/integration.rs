@@ -14,8 +14,8 @@ use chrono::{Duration, Utc};
 use common::{
     add_messages_delta, assignment_hash_for, fixed_valid_slot, inbox_verifying_key,
     make_inbox_keypair, make_inbox_state, make_inbox_value, make_message, make_params,
-    make_token_assignment, make_token_generator_keypair, make_token_record, related_state_update,
-    token_record_id_for,
+    make_params_with_policy, make_token_assignment, make_token_generator_keypair,
+    make_token_record, related_state_update, token_record_id_for,
 };
 use freenet_aft_interface::Tier;
 use freenet_email_inbox::{Inbox, InboxSettings};
@@ -190,6 +190,46 @@ fn update_rejects_token_with_invalid_slot() {
     assert!(
         result.is_err(),
         "an invalid time slot should produce an error from update_state; got {result:?}"
+    );
+}
+
+/// #85: when `InboxParams.required_tier` is set to a non-default tier,
+/// any incoming AddMessages that carries a token minted at the default
+/// (Day1) tier must be rejected. This is the contract-side gate that
+/// makes the recipient's anti-flood policy authenticated by
+/// `hash(code, params)`.
+#[test]
+fn update_rejects_token_with_wrong_tier_for_recipient_policy() {
+    let owner_sk = make_inbox_keypair();
+    let owner_vk = inbox_verifying_key(&owner_sk);
+    let (gen_sk, gen_vk_bytes) = make_token_generator_keypair();
+    // Recipient policy: Hour1, not Day1.
+    let params = make_params_with_policy(&owner_vk, Tier::Hour1, 365 * 24 * 3600);
+
+    let token_record_id = token_record_id_for(b"wrong-tier-record");
+    // Sender mints at Day1 (the legacy default), which now mismatches
+    // the recipient's policy and should be rejected.
+    let assignment = make_token_assignment(
+        &gen_sk,
+        gen_vk_bytes,
+        Tier::Day1,
+        fixed_valid_slot(),
+        assignment_hash_for(b"wrong-tier-msg"),
+        token_record_id,
+    );
+    let message = make_message(b"wrong-tier-payload".to_vec(), assignment.clone());
+    let record = make_token_record(assignment);
+
+    let initial_state = make_inbox_state(&owner_sk, vec![], Utc::now(), InboxSettings::default());
+    let updates = vec![
+        add_messages_delta(vec![message]),
+        related_state_update(token_record_id, record),
+    ];
+
+    let result = Inbox::update_state(params, initial_state, updates);
+    assert!(
+        result.is_err(),
+        "tier-mismatched token must be rejected by update_state; got {result:?}"
     );
 }
 

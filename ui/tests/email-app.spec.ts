@@ -1307,3 +1307,139 @@ test.describe("Sent delivery state (#58)", () => {
     );
   });
 });
+
+// ── Recipient anti-flood policy on ContactCard (#85) ──────────────────────────
+//
+// Issue #85 makes the AFT tier + max_age recipient-configurable by hashing
+// them into `InboxParams`. The wire format change percolates to ContactCard
+// (v2 adds `required_tier` + `max_age_secs`). The decoder must:
+//   1. Accept v2 cards and round-trip the explicit policy fields.
+//   2. Accept legacy v1 cards (no policy fields) and default-fill them so
+//      pre-#85 imports keep working.
+// Both are exercised through the public Import Contact UI, which is the
+// path real users hit.
+
+test.describe("ContactCard #85 — recipient anti-flood policy", () => {
+  test("v2 contact card with explicit Hour1 policy imports successfully", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await waitForApp(page);
+
+    const contactCard = await page.evaluate(() => {
+      const mlDsaVk = new Array(1952)
+        .fill(0)
+        .map((_, i) => (i * 11 + 3) & 0xff);
+      const mlKemEk = new Array(1184)
+        .fill(0)
+        .map((_, i) => (i * 13 + 5) & 0xff);
+      const card = {
+        version: 2,
+        ml_dsa_vk_bytes: mlDsaVk,
+        ml_kem_ek_bytes: mlKemEk,
+        suggested_alias: "hour1-contact",
+        suggested_description: "Heavy-traffic recipient",
+        // #85 fields: recipient demands Hour1 minted tokens with a
+        // 30-day max_age, instead of the legacy Day1/365d defaults.
+        required_tier: "Hour1",
+        max_age_secs: 30 * 24 * 3600,
+      };
+      const json = JSON.stringify(card);
+      return `verify: foo-bar-baz-qux-quux-corge\ncontact://${btoa(json)}`;
+    });
+
+    await page.locator('[data-testid="fm-contact-import"]').click();
+    const importModal = page.locator('[data-testid="fm-import-contact-modal"]');
+    await importModal.waitFor({ timeout: 5_000 });
+
+    await importModal.locator("textarea").fill(contactCard);
+
+    const fingerprintPanel = page.locator('[data-testid="fm-import-fp"]');
+    await expect(fingerprintPanel).toBeVisible({ timeout: 5_000 });
+
+    await page.locator('[data-testid="fm-import-submit"]').click();
+
+    const contactRow = page.locator(
+      '[data-testid="contact-row"][data-alias="hour1-contact"]',
+    );
+    await expect(contactRow).toBeVisible({ timeout: 5_000 });
+  });
+
+  test("v1 contact card without policy fields imports with defaults", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await waitForApp(page);
+
+    // Legacy v1 wire shape — no `required_tier` / `max_age_secs`.
+    // The Rust decoder's serde defaults (Day1 + DEFAULT_MAX_AGE_SECS)
+    // must kick in so pre-#85 cards keep round-tripping.
+    const contactCard = await page.evaluate(() => {
+      const mlDsaVk = new Array(1952)
+        .fill(0)
+        .map((_, i) => (i * 17 + 23) & 0xff);
+      const mlKemEk = new Array(1184)
+        .fill(0)
+        .map((_, i) => (i * 19 + 29) & 0xff);
+      const card = {
+        version: 1,
+        ml_dsa_vk_bytes: mlDsaVk,
+        ml_kem_ek_bytes: mlKemEk,
+        suggested_alias: "legacy-contact",
+        suggested_description: "Pre-#85 v1 card",
+      };
+      const json = JSON.stringify(card);
+      return `verify: aaa-bbb-ccc-ddd-eee-fff\ncontact://${btoa(json)}`;
+    });
+
+    await page.locator('[data-testid="fm-contact-import"]').click();
+    const importModal = page.locator('[data-testid="fm-import-contact-modal"]');
+    await importModal.waitFor({ timeout: 5_000 });
+
+    await importModal.locator("textarea").fill(contactCard);
+
+    // If the decoder rejected the missing fields the fingerprint panel
+    // would never appear and the submit button stays disabled.
+    const fingerprintPanel = page.locator('[data-testid="fm-import-fp"]');
+    await expect(fingerprintPanel).toBeVisible({ timeout: 5_000 });
+
+    await page.locator('[data-testid="fm-import-submit"]').click();
+
+    const contactRow = page.locator(
+      '[data-testid="contact-row"][data-alias="legacy-contact"]',
+    );
+    await expect(contactRow).toBeVisible({ timeout: 5_000 });
+  });
+
+  test("malformed policy in v2 card is rejected", async ({ page }) => {
+    await page.goto("/");
+    await waitForApp(page);
+
+    // `required_tier` is an enum — a stray string like "Bogus" must
+    // fail JSON deser, so the import dialog should refuse the card
+    // (no fingerprint panel renders).
+    const badCard = await page.evaluate(() => {
+      const mlDsaVk = new Array(1952).fill(0).map((_, i) => i & 0xff);
+      const mlKemEk = new Array(1184).fill(0).map((_, i) => i & 0xff);
+      const card = {
+        version: 2,
+        ml_dsa_vk_bytes: mlDsaVk,
+        ml_kem_ek_bytes: mlKemEk,
+        suggested_alias: "bogus",
+        suggested_description: null,
+        required_tier: "Bogus",
+        max_age_secs: 86400,
+      };
+      const json = JSON.stringify(card);
+      return `contact://${btoa(json)}`;
+    });
+
+    await page.locator('[data-testid="fm-contact-import"]').click();
+    const importModal = page.locator('[data-testid="fm-import-contact-modal"]');
+    await importModal.waitFor({ timeout: 5_000 });
+    await importModal.locator("textarea").fill(badCard);
+
+    // Fingerprint panel must NOT render (decoder rejected the card).
+    await expect(page.locator('[data-testid="fm-import-fp"]')).toHaveCount(0);
+  });
+});

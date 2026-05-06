@@ -55,9 +55,23 @@ pub fn make_token_generator_keypair() -> (MlDsaSigningKey<MlDsa65>, Vec<u8>) {
 }
 
 /// Build the serialized [`InboxParams`] (a JSON-encoded `Parameters` blob)
-/// for the given inbox owner's ML-DSA verifying key.
+/// for the given inbox owner's ML-DSA verifying key. Uses the default
+/// recipient policy (`Tier::Day1`, 365d) so existing tests stay
+/// equivalent to pre-#85 behavior.
 pub fn make_params(owner_vk: &MlDsaVerifyingKey<MlDsa65>) -> Parameters<'static> {
     InboxParams::from_verifying_key(owner_vk)
+        .try_into()
+        .expect("inbox params -> parameters")
+}
+
+/// `make_params` variant that pins an explicit recipient policy, used
+/// by tests that exercise the tier-mismatch enforcement path (#85).
+pub fn make_params_with_policy(
+    owner_vk: &MlDsaVerifyingKey<MlDsa65>,
+    required_tier: Tier,
+    max_age_secs: u64,
+) -> Parameters<'static> {
+    InboxParams::new(owner_vk, required_tier, max_age_secs)
         .try_into()
         .expect("inbox params -> parameters")
 }
