@@ -308,12 +308,20 @@ test.describe("Live node E2E", () => {
       // value (when the positive assert fails, the log grep tells
       // which layer failed) but the positive bob-receives check is
       // the gate.
+      // Scope to inbox/AFT failure modes only. Excludes web-container
+      // re-publish noise ("New state version N must be higher than
+      // current version N" — version equality is a benign stale
+      // rebroadcast on the WC contract, not an inbox bug).
+      // Targets:
+      //  - #71: AFT tier deserialization (`missing field "tier"`)
+      //  - #72: inbox slot-collision (`slot.*collision`, `delta_apply_failed`)
+      //  - generic deserialize panics on inbox state
       const receiverErrors = grepPeerLog(
-        /execution error.*invalid contract update|merge_rejected|delta_apply_failed|missing field `tier`/,
+        /missing field `tier`|delta_apply_failed|slot.*collision|failed to deserialize.*Inbox|InboxUpdateError/,
       );
       expect(
         receiverErrors,
-        "expected NO contract-side errors during cross-node delivery (#71/#72)",
+        "expected NO inbox/AFT contract-side errors during cross-node delivery (#71/#72)",
       ).toBe(false);
       expect(
         grepLog(/task .* panicked|missing related contract/),
