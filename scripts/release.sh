@@ -139,6 +139,21 @@ cargo make test-inbox
 cargo make clippy
 echo "  ✓ cargo make test, test-inbox, clippy green"
 
+# Real-node E2E (opt-in via FREENET_RELEASE_E2E=1). Heavy: spins up
+# a 2-node iso Freenet network + dx build + headed chromium, runs
+# 5–10min. Off by default so a routine release isn't gated on the
+# iso harness, but recommended before tagging anything user-facing.
+# CI runs the same target on tag push (.github/workflows/e2e-real-node.yml),
+# so the post-push gate stays in place either way.
+if [ "${FREENET_RELEASE_E2E:-0}" = "1" ]; then
+    echo ""
+    echo "═══ Real-node E2E (FREENET_RELEASE_E2E=1) ════════════════════"
+    cargo make test-e2e-real-node
+    echo "  ✓ test-e2e-real-node green"
+else
+    echo "  • skipped test-e2e-real-node (set FREENET_RELEASE_E2E=1 to run)"
+fi
+
 # ─── Confirmation ──────────────────────────────────────────────────────────
 
 echo ""
