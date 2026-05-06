@@ -168,22 +168,21 @@ jobs:
 
       - name: Install Playwright browser system deps (cached hit)
         if: steps.cache-playwright.outputs.cache-hit == 'true'
-        timeout-minutes: 15
+        timeout-minutes: 25
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
-          # Retry up to 3× with per-attempt timeout — apt mirror on
-          # ubicloud runners has hung this step for >1h on occasion.
-          # Fail fast (4min/attempt) and surface the apt error rather
-          # than blocking the run.
-          for i in 1 2 3; do
-            if timeout 240 npx playwright install-deps chromium; then
+          # Retry with generous per-attempt timeout — apt mirror on
+          # ubicloud runners is slow (10min+ per `apt-get update`).
+          # The previous 240s budget was below the typical mirror time,
+          # so all 3 attempts timed out. Bump to 10min/attempt × 2.
+          for i in 1 2; do
+            if timeout 600 npx playwright install-deps chromium; then
               exit 0
             fi
             echo "attempt $i failed"
             # `timeout` SIGTERMs npx but the spawned apt-get keeps the
-            # /var/lib/apt/lists/lock — subsequent attempts then fail
-            # in <1s with "Could not get lock". Reap it before retry.
+            # /var/lib/apt/lists/lock — clear it before retrying.
             sudo pkill -9 -f 'apt(-get)?' 2>/dev/null || true
             sudo rm -f /var/lib/apt/lists/lock /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock 2>/dev/null || true
             sleep 30
