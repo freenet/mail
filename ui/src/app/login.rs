@@ -201,7 +201,21 @@ impl Identity {
                             Arc::clone(&ml_dsa_signing_key),
                             ml_kem_dk.clone(),
                         );
-                        user.write().identities.push(identity.clone());
+                        // Dedup user.identities by alias name. ALIASES is
+                        // rebuilt wholesale (see `*aliases = to_add` below),
+                        // but user.identities is a Signal Vec that only
+                        // gets appended — without this guard a delegate
+                        // echo after `set_alias` doubles the row. See #114.
+                        {
+                            let mut user_w = user.write();
+                            if let Some(slot) =
+                                user_w.identities.iter_mut().find(|i| i.alias == alias)
+                            {
+                                *slot = identity.clone();
+                            } else {
+                                user_w.identities.push(identity.clone());
+                            }
+                        }
                         let full = Identity::new(
                             alias.clone(),
                             id,
@@ -265,11 +279,24 @@ impl Identity {
             vk_bytes: vk_bytes.clone(),
         };
         crate::inbox::InboxModel::set_contract_identity(inbox_key, identity.clone());
-        user.write().identities.push(identity.clone());
+        // Dedup by alias name. If a stale GetIdentities echo (or
+        // example-data seeding) already populated `alias`, replace
+        // the entry in place instead of pushing a duplicate. The
+        // delegate is single-valued per alias name (HashMap insert
+        // overwrites), so the old VK is already gone server-side —
+        // surfacing two rows in the UI is the bug. See #114.
+        {
+            let mut user_w = user.write();
+            if let Some(slot) = user_w.identities.iter_mut().find(|i| i.alias == alias) {
+                *slot = identity.clone();
+            } else {
+                user_w.identities.push(identity.clone());
+            }
+        }
         ALIASES.with(|aliases| {
             let aliases = &mut *aliases.borrow_mut();
             let full = Identity {
-                alias,
+                alias: alias.clone(),
                 id: identity.id,
                 description,
                 ml_dsa_signing_key,
@@ -278,7 +305,11 @@ impl Identity {
                 vk_bytes,
             };
             crate::app::address_book::register_identity(&full);
-            aliases.push(full);
+            if let Some(slot) = aliases.iter_mut().find(|a| a.alias == alias) {
+                *slot = full;
+            } else {
+                aliases.push(full);
+            }
         });
         identity
     }
