@@ -180,8 +180,13 @@ jobs:
             if timeout 240 npx playwright install-deps chromium; then
               exit 0
             fi
-            echo "attempt $i failed, retrying"
-            sleep 10
+            echo "attempt $i failed"
+            # `timeout` SIGTERMs npx but the spawned apt-get keeps the
+            # /var/lib/apt/lists/lock — subsequent attempts then fail
+            # in <1s with "Could not get lock". Reap it before retry.
+            sudo pkill -9 -f 'apt(-get)?' 2>/dev/null || true
+            sudo rm -f /var/lib/apt/lists/lock /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock 2>/dev/null || true
+            sleep 30
           done
           exit 1
         working-directory: ./ui/tests
