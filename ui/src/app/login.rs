@@ -913,6 +913,12 @@ pub(super) fn CreateAliasForm() -> Element {
             login_error.set("Alias is required.".into());
             return;
         }
+        if Identity::get_alias(&alias_str).is_some() {
+            login_error.set(format!(
+                "An identity named \"{alias_str}\" already exists. Choose a different name, or delete the existing one first — replacing it would make its inbox unreadable."
+            ));
+            return;
+        }
         match get_keys() {
             Ok((ml_dsa, ml_kem)) => {
                 use ml_dsa::signature::Keypair;
@@ -1163,6 +1169,7 @@ fn ImportForm() -> Element {
     let parsed_backup: Signal<Option<IdentityBackup>> = use_signal(|| None);
     let mut address = use_signal(String::new);
     let mut description = use_signal(String::new);
+    let mut restore_error = use_signal(String::new);
 
     let preview_words: Option<[&'static str; 6]> = parsed_backup.read().as_ref().map(|b| {
         let ml_dsa = b.keys.ml_dsa_signing_key();
@@ -1290,6 +1297,11 @@ fn ImportForm() -> Element {
                     " Once restored, treat the original file like a password — store it offline or delete it."
                 }
             }
+            if !restore_error.read().is_empty() {
+                div { class: "info", style: "background:#fef2f2; border-color:#fecaca; color:#991b1b;",
+                    "{restore_error.read()}"
+                }
+            }
             div { class: "modal-foot", style: "background:transparent; border:0; padding:18px 0 0;",
                 button {
                     class: "btn btn-ghost",
@@ -1306,7 +1318,19 @@ fn ImportForm() -> Element {
                                 crate::log::debug!("Rejected backup: {_msg}");
                                 return;
                             }
-                            let alias: Rc<str> = address.read().to_owned().into();
+                            let alias_str = address.read().trim().to_string();
+                            if alias_str.is_empty() {
+                                restore_error.set("Alias is required.".into());
+                                return;
+                            }
+                            if Identity::get_alias(&alias_str).is_some() {
+                                restore_error.set(format!(
+                                    "An identity named \"{alias_str}\" already exists. Rename the import or delete the existing one first — restoring would replace it and its inbox would become unreadable."
+                                ));
+                                return;
+                            }
+                            restore_error.set(String::new());
+                            let alias: Rc<str> = alias_str.into();
                             let desc_val = description.read().clone();
                             let ml_dsa = backup.keys.ml_dsa_signing_key();
                             let ml_kem = backup.keys.ml_kem_dk();
