@@ -658,6 +658,27 @@ test.describe("Create-alias reveal stage (#52)", () => {
       page.locator('[data-testid="fm-id-row"][data-alias="address1"]'),
     ).toBeVisible();
   });
+
+  // #117 — refuse-with-error guard. Typing an alias that already exists
+  // in offline mode (`address1`) must NOT advance to the reveal stage; an
+  // inline error banner replaces the form's six-word fingerprint reveal.
+  test("submitting an existing alias name shows an error and does not reveal keys", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await waitForApp(page);
+
+    await page.locator('[data-testid="fm-id-create"]').click();
+    await page.locator('[data-testid="fm-create-alias-input"]').fill("address1");
+    await page.locator('[data-testid="fm-create-submit"]').click();
+
+    await expect(
+      page.getByText(/An identity named "address1" already exists/i),
+    ).toBeVisible({ timeout: 3_000 });
+    await expect(
+      page.getByRole("heading", { name: "Your fingerprint" }),
+    ).toHaveCount(0);
+  });
 });
 
 test.describe("Share modal (#52)", () => {
