@@ -168,26 +168,23 @@ jobs:
 
       - name: Install Playwright browser system deps (cached hit)
         if: steps.cache-playwright.outputs.cache-hit == 'true'
-        timeout-minutes: 25
+        timeout-minutes: 10
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
-          # Retry with generous per-attempt timeout — apt mirror on
-          # ubicloud runners is slow (10min+ per `apt-get update`).
-          # The previous 240s budget was below the typical mirror time,
-          # so all 3 attempts timed out. Bump to 10min/attempt × 2.
-          for i in 1 2; do
-            if timeout 600 npx playwright install-deps chromium; then
-              exit 0
-            fi
-            echo "attempt $i failed"
-            # `timeout` SIGTERMs npx but the spawned apt-get keeps the
-            # /var/lib/apt/lists/lock — clear it before retrying.
-            sudo pkill -9 -f 'apt(-get)?' 2>/dev/null || true
-            sudo rm -f /var/lib/apt/lists/lock /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock 2>/dev/null || true
-            sleep 30
-          done
-          exit 1
+          # `npx playwright install-deps chromium` runs `apt-get update`
+          # before installing, and ubicloud's apt mirror routinely hangs
+          # 10min+ on the update phase, blowing past any reasonable
+          # timeout. Bypass it by installing the chromium package list
+          # directly — package names extracted from
+          # node_modules/playwright-core/lib/server/registry/nativeDeps.js
+          # (Playwright 1.59.x). If Playwright bumps the list we'll catch
+          # it in the cache-miss path which still uses install-deps.
+          sudo apt-get install -y --no-install-recommends \
+            libasound2t64 libatk-bridge2.0-0t64 libatk1.0-0t64 libatspi2.0-0t64 \
+            libcairo2 libcups2t64 libdbus-1-3 libdrm2 libgbm1 libglib2.0-0t64 \
+            libnspr4 libnss3 libpango-1.0-0 libx11-6 libxcb1 libxcomposite1 \
+            libxdamage1 libxext6 libxfixes3 libxkbcommon0 libxrandr2
         working-directory: ./ui/tests
 
       - name: Build UI in offline mode
