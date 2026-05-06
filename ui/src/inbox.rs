@@ -69,20 +69,11 @@ pub(crate) fn inbox_params_pub_key_bytes(ml_dsa_vk: &MlDsaVerifyingKey<MlDsa65>)
 /// so the compose-Send path can enqueue a pending Sent ack against the
 /// recipient's inbox key without re-implementing the params encoding.
 ///
-/// `required_tier` and `max_age_secs` are the recipient's anti-flood
-/// policy from their `ContactCard` (#85). They are part of `InboxParams`
-/// and therefore part of the contract id, so getting them wrong here
-/// produces a different `ContractKey` than the one the recipient
-/// actually owns.
 pub(crate) fn inbox_key_for(
     ml_dsa_vk: &MlDsaVerifyingKey<MlDsa65>,
-    required_tier: freenet_aft_interface::Tier,
-    max_age_secs: u64,
 ) -> Result<ContractKey, DynError> {
     let params = InboxParams {
         pub_key: inbox_params_pub_key_bytes(ml_dsa_vk),
-        required_tier,
-        max_age_secs,
     }
     .try_into()
     .map_err(|e| format!("{e}"))?;
@@ -234,8 +225,14 @@ struct InternalSettings {
     /// This id is used for internal handling of the inbox and is not persistent
     /// or unique across sessions.
     next_msg_id: u64,
-    #[allow(dead_code)] // TODO: surfaced via settings UI (not yet wired)
+    /// AFT tier the recipient demands from incoming senders. Mutable
+    /// via the Settings UI (#85): `update_settings_at_store` signs a
+    /// `ModifySettings` delta with `ml_dsa_signing_key` and pushes it
+    /// to the inbox contract.
     minimum_tier: Tier,
+    /// `max_age_secs` half of the recipient anti-flood policy. Sent
+    /// alongside `minimum_tier` in `ModifySettings` deltas.
+    max_age_secs: u64,
     /// ML-DSA-65 signing key used to authorise modifications to the inbox
     /// contract state (add/remove messages, settings updates). The corresponding
     /// verifying key is embedded in `InboxParams` and becomes part of the
@@ -269,13 +266,14 @@ impl InternalSettings {
             next_msg_id: next_id,
             ml_dsa_signing_key,
             minimum_tier: stored_settings.minimum_tier,
+            max_age_secs: stored_settings.max_age_secs,
         })
     }
 
-    #[allow(dead_code)] // TODO: invoked from update_settings_at_store
     fn to_stored(&self) -> Result<StoredSettings, DynError> {
         Ok(StoredSettings {
             minimum_tier: self.minimum_tier,
+            max_age_secs: self.max_age_secs,
             private: vec![],
         })
     }
@@ -440,8 +438,6 @@ impl DecryptedMessage {
         .await?;
         let params = InboxParams {
             pub_key: inbox_pub_key_bytes,
-            required_tier: recipient_required_tier,
-            max_age_secs: recipient_max_age_secs,
         }
         .try_into()
         .map_err(|e| format!("{e}"))?;
@@ -642,13 +638,9 @@ impl InboxModel {
         fn get_key(identity: &Identity) -> Result<ContractKey, DynError> {
             let vk = MlDsaKeypair::verifying_key(identity.ml_dsa_signing_key.as_ref());
             let pub_key = inbox_params_pub_key_bytes(&vk);
-            let params = freenet_email_inbox::InboxParams {
-                pub_key,
-                required_tier: identity.required_tier,
-                max_age_secs: identity.max_age_secs,
-            }
-            .try_into()
-            .map_err(|e| format!("{e}"))?;
+            let params = freenet_email_inbox::InboxParams { pub_key }
+                .try_into()
+                .map_err(|e| format!("{e}"))?;
             ContractKey::from_params(crate::inbox::INBOX_CODE_HASH, params)
                 .map_err(|e| format!("{e}").into())
         }
@@ -691,8 +683,6 @@ impl InboxModel {
         let vk = MlDsaKeypair::verifying_key(id.ml_dsa_signing_key.as_ref());
         let params = InboxParams {
             pub_key: inbox_params_pub_key_bytes(&vk),
-            required_tier: id.required_tier,
-            max_age_secs: id.max_age_secs,
         }
         .try_into()
         .map_err(|e| format!("{e}"))?;
@@ -897,11 +887,18 @@ impl InboxModel {
         }
     }
 
-    #[allow(dead_code)] // TODO: wire into settings UI
-    async fn update_settings_at_store(
+    /// Apply a new anti-flood policy locally and return a serialized
+    /// `ModifySettings` delta the caller must push to the inbox
+    /// contract via `client.send` outside any RefCell borrow (#85).
+    /// Only the inbox owner can mutate policy — `can_update_settings`
+    /// on the contract verifies the signature against `params.pub_key`.
+    pub fn update_policy_prepare(
         &mut self,
-        client: &mut WebApiRequestClient,
-    ) -> Result<(), DynError> {
+        minimum_tier: Tier,
+        max_age_secs: u64,
+    ) -> Result<ContractRequest<'static>, DynError> {
+        self.settings.minimum_tier = minimum_tier;
+        self.settings.max_age_secs = max_age_secs;
         let settings = self.settings.to_stored()?;
         let serialized = serde_json::to_vec(&settings)?;
         let signing_key = self.settings.ml_dsa_signing_key.as_ref();
@@ -911,12 +908,10 @@ impl InboxModel {
             signature,
             settings,
         };
-        let request = ContractRequest::Update {
+        Ok(ContractRequest::Update {
             key: self.key,
             data: UpdateData::Delta(serde_json::to_vec(&delta)?.into()),
-        };
-        client.send(request.into()).await?;
-        Ok(())
+        })
     }
 
     pub async fn get_state(
@@ -968,6 +963,7 @@ mod tests {
                 settings: InternalSettings {
                     next_msg_id: 0,
                     minimum_tier: Tier::Hour1,
+                    max_age_secs: freenet_email_inbox::DEFAULT_MAX_AGE_SECS,
                     ml_dsa_signing_key,
                 },
                 key: ContractKey::from_params_and_code(

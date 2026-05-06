@@ -260,14 +260,19 @@ mod inbox_management {
         let identity_key = vk.encode().to_vec();
         let params: Parameters = InboxParams {
             pub_key: crate::inbox::inbox_params_pub_key_bytes(&vk),
-            required_tier,
-            max_age_secs,
         }
         .try_into()?;
+        // Seed the initial InboxSettings with the owner's anti-flood
+        // policy so senders mint at the right tier from day one. The
+        // owner can later mutate this via ModifySettings (#85).
         let state = {
             let inbox = freenet_email_inbox::Inbox::new(
                 ml_dsa_key.as_ref(),
-                InboxSettings::default(),
+                InboxSettings {
+                    minimum_tier: required_tier,
+                    max_age_secs,
+                    private: Default::default(),
+                },
                 Vec::new(),
             );
             inbox.serialize()?
@@ -772,6 +777,7 @@ pub(crate) async fn node_comms(
         token_rec_to_id: &mut HashMap<ContractKey, Identity>,
         user: Signal<crate::app::User>,
         mut login_controller: Signal<crate::app::LoginController>,
+        inboxes: &InboxesData,
     ) {
         let mut client = api.sender_half();
         match req {
@@ -875,6 +881,60 @@ pub(crate) async fn node_comms(
                     }
                     Err(e) => {
                         crate::log::error(format!("{e}"), Some(TryNodeAction::CreateDelegate))
+                    }
+                }
+            }
+            NodeAction::UpdateInboxPolicy {
+                identity,
+                required_tier,
+                max_age_secs,
+            } => {
+                // Match the loaded InboxModel by identity vk-bytes;
+                // skip silently if the inbox isn't loaded yet (caller
+                // shouldn't be able to surface the form pre-load, but
+                // avoid panicking either way).
+                let target_vk = identity.ml_dsa_vk_bytes();
+                let mut found = None;
+                for cell in inboxes.snapshot() {
+                    let key_owner = {
+                        let m = cell.borrow();
+                        crate::inbox::InboxModel::contract_identity(&m.key)
+                    };
+                    if let Some(owner) = key_owner
+                        && owner.ml_dsa_vk_bytes() == target_vk
+                    {
+                        found = Some(cell);
+                        break;
+                    }
+                }
+                let Some(cell) = found else {
+                    crate::log::error(
+                        format!(
+                            "UpdateInboxPolicy: no loaded inbox for alias `{}`",
+                            identity.alias()
+                        ),
+                        None,
+                    );
+                    return;
+                };
+                let prepared = {
+                    let mut model = cell.borrow_mut();
+                    model.update_policy_prepare(required_tier, max_age_secs)
+                };
+                match prepared {
+                    Ok(request) => {
+                        if let Err(e) = client.send(request.into()).await {
+                            crate::log::error(
+                                format!("UpdateInboxPolicy send failed: {e}"),
+                                Some(TryNodeAction::SendMessage),
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        crate::log::error(
+                            format!("UpdateInboxPolicy prepare failed: {e}"),
+                            Some(TryNodeAction::SendMessage),
+                        );
                     }
                 }
             }
@@ -1579,7 +1639,15 @@ pub(crate) async fn node_comms(
             }
             req = rx.next() => {
                 let Some(req) = req else { panic!("async action ch closed") };
-                handle_action(req, &api, &mut token_contract_to_id, user, login_controller).await;
+                handle_action(
+                    req,
+                    &api,
+                    &mut token_contract_to_id,
+                    user,
+                    login_controller,
+                    &inboxes,
+                )
+                .await;
             }
             req = api.requests.next() => {
                 let Some(req) = req else { panic!("request ch closed") };

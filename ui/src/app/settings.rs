@@ -639,6 +639,33 @@ fn ScrPrivacy() -> Element {
     }
 }
 
+/// Map an `IdentityAftPrefs.required_tier` string back to the typed
+/// enum. Mirrors the names the `TIER_ROWS` picker writes to local
+/// state (#85). Returns `None` for unrecognized values so the
+/// caller can surface the error rather than silently defaulting.
+#[cfg(feature = "wip-settings")]
+fn parse_tier(s: &str) -> Option<freenet_aft_interface::Tier> {
+    use freenet_aft_interface::Tier::*;
+    Some(match s {
+        "Min1" => Min1,
+        "Min5" => Min5,
+        "Min10" => Min10,
+        "Min30" => Min30,
+        "Hour1" => Hour1,
+        "Hour3" => Hour3,
+        "Hour6" => Hour6,
+        "Hour12" => Hour12,
+        "Day1" => Day1,
+        "Day7" => Day7,
+        "Day15" => Day15,
+        "Day30" => Day30,
+        "Day90" => Day90,
+        "Day180" => Day180,
+        "Day365" => Day365,
+        _ => return None,
+    })
+}
+
 /// One row per real `freenet_aft_interface::Tier`. The "rate" column is
 /// derived from the tier name (1 token per N time-unit) — there is no
 /// `tokens_per_period` getter on the enum, so the period text is encoded
@@ -669,16 +696,64 @@ fn ScrAft() -> Element {
     let (alias_key, ident) = use_identity_settings();
     let aft_now = ident.aft.clone();
     let selected_tier = aft_now.required_tier.clone();
+    let max_age_days = aft_now.max_age_days;
     let allow_known = aft_now.allow_known;
     let allow_anon = aft_now.allow_anon;
     let bounce = aft_now.bounce_message.clone();
+    let actions = use_coroutine_handle::<crate::app::NodeAction>();
+
+    // #85: dispatch a `ModifySettings` delta to the inbox contract so
+    // the new policy actually gates incoming sends — without this the
+    // change is local-state-only and senders keep minting at the old
+    // tier.
+    let push_policy = move |alias: &str, tier_str: &str, max_age_days: u64| {
+        let identity = crate::app::address_book::lookup(alias)
+            .filter(|r| r.is_own)
+            .and_then(|_| {
+                crate::app::login::Identity::get_aliases()
+                    .borrow()
+                    .iter()
+                    .find(|i| i.alias.as_ref() == alias)
+                    .cloned()
+            });
+        let Some(identity) = identity else {
+            crate::log::error(
+                format!("AFT settings: no own identity for alias `{alias}`"),
+                None,
+            );
+            return;
+        };
+        let Some(tier) = parse_tier(tier_str) else {
+            crate::log::error(format!("AFT settings: invalid tier `{tier_str}`"), None);
+            return;
+        };
+        let max_age_secs = max_age_days.saturating_mul(86_400);
+        actions.send(crate::app::NodeAction::UpdateInboxPolicy {
+            identity: Box::new(identity),
+            required_tier: tier,
+            max_age_secs,
+        });
+    };
 
     let alias_key_t = alias_key.clone();
     let ident_t = ident.clone();
+    let push_policy_t = push_policy.clone();
     let on_tier = move |new_tier: String| {
         let mut next = ident_t.clone();
-        next.aft.required_tier = new_tier;
-        local_state::persist_identity_settings(alias_key_t.clone(), next);
+        next.aft.required_tier = new_tier.clone();
+        local_state::persist_identity_settings(alias_key_t.clone(), next.clone());
+        push_policy_t(&alias_key_t, &new_tier, next.aft.max_age_days);
+    };
+    let alias_key_m = alias_key.clone();
+    let ident_m = ident.clone();
+    let push_policy_m = push_policy.clone();
+    let on_max_age = move |ev: Event<FormData>| {
+        let raw = ev.value();
+        let parsed: u64 = raw.parse().unwrap_or(365).clamp(1, 730);
+        let mut next = ident_m.clone();
+        next.aft.max_age_days = parsed;
+        local_state::persist_identity_settings(alias_key_m.clone(), next.clone());
+        push_policy_m(&alias_key_m, &next.aft.required_tier, parsed);
     };
     let alias_key_k = alias_key.clone();
     let ident_k = ident.clone();
@@ -729,6 +804,20 @@ fn ScrAft() -> Element {
                                 }
                             }
                         }
+                    }
+                }
+            }
+            Card {
+                title: "Token max age (days)",
+                sub: "Sender's AFT delegate uses this when picking a free slot. Capped at 730 days by the AFT crate; lower values rotate the cap faster.",
+                div { class: "field",
+                    input {
+                        class: "input",
+                        r#type: "number",
+                        min: "1",
+                        max: "730",
+                        value: "{max_age_days}",
+                        onchange: on_max_age,
                     }
                 }
             }

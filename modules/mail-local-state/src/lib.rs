@@ -167,6 +167,12 @@ pub struct IdentityAftPrefs {
     /// `Hour1`, `Hour3`, `Hour6`, `Hour12`, `Day1`, `Day7`, `Day15`,
     /// `Day30`, `Day90`, `Day180`, `Day365`).
     pub required_tier: String,
+    /// `max_age` half of the recipient anti-flood policy, in days
+    /// (#85). The AFT delegate uses it sender-side when computing
+    /// free slots; capped at 730 to stay under the 2-year ceiling
+    /// `AllocationCriteria::new` enforces.
+    #[serde(default = "default_max_age_days")]
+    pub max_age_days: u64,
     /// Accept messages from contacts in the address book regardless of tier.
     pub allow_known: bool,
     /// Accept messages from senders not in the address book.
@@ -175,10 +181,15 @@ pub struct IdentityAftPrefs {
     pub bounce_message: String,
 }
 
+fn default_max_age_days() -> u64 {
+    365
+}
+
 impl Default for IdentityAftPrefs {
     fn default() -> Self {
         Self {
             required_tier: "Day1".to_string(),
+            max_age_days: default_max_age_days(),
             allow_known: true,
             allow_anon: false,
             bounce_message: String::new(),
@@ -919,6 +930,7 @@ mod boundary_tests {
             auto_sign: false,
             aft: IdentityAftPrefs {
                 required_tier: "Mid2".into(),
+                max_age_days: 90,
                 allow_known: true,
                 allow_anon: true,
                 bounce_message: "rate-limited".into(),

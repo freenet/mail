@@ -61,14 +61,27 @@ spawn_setsid() {
 }
 
 setup_dirs() {
+    # macOS layout: dirs::config_dir() / dirs::data_local_dir() both
+    # resolve under "Library/Application Support/<APPLICATION>".
     mkdir -p "$GW_HOME/Library/Application Support/The-Freenet-Project-Inc.Freenet"
     mkdir -p "$PEER_HOME/Library/Application Support/The-Freenet-Project-Inc.Freenet"
+    # Linux layout: dirs::config_dir() = $XDG_CONFIG_HOME or $HOME/.config;
+    # dirs::data_local_dir() = $XDG_DATA_HOME or $HOME/.local/share.
+    # Pre-create both so freenet never falls back to a host-default path
+    # outside our HOME override (which would let gw + peer share state).
+    mkdir -p "$GW_HOME/.config/freenet" "$GW_HOME/.local/share/freenet"
+    mkdir -p "$PEER_HOME/.config/freenet" "$PEER_HOME/.local/share/freenet"
     mkdir -p "$GW_DATA" "$GW_LOGS" "$PEER_DATA" "$PEER_LOGS"
     # Empty `gateways = []` so freenet doesn't load real public bootstraps
     # from the global config dir. Empty file ('') errors out with
     # "missing field `gateways`" — must be the explicit array form.
-    printf 'gateways = []\n' > "$GW_HOME/Library/Application Support/The-Freenet-Project-Inc.Freenet/gateways.toml"
-    printf 'gateways = []\n' > "$PEER_HOME/Library/Application Support/The-Freenet-Project-Inc.Freenet/gateways.toml"
+    for cfg in \
+        "$GW_HOME/Library/Application Support/The-Freenet-Project-Inc.Freenet/gateways.toml" \
+        "$PEER_HOME/Library/Application Support/The-Freenet-Project-Inc.Freenet/gateways.toml" \
+        "$GW_HOME/.config/freenet/gateways.toml" \
+        "$PEER_HOME/.config/freenet/gateways.toml"; do
+        printf 'gateways = []\n' > "$cfg"
+    done
 }
 
 derive_pubkey() {
@@ -114,6 +127,14 @@ up() {
     GW_PUBKEY=$(derive_pubkey)
     echo "$GW_PUBKEY" > "$GW_PUBKEY_FILE"
     echo "gateway pubkey: $GW_PUBKEY"
+    # Diagnostic for the CI flake where peer bails with
+    # "Skipping gateway with same public key as self" — print the first
+    # 16 bytes of gw's transport_keypair so a follow-up CI run can
+    # compare against peer's keypair head and confirm whether they
+    # actually collide on Linux.
+    if [ -f "$GW_DATA/secrets/transport_keypair" ]; then
+        echo "gw transport_keypair head: $(head -c 32 "$GW_DATA/secrets/transport_keypair")"
+    fi
 
     if lsof -i :$PEER_PORT_WS -P -sTCP:LISTEN > /dev/null 2>&1; then
         echo "peer already listening on :$PEER_PORT_WS"
@@ -139,8 +160,15 @@ up() {
 
     # Confirm only the local gateway shows up in the peer's bootstrap list.
     sleep 2
+    if [ -f "$PEER_DATA/secrets/transport_keypair" ]; then
+        echo "peer transport_keypair head: $(head -c 32 "$PEER_DATA/secrets/transport_keypair")"
+    fi
     local n
-    n=$(grep -c "Attempting connection to gateway" "$PEER_LOGS"/freenet.*.log 2>/dev/null | tail -1 || echo 0)
+    # `grep -c` over multiple files emits `<file>:<count>` lines; sum
+    # the counts via cut+awk so the bare integer comparison below
+    # doesn't trip on a `:0:`-suffixed string.
+    n=$(grep -c "Attempting connection to gateway" "$PEER_LOGS"/freenet.*.log 2>/dev/null \
+        | awk -F: '{ sum += $NF } END { print sum + 0 }')
     if [ "${n:-0}" -gt 1 ]; then
         echo "WARNING: peer is dialing $n gateways — isolation broken (check HOME override)"
     fi
