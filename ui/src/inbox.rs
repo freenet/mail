@@ -68,11 +68,21 @@ pub(crate) fn inbox_params_pub_key_bytes(ml_dsa_vk: &MlDsaVerifyingKey<MlDsa65>)
 /// `ml_dsa_vk`. Same derivation as `start_sending` uses internally; exposed
 /// so the compose-Send path can enqueue a pending Sent ack against the
 /// recipient's inbox key without re-implementing the params encoding.
+///
+/// `required_tier` and `max_age_secs` are the recipient's anti-flood
+/// policy from their `ContactCard` (#85). They are part of `InboxParams`
+/// and therefore part of the contract id, so getting them wrong here
+/// produces a different `ContractKey` than the one the recipient
+/// actually owns.
 pub(crate) fn inbox_key_for(
     ml_dsa_vk: &MlDsaVerifyingKey<MlDsa65>,
+    required_tier: freenet_aft_interface::Tier,
+    max_age_secs: u64,
 ) -> Result<ContractKey, DynError> {
     let params = InboxParams {
         pub_key: inbox_params_pub_key_bytes(ml_dsa_vk),
+        required_tier,
+        max_age_secs,
     }
     .try_into()
     .map_err(|e| format!("{e}"))?;
@@ -146,6 +156,49 @@ pub(crate) fn take_next_pending_sent_ack(inbox_key: &InboxContract) -> Option<(S
         }
         item
     })
+}
+
+/// Drain every pending Sent row queued against `inbox_key` and flip
+/// each to `Failed` (both locally and via the local-state delegate so
+/// the change persists across reload). Used when the AFT delegate
+/// reports a `Failure` for a token request — the send cannot complete
+/// and the user must see that, instead of a Pending spinner that never
+/// resolves (#85).
+#[cfg(feature = "use-node")]
+pub(crate) async fn fail_pending_sent_for_inbox(
+    client: &mut crate::api::WebApiRequestClient,
+    inbox_key: InboxContract,
+) {
+    let entries: Vec<(String, String)> = PENDING_SENT_ACK.with(|m| {
+        let mut map = m.borrow_mut();
+        match map.remove(&inbox_key) {
+            Some(q) => q.into_iter().collect(),
+            None => Vec::new(),
+        }
+    });
+    for (sender_alias, sent_id) in entries {
+        crate::local_state::local_set_sent_delivery_state(
+            &sender_alias,
+            &sent_id,
+            mail_local_state::DeliveryState::Failed,
+        );
+        if let Err(e) = crate::local_state::set_sent_delivery_state(
+            client,
+            sender_alias.clone(),
+            sent_id.clone(),
+            mail_local_state::DeliveryState::Failed,
+        )
+        .await
+        {
+            crate::log::error(
+                format!("set_sent_delivery_state(Failed) for {sender_alias}/{sent_id}: {e}"),
+                None,
+            );
+        }
+    }
+    PENDING_INBOXES_UPDATE.with(|m| {
+        m.borrow_mut().remove(&inbox_key);
+    });
 }
 
 /// Remove a specific pending sent record from the queue (e.g. on
@@ -366,6 +419,8 @@ impl DecryptedMessage {
         client: &mut WebApiRequestClient,
         recipient_ek: EncapsulationKey<MlKem768>,
         recipient_ml_dsa_vk: MlDsaVerifyingKey<MlDsa65>,
+        recipient_required_tier: freenet_aft_interface::Tier,
+        recipient_max_age_secs: u64,
         from: &Identity,
     ) -> Result<(), DynError> {
         let (hash, _) = self.assignment_hash_and_signed_content()?;
@@ -374,10 +429,19 @@ impl DecryptedMessage {
             bs58::encode(hash).into_string()
         );
         let inbox_pub_key_bytes = inbox_params_pub_key_bytes(&recipient_ml_dsa_vk);
-        let delegate_key =
-            AftRecords::assign_token(client, inbox_pub_key_bytes.clone(), from, hash).await?;
+        let delegate_key = AftRecords::assign_token(
+            client,
+            inbox_pub_key_bytes.clone(),
+            recipient_required_tier,
+            recipient_max_age_secs,
+            from,
+            hash,
+        )
+        .await?;
         let params = InboxParams {
             pub_key: inbox_pub_key_bytes,
+            required_tier: recipient_required_tier,
+            max_age_secs: recipient_max_age_secs,
         }
         .try_into()
         .map_err(|e| format!("{e}"))?;
@@ -578,9 +642,13 @@ impl InboxModel {
         fn get_key(identity: &Identity) -> Result<ContractKey, DynError> {
             let vk = MlDsaKeypair::verifying_key(identity.ml_dsa_signing_key.as_ref());
             let pub_key = inbox_params_pub_key_bytes(&vk);
-            let params = freenet_email_inbox::InboxParams { pub_key }
-                .try_into()
-                .map_err(|e| format!("{e}"))?;
+            let params = freenet_email_inbox::InboxParams {
+                pub_key,
+                required_tier: identity.required_tier,
+                max_age_secs: identity.max_age_secs,
+            }
+            .try_into()
+            .map_err(|e| format!("{e}"))?;
             ContractKey::from_params(crate::inbox::INBOX_CODE_HASH, params)
                 .map_err(|e| format!("{e}").into())
         }
@@ -623,6 +691,8 @@ impl InboxModel {
         let vk = MlDsaKeypair::verifying_key(id.ml_dsa_signing_key.as_ref());
         let params = InboxParams {
             pub_key: inbox_params_pub_key_bytes(&vk),
+            required_tier: id.required_tier,
+            max_age_secs: id.max_age_secs,
         }
         .try_into()
         .map_err(|e| format!("{e}"))?;
@@ -892,9 +962,7 @@ mod tests {
             _ml_kem_dk: DecapsulationKey<MlKem768>,
         ) -> Result<Self, DynError> {
             let vk = MlDsaKeypair::verifying_key(ml_dsa_signing_key.as_ref());
-            let params = InboxParams {
-                pub_key: inbox_params_pub_key_bytes(&vk),
-            };
+            let params = InboxParams::from_verifying_key(&vk);
             Ok(Self {
                 messages: vec![],
                 settings: InternalSettings {

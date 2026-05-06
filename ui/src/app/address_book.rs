@@ -9,6 +9,8 @@
 use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::OnceLock};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
+use freenet_aft_interface::Tier;
+use freenet_email_inbox::DEFAULT_MAX_AGE_SECS;
 use freenet_stdlib::prelude::blake3;
 use ml_dsa::{MlDsa65, VerifyingKey as MlDsaVerifyingKey};
 use ml_kem::{EncapsulationKey, MlKem768};
@@ -68,10 +70,30 @@ pub struct ContactCard {
     pub ml_kem_ek_bytes: Vec<u8>,
     pub suggested_alias: Option<String>,
     pub suggested_description: Option<String>,
+    /// Recipient's anti-flood policy: AFT tier the sender must mint at.
+    /// Encoded into the recipient's `InboxParams`, so the contract id
+    /// hashes over this value — sending under a different tier is
+    /// rejected by `verify_token_policy` in the inbox contract.
+    /// Defaults to `Tier::Day1` when missing so v1 cards keep working.
+    #[serde(default = "default_tier")]
+    pub required_tier: Tier,
+    /// Recipient's anti-flood policy: max age (seconds) the AFT delegate
+    /// considers when looking for free slots. Mirrors
+    /// `InboxParams.max_age_secs`.
+    #[serde(default = "default_max_age_secs")]
+    pub max_age_secs: u64,
+}
+
+fn default_tier() -> Tier {
+    Tier::Day1
+}
+
+fn default_max_age_secs() -> u64 {
+    DEFAULT_MAX_AGE_SECS
 }
 
 impl ContactCard {
-    pub const VERSION: u32 = 1;
+    pub const VERSION: u32 = 2;
     /// Wire format uses standard (non-URL-safe) base64; the Playwright
     /// test (email-app.spec.ts) exchanges cards via `btoa()` and relies
     /// on the encodings matching.
@@ -111,6 +133,8 @@ impl ContactCard {
             } else {
                 Some(identity.description.clone())
             },
+            required_tier: identity.required_tier,
+            max_age_secs: identity.max_age_secs,
         }
     }
 
@@ -139,6 +163,11 @@ pub struct Contact {
     pub description: String,
     pub ml_dsa_vk_bytes: Vec<u8>,
     pub ml_kem_ek_bytes: Vec<u8>,
+    /// AFT tier the recipient requires. Carried on the contact so the
+    /// sender can construct `InboxParams` and `AllocationCriteria`
+    /// without a state fetch (#85).
+    pub required_tier: Tier,
+    pub max_age_secs: u64,
     /// True when the user explicitly confirmed the fingerprint with the sender.
     pub verified: bool,
 }
@@ -175,6 +204,11 @@ pub struct Recipient {
     pub ml_dsa_vk_bytes: Vec<u8>,
     pub ml_kem_ek_bytes: Vec<u8>,
     pub fingerprint: [&'static str; 6],
+    /// Recipient's anti-flood policy (#85). Used by the send path to
+    /// derive `InboxParams` and `AllocationCriteria` so the AFT delegate
+    /// mints at the tier the recipient hashed into their contract id.
+    pub required_tier: Tier,
+    pub max_age_secs: u64,
     /// True only for contacts whose fingerprint was confirmed by the user.
     pub verified: bool,
     pub is_own: bool,
@@ -288,6 +322,8 @@ pub fn lookup(alias: &str) -> Option<Recipient> {
                     ml_dsa_vk_bytes,
                     ml_kem_ek_bytes,
                     fingerprint,
+                    required_tier: id.required_tier,
+                    max_age_secs: id.max_age_secs,
                     verified: true,
                     is_own: true,
                 }
@@ -299,6 +335,8 @@ pub fn lookup(alias: &str) -> Option<Recipient> {
                     ml_dsa_vk_bytes: c.ml_dsa_vk_bytes.clone(),
                     ml_kem_ek_bytes: c.ml_kem_ek_bytes.clone(),
                     fingerprint,
+                    required_tier: c.required_tier,
+                    max_age_secs: c.max_age_secs,
                     verified: c.verified,
                     is_own: false,
                 }
@@ -359,6 +397,10 @@ pub struct StoredContactKeys {
     pub ml_kem_ek_bytes: Vec<u8>,
     pub suggested_alias: Option<String>,
     pub verified: bool,
+    #[serde(default = "default_tier")]
+    pub required_tier: Tier,
+    #[serde(default = "default_max_age_secs")]
+    pub max_age_secs: u64,
 }
 
 impl StoredContactKeys {
@@ -368,6 +410,8 @@ impl StoredContactKeys {
             ml_kem_ek_bytes: card.ml_kem_ek_bytes.clone(),
             suggested_alias: card.suggested_alias.clone(),
             verified,
+            required_tier: card.required_tier,
+            max_age_secs: card.max_age_secs,
         }
     }
 
@@ -377,6 +421,8 @@ impl StoredContactKeys {
             description,
             ml_dsa_vk_bytes: self.ml_dsa_vk_bytes,
             ml_kem_ek_bytes: self.ml_kem_ek_bytes,
+            required_tier: self.required_tier,
+            max_age_secs: self.max_age_secs,
             verified: self.verified,
         }
     }
@@ -447,32 +493,58 @@ mod tests {
     #[test]
     fn contact_card_encode_decode_round_trip() {
         let card = ContactCard {
-            version: 1,
+            version: ContactCard::VERSION,
             ml_dsa_vk_bytes: vec![1u8; 10],
             ml_kem_ek_bytes: vec![2u8; 10],
             suggested_alias: Some("alice".into()),
             suggested_description: None,
+            required_tier: Tier::Day1,
+            max_age_secs: DEFAULT_MAX_AGE_SECS,
         };
         let encoded = card.encode();
         assert!(encoded.starts_with("contact://"));
         let decoded = ContactCard::decode(&encoded).expect("decode should succeed");
         assert_eq!(decoded.suggested_alias.as_deref(), Some("alice"));
         assert_eq!(decoded.ml_dsa_vk_bytes, card.ml_dsa_vk_bytes);
+        assert_eq!(decoded.required_tier, Tier::Day1);
+        assert_eq!(decoded.max_age_secs, DEFAULT_MAX_AGE_SECS);
     }
 
     #[test]
     fn contact_card_decode_bare_base64() {
         let card = ContactCard {
-            version: 1,
+            version: ContactCard::VERSION,
             ml_dsa_vk_bytes: vec![3u8; 10],
             ml_kem_ek_bytes: vec![4u8; 10],
             suggested_alias: None,
             suggested_description: None,
+            required_tier: Tier::Day1,
+            max_age_secs: DEFAULT_MAX_AGE_SECS,
         };
         let encoded = card.encode();
         let bare = encoded.strip_prefix("contact://").unwrap();
         let decoded = ContactCard::decode(bare).expect("bare base64 should decode");
         assert_eq!(decoded.ml_dsa_vk_bytes, card.ml_dsa_vk_bytes);
+    }
+
+    /// Pre-#85 v1 cards lacked `required_tier` and `max_age_secs`. Decode
+    /// must default-fill those fields so existing imports still work.
+    #[test]
+    fn contact_card_v1_decodes_with_default_policy() {
+        let vk: Vec<u8> = vec![1u8; 10];
+        let ek: Vec<u8> = vec![2u8; 10];
+        let v1_json = serde_json::json!({
+            "version": 1,
+            "ml_dsa_vk_bytes": vk,
+            "ml_kem_ek_bytes": ek,
+            "suggested_alias": "alice",
+            "suggested_description": null,
+        });
+        let bytes = serde_json::to_vec(&v1_json).unwrap();
+        let encoded = format!("contact://{}", B64.encode(&bytes));
+        let decoded = ContactCard::decode(&encoded).expect("v1 card decodes");
+        assert_eq!(decoded.required_tier, Tier::Day1);
+        assert_eq!(decoded.max_age_secs, DEFAULT_MAX_AGE_SECS);
     }
 
     fn make_contact(alias: &str, vk: u8, ek: u8) -> Contact {
@@ -481,6 +553,8 @@ mod tests {
             description: String::new(),
             ml_dsa_vk_bytes: vec![vk; 1952],
             ml_kem_ek_bytes: vec![ek; 1184],
+            required_tier: Tier::Day1,
+            max_age_secs: DEFAULT_MAX_AGE_SECS,
             verified: false,
         }
     }
@@ -556,11 +630,13 @@ mod tests {
     #[test]
     fn fingerprint_short_returns_first_three_words_joined() {
         let card = ContactCard {
-            version: 1,
+            version: ContactCard::VERSION,
             ml_dsa_vk_bytes: vec![17; 1952],
             ml_kem_ek_bytes: vec![19; 1184],
             suggested_alias: None,
             suggested_description: None,
+            required_tier: Tier::Day1,
+            max_age_secs: DEFAULT_MAX_AGE_SECS,
         };
         let fp = card.fingerprint();
         assert_eq!(
@@ -596,11 +672,13 @@ mod tests {
         // human comparison followed by the `contact://...` URI. The import
         // form must accept the whole blob, not just the URI.
         let card = ContactCard {
-            version: 1,
+            version: ContactCard::VERSION,
             ml_dsa_vk_bytes: vec![5u8; 10],
             ml_kem_ek_bytes: vec![6u8; 10],
             suggested_alias: Some("alice".into()),
             suggested_description: None,
+            required_tier: Tier::Day1,
+            max_age_secs: DEFAULT_MAX_AGE_SECS,
         };
         let share_text = format!(
             "verify: {}\n{}",

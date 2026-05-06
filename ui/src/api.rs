@@ -253,11 +253,15 @@ mod inbox_management {
     pub(super) async fn create_contract(
         client: &mut WebApiRequestClient,
         ml_dsa_key: Arc<MlDsaSigningKey<MlDsa65>>,
+        required_tier: freenet_aft_interface::Tier,
+        max_age_secs: u64,
     ) -> Result<ContractKey, DynError> {
         let vk = Keypair::verifying_key(ml_dsa_key.as_ref());
         let identity_key = vk.encode().to_vec();
         let params: Parameters = InboxParams {
             pub_key: crate::inbox::inbox_params_pub_key_bytes(&vk),
+            required_tier,
+            max_age_secs,
         }
         .try_into()?;
         let state = {
@@ -604,6 +608,8 @@ mod identity_management {
             ml_kem_ek_bytes: contact.ml_kem_ek_bytes.clone(),
             suggested_alias: Some(contact.local_alias.to_string()),
             verified: contact.verified,
+            required_tier: contact.required_tier,
+            max_age_secs: contact.max_age_secs,
         };
         let msg = IdentityMsg::CreateIdentity {
             alias: contact.local_alias.to_string(),
@@ -817,10 +823,19 @@ pub(crate) async fn node_comms(
                 ml_dsa_key,
                 contract_type,
                 alias,
+                required_tier,
+                max_age_secs,
             } => match contract_type {
                 ContractType::InboxContract => {
                     crate::log::debug!("creating inbox contract for {alias}");
-                    match inbox_management::create_contract(&mut client, ml_dsa_key).await {
+                    match inbox_management::create_contract(
+                        &mut client,
+                        ml_dsa_key,
+                        required_tier,
+                        max_age_secs,
+                    )
+                    .await
+                    {
                         Ok(key) => {
                             inbox_management::CREATED_INBOX.with(|k| {
                                 crate::log::debug!("waiting inbox contract for {alias}");
@@ -1487,11 +1502,30 @@ pub(crate) async fn node_comms(
                                     }
                                 }
                                 TokenDelegateMessage::Failure(reason) => {
-                                    // FIXME: this may mean a pending message waiting for a token has failed, and need to notify that in the UI
+                                    // #85: when the delegate refuses to mint
+                                    // (NoFreeSlot at the recipient's tier, or
+                                    // user denial), every send queued against
+                                    // this delegate is now stuck. Drain the
+                                    // pending queue for this delegate and flip
+                                    // each affected Sent row from Pending →
+                                    // Failed so the user sees the truth in the
+                                    // sidebar instead of a spinner that never
+                                    // resolves. The delegate response carries
+                                    // no `assignment_hash`, so we conservatively
+                                    // fail all queued sends for the delegate.
                                     crate::log::error(
                                         format!("token assignment failure: {reason}"),
                                         Some(TryNodeAction::SendMessage),
-                                    )
+                                    );
+                                    let drained =
+                                        AftRecords::drain_pending_for_delegate(&key);
+                                    for (inbox_key, _hash) in drained {
+                                        crate::inbox::fail_pending_sent_for_inbox(
+                                            &mut client,
+                                            inbox_key,
+                                        )
+                                        .await;
+                                    }
                                 }
                                 TokenDelegateMessage::RequestNewToken(_) => {
                                     // Delegate echoes the original request back to itself

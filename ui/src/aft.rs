@@ -79,6 +79,24 @@ struct PendingAssignmentRegister {
     inbox: InboxContract,
 }
 
+/// Build an `AllocationCriteria` from the recipient's `InboxParams`
+/// policy (#85). Pure / testable: factored out of `assign_token` so a
+/// host-side unit test can verify that the criteria the AFT delegate
+/// receives reflects the recipient's chosen tier and `max_age_secs`,
+/// not the legacy hardcoded `Day1`/365d.
+pub(crate) fn build_recipient_criteria(
+    recipient_required_tier: Tier,
+    recipient_max_age_secs: u64,
+    token_record: ContractInstanceId,
+) -> Result<AllocationCriteria, DynError> {
+    AllocationCriteria::new(
+        recipient_required_tier,
+        std::time::Duration::from_secs(recipient_max_age_secs),
+        token_record,
+    )
+    .map_err(|e| format!("{e}").into())
+}
+
 impl AftRecords {
     pub async fn load_all(
         client: &mut WebApiRequestClient,
@@ -159,6 +177,38 @@ impl AftRecords {
             });
         }
         expired
+    }
+
+    /// Drain every queued outbound assignment for `delegate` and return
+    /// the matching `(inbox_contract, assignment_hash)` pairs so the
+    /// caller can flip the corresponding Sent rows to `Failed` and emit
+    /// a user-visible toast. Used by the AFT `Failure(NoFreeSlot)` path
+    /// (#85) where the delegate has no `assignment_hash` to disambiguate
+    /// which send tripped the cap, so we conservatively fail every
+    /// pending send waiting on the same delegate.
+    pub fn drain_pending_for_delegate(
+        delegate: &AftDelegate,
+    ) -> Vec<(InboxContract, AssignmentHash)> {
+        let inboxes = PENDING_TOKEN_ASSIGNMENT.with(|map| {
+            map.borrow_mut()
+                .remove(delegate)
+                .unwrap_or_default()
+        });
+        if inboxes.is_empty() {
+            return Vec::new();
+        }
+        let inbox_set: HashMap<InboxContract, ()> =
+            inboxes.iter().map(|c| (*c, ())).collect();
+        PENDING_INBOXES_UPDATES.with(|queue| {
+            let mut queue = queue.borrow_mut();
+            let drained: Vec<(InboxContract, AssignmentHash)> = queue
+                .iter()
+                .filter(|(inbox, _)| inbox_set.contains_key(inbox))
+                .copied()
+                .collect();
+            queue.retain(|(inbox, _)| !inbox_set.contains_key(inbox));
+            drained
+        })
     }
 
     pub fn pending_assignment(delegate: AftDelegate, contract: InboxContract) {
@@ -269,9 +319,13 @@ impl AftRecords {
 
     // `recipient_inbox_pub_key`: encoded `InboxParams.pub_key` bytes for the
     // recipient's inbox contract (ML-DSA-65 verifying key bytes, caller-computed).
+    // `recipient_required_tier` / `recipient_max_age_secs`: recipient's
+    // anti-flood policy from their `InboxParams` / `ContactCard` (#85).
     pub async fn assign_token(
         client: &mut WebApiRequestClient,
         recipient_inbox_pub_key: Vec<u8>,
+        recipient_required_tier: Tier,
+        recipient_max_age_secs: u64,
         generator_id: &Identity,
         assignment_hash: [u8; 32],
     ) -> Result<DelegateKey, DynError> {
@@ -300,6 +354,8 @@ impl AftRecords {
 
         let inbox_params: Parameters = InboxParams {
             pub_key: recipient_inbox_pub_key,
+            required_tier: recipient_required_tier,
+            max_age_secs: recipient_max_age_secs,
         }
         .try_into()?;
         let inbox_key =
@@ -313,10 +369,9 @@ impl AftRecords {
         )
         .unwrap()
         .into();
-        // todo: the criteria should come from the recipient inbox really
-        let criteria = AllocationCriteria::new(
-            Tier::Day1,
-            std::time::Duration::from_secs(365 * 24 * 3600),
+        let criteria = build_recipient_criteria(
+            recipient_required_tier,
+            recipient_max_age_secs,
             token_record,
         )?;
         // todo: optimize so we don't clone the whole record and instead use a smart pointer
@@ -418,5 +473,132 @@ impl AftRecords {
         };
         client.send(request.into()).await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use freenet_stdlib::prelude::ContractInstanceId;
+
+    fn fake_token_record() -> ContractInstanceId {
+        ContractInstanceId::new([7u8; 32])
+    }
+
+    /// `build_recipient_criteria` must reflect the recipient's tier +
+    /// `max_age_secs` exactly, with no fallback to the legacy `Day1` /
+    /// 365d defaults that the pre-#85 hardcoded path used.
+    #[test]
+    fn build_recipient_criteria_uses_recipient_policy() {
+        let token_record = fake_token_record();
+        let criteria = build_recipient_criteria(Tier::Hour1, 7 * 24 * 3600, token_record)
+            .expect("Hour1 + 7d criteria must be valid");
+        assert_eq!(criteria.frequency, Tier::Hour1);
+        assert_eq!(criteria.max_age.as_secs(), 7 * 24 * 3600);
+    }
+
+    /// Default policy (Day1, 365d) round-trips so the legacy code path
+    /// stays equivalent to the pre-#85 hardcoded constants.
+    #[test]
+    fn build_recipient_criteria_defaults_match_legacy() {
+        let token_record = fake_token_record();
+        let criteria = build_recipient_criteria(
+            Tier::Day1,
+            freenet_email_inbox::DEFAULT_MAX_AGE_SECS,
+            token_record,
+        )
+        .expect("legacy default criteria must be valid");
+        assert_eq!(criteria.frequency, Tier::Day1);
+        assert_eq!(criteria.max_age.as_secs(), 365 * 24 * 3600);
+    }
+
+    /// `AllocationCriteria::new` rejects a `max_age` over 2 years (see
+    /// `modules/antiflood-tokens/interfaces/src/lib.rs`). Surface that
+    /// rejection through the helper so a misconfigured recipient
+    /// `max_age_secs` cannot silently produce broken criteria.
+    #[test]
+    fn build_recipient_criteria_rejects_excessive_max_age() {
+        let token_record = fake_token_record();
+        // 3 years exceeds the 2-year ceiling enforced by AllocationCriteria::new.
+        let three_years = 3 * 365 * 24 * 3600;
+        let result = build_recipient_criteria(Tier::Day1, three_years, token_record);
+        assert!(
+            result.is_err(),
+            "max_age beyond 2-year ceiling must error; got {result:?}"
+        );
+    }
+
+    /// Pre-condition for the AFT Failure → fail-pending plumbing (#85):
+    /// `drain_pending_for_delegate` must remove every queued
+    /// `(inbox, hash)` keyed by `pending_assignment(delegate, inbox)`,
+    /// returning them so the caller can flip the corresponding Sent
+    /// rows to `Failed`. Ensures we don't leak entries when the
+    /// delegate refuses to mint.
+    #[test]
+    fn drain_pending_for_delegate_returns_and_clears_queued_entries() {
+        // Use a synthetic DelegateKey + InboxContract; both are opaque
+        // 32-byte ids from the test's perspective.
+        let delegate_key = DelegateKey::new(
+            [9u8; 32],
+            freenet_stdlib::prelude::CodeHash::new([3u8; 32]),
+        );
+        let inbox_id = ContractInstanceId::new([42u8; 32]);
+        let inbox_code_hash = freenet_stdlib::prelude::CodeHash::new([5u8; 32]);
+        let inbox_key = ContractKey::from_id_and_code(inbox_id, inbox_code_hash);
+        let assignment_hash = [11u8; 32];
+
+        // Reset thread-locals so concurrent test runs don't leak state.
+        PENDING_TOKEN_ASSIGNMENT.with(|m| m.borrow_mut().clear());
+        PENDING_INBOXES_UPDATES.with(|q| q.borrow_mut().clear());
+
+        AftRecords::pending_assignment(delegate_key.clone(), inbox_key);
+        PENDING_INBOXES_UPDATES.with(|q| {
+            q.borrow_mut().push((inbox_key, assignment_hash));
+        });
+
+        let drained = AftRecords::drain_pending_for_delegate(&delegate_key);
+        assert_eq!(drained.len(), 1, "one entry queued, one expected back");
+        assert_eq!(drained[0].0, inbox_key);
+        assert_eq!(drained[0].1, assignment_hash);
+
+        // Both queues must be empty after a drain.
+        let leftover_pending = PENDING_TOKEN_ASSIGNMENT.with(|m| m.borrow().len());
+        let leftover_updates = PENDING_INBOXES_UPDATES.with(|q| q.borrow().len());
+        assert_eq!(leftover_pending, 0, "PENDING_TOKEN_ASSIGNMENT not cleared");
+        assert_eq!(leftover_updates, 0, "PENDING_INBOXES_UPDATES not cleared");
+    }
+
+    /// Drain on an unknown delegate must be a no-op (returns empty,
+    /// touches no queue). Otherwise a stray Failure for an unrelated
+    /// delegate could clear out unrelated pending sends.
+    #[test]
+    fn drain_pending_for_delegate_unknown_delegate_is_noop() {
+        let known_delegate = DelegateKey::new(
+            [2u8; 32],
+            freenet_stdlib::prelude::CodeHash::new([1u8; 32]),
+        );
+        let unknown_delegate = DelegateKey::new(
+            [9u8; 32],
+            freenet_stdlib::prelude::CodeHash::new([8u8; 32]),
+        );
+        let inbox_id = ContractInstanceId::new([55u8; 32]);
+        let inbox_code_hash = freenet_stdlib::prelude::CodeHash::new([6u8; 32]);
+        let inbox_key = ContractKey::from_id_and_code(inbox_id, inbox_code_hash);
+        let assignment_hash = [22u8; 32];
+
+        PENDING_TOKEN_ASSIGNMENT.with(|m| m.borrow_mut().clear());
+        PENDING_INBOXES_UPDATES.with(|q| q.borrow_mut().clear());
+        AftRecords::pending_assignment(known_delegate.clone(), inbox_key);
+        PENDING_INBOXES_UPDATES.with(|q| {
+            q.borrow_mut().push((inbox_key, assignment_hash));
+        });
+
+        let drained = AftRecords::drain_pending_for_delegate(&unknown_delegate);
+        assert!(drained.is_empty());
+        let leftover_updates = PENDING_INBOXES_UPDATES.with(|q| q.borrow().len());
+        assert_eq!(
+            leftover_updates, 1,
+            "unrelated drain must not touch PENDING_INBOXES_UPDATES"
+        );
     }
 }

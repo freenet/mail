@@ -53,6 +53,11 @@ pub(crate) enum NodeAction {
         /// ML-DSA-65 signing key used for both inbox ownership and AFT
         /// token signing (same key serves both subsystems post-Stage-4).
         ml_dsa_key: Arc<MlDsaSigningKey<MlDsa65>>,
+        /// Recipient anti-flood policy hashed into `InboxParams`. Only
+        /// consulted for `ContractType::InboxContract`; the AFT record
+        /// contract id is derived from the sender's key alone (#85).
+        required_tier: freenet_aft_interface::Tier,
+        max_age_secs: u64,
     },
     CreateDelegate {
         alias: Rc<str>,
@@ -253,6 +258,8 @@ impl InboxView {
         from: &str,
         recipient_ek: EncapsulationKey<MlKem768>,
         recipient_ml_dsa_vk: ml_dsa::VerifyingKey<MlDsa65>,
+        recipient_required_tier: freenet_aft_interface::Tier,
+        recipient_max_age_secs: u64,
         title: &str,
         content: &str,
         // Optional `(sender_alias, sent_id, inbox_key)` so the future can
@@ -286,7 +293,14 @@ impl InboxView {
             let ack_meta_async = ack_meta.clone();
             let f = async move {
                 let res = content_clone
-                    .start_sending(&mut client, recipient_ek, recipient_ml_dsa_vk, &id)
+                    .start_sending(
+                        &mut client,
+                        recipient_ek,
+                        recipient_ml_dsa_vk,
+                        recipient_required_tier,
+                        recipient_max_age_secs,
+                        &id,
+                    )
                     .await;
                 let is_err = res.is_err();
                 node_response_error_handling(
@@ -2319,7 +2333,11 @@ fn ComposeSheet() -> Element {
         // `send_message` so we can pair the eventual UpdateResponse back to
         // the Sent row's `SentId`.
         #[cfg(feature = "use-node")]
-        let inbox_key_for_ack = crate::inbox::inbox_key_for(&recipient_vk);
+        let inbox_key_for_ack = crate::inbox::inbox_key_for(
+            &recipient_vk,
+            recipient.required_tier,
+            recipient.max_age_secs,
+        );
 
         // Allocate the SentId up-front so the sync enqueue and the async
         // failure-flip both name the same row.
@@ -2342,6 +2360,8 @@ fn ComposeSheet() -> Element {
             &alias,
             recipient_ek,
             recipient_vk,
+            recipient.required_tier,
+            recipient.max_age_secs,
             &title_val,
             &content_val,
             ack_meta,
