@@ -78,6 +78,13 @@
     }
     .badge-fp { color: var(--ink3); }
 
+    .sheet-recipient-hint {
+      padding: 6px 18px 10px;
+      border-bottom: 1px solid var(--line2);
+      font-size: 11px; color: var(--unread);
+      margin-top: -1px;
+    }
+
     .sheet-body { padding: 14px 18px; }
     .sheet-textarea {
       width: 100%; min-height: 180px; border: 0; background: transparent; resize: none;
