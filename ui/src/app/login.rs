@@ -1184,8 +1184,6 @@ pub(super) fn CreateAliasForm() -> Element {
                             let entry = {
                                 let guard = pending.read();
                                 guard.as_ref().map(|(ml_dsa, ml_kem, words)| {
-                                    use ml_dsa::signature::Keypair;
-                                    use ml_kem::kem::KeyExport;
                                     let keys = StoredIdentityKeys::new(ml_dsa, ml_kem);
                                     let alias_str = alias_input.read().trim().to_string();
                                     let desc = description.read().clone();
