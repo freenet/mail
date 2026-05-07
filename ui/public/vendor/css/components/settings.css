@@ -603,5 +603,52 @@
       box-shadow: 0 0 0 2px rgba(241, 245, 249, 0.85);
     }
 
+    /* Login-style contact modals (.veil / .modal) rendered inside
+       div.fm-app (inbox view). Mirrors the .veil/.modal rules in
+       login.css (@scope .fm-pre) so that these overlays get
+       position:fixed + z-index:80 regardless of which scope they
+       live in. Needed after #164 moved signal providers to app()
+       root and the modal render sites to each CSS-scope root. */
+    .veil {
+      position: fixed; inset: 0; background: rgba(15, 23, 42, 0.32); z-index: 80;
+      display: flex; align-items: center; justify-content: center; padding: 24px;
+      -webkit-backdrop-filter: blur(2px); backdrop-filter: blur(2px);
+      animation: fm-veilIn .15s ease both;
+    }
+    @keyframes fm-veilIn {
+      from { opacity: 0; }
+      to   { opacity: 1; }
+    }
+    .modal {
+      width: 520px; max-width: 100%; max-height: calc(100vh - 64px);
+      background: #fff; border-radius: 14px; box-shadow: var(--sh-lg);
+      display: flex; flex-direction: column; overflow: hidden;
+      animation: fm-modalIn .25s cubic-bezier(0.34, 1.28, 0.64, 1) both;
+    }
+    @keyframes fm-modalIn {
+      from { opacity: 0; transform: translateY(14px) scale(0.97); }
+      to   { opacity: 1; transform: none; }
+    }
+    .modal-head {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 18px 24px 14px; border-bottom: 1px solid var(--line2);
+    }
+    .modal-title {
+      font-family: "Fraunces", serif; font-size: 18px; font-weight: 400;
+      letter-spacing: -0.03em; color: var(--ink0);
+    }
+    .modal-x {
+      appearance: none; background: transparent;
+      width: 28px; height: 28px; border-radius: 7px; color: var(--ink3); font-size: 14px;
+      border: 0;
+    }
+    .modal-x:hover { background: var(--c1); color: var(--ink0); }
+    .modal-body { padding: 22px 24px; overflow-y: auto; }
+    .modal-foot {
+      display: flex; align-items: center; justify-content: flex-end; gap: 8px;
+      padding: 14px 24px; border-top: 1px solid var(--line2);
+      background: rgba(241, 245, 249, 0.4);
+    }
+
   }
 }

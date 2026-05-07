@@ -144,12 +144,16 @@ pub(crate) fn app() -> Element {
     // Modal signals lifted to the root so that both the login pane
     // (IdentifiersList) and the inbox (UserInbox → Settings → Contacts)
     // can open these modals. Fixes #158.
+    //
+    // The actual modal *components* are rendered inside their respective
+    // CSS-scope roots (div.fm-pre in IdentifiersList, div.fm-app in
+    // UserInbox) so that the `.veil`/`.modal` CSS rules apply correctly.
+    // These context providers are still here so both subtrees share the
+    // same signal instances.
     use_context_provider(|| Signal::new(login::ImportBackup(false)));
     use_context_provider(|| Signal::new(login::ImportContact(false)));
     use_context_provider(|| Signal::new(login::ShareContact(false)));
     use_context_provider(|| Signal::new(login::SharePending::default()));
-    let import_contact = use_context::<Signal<login::ImportContact>>();
-    let share_contact = use_context::<Signal<login::ShareContact>>();
 
     #[cfg(all(feature = "use-node", not(feature = "no-sync")))]
     {
@@ -243,15 +247,6 @@ pub(crate) fn app() -> Element {
     rsx! {
         document::Title { "{app_name}" }
         {body}
-        // Modals are rendered at the root so they are reachable from both
-        // the login pane (IdentifiersList) and the inbox (UserInbox). Their
-        // signals are provided above. (#158)
-        if share_contact.read().0 {
-            login::ShareContactModal {}
-        }
-        if import_contact.read().0 {
-            login::ImportContactForm {}
-        }
     }
 }
 
@@ -1107,6 +1102,9 @@ fn UserInbox() -> Element {
     };
     let app_class = format!("fm-app{serif_class}");
 
+    let import_contact = use_context::<Signal<crate::app::login::ImportContact>>();
+    let share_contact = use_context::<Signal<crate::app::login::ShareContact>>();
+
     rsx! {
         div {
             class: "{app_class}",
@@ -1126,6 +1124,16 @@ fn UserInbox() -> Element {
                 ComposeSheet {}
             }
             ToastView {}
+            // Modals rendered inside div.fm-app so that `.veil`/`.modal`
+            // CSS rules (scoped to .fm-app via @scope) apply correctly.
+            // Signals are provided at app() root so Settings → Contacts
+            // buttons can toggle them without re-providing. (#158)
+            if share_contact.read().0 {
+                login::ShareContactModal {}
+            }
+            if import_contact.read().0 {
+                login::ImportContactForm {}
+            }
         }
     }
 }

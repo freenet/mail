@@ -673,6 +673,8 @@ pub(super) fn IdentifiersList() -> Element {
     let create_alias_form = use_context::<Signal<CreateAlias>>();
     let import_backup_form = use_context::<Signal<ImportBackup>>();
     let verify_contact_pending = use_context::<Signal<VerifyContactPending>>();
+    let import_contact = use_context::<Signal<ImportContact>>();
+    let share_contact = use_context::<Signal<ShareContact>>();
 
     rsx! {
         div { class: "fm-pre",
@@ -691,6 +693,17 @@ pub(super) fn IdentifiersList() -> Element {
             }
             if verify_contact_pending.read().0.is_some() {
                 VerifyContactModal {}
+            }
+            // Contact modals rendered here so they are inside div.fm-pre
+            // and get the correct scoped CSS (`.veil`/`.modal` in login.css
+            // @scope .fm-pre). Signals are provided by app() root so
+            // UserInbox (Settings → Contacts) can also trigger them; the
+            // companion render site lives inside UserInbox's div.fm-app. (#158)
+            if share_contact.read().0 {
+                ShareContactModal {}
+            }
+            if import_contact.read().0 {
+                ImportContactForm {}
             }
         }
     }
