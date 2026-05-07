@@ -780,7 +780,7 @@ pub(crate) async fn node_comms(
         user: Signal<crate::app::User>,
         mut login_controller: Signal<crate::app::LoginController>,
         inboxes: &InboxesData,
-        ab_gen: crate::app::AddressBookGen,
+        mut ab_gen: crate::app::AddressBookGen,
     ) {
         let mut client = api.sender_half();
         match req {
