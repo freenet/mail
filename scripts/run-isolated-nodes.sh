@@ -140,7 +140,20 @@ up() {
         echo "peer already listening on :$PEER_PORT_WS"
     else
         echo "starting peer on ws://127.0.0.1:$PEER_PORT_WS (net :$PEER_PORT_NET) → gateway 127.0.0.1:$GW_PORT_NET"
-        HOME="$PEER_HOME" spawn_setsid "$PEER_PIDFILE" "$PEER_PGIDFILE" "$PEER_LOGS/stdout.log" \
+        # #124 diagnostic: dump pre-launch state of peer dirs so we can prove
+        # whether peer is starting from a clean slate or inheriting bytes.
+        echo "--- #124 pre-launch peer state ---"
+        echo "PEER_DATA=$PEER_DATA"
+        echo "PEER_HOME=$PEER_HOME"
+        echo "GW_DATA=$GW_DATA"
+        ls -laR "$PEER_DATA" 2>&1 | head -50 || true
+        echo "--- HOME-peer config + data dirs ---"
+        ls -laR "$PEER_HOME/.config/freenet" "$PEER_HOME/.local/share/freenet" 2>&1 | head -30 || true
+        echo "--- envs that could leak into peer ---"
+        env | grep -E '^(HOME|DATA_DIR|CONFIG_DIR|TRANSPORT_KEYPAIR|FREENET|XDG_)' || true
+        echo "--- end #124 diagnostic ---"
+        HOME="$PEER_HOME" RUST_LOG=info,freenet::config=debug,freenet::node=debug \
+            spawn_setsid "$PEER_PIDFILE" "$PEER_PGIDFILE" "$PEER_LOGS/stdout.log" \
             freenet network \
             --network-port "$PEER_PORT_NET" \
             --ws-api-port "$PEER_PORT_WS" \
@@ -165,6 +178,18 @@ up() {
     else
         echo "peer transport_keypair: NOT WRITTEN (peer likely crashed during init — see $PEER_LOGS)"
     fi
+    # #124 post-launch dump.
+    echo "--- #124 post-launch peer state ---"
+    ls -laR "$PEER_DATA" 2>&1 | head -80 || true
+    echo "--- peer stdout tail ---"
+    tail -50 "$PEER_LOGS/stdout.log" 2>&1 || true
+    echo "--- peer freenet.*.log tail ---"
+    shopt -s nullglob
+    for f in "$PEER_LOGS"/freenet.*.log; do
+        echo "[$f]"; tail -80 "$f" || true
+    done
+    shopt -u nullglob
+    echo "--- end #124 post-launch ---"
     # Use shopt nullglob so the freenet.*.log glob doesn't pass a
     # literal pattern to grep when the peer crashed before producing
     # any rolled log file. `set -e + pipefail` would abort the whole
