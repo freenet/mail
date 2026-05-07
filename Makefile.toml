@@ -565,7 +565,7 @@ mkdir -p "$DATA_DIR" "$NODE_HOME/.config/freenet"
 echo "freenet local: port=$PORT data-dir=$DATA_DIR home=$NODE_HOME"
 RUST_BACKTRACE=1 RUST_LOG=freenet=debug,freenet_core=debug,info \
     HOME="$NODE_HOME" \
-    freenet local --data-dir "$DATA_DIR" --port "$PORT"
+    freenet local --data-dir "$DATA_DIR" --ws-api-port "$PORT" --ws-api-address 127.0.0.1
 '''
 
 [tasks.test]
