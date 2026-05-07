@@ -660,10 +660,10 @@ impl LoginController {
 #[allow(non_snake_case)]
 pub(super) fn IdentifiersList() -> Element {
     use_context_provider(|| Signal::new(CreateAlias(false)));
-    use_context_provider(|| Signal::new(ImportBackup(false)));
-    use_context_provider(|| Signal::new(ShareContact(false)));
-    use_context_provider(|| Signal::new(SharePending::default()));
-    use_context_provider(|| Signal::new(ImportContact(false)));
+    // ImportBackup / ShareContact / SharePending / ImportContact are provided
+    // by app() so that the modals are also reachable from UserInbox
+    // (Settings → Contacts / Account). VerifyContactPending is
+    // login-pane-only; provide it here.
     use_context_provider(|| Signal::new(VerifyContactPending::default()));
     // ImportForm is shared between the hub flow (toggled by ImportBackup
     // here) and the first-run flow (toggled by ImportId in
@@ -672,8 +672,6 @@ pub(super) fn IdentifiersList() -> Element {
     use_context_provider(|| Signal::new(ImportId(false)));
     let create_alias_form = use_context::<Signal<CreateAlias>>();
     let import_backup_form = use_context::<Signal<ImportBackup>>();
-    let share_contact_form = use_context::<Signal<ShareContact>>();
-    let import_contact_form = use_context::<Signal<ImportContact>>();
     let verify_contact_pending = use_context::<Signal<VerifyContactPending>>();
 
     rsx! {
@@ -690,12 +688,6 @@ pub(super) fn IdentifiersList() -> Element {
                         ContactsSection {}
                     }
                 }
-            }
-            if share_contact_form.read().0 {
-                ShareContactModal {}
-            }
-            if import_contact_form.read().0 {
-                ImportContactForm {}
             }
             if verify_contact_pending.read().0.is_some() {
                 VerifyContactModal {}
@@ -1453,7 +1445,7 @@ fn copy_to_clipboard(_text: String) {}
 
 /// Modal that displays the shareable ContactCard text and offers a copy button.
 #[allow(non_snake_case)]
-fn ShareContactModal() -> Element {
+pub(super) fn ShareContactModal() -> Element {
     let mut share_contact_form = use_context::<Signal<ShareContact>>();
     let share_pending = use_context::<Signal<SharePending>>();
     let (alias, share_text) = share_pending
@@ -1548,7 +1540,7 @@ fn ShareContactModal() -> Element {
 
 /// Form to import a contact from a pasted ContactCard.
 #[allow(non_snake_case)]
-fn ImportContactForm() -> Element {
+pub(super) fn ImportContactForm() -> Element {
     let mut import_contact_form = use_context::<Signal<ImportContact>>();
     let actions = use_coroutine_handle::<NodeAction>();
 
