@@ -85,6 +85,63 @@
       margin-top: -1px;
     }
 
+    /* Autocomplete dropdown for the To field */
+    .compose-autocomplete-wrap {
+      position: relative;
+    }
+    .compose-autocomplete {
+      position: absolute;
+      top: calc(100% + 2px);
+      left: 0; right: 0;
+      background: #fff;
+      border: 1px solid var(--line2);
+      border-radius: 8px;
+      box-shadow: var(--sh-lg);
+      z-index: 200;
+      overflow: hidden;
+      max-height: 300px;
+      overflow-y: auto;
+    }
+    .compose-ac-item {
+      display: flex; align-items: center; gap: 8px;
+      padding: 8px 14px;
+      cursor: pointer;
+      font-size: 13px; color: var(--ink1);
+      border-bottom: 1px solid var(--line2);
+    }
+    .compose-ac-item:last-child { border-bottom: 0; }
+    .compose-ac-item:hover,
+    .compose-ac-item.highlighted {
+      background: var(--c1);
+    }
+    .compose-ac-alias {
+      font-weight: 600;
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .compose-ac-trust {
+      font-family: "Geist Mono", monospace;
+      font-size: 8px;
+      padding: 2px 6px; border-radius: 4px;
+      text-transform: uppercase; letter-spacing: 0.04em;
+      flex-shrink: 0;
+    }
+    .compose-ac-trust.known {
+      color: var(--trust); background: var(--trust-bg);
+      border: 1px solid rgba(51, 153, 102, 0.25);
+    }
+    .compose-ac-trust.unknown {
+      color: var(--unread); background: rgba(217, 119, 6, 0.10);
+      border: 1px solid rgba(217, 119, 6, 0.25);
+    }
+    .compose-ac-fp {
+      font-family: "Geist Mono", monospace;
+      font-size: 9px; color: var(--ink3);
+      flex-shrink: 0;
+    }
+
     .sheet-body { padding: 14px 18px; }
     .sheet-textarea {
       width: 100%; min-height: 180px; border: 0; background: transparent; resize: none;
