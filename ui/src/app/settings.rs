@@ -634,6 +634,7 @@ const TIER_ROWS: &[(&str, &str)] = &[
 /// 1. Per-recipient saved decision (`permission_decisions` map).
 /// 2. `auto_accept_verified_contacts` + `is_verified`.
 /// 3. No automatic decision → `None`.
+#[cfg(any(all(target_family = "wasm", feature = "use-node"), test))]
 pub(crate) fn resolve_permission_decision(
     prefs: &IdentityAftPrefs,
     fingerprint_full: &str,
