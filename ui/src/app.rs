@@ -2190,7 +2190,11 @@ fn ToastView() -> Element {
     let value = toast.read().clone();
     if let Some(text) = value {
         rsx! {
-            div { class: "toast", "data-testid": testid::FM_TOAST,
+            div {
+                class: "toast",
+                "data-testid": testid::FM_TOAST,
+                role: "status",
+                "aria-live": "assertive",
                 span { class: "pulse-dot" }
                 span { "{text}" }
             }
@@ -2335,6 +2339,7 @@ fn ComposeSheet() -> Element {
                 toast.set(Some(format!(
                     "Recipient `{to_val}` is not in your address book. Import their contact card before sending."
                 )));
+                spawn_toast_clear();
                 return;
             }
         };
@@ -2350,6 +2355,7 @@ fn ComposeSheet() -> Element {
             toast.set(Some(format!(
                 "Recipient `{to_val}` is not verified. Verify the fingerprint in Contacts before sending."
             )));
+            spawn_toast_clear();
             return;
         }
         let recipient_ek = match address_book::ek_from_bytes(&recipient.ml_kem_ek_bytes) {
@@ -2572,11 +2578,13 @@ fn ComposeSheet() -> Element {
                                 }
                             }
                         }
-                    } else if !to_val.is_empty() {
+                    } else if !to_val.trim().is_empty() {
                         rsx! {
                             div {
                                 class: "sheet-recipient-hint",
                                 "data-testid": testid::FM_COMPOSE_RECIPIENT_HINT,
+                                role: "status",
+                                "aria-live": "polite",
                                 "Not in address book — import their contact card first."
                             }
                         }
