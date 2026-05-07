@@ -272,6 +272,7 @@ mod inbox_management {
                     minimum_tier: required_tier,
                     max_age_secs,
                     private: Default::default(),
+                    ..InboxSettings::default()
                 },
                 Vec::new(),
             );

@@ -208,9 +208,6 @@ enum VerificationError {
     /// on the verified-sender bypass path where the AFT token check is
     /// skipped but signature authenticity must still be confirmed.
     SenderSignatureInvalid,
-    /// `ModifySettings` would push `verified_senders.len()` above
-    /// `MAX_VERIFIED_SENDERS`. Rejected to prevent unbounded state growth.
-    TooManyVerifiedSenders,
 }
 
 fn decode_token_generator_vk(encoded: &[u8]) -> Option<MlDsaVerifyingKey<MlDsa65>> {
@@ -294,12 +291,6 @@ impl Display for VerificationError {
                 write!(
                     f,
                     "Sender ML-DSA-65 signature over message content is invalid or missing"
-                )
-            }
-            VerificationError::TooManyVerifiedSenders => {
-                write!(
-                    f,
-                    "verified_senders exceeds the maximum of {MAX_VERIFIED_SENDERS} entries"
                 )
             }
         }
