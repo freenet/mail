@@ -172,7 +172,6 @@ pub(crate) fn SettingsShell() -> Element {
                     match screen {
                         menu::SettingsScreen::Account => rsx! { ScrAccount {} },
                         menu::SettingsScreen::Privacy => rsx! { ScrPrivacy {} },
-                        #[cfg(feature = "wip-settings")]
                         menu::SettingsScreen::Aft => rsx! { ScrAft {} },
                         menu::SettingsScreen::Inbox => rsx! { ScrInbox {} },
                         menu::SettingsScreen::Contacts => rsx! { ScrContacts {} },
@@ -214,7 +213,6 @@ fn NavBlock(current: menu::SettingsScreen) -> Element {
     let identity_items: Vec<(menu::SettingsScreen, &str)> = vec![
         (menu::SettingsScreen::Account, "◉ Account & profile"),
         (menu::SettingsScreen::Privacy, "▣ Privacy & security"),
-        #[cfg(feature = "wip-settings")]
         (menu::SettingsScreen::Aft, "▶ Anti-Flood (AFT)"),
         (menu::SettingsScreen::Inbox, "◌ Inbox & folders"),
         (menu::SettingsScreen::Contacts, "· Contacts"),
@@ -379,7 +377,6 @@ fn ScrAccount() -> Element {
         .unwrap_or_default();
 
     let (alias_key, ident) = use_identity_settings();
-    #[cfg(feature = "wip-settings")]
     let display_name = ident.display_name.clone();
     let signature = ident.signature.clone();
     let auto_sign = ident.auto_sign;
@@ -392,11 +389,8 @@ fn ScrAccount() -> Element {
         None => "Never".to_string(),
     };
 
-    #[cfg(feature = "wip-settings")]
     let alias_key_dn = alias_key.clone();
-    #[cfg(feature = "wip-settings")]
     let ident_dn = ident.clone();
-    #[cfg(feature = "wip-settings")]
     let on_display_name = move |ev: Event<FormData>| {
         let mut next = ident_dn.clone();
         next.display_name = ev.value();
@@ -476,26 +470,17 @@ fn ScrAccount() -> Element {
                     help: "The handle others type to reach you. Bound to this identity's keys; cannot be changed without rotating.",
                     control: rsx! { input { class: "fm-input mono", value: "{alias}", disabled: true, style: "width: 180px" } },
                 }
-                {
-                    #[cfg(feature = "wip-settings")]
-                    {
-                        rsx! {
-                            SettingRow {
-                                label: "Display name",
-                                help: "Shown next to your alias in recipients' inboxes. Plain text, no verification.",
-                                control: rsx! {
-                                    input {
-                                        class: "fm-input",
-                                        value: "{display_name}",
-                                        style: "width: 180px",
-                                        oninput: on_display_name,
-                                    }
-                                },
-                            }
+                SettingRow {
+                    label: "Display name",
+                    help: "Shown next to your alias in recipients' inboxes. Plain text, no verification.",
+                    control: rsx! {
+                        input {
+                            class: "fm-input",
+                            value: "{display_name}",
+                            style: "width: 180px",
+                            oninput: on_display_name,
                         }
-                    }
-                    #[cfg(not(feature = "wip-settings"))]
-                    rsx! {}
+                    },
                 }
                 SettingRow {
                     label: "Signature",
@@ -575,9 +560,7 @@ fn ScrPrivacy() -> Element {
     let priv_now = ident.privacy.clone();
     let verify_on_send = priv_now.verify_on_send;
     let hide_unsigned = priv_now.hide_unsigned;
-    #[cfg(feature = "wip-settings")]
     let pad_length = priv_now.pad_length;
-    #[cfg(feature = "wip-settings")]
     let read_receipts = priv_now.read_receipts;
 
     let mk_toggle = move |mutate: fn(&mut IdentityPrivacyPrefs)| {
@@ -591,9 +574,7 @@ fn ScrPrivacy() -> Element {
     };
     let on_verify = mk_toggle(|p| p.verify_on_send = !p.verify_on_send);
     let on_hide_unsigned = mk_toggle(|p| p.hide_unsigned = !p.hide_unsigned);
-    #[cfg(feature = "wip-settings")]
     let on_pad = mk_toggle(|p| p.pad_length = !p.pad_length);
-    #[cfg(feature = "wip-settings")]
     let on_receipts = mk_toggle(|p| p.read_receipts = !p.read_receipts);
     rsx! {
         div { class: "fm-set-inner",
@@ -612,28 +593,19 @@ fn ScrPrivacy() -> Element {
                     control: rsx! { Toggle { on: hide_unsigned, ontoggle: on_hide_unsigned } },
                 }
             }
-            {
-                #[cfg(feature = "wip-settings")]
-                {
-                    rsx! {
-                        Card {
-                            title: "Linkability",
-                            sub: "Information that reveals patterns across your identities.",
-                            SettingRow {
-                                label: "Share read receipts",
-                                help: "Senders see when you opened the message. Off by default; off is the unlinkable option.",
-                                control: rsx! { Toggle { on: read_receipts, ontoggle: on_receipts } },
-                            }
-                            SettingRow {
-                                label: "Pad message length",
-                                help: "Round ciphertext size to fixed buckets so observers can't infer content size. Adds ~5% bandwidth.",
-                                control: rsx! { Toggle { on: pad_length, ontoggle: on_pad } },
-                            }
-                        }
-                    }
+            Card {
+                title: "Linkability",
+                sub: "Information that reveals patterns across your identities.",
+                SettingRow {
+                    label: "Share read receipts",
+                    help: "Senders see when you opened the message. Off by default; off is the unlinkable option.",
+                    control: rsx! { Toggle { on: read_receipts, ontoggle: on_receipts } },
                 }
-                #[cfg(not(feature = "wip-settings"))]
-                rsx! {}
+                SettingRow {
+                    label: "Pad message length",
+                    help: "Round ciphertext size to fixed buckets so observers can't infer content size. Adds ~5% bandwidth.",
+                    control: rsx! { Toggle { on: pad_length, ontoggle: on_pad } },
+                }
             }
         }
     }
@@ -643,7 +615,6 @@ fn ScrPrivacy() -> Element {
 /// enum. Mirrors the names the `TIER_ROWS` picker writes to local
 /// state (#85). Returns `None` for unrecognized values so the
 /// caller can surface the error rather than silently defaulting.
-#[cfg(feature = "wip-settings")]
 fn parse_tier(s: &str) -> Option<freenet_aft_interface::Tier> {
     use freenet_aft_interface::Tier::*;
     Some(match s {
@@ -671,7 +642,6 @@ fn parse_tier(s: &str) -> Option<freenet_aft_interface::Tier> {
 /// `tokens_per_period` getter on the enum, so the period text is encoded
 /// here rather than in `freenet-aft-interface` to keep the AFT crate from
 /// taking on UI vocabulary.
-#[cfg(feature = "wip-settings")]
 const TIER_ROWS: &[(&str, &str)] = &[
     ("Min1", "1 / minute"),
     ("Min5", "1 / 5 minutes"),
@@ -691,7 +661,6 @@ const TIER_ROWS: &[(&str, &str)] = &[
 ];
 
 #[allow(non_snake_case)]
-#[cfg(feature = "wip-settings")]
 fn ScrAft() -> Element {
     let (alias_key, ident) = use_identity_settings();
     let aft_now = ident.aft.clone();
@@ -737,23 +706,21 @@ fn ScrAft() -> Element {
 
     let alias_key_t = alias_key.clone();
     let ident_t = ident.clone();
-    let push_policy_t = push_policy.clone();
     let on_tier = move |new_tier: String| {
         let mut next = ident_t.clone();
         next.aft.required_tier = new_tier.clone();
         local_state::persist_identity_settings(alias_key_t.clone(), next.clone());
-        push_policy_t(&alias_key_t, &new_tier, next.aft.max_age_days);
+        push_policy(&alias_key_t, &new_tier, next.aft.max_age_days);
     };
     let alias_key_m = alias_key.clone();
     let ident_m = ident.clone();
-    let push_policy_m = push_policy.clone();
     let on_max_age = move |ev: Event<FormData>| {
         let raw = ev.value();
         let parsed: u64 = raw.parse().unwrap_or(365).clamp(1, 730);
         let mut next = ident_m.clone();
         next.aft.max_age_days = parsed;
         local_state::persist_identity_settings(alias_key_m.clone(), next.clone());
-        push_policy_m(&alias_key_m, &next.aft.required_tier, parsed);
+        push_policy(&alias_key_m, &next.aft.required_tier, parsed);
     };
     let alias_key_k = alias_key.clone();
     let ident_k = ident.clone();
