@@ -126,13 +126,18 @@ pub(crate) fn app() -> Element {
     // `.read()` re-render and pick up the updated verification state.
     use_context_provider(|| AddressBookGen(Signal::new(0u32)));
     let ab_gen = use_context::<AddressBookGen>();
+    // Toast signal is provided at the root so both the node-comms coroutine
+    // (which surfaces async AFT failures) and all UI components can write/read
+    // it without an extra Signal thread-local.
+    use_context_provider(|| Signal::new(Option::<String>::None));
+    let toast = use_context::<Signal<Option<String>>>();
 
     #[cfg(all(feature = "use-node", not(feature = "no-sync")))]
     {
         let _sync: Coroutine<NodeAction> = use_coroutine(move |rx| {
             let login_controller = login_controller;
             let user = user;
-            let fut = crate::api::node_comms(rx, login_controller, user, inbox_data, ab_gen)
+            let fut = crate::api::node_comms(rx, login_controller, user, inbox_data, ab_gen, toast)
                 .map(|_| Ok(JsValue::NULL));
             let _ = wasm_bindgen_futures::future_to_promise(fut);
             async {}.boxed_local()
@@ -141,6 +146,7 @@ pub(crate) fn app() -> Element {
     #[cfg(any(not(feature = "use-node"), feature = "no-sync"))]
     {
         let _ = inbox_data;
+        let _ = toast;
         let mut login_ctl = login_controller;
         let mut ab_gen = ab_gen;
         let _sync: Coroutine<NodeAction> =
@@ -1044,7 +1050,8 @@ fn matches_search(m: &Message, q: &str) -> bool {
 #[allow(non_snake_case)]
 fn UserInbox() -> Element {
     use_context_provider(|| Signal::new(menu::MenuSelection::default()));
-    use_context_provider(|| Signal::new(Option::<String>::None));
+    // Toast signal is provided by app() at the root; UserInbox uses it via
+    // use_context. No re-provide here.
     // SettingsShell.AccountIdentity reads `Signal<ImportBackup>` to drive
     // its Restore action through the same modal as the login pane. The
     // login flow also provides this; we re-provide here so Settings can
@@ -2518,7 +2525,15 @@ fn ComposeSheet() -> Element {
                 true
             }
             Err(e) => {
-                crate::log::error(format!("{e}"), Some(TryNodeAction::SendMessage));
+                let msg = e.to_string();
+                crate::log::error(msg.clone(), Some(TryNodeAction::SendMessage));
+                let user_msg = if msg.contains("failed to get token record") {
+                    crate::aft::format_no_record_toast()
+                } else {
+                    format!("Can't send: {msg}. Check Settings → AFT or try again.")
+                };
+                toast.set(Some(user_msg));
+                spawn_toast_clear();
                 false
             }
         };

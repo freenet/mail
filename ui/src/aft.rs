@@ -3,8 +3,9 @@ use std::{cell::RefCell, collections::HashMap};
 
 use chrono::{DateTime, Utc};
 use freenet_aft_interface::{
-    AllocationCriteria, DelegateParameters, RequestNewToken, Tier, TokenAllocationRecord,
-    TokenAllocationSummary, TokenAssignment, TokenDelegateMessage, TokenDelegateParameters,
+    AllocationCriteria, DelegateParameters, FailureReason, RequestNewToken, Tier,
+    TokenAllocationRecord, TokenAllocationSummary, TokenAssignment, TokenDelegateMessage,
+    TokenDelegateParameters,
 };
 use freenet_stdlib::client_api::{ContractRequest, DelegateRequest};
 use freenet_stdlib::prelude::UpdateData::{Delta, State as StateUpdate};
@@ -485,6 +486,50 @@ impl AftRecords {
     }
 }
 
+/// Build a user-facing toast message for a `FailureReason` returned by
+/// the AFT delegate.  Produces distinct, actionable copy for each variant
+/// so the user knows both why the send failed and what they can do next.
+///
+/// `recipient` is an optional display label for the intended recipient;
+/// when `None` the copy falls back to `"the recipient"`.
+pub(crate) fn format_failure_toast(reason: &FailureReason, recipient: Option<&str>) -> String {
+    let recipient = recipient.unwrap_or("the recipient");
+    match reason {
+        FailureReason::UserPermissionDenied => {
+            "Can't send: the token delegate refused to mint a token. \
+             Check Settings → AFT to approve token allocation."
+                .to_string()
+        }
+        FailureReason::NoFreeSlot { criteria, .. } => {
+            format!(
+                "Can't send: no token available at tier {tier} for {recipient}. \
+                 Check Settings → AFT to mint {tier} tokens, or ask {recipient} \
+                 to relax their policy.",
+                tier = criteria.frequency,
+            )
+        }
+    }
+}
+
+/// Build a user-facing toast message when an in-flight AFT assignment
+/// confirmation timed out (the delegate sent no `confirm_allocation`
+/// within the sweep window).
+pub(crate) fn format_expired_assignment_toast(tier: Tier) -> String {
+    format!(
+        "Can't send: the {tier} token assignment timed out. \
+         Your tokens may have expired — mint new ones in Settings → AFT."
+    )
+}
+
+/// Build a user-facing toast message when no AFT token record has been
+/// loaded for the sender yet (the record contract was not yet fetched
+/// from the node when send was attempted).
+pub(crate) fn format_no_record_toast() -> String {
+    "Can't send: your token record hasn't loaded yet. \
+     Wait a moment and try again, or check Settings → AFT."
+        .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -573,6 +618,57 @@ mod tests {
         let leftover_updates = PENDING_INBOXES_UPDATES.with(|q| q.borrow().len());
         assert_eq!(leftover_pending, 0, "PENDING_TOKEN_ASSIGNMENT not cleared");
         assert_eq!(leftover_updates, 0, "PENDING_INBOXES_UPDATES not cleared");
+    }
+
+    /// `format_failure_toast` produces distinct copy for each variant.
+    #[test]
+    fn format_failure_toast_user_permission_denied() {
+        let msg = format_failure_toast(&FailureReason::UserPermissionDenied, None);
+        assert!(
+            msg.contains("refused to mint"),
+            "expected 'refused to mint' in: {msg}"
+        );
+        assert!(
+            msg.contains("Settings → AFT"),
+            "expected settings hint in: {msg}"
+        );
+    }
+
+    #[test]
+    fn format_failure_toast_no_free_slot_includes_tier_and_recipient() {
+        let token_record = fake_token_record();
+        let criteria = AllocationCriteria::new(
+            Tier::Min10,
+            std::time::Duration::from_secs(3600),
+            token_record,
+        )
+        .expect("valid criteria");
+        let delegate_id = freenet_stdlib::prelude::SecretsId::new(vec![0u8; 32]);
+        let reason = FailureReason::NoFreeSlot {
+            delegate_id,
+            criteria,
+        };
+        let msg = format_failure_toast(&reason, Some("alice"));
+        assert!(msg.contains("min10"), "expected tier name in: {msg}");
+        assert!(msg.contains("alice"), "expected recipient in: {msg}");
+        assert!(
+            msg.contains("Settings → AFT"),
+            "expected settings hint in: {msg}"
+        );
+    }
+
+    #[test]
+    fn format_expired_assignment_toast_includes_tier() {
+        let msg = format_expired_assignment_toast(Tier::Day1);
+        assert!(msg.contains("day1"), "expected tier in: {msg}");
+        assert!(msg.contains("Settings → AFT"), "expected hint in: {msg}");
+    }
+
+    #[test]
+    fn format_no_record_toast_is_nonempty() {
+        let msg = format_no_record_toast();
+        assert!(!msg.is_empty());
+        assert!(msg.contains("token record"), "expected context in: {msg}");
     }
 
     /// Drain on an unknown delegate must be a no-op (returns empty,
