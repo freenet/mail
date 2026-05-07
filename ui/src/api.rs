@@ -690,7 +690,7 @@ pub(crate) async fn node_comms(
     login_controller: Signal<crate::app::LoginController>,
     user: Signal<crate::app::User>,
     inboxes: crate::app::InboxesData,
-    mut ab_gen: crate::app::AddressBookGen,
+    ab_gen: crate::app::AddressBookGen,
 ) {
     // todo don't unwrap inside this function, propagate errors to the UI somehow
     use freenet_email_inbox::Inbox as StoredInbox;
@@ -1006,6 +1006,7 @@ pub(crate) async fn node_comms(
         mut inboxes: InboxesData,
         mut login_controller: dioxus::prelude::Signal<crate::app::LoginController>,
         user: Signal<crate::app::User>,
+        mut ab_gen: crate::app::AddressBookGen,
     ) {
         let mut client = WEB_API_SENDER.get().unwrap().clone();
         let res = match res {
@@ -1485,6 +1486,11 @@ pub(crate) async fn node_comms(
                                         // Dioxus signal — bump login_controller
                                         // so the Identities component re-renders.
                                         login_controller.write().updated = true;
+                                        // Bump generation so MessageList / OpenMessage
+                                        // re-render after identity-switch / re-hydrate
+                                        // populates the address book with contacts (#143).
+                                        let prev = *ab_gen.0.read();
+                                        *ab_gen.0.write() = prev.wrapping_add(1);
                                         // Restore runtime wiring lost on reload:
                                         // INBOX_TO_ID + AFT-record subscriptions
                                         // (load_all does both), and AFT-gen
@@ -1645,7 +1651,8 @@ pub(crate) async fn node_comms(
                     &mut token_contract_to_id,
                     inboxes,
                     login_controller,
-                    user
+                    user,
+                    ab_gen,
                 )
                 .await;
             }

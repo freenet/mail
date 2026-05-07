@@ -2362,7 +2362,13 @@ fn ComposeSheet() -> Element {
         }
     });
 
-    let recipient_lookup = use_memo(move || address_book::lookup(&to.read()));
+    // Subscribe to address-book mutations so the recipient badge re-renders
+    // when a contact is imported after the alias was already typed (#143).
+    let ab_gen_ctx = use_context::<AddressBookGen>();
+    let recipient_lookup = use_memo(move || {
+        let _ab = ab_gen_ctx.0.read();
+        address_book::lookup(&to.read())
+    });
 
     // Autocomplete suggestions: case-insensitive substring over all contacts.
     // Empty when input is blank or exactly matches a known alias.
