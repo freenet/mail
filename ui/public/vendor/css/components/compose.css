@@ -93,7 +93,7 @@
       position: absolute;
       top: calc(100% + 2px);
       left: 0; right: 0;
-      background: #fff;
+      background: var(--bg-card, #fff);
       border: 1px solid var(--line2);
       border-radius: 8px;
       box-shadow: var(--sh-lg);

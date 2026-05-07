@@ -640,6 +640,9 @@ impl User {
         }
         // Seed a pre-imported contact so the compose-sheet autocomplete
         // has something to suggest in offline / Playwright test mode.
+        // Gated on `not(use-node)` because the fake 0xAA/0xBB key bytes
+        // are placeholders and must never be used against a real node.
+        #[cfg(not(feature = "use-node"))]
         let _ = address_book::insert_contact(address_book::Contact {
             local_alias: "alice-example".into(),
             description: "Example contact for offline testing".into(),
@@ -2327,8 +2330,13 @@ fn ComposeSheet() -> Element {
     let draft_id = use_signal(|| initial_draft_id.clone());
     // Autocomplete state: index of the highlighted suggestion (-1 = none).
     let mut ac_highlighted: Signal<i32> = use_signal(|| -1i32);
-    // Whether the autocomplete dropdown is open. Cleared by Escape or selection.
-    let mut ac_open: Signal<bool> = use_signal(|| true);
+    // Whether the autocomplete dropdown is open. Closed by default; opened
+    // only by oninput or onfocus so the dropdown doesn't appear on mount.
+    let mut ac_open: Signal<bool> = use_signal(|| false);
+    // Blur-guard: set to true on pointerdown over a suggestion item so that
+    // the onblur handler (which fires before click/mouseup on touch) does not
+    // prematurely close the dropdown before the selection is committed.
+    let mut ac_ignore_blur: Signal<bool> = use_signal(|| false);
     // Monotonic token bumped by every keystroke. The debounced delegate save
     // captures the token at scheduling time and only fires the wire call if
     // it still matches when the timer elapses — older keystrokes are silently
@@ -2648,70 +2656,88 @@ fn ComposeSheet() -> Element {
                 }
                 div { class: "sheet-field compose-autocomplete-wrap",
                     span { class: "field-lbl", "To" }
-                    input {
-                        class: "field-input",
-                        r#type: "text",
-                        placeholder: "alias or address",
-                        value: "{to}",
-                        oninput: move |ev| {
-                            to.set(ev.value());
-                            ac_highlighted.set(-1);
-                            ac_open.set(true);
-                            autosave(());
-                        },
-                        onkeydown: move |ev| {
-                            let suggestions = ac_suggestions.read();
-                            let len = suggestions.len() as i32;
-                            // Always intercept Escape even when no suggestions are visible.
-                            if ev.key() == Key::Escape {
-                                ac_open.set(false);
-                                ac_highlighted.set(-1);
-                                return;
-                            }
-                            if len == 0 || !*ac_open.read() {
-                                return;
-                            }
-                            match ev.key() {
-                                Key::ArrowDown => {
-                                    let next = (*ac_highlighted.read() + 1).min(len - 1);
-                                    ac_highlighted.set(next);
-                                }
-                                Key::ArrowUp => {
-                                    let prev = (*ac_highlighted.read() - 1).max(-1);
-                                    ac_highlighted.set(prev);
-                                }
-                                Key::Enter => {
-                                    let idx = *ac_highlighted.read();
-                                    if idx >= 0 && idx < len {
-                                        let alias = suggestions[idx as usize].local_alias.to_string();
-                                        to.set(alias);
-                                        ac_highlighted.set(-1);
+                    {
+                        let dropdown_open = *ac_open.read();
+                        let suggestions_len = ac_suggestions.read().len();
+                        let has_suggestions = dropdown_open && suggestions_len > 0;
+                        rsx! {
+                            input {
+                                class: "field-input",
+                                r#type: "text",
+                                placeholder: "alias or address",
+                                value: "{to}",
+                                role: "combobox",
+                                aria_autocomplete: "list",
+                                aria_expanded: "{has_suggestions}",
+                                oninput: move |ev| {
+                                    to.set(ev.value());
+                                    ac_highlighted.set(-1);
+                                    ac_open.set(true);
+                                    autosave(());
+                                },
+                                onkeydown: move |ev| {
+                                    let suggestions = ac_suggestions.read();
+                                    let len = suggestions.len() as i32;
+                                    // Consume Escape only when the dropdown is visible;
+                                    // otherwise let the event bubble to parent handlers.
+                                    if ev.key() == Key::Escape && *ac_open.read() && len > 0 {
                                         ac_open.set(false);
-                                        autosave(());
+                                        ac_highlighted.set(-1);
+                                        return;
                                     }
-                                }
-                                _ => {}
+                                    if len == 0 || !*ac_open.read() {
+                                        return;
+                                    }
+                                    match ev.key() {
+                                        Key::ArrowDown => {
+                                            let next = (*ac_highlighted.read() + 1).min(len - 1);
+                                            ac_highlighted.set(next);
+                                        }
+                                        Key::ArrowUp => {
+                                            let prev = (*ac_highlighted.read() - 1).max(-1);
+                                            ac_highlighted.set(prev);
+                                        }
+                                        Key::Enter => {
+                                            let idx = *ac_highlighted.read();
+                                            if idx >= 0 && idx < len {
+                                                let alias = suggestions[idx as usize].local_alias.to_string();
+                                                to.set(alias);
+                                                ac_highlighted.set(-1);
+                                                ac_open.set(false);
+                                                autosave(());
+                                            }
+                                        }
+                                        _ => {}
+                                    }
+                                },
+                                // Dismiss on blur — but skip if a suggestion item just received
+                                // a pointerdown (ac_ignore_blur guard prevents premature close
+                                // on long-press and touch devices where blur fires before click).
+                                onblur: move |_| {
+                                    if *ac_ignore_blur.read() {
+                                        // The blur was caused by a pointer interaction with a
+                                        // suggestion item; the onpointerdown handler on the item
+                                        // will commit the selection and clear the guard.
+                                        return;
+                                    }
+                                    ac_open.set(false);
+                                    ac_highlighted.set(-1);
+                                },
+                                onfocus: move |_| { ac_open.set(true); },
                             }
-                        },
-                        // Dismiss on blur — small delay so mousedown on an item fires first.
-                        onblur: move |_| {
-                            spawn(async move {
-                                gloo_timers::future::TimeoutFuture::new(150).await;
-                                ac_open.set(false);
-                                ac_highlighted.set(-1);
-                            });
-                        },
-                        onfocus: move |_| { ac_open.set(true); },
+                        }
                     }
                     // Dropdown — rendered inside the same relative wrapper.
                     {
                         let suggestions = ac_suggestions.read().clone();
                         let highlighted = *ac_highlighted.read();
                         let open = *ac_open.read();
+                        let n = suggestions.len();
                         if open && !suggestions.is_empty() {
                             rsx! {
                                 div {
                                     class: "compose-autocomplete",
+                                    role: "listbox",
                                     "data-testid": testid::FM_COMPOSE_AUTOCOMPLETE,
                                     for (idx, contact) in suggestions.iter().enumerate() {
                                         {
@@ -2728,15 +2754,26 @@ fn ComposeSheet() -> Element {
                                             } else {
                                                 "compose-ac-item"
                                             };
+                                            let item_id = format!("ac-item-{idx}");
+                                            let _ = n; // silence unused-variable lint
                                             rsx! {
                                                 div {
                                                     key: "{alias}",
+                                                    id: "{item_id}",
                                                     class: "{item_class}",
+                                                    role: "option",
+                                                    aria_selected: "{highlighted == idx as i32}",
                                                     "data-testid": testid::FM_COMPOSE_AUTOCOMPLETE_ITEM,
-                                                    onmousedown: move |_| {
+                                                    // pointerdown fires before blur on both mouse and
+                                                    // touch, allowing us to set the guard before the
+                                                    // input's onblur clears the dropdown.
+                                                    onpointerdown: move |ev| {
+                                                        ev.prevent_default();
+                                                        ac_ignore_blur.set(true);
                                                         to.set(alias_fill.clone());
                                                         ac_highlighted.set(-1);
                                                         ac_open.set(false);
+                                                        ac_ignore_blur.set(false);
                                                         autosave(());
                                                     },
                                                     span { class: "compose-ac-alias", "{alias}" }

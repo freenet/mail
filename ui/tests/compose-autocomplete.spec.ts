@@ -168,4 +168,85 @@ test.describe("Compose To-field autocomplete (#132)", () => {
       .first();
     await expect(item.locator(".compose-ac-trust.known")).toBeVisible();
   });
+
+  test("Escape only consumes event when dropdown is visible", async ({
+    page,
+  }) => {
+    const sheet = page.locator(`[data-testid="${TID.fmComposeSheet}"]`);
+    const toInput = sheet.locator('input[placeholder="alias or address"]');
+    const dropdown = sheet.locator(
+      `[data-testid="${TID.fmComposeAutocomplete}"]`,
+    );
+
+    // Type to open the dropdown, then press Escape — dropdown closes.
+    await toInput.fill("alice");
+    await expect(dropdown).toBeVisible();
+    await toInput.press("Escape");
+    await expect(dropdown).toHaveCount(0);
+
+    // Press Escape a second time with no dropdown — the compose sheet
+    // should still be present (event was not consumed by the autocomplete).
+    await toInput.press("Escape");
+    await expect(sheet).toBeVisible();
+  });
+});
+
+test.describe("Compose autocomplete — touch long-press (Pixel 5)", () => {
+  // Spread the Pixel 5 device profile but omit `defaultBrowserType` —
+  // Playwright forbids that property inside a describe block (it forces a
+  // new worker and must live at the project level in the config instead).
+  const { defaultBrowserType: _unused, ...pixel5 } =
+    require("@playwright/test").devices["Pixel 5"];
+  test.use({ ...pixel5 });
+
+  test.beforeEach(async ({ page }) => {
+    await page.goto("/");
+    await page
+      .locator('.brand-name, [data-testid="fm-app"]')
+      .first()
+      .waitFor({ timeout: 60_000 });
+    await page
+      .locator(
+        `[data-testid="${TID.fmIdRow}"][data-alias="address1"] [data-testid="${TID.fmIdOpen}"]`,
+      )
+      .click();
+    await page.locator(`[data-testid="${TID.fmApp}"]`).waitFor({ timeout: 10_000 });
+    await page.locator(`[data-testid="${TID.fmComposeBtn}"]`).click();
+    await page
+      .locator(`[data-testid="${TID.fmComposeSheet}"]`)
+      .waitFor({ timeout: 5_000 });
+  });
+
+  test("long-press on touch device selects suggestion and fills To field", async ({
+    page,
+  }) => {
+    const sheet = page.locator(`[data-testid="${TID.fmComposeSheet}"]`);
+    const toInput = sheet.locator('input[placeholder="alias or address"]');
+
+    await toInput.fill("alice");
+
+    const dropdown = sheet.locator(
+      `[data-testid="${TID.fmComposeAutocomplete}"]`,
+    );
+    await expect(dropdown).toBeVisible({ timeout: 3_000 });
+
+    const item = dropdown
+      .locator(`[data-testid="${TID.fmComposeAutocompleteItem}"]`)
+      .first();
+
+    // Simulate a long-press: touchstart held for 600 ms then touchend.
+    // The pointerdown handler on the item must commit the selection even
+    // though blur may fire during the hold — the ignore-blur guard prevents
+    // premature dropdown close before the selection lands.
+    const box = await item.boundingBox();
+    if (!box) throw new Error("item bounding box not found");
+    const cx = box.x + box.width / 2;
+    const cy = box.y + box.height / 2;
+
+    await page.touchscreen.tap(cx, cy);
+
+    // After tap, the To field must hold the alias.
+    await expect(toInput).toHaveValue("alice-example", { timeout: 3_000 });
+    await expect(dropdown).toHaveCount(0);
+  });
 });
