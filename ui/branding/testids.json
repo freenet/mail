@@ -37,6 +37,7 @@
   "fmActionImport": "fm-action-import",
   "fmCreateAliasInput": "fm-create-alias-input",
   "fmCreateConfirm": "fm-create-confirm",
+  "fmCreateBackupNow": "fm-create-backup-now",
   "fmCreateSubmit": "fm-create-submit",
   "fmVerifyCheck": "fm-verify-check",
   "fmRestoreFile": "fm-restore-file",
