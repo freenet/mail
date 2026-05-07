@@ -79,6 +79,19 @@ struct PendingAssignmentRegister {
     inbox: InboxContract,
 }
 
+/// Pick the cheapest (lowest-cost) tier the sender has available that
+/// satisfies the recipient's `minimum_tier` requirement (#152).
+///
+/// "Cheapest" means the shortest-period tier: `Min1 < Min5 < Min10 <
+/// … < Day365`. Returns the lowest `t` in `available` such that
+/// `t >= required`, or `None` if no available tier qualifies.
+///
+/// This is pure and host-side–testable so the selection logic can be
+/// unit-tested without spinning up a delegate.
+pub(crate) fn pick_spend_tier(available: &[Tier], required: Tier) -> Option<Tier> {
+    available.iter().copied().filter(|&t| t >= required).min()
+}
+
 /// Build an `AllocationCriteria` from the recipient's `InboxParams`
 /// policy (#85). Pure / testable: factored out of `assign_token` so a
 /// host-side unit test can verify that the criteria the AFT delegate
@@ -363,11 +376,6 @@ impl AftRecords {
         )
         .unwrap()
         .into();
-        let criteria = build_recipient_criteria(
-            recipient_required_tier,
-            recipient_max_age_secs,
-            token_record,
-        )?;
         // todo: optimize so we don't clone the whole record and instead use a smart pointer
         let Some(records) = RECORDS.with(|recs| recs.borrow().get(generator_id).cloned()) else {
             // todo: somehow propagate this to the UI so the user retries /or we retry automatically/ later
@@ -378,6 +386,13 @@ impl AftRecords {
             )
             .into());
         };
+        // Pick the cheapest tier the sender has available that still satisfies
+        // the recipient's minimum (#152). Collect available tiers from the
+        // cached record so we prefer a Min10 slot over a Day1 when both exist.
+        let available_tiers: Vec<Tier> = (&records).into_iter().map(|(t, _)| *t).collect();
+        let spend_tier = pick_spend_tier(&available_tiers, recipient_required_tier)
+            .unwrap_or(recipient_required_tier);
+        let criteria = build_recipient_criteria(spend_tier, recipient_max_age_secs, token_record)?;
         let token_request = TokenDelegateMessage::RequestNewToken(RequestNewToken {
             request_id: REQUEST_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
             delegate_id: delegate_key.clone().into(),
@@ -587,6 +602,66 @@ mod tests {
         assert_eq!(
             leftover_updates, 1,
             "unrelated drain must not touch PENDING_INBOXES_UPDATES"
+        );
+    }
+
+    // --- pick_spend_tier tests (#152) ------------------------------------
+
+    /// Sender has [Min10, Hour1, Day1]; recipient requires Min10.
+    /// Cheapest satisfying tier is Min10.
+    #[test]
+    fn pick_spend_tier_picks_cheapest_satisfying() {
+        let available = vec![Tier::Min10, Tier::Hour1, Tier::Day1];
+        assert_eq!(
+            pick_spend_tier(&available, Tier::Min10),
+            Some(Tier::Min10),
+            "cheapest satisfying tier must be Min10"
+        );
+    }
+
+    /// Sender has [Hour1, Day1]; recipient requires Min10.
+    /// Min10 is absent, so the next cheapest qualifying tier is Hour1.
+    #[test]
+    fn pick_spend_tier_falls_back_to_next_cheapest() {
+        let available = vec![Tier::Hour1, Tier::Day1];
+        assert_eq!(
+            pick_spend_tier(&available, Tier::Min10),
+            Some(Tier::Hour1),
+            "should fall back to Hour1 when Min10 is absent"
+        );
+    }
+
+    /// Sender only has [Min1]; recipient requires Min10.
+    /// Min1 is cheaper than the minimum, so no tier qualifies.
+    #[test]
+    fn pick_spend_tier_none_when_all_cheaper_than_required() {
+        let available = vec![Tier::Min1];
+        assert_eq!(
+            pick_spend_tier(&available, Tier::Min10),
+            None,
+            "no tier satisfies min10 when only min1 is available"
+        );
+    }
+
+    /// Empty sender pool → no tier can be picked.
+    #[test]
+    fn pick_spend_tier_empty_pool_returns_none() {
+        assert_eq!(
+            pick_spend_tier(&[], Tier::Min10),
+            None,
+            "empty pool must return None"
+        );
+    }
+
+    /// Sender has [Day7, Day1]; recipient requires Day1.
+    /// Day1 == required, so it should be picked (tie-break: same tier is fine).
+    #[test]
+    fn pick_spend_tier_exact_match_preferred_over_higher() {
+        let available = vec![Tier::Day7, Tier::Day1];
+        assert_eq!(
+            pick_spend_tier(&available, Tier::Day1),
+            Some(Tier::Day1),
+            "Day1 exact match must be preferred over Day7"
         );
     }
 }

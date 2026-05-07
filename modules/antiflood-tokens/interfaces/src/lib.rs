@@ -94,7 +94,9 @@ pub trait TokenAllocation: DeserializeOwned {
     fn get_criteria(&self) -> AllocationCriteria;
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Display)]
+#[derive(
+    Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Display, PartialOrd, Ord,
+)]
 #[strum(serialize_all = "lowercase")]
 #[repr(u8)]
 pub enum Tier {
