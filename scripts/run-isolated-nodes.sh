@@ -6,6 +6,13 @@
 # - HOME override per node so neither reads ~/Library/.../gateways.toml
 #   (which would pull in public Freenet bootstrap gateways and break
 #   the "isolated" guarantee — see freenet/freenet-core#3980).
+# - --config-dir per node so gw and peer never share a config.toml.
+#   freenet-core's ConfigArgs::build persists a config.toml on first run
+#   (containing secrets.transport_keypair = ...). On hosts where
+#   XDG_CONFIG_HOME is set (ubicloud runners), HOME override is bypassed
+#   for config resolution and both nodes resolve to the same dir, so the
+#   second node loads the first's transport keypair and fails its
+#   "same public key as self" check (#124).
 #
 # Usage:
 #   scripts/run-isolated-nodes.sh up      # start both
@@ -23,8 +30,10 @@ GW_HOME="$ROOT/HOME-gw"
 PEER_HOME="$ROOT/HOME-peer"
 GW_DATA="$ROOT/gw/data"
 GW_LOGS="$ROOT/gw/logs"
+GW_CONFIG="$ROOT/gw/config"
 PEER_DATA="$ROOT/peer/data"
 PEER_LOGS="$ROOT/peer/logs"
+PEER_CONFIG="$ROOT/peer/config"
 
 GW_PORT_NET=31338
 GW_PORT_WS=7510
@@ -71,7 +80,7 @@ setup_dirs() {
     # outside our HOME override (which would let gw + peer share state).
     mkdir -p "$GW_HOME/.config/freenet" "$GW_HOME/.local/share/freenet"
     mkdir -p "$PEER_HOME/.config/freenet" "$PEER_HOME/.local/share/freenet"
-    mkdir -p "$GW_DATA" "$GW_LOGS" "$PEER_DATA" "$PEER_LOGS"
+    mkdir -p "$GW_DATA" "$GW_LOGS" "$GW_CONFIG" "$PEER_DATA" "$PEER_LOGS" "$PEER_CONFIG"
     # Empty `gateways = []` so freenet doesn't load real public bootstraps
     # from the global config dir. Empty file ('') errors out with
     # "missing field `gateways`" — must be the explicit array form.
@@ -110,6 +119,7 @@ up() {
             --ws-api-address 0.0.0.0 \
             --is-gateway \
             --skip-load-from-network \
+            --config-dir "$GW_CONFIG" \
             --data-dir "$GW_DATA" \
             --public-network-address 127.0.0.1 \
             --log-dir "$GW_LOGS" \
@@ -140,26 +150,14 @@ up() {
         echo "peer already listening on :$PEER_PORT_WS"
     else
         echo "starting peer on ws://127.0.0.1:$PEER_PORT_WS (net :$PEER_PORT_NET) → gateway 127.0.0.1:$GW_PORT_NET"
-        # #124 diagnostic: dump pre-launch state of peer dirs so we can prove
-        # whether peer is starting from a clean slate or inheriting bytes.
-        echo "--- #124 pre-launch peer state ---"
-        echo "PEER_DATA=$PEER_DATA"
-        echo "PEER_HOME=$PEER_HOME"
-        echo "GW_DATA=$GW_DATA"
-        ls -laR "$PEER_DATA" 2>&1 | head -50 || true
-        echo "--- HOME-peer config + data dirs ---"
-        ls -laR "$PEER_HOME/.config/freenet" "$PEER_HOME/.local/share/freenet" 2>&1 | head -30 || true
-        echo "--- envs that could leak into peer ---"
-        env | grep -E '^(HOME|DATA_DIR|CONFIG_DIR|TRANSPORT_KEYPAIR|FREENET|XDG_)' || true
-        echo "--- end #124 diagnostic ---"
-        HOME="$PEER_HOME" RUST_LOG=info,freenet::config=debug,freenet::node=debug \
-            spawn_setsid "$PEER_PIDFILE" "$PEER_PGIDFILE" "$PEER_LOGS/stdout.log" \
+        HOME="$PEER_HOME" spawn_setsid "$PEER_PIDFILE" "$PEER_PGIDFILE" "$PEER_LOGS/stdout.log" \
             freenet network \
             --network-port "$PEER_PORT_NET" \
             --ws-api-port "$PEER_PORT_WS" \
             --ws-api-address 0.0.0.0 \
             --gateway "127.0.0.1:$GW_PORT_NET,$GW_PUBKEY" \
             --skip-load-from-network \
+            --config-dir "$PEER_CONFIG" \
             --data-dir "$PEER_DATA" \
             --log-dir "$PEER_LOGS" \
             --log-level info
@@ -178,18 +176,6 @@ up() {
     else
         echo "peer transport_keypair: NOT WRITTEN (peer likely crashed during init — see $PEER_LOGS)"
     fi
-    # #124 post-launch dump.
-    echo "--- #124 post-launch peer state ---"
-    ls -laR "$PEER_DATA" 2>&1 | head -80 || true
-    echo "--- peer stdout tail ---"
-    tail -50 "$PEER_LOGS/stdout.log" 2>&1 || true
-    echo "--- peer freenet.*.log tail ---"
-    shopt -s nullglob
-    for f in "$PEER_LOGS"/freenet.*.log; do
-        echo "[$f]"; tail -80 "$f" || true
-    done
-    shopt -u nullglob
-    echo "--- end #124 post-launch ---"
     # Use shopt nullglob so the freenet.*.log glob doesn't pass a
     # literal pattern to grep when the peer crashed before producing
     # any rolled log file. `set -e + pipefail` would abort the whole
