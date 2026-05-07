@@ -684,12 +684,13 @@ mod identity_management {
 }
 
 #[cfg(feature = "use-node")]
+#[allow(unused_mut)]
 pub(crate) async fn node_comms(
     mut rx: UnboundedReceiver<crate::app::NodeAction>,
     login_controller: Signal<crate::app::LoginController>,
     user: Signal<crate::app::User>,
     inboxes: crate::app::InboxesData,
-    #[allow(unused_mut)] mut ab_gen: crate::app::AddressBookGen,
+    mut ab_gen: crate::app::AddressBookGen,
 ) {
     // todo don't unwrap inside this function, propagate errors to the UI somehow
     use freenet_email_inbox::Inbox as StoredInbox;
