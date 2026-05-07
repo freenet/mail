@@ -2689,7 +2689,7 @@ mod inbox_sort_tests {
     /// Messages with distinct timestamps should be sorted newest-first.
     #[test]
     fn sort_by_time_desc() {
-        let mut v = vec![make_msg(1, 1_000), make_msg(2, 3_000), make_msg(3, 2_000)];
+        let mut v = [make_msg(1, 1_000), make_msg(2, 3_000), make_msg(3, 2_000)];
         v.sort_by(sort_cmp_inbox);
         let ids: Vec<u64> = v.iter().map(|m| m.id).collect();
         assert_eq!(ids, vec![2, 3, 1]);
@@ -2700,7 +2700,7 @@ mod inbox_sort_tests {
     #[test]
     fn tie_break_by_id_desc() {
         let ts = 5_000;
-        let mut v = vec![make_msg(10, ts), make_msg(30, ts), make_msg(20, ts)];
+        let mut v = [make_msg(10, ts), make_msg(30, ts), make_msg(20, ts)];
         v.sort_by(sort_cmp_inbox);
         let ids: Vec<u64> = v.iter().map(|m| m.id).collect();
         // Regardless of input order, higher id must come first.
@@ -2712,7 +2712,7 @@ mod inbox_sort_tests {
     #[test]
     fn sort_is_idempotent() {
         let ts = 7_000;
-        let mut v = vec![
+        let mut v = [
             make_msg(5, ts),
             make_msg(1, ts),
             make_msg(3, ts),
@@ -2775,7 +2775,7 @@ mod folder_sort_tests {
     /// Drafts should appear newest-first by `updated_at`.
     #[test]
     fn drafts_sort_time_desc() {
-        let mut d = vec![
+        let mut d = [
             make_draft("id-1", 1_000),
             make_draft("id-2", 3_000),
             make_draft("id-3", 2_000),
@@ -2790,7 +2790,7 @@ mod folder_sort_tests {
     #[test]
     fn drafts_tie_break_by_id_desc() {
         let ts = 5_000;
-        let mut d = vec![
+        let mut d = [
             make_draft("aaa", ts),
             make_draft("ccc", ts),
             make_draft("bbb", ts),
@@ -2804,7 +2804,7 @@ mod folder_sort_tests {
     #[test]
     fn drafts_sort_idempotent() {
         let ts = 7_000;
-        let mut d = vec![
+        let mut d = [
             make_draft("x", ts),
             make_draft("y", ts),
             make_draft("z", ts),
@@ -2822,7 +2822,7 @@ mod folder_sort_tests {
     /// Sent messages should appear newest-first by `sent_at`.
     #[test]
     fn sent_sort_time_desc() {
-        let mut s = vec![
+        let mut s = [
             make_sent("id-1", 1_000),
             make_sent("id-2", 3_000),
             make_sent("id-3", 2_000),
@@ -2836,7 +2836,7 @@ mod folder_sort_tests {
     #[test]
     fn sent_tie_break_by_id_desc() {
         let ts = 5_000;
-        let mut s = vec![
+        let mut s = [
             make_sent("aaa", ts),
             make_sent("ccc", ts),
             make_sent("bbb", ts),
@@ -2850,7 +2850,7 @@ mod folder_sort_tests {
     #[test]
     fn sent_sort_idempotent() {
         let ts = 7_000;
-        let mut s = vec![
+        let mut s = [
             make_sent("x", ts),
             make_sent("y", ts),
             make_sent("z", ts),
@@ -2868,7 +2868,7 @@ mod folder_sort_tests {
     /// Archived messages should appear newest-first by `archived_at`.
     #[test]
     fn archive_sort_time_desc() {
-        let mut a = vec![
+        let mut a = [
             make_archived(1, 1_000),
             make_archived(2, 3_000),
             make_archived(3, 2_000),
@@ -2883,7 +2883,7 @@ mod folder_sort_tests {
     #[test]
     fn archive_tie_break_by_id_desc() {
         let ts = 5_000;
-        let mut a = vec![
+        let mut a = [
             make_archived(10, ts),
             make_archived(30, ts),
             make_archived(20, ts),
@@ -2897,7 +2897,7 @@ mod folder_sort_tests {
     #[test]
     fn archive_sort_idempotent() {
         let ts = 7_000;
-        let mut a = vec![
+        let mut a = [
             make_archived(5, ts),
             make_archived(1, ts),
             make_archived(3, ts),
