@@ -1044,7 +1044,7 @@ pub(super) fn CreateAliasForm() -> Element {
                     span { class: "nudge-icon", "⚠" }
                     div { class: "nudge-text",
                         strong { "Back up the key before you continue." }
-                        " It lives in this browser only. There is no recovery."
+                        " Keys are stored in your local Freenet node's delegate — losing the node's data dir destroys them. Export a backup file to migrate or recover."
                     }
                 }
                 div { class: "modal-foot", style: "background:transparent; border:0; padding:18px 0 0;",
@@ -1052,6 +1052,30 @@ pub(super) fn CreateAliasForm() -> Element {
                         class: "btn btn-ghost",
                         onclick: cancel,
                         "Discard"
+                    }
+                    button {
+                        class: "btn btn-secondary",
+                        "data-testid": testid::FM_CREATE_BACKUP_NOW,
+                        title: "Download a backup of this identity's private keys",
+                        onclick: move |_| {
+                            if let Some((ml_dsa, ml_kem, _)) = pending.read().as_ref() {
+                                let keys = StoredIdentityKeys::new(ml_dsa, ml_kem);
+                                let backup = IdentityBackup {
+                                    version: IDENTITY_BACKUP_VERSION,
+                                    alias: alias_input.read().trim().to_string(),
+                                    description: description.read().clone(),
+                                    keys,
+                                };
+                                if let Ok(json) = serde_json::to_vec_pretty(&backup) {
+                                    let fname = format!(
+                                        "freenet-identity-{}.json",
+                                        alias_input.read().trim()
+                                    );
+                                    trigger_browser_download(&fname, &json);
+                                }
+                            }
+                        },
+                        "Back up now ↓"
                     }
                     button {
                         class: "btn btn-primary btn-lg",
