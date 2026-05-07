@@ -567,58 +567,104 @@ impl IdentityBackup {
     }
 }
 
+/// Sanitize an alias string into a safe download filename stem.
+///
+/// Keeps `[A-Za-z0-9_-]`, replaces any other character with `_`, and
+/// collapses runs of underscores. If the result would be empty, returns
+/// `None` so the caller can fall back to a fingerprint-based name.
+pub(crate) fn sanitize_filename_stem(alias: &str) -> Option<String> {
+    let sanitized: String = alias
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    // Collapse consecutive underscores and trim leading/trailing ones.
+    let mut result = String::with_capacity(sanitized.len());
+    let mut prev_under = false;
+    for c in sanitized.chars() {
+        if c == '_' {
+            if !prev_under {
+                result.push(c);
+            }
+            prev_under = true;
+        } else {
+            result.push(c);
+            prev_under = false;
+        }
+    }
+    let result = result.trim_matches('_').to_string();
+    if result.is_empty() {
+        None
+    } else {
+        Some(result)
+    }
+}
+
+/// Build a safe download filename for an identity backup.
+///
+/// Uses the sanitized alias when possible; falls back to
+/// `freenet-identity-<first-two-fingerprint-words>.json` when the alias
+/// produces an empty stem after sanitization.
+pub(crate) fn backup_filename(alias: &str, words: &[&str; 6]) -> String {
+    match sanitize_filename_stem(alias) {
+        Some(stem) => format!("freenet-identity-{stem}.json"),
+        None => format!("freenet-identity-{}-{}.json", words[0], words[1]),
+    }
+}
+
 /// Trigger a browser file-download of `json_bytes` as `filename`.
 ///
 /// Creates a `Blob`, wraps it in an object URL, synthesises a temporary
 /// `<a download>` element, clicks it, then revokes the URL.
+///
+/// Returns `Ok(())` on success or an error string describing the failure.
 #[cfg(target_family = "wasm")]
-pub(crate) fn trigger_browser_download(filename: &str, json_bytes: &[u8]) {
+pub(crate) fn trigger_browser_download(filename: &str, json_bytes: &[u8]) -> Result<(), String> {
     use wasm_bindgen::JsCast;
     use web_sys::{Blob, BlobPropertyBag, HtmlAnchorElement, Url, js_sys};
 
-    let window = match web_sys::window() {
-        Some(w) => w,
-        None => return,
-    };
-    let document = match window.document() {
-        Some(d) => d,
-        None => return,
-    };
+    let window = web_sys::window().ok_or_else(|| "no browser window context".to_string())?;
+    let document = window
+        .document()
+        .ok_or_else(|| "no document on window".to_string())?;
 
     let uint8 = js_sys::Uint8Array::from(json_bytes);
     let array = js_sys::Array::new();
     array.push(&uint8);
     let opts = BlobPropertyBag::new();
     opts.set_type("application/json");
-    let blob = match Blob::new_with_u8_array_sequence_and_options(&array, &opts) {
-        Ok(b) => b,
-        Err(_) => return,
-    };
-    let url = match Url::create_object_url_with_blob(&blob) {
-        Ok(u) => u,
-        Err(_) => return,
-    };
-    if let Some(anchor) = document
+    let blob = Blob::new_with_u8_array_sequence_and_options(&array, &opts)
+        .map_err(|e| format!("Blob creation failed: {e:?}"))?;
+    let url = Url::create_object_url_with_blob(&blob)
+        .map_err(|e| format!("URL creation failed: {e:?}"))?;
+    let anchor = document
         .create_element("a")
         .ok()
         .and_then(|el| el.dyn_into::<HtmlAnchorElement>().ok())
-    {
-        anchor.set_href(&url);
-        anchor.set_download(filename);
-        // Append to body before clicking — Safari ignores clicks on detached anchors.
-        if let Some(body) = document.body() {
-            let _ = body.append_child(&anchor);
-            anchor.click();
-            let _ = body.remove_child(&anchor);
-        } else {
-            anchor.click();
-        }
+        .ok_or_else(|| "failed to create anchor element".to_string())?;
+    anchor.set_href(&url);
+    anchor.set_download(filename);
+    // Append to body before clicking — Safari ignores clicks on detached anchors.
+    if let Some(body) = document.body() {
+        let _ = body.append_child(&anchor);
+        anchor.click();
+        let _ = body.remove_child(&anchor);
+    } else {
+        anchor.click();
     }
     let _ = Url::revoke_object_url(&url);
+    Ok(())
 }
 
 #[cfg(not(target_family = "wasm"))]
-pub(crate) fn trigger_browser_download(_filename: &str, _json_bytes: &[u8]) {}
+pub(crate) fn trigger_browser_download(_filename: &str, _json_bytes: &[u8]) -> Result<(), String> {
+    Ok(())
+}
 
 pub(crate) struct ImportBackup(pub(crate) bool);
 
@@ -839,9 +885,20 @@ pub(super) fn Identities() -> Element {
                             "data-testid": testid::FM_ID_BACKUP,
                             onclick: move |_| {
                                 let backup = IdentityBackup::from_identity(&backup_alias);
-                                if let Ok(json) = serde_json::to_vec_pretty(&backup) {
-                                    let fname = format!("freenet-identity-{}.json", &*backup_alias.alias);
-                                    trigger_browser_download(&fname, &json);
+                                match serde_json::to_vec_pretty(&backup) {
+                                    Ok(json) => {
+                                        let words = crate::app::address_book::fingerprint_words(
+                                            &backup_alias.ml_dsa_vk_bytes(),
+                                            &backup_alias.ml_kem_ek_bytes(),
+                                        );
+                                        let fname = backup_filename(&backup_alias.alias, &words);
+                                        if let Err(e) = trigger_browser_download(&fname, &json) {
+                                            crate::log::info(format!("Backup download failed: {e}"));
+                                        }
+                                    }
+                                    Err(e) => {
+                                        crate::log::info(format!("Backup serialize failed: {e}"));
+                                    }
                                 }
                             },
                             "↓"
@@ -936,6 +993,13 @@ pub(super) fn CreateAliasForm() -> Element {
         [&'static str; 6],
     );
     let mut pending: Signal<Option<PendingIdentity>> = use_signal(|| None);
+    // Tracks whether the user has triggered at least one backup download
+    // during this creation flow, so we can warn them before discarding.
+    let mut backup_taken = use_signal(|| false);
+    // When true, show the orphan-keyfile confirmation dialog.
+    let mut discard_confirm_open = use_signal(|| false);
+    // Double-click guard: true while the backup button is cooling down.
+    let mut backup_busy = use_signal(|| false);
 
     let submit = move |_| {
         let alias_str = alias_input.read().trim().to_string();
@@ -958,6 +1022,7 @@ pub(super) fn CreateAliasForm() -> Element {
                 let words = crate::app::address_book::fingerprint_words(&vk_bytes, &ek_bytes);
                 pending.set(Some((ml_dsa, ml_kem, words)));
                 login_error.set(String::new());
+                backup_taken.set(false);
             }
             Err(e) => {
                 login_error.set(format!("Failed to generate keys: {e:?}"));
@@ -999,6 +1064,7 @@ pub(super) fn CreateAliasForm() -> Element {
         create_alias_form.write().0 = false;
     };
 
+    // Cancel from the form stage (before keys are generated — no orphan risk).
     let cancel = move |_| {
         pending.set(None);
         alias_input.set(String::new());
@@ -1006,10 +1072,55 @@ pub(super) fn CreateAliasForm() -> Element {
         create_alias_form.write().0 = false;
     };
 
+    // Real discard: unconditionally clear state and close the form.
+    let do_discard = move |_| {
+        pending.set(None);
+        backup_taken.set(false);
+        discard_confirm_open.set(false);
+        alias_input.set(String::new());
+        description.set(String::new());
+        create_alias_form.write().0 = false;
+    };
+
+    // "Discard" button handler: warn if the user already downloaded a backup
+    // (orphan risk), otherwise discard immediately.
+    let on_discard_click = move |_| {
+        if *backup_taken.read() {
+            discard_confirm_open.set(true);
+        } else {
+            pending.set(None);
+            alias_input.set(String::new());
+            description.set(String::new());
+            create_alias_form.write().0 = false;
+        }
+    };
+
     let words_opt = pending.read().as_ref().map(|(_, _, w)| *w);
 
     rsx! {
-        if let Some(words) = words_opt {
+        if *discard_confirm_open.read() {
+            // ── Orphan-keyfile confirmation dialog ───────────────────
+            div { class: "modal-overlay",
+                div { class: "card",
+                    h2 { class: "display md italic", "Discard backed-up identity?" }
+                    p { class: "lede",
+                        "You backed up this identity but have not saved it yet. Discarding now will leave the backup file orphaned — the key in it cannot be restored because it was never registered."
+                    }
+                    div { class: "modal-foot", style: "background:transparent; border:0; padding:18px 0 0;",
+                        button {
+                            class: "btn btn-ghost",
+                            onclick: move |_| { discard_confirm_open.set(false); },
+                            "Go back"
+                        }
+                        button {
+                            class: "btn btn-danger",
+                            onclick: do_discard,
+                            "Discard anyway"
+                        }
+                    }
+                }
+            }
+        } else if let Some(words) = words_opt {
             // ── Reveal stage ────────────────────────────────────────
             div { class: "card",
                 h2 { class: "display md italic", "Your fingerprint" }
@@ -1039,31 +1150,65 @@ pub(super) fn CreateAliasForm() -> Element {
                         " Keys are stored in your local Freenet node's delegate — losing the node's data dir destroys them. Export a backup file to migrate or recover."
                     }
                 }
+                if !login_error.read().is_empty() {
+                    div { class: "info", style: "background:#fef2f2; border-color:#fecaca; color:#991b1b;",
+                        "{login_error.read()}"
+                    }
+                }
                 div { class: "modal-foot", style: "background:transparent; border:0; padding:18px 0 0;",
                     button {
                         class: "btn btn-ghost",
-                        onclick: cancel,
+                        onclick: on_discard_click,
                         "Discard"
                     }
                     button {
                         class: "btn btn-secondary",
+                        disabled: *backup_busy.read(),
                         "data-testid": testid::FM_CREATE_BACKUP_NOW,
                         title: "Download a backup of this identity's private keys",
                         onclick: move |_| {
-                            if let Some((ml_dsa, ml_kem, _)) = pending.read().as_ref() {
-                                let keys = StoredIdentityKeys::new(ml_dsa, ml_kem);
+                            if *backup_busy.read() {
+                                return;
+                            }
+                            // Clone keys out so the read guard is dropped before download.
+                            let entry = {
+                                let guard = pending.read();
+                                guard.as_ref().map(|(ml_dsa, ml_kem, words)| {
+                                    let keys = StoredIdentityKeys::new(ml_dsa, ml_kem);
+                                    let alias_str = alias_input.read().trim().to_string();
+                                    let desc = description.read().clone();
+                                    (*words, keys, alias_str, desc)
+                                })
+                            };
+                            if let Some((words, keys, alias_str, desc)) = entry {
                                 let backup = IdentityBackup {
                                     version: IDENTITY_BACKUP_VERSION,
-                                    alias: alias_input.read().trim().to_string(),
-                                    description: description.read().clone(),
+                                    alias: alias_str.clone(),
+                                    description: desc,
                                     keys,
                                 };
-                                if let Ok(json) = serde_json::to_vec_pretty(&backup) {
-                                    let fname = format!(
-                                        "freenet-identity-{}.json",
-                                        alias_input.read().trim()
-                                    );
-                                    trigger_browser_download(&fname, &json);
+                                match serde_json::to_vec_pretty(&backup) {
+                                    Ok(json) => {
+                                        let fname = backup_filename(&alias_str, &words);
+                                        match trigger_browser_download(&fname, &json) {
+                                            Ok(()) => {
+                                                backup_taken.set(true);
+                                                login_error.set(String::new());
+                                                // Double-click guard: disable button briefly.
+                                                backup_busy.set(true);
+                                                spawn(async move {
+                                                    gloo_timers::future::TimeoutFuture::new(1_000).await;
+                                                    backup_busy.set(false);
+                                                });
+                                            }
+                                            Err(e) => {
+                                                login_error.set(format!("Backup failed: {e}"));
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        login_error.set(format!("Backup failed: could not serialize identity: {e}"));
+                                    }
                                 }
                             }
                         },
@@ -1930,5 +2075,77 @@ fn ContactsSection() -> Element {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{backup_filename, sanitize_filename_stem};
+
+    #[test]
+    fn sanitize_plain_ascii() {
+        assert_eq!(sanitize_filename_stem("alice"), Some("alice".to_string()));
+        assert_eq!(
+            sanitize_filename_stem("my-work_key"),
+            Some("my-work_key".to_string())
+        );
+        assert_eq!(
+            sanitize_filename_stem("Hello123"),
+            Some("Hello123".to_string())
+        );
+    }
+
+    #[test]
+    fn sanitize_replaces_disallowed_chars() {
+        // Path separators and unicode must be replaced with '_'.
+        assert_eq!(
+            sanitize_filename_stem("alice/bob"),
+            Some("alice_bob".to_string())
+        );
+        assert_eq!(sanitize_filename_stem("../../etc"), Some("etc".to_string()));
+        // Unicode collapsed to underscores, then trimmed.
+        assert_eq!(sanitize_filename_stem("mira💌"), Some("mira".to_string()));
+        // Spaces become underscores.
+        assert_eq!(
+            sanitize_filename_stem("my alias"),
+            Some("my_alias".to_string())
+        );
+        // Multiple consecutive bad chars become a single underscore.
+        assert_eq!(sanitize_filename_stem("a///b"), Some("a_b".to_string()));
+    }
+
+    #[test]
+    fn sanitize_empty_returns_none() {
+        assert_eq!(sanitize_filename_stem(""), None);
+        // Only disallowed chars → all become underscores → trimmed → empty.
+        assert_eq!(sanitize_filename_stem("///"), None);
+        assert_eq!(sanitize_filename_stem("💌💌"), None);
+    }
+
+    #[test]
+    fn backup_filename_uses_sanitized_alias() {
+        let words = &["alpha", "bravo", "charlie", "delta", "echo", "foxtrot"];
+        assert_eq!(
+            backup_filename("alice", words),
+            "freenet-identity-alice.json"
+        );
+        assert_eq!(
+            backup_filename("my alias", words),
+            "freenet-identity-my_alias.json"
+        );
+    }
+
+    #[test]
+    fn backup_filename_falls_back_to_fingerprint_on_empty_stem() {
+        let words = &["alpha", "bravo", "charlie", "delta", "echo", "foxtrot"];
+        // All-unicode alias → empty stem after sanitization → fingerprint fallback.
+        assert_eq!(
+            backup_filename("💌💌", words),
+            "freenet-identity-alpha-bravo.json"
+        );
+        assert_eq!(
+            backup_filename("///", words),
+            "freenet-identity-alpha-bravo.json"
+        );
     }
 }

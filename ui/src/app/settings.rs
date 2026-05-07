@@ -420,8 +420,15 @@ fn ScrAccount() -> Element {
         let Ok(json) = serde_json::to_vec_pretty(&backup) else {
             return;
         };
-        let fname = format!("freenet-identity-{}.json", &*active.alias);
-        crate::app::login::trigger_browser_download(&fname, &json);
+        let words = crate::app::address_book::fingerprint_words(
+            &active.ml_dsa_vk_bytes(),
+            &active.ml_kem_ek_bytes(),
+        );
+        let fname = crate::app::login::backup_filename(&active.alias, &words);
+        if let Err(e) = crate::app::login::trigger_browser_download(&fname, &json) {
+            crate::log::info(format!("Backup download failed: {e}"));
+            return;
+        }
         let mut next = ident_bk.clone();
         next.last_backup_at = Some(chrono::Utc::now().timestamp_millis());
         local_state::persist_identity_settings(alias_key_bk.clone(), next);
