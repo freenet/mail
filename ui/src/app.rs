@@ -121,13 +121,18 @@ pub(crate) fn app() -> Element {
     let inbox = use_context::<Signal<InboxView>>();
     use_context_provider(InboxesData::new);
     let inbox_data = use_context::<InboxesData>();
+    // Address-book generation counter (#134). Bumped on every
+    // CreateContact / DeleteContact so inbox components subscribed via
+    // `.read()` re-render and pick up the updated verification state.
+    use_context_provider(|| AddressBookGen(Signal::new(0u32)));
+    let ab_gen = use_context::<AddressBookGen>();
 
     #[cfg(all(feature = "use-node", not(feature = "no-sync")))]
     {
         let _sync: Coroutine<NodeAction> = use_coroutine(move |rx| {
             let login_controller = login_controller;
             let user = user;
-            let fut = crate::api::node_comms(rx, login_controller, user, inbox_data)
+            let fut = crate::api::node_comms(rx, login_controller, user, inbox_data, ab_gen)
                 .map(|_| Ok(JsValue::NULL));
             let _ = wasm_bindgen_futures::future_to_promise(fut);
             async {}.boxed_local()
@@ -137,6 +142,7 @@ pub(crate) fn app() -> Element {
     {
         let _ = inbox_data;
         let mut login_ctl = login_controller;
+        let mut ab_gen = ab_gen;
         let _sync: Coroutine<NodeAction> =
             use_coroutine(move |mut rx: UnboundedReceiver<NodeAction>| async move {
                 use futures::StreamExt;
@@ -149,11 +155,20 @@ pub(crate) fn app() -> Element {
                         NodeAction::CreateContact { contact } => {
                             if address_book::insert_contact(contact).is_ok() {
                                 login_ctl.write().updated = true;
+                                // Bump generation so MessageList / OpenMessage
+                                // re-render and reflect the new contact (#134).
+                                let prev = *ab_gen.0.read();
+                                ab_gen.0.set(prev.wrapping_add(1));
                             }
                         }
                         NodeAction::DeleteContact { alias } => {
                             address_book::remove_contact(&alias);
                             login_ctl.write().updated = true;
+                            // Bump generation so inbox rows that showed the
+                            // removed contact as "verified" revert to
+                            // "unknown sender" (#134).
+                            let prev = *ab_gen.0.read();
+                            ab_gen.0.set(prev.wrapping_add(1));
                         }
                         NodeAction::RenameIdentity { old, new, .. } => {
                             // Offline mode: just relabel the in-memory
@@ -212,6 +227,17 @@ pub(crate) fn app() -> Element {
 /// for re-render on writes — no separate bump-signal needed.
 #[derive(Clone, Copy)]
 pub(crate) struct InboxesData(pub(crate) Signal<Vec<Rc<RefCell<InboxModel>>>>);
+
+/// Generation counter for address-book mutations (issue #134).
+///
+/// Provided as Dioxus context in `app()` and bumped on every
+/// `CreateContact` / `DeleteContact` action so that inbox components
+/// that call `verification_state()` (which reads the address book
+/// directly) are subscribed to changes. Any component that calls
+/// `.read()` on this value is re-rendered the next time the counter
+/// increments.
+#[derive(Clone, Copy)]
+pub(crate) struct AddressBookGen(pub(crate) Signal<u32>);
 
 impl InboxesData {
     pub fn new() -> Self {
@@ -1294,6 +1320,10 @@ fn MessageList() -> Element {
     // Touch the local-state generation so this component re-renders when
     // drafts are added/removed.
     let _local_gen = crate::local_state::GENERATION();
+    // Subscribe to address-book mutations so verification badges on
+    // inbox rows update immediately after a contact is imported (#134).
+    let ab_gen_ctx = use_context::<AddressBookGen>();
+    let _ab_gen = ab_gen_ctx.0.read();
 
     let inbox_view = inbox.read();
     let emails = inbox_view.messages.borrow();
@@ -1973,6 +2003,11 @@ fn OpenMessage(msg: Message) -> Element {
     let reply_to = from.clone();
     let reply_subj = format!("Re: {}", title);
     let time_full = format_time_full(msg.time);
+    // Subscribe to address-book mutations so the verification badge
+    // updates immediately when the user imports the sender's contact
+    // without requiring a full page reload (#134).
+    let ab_gen_ctx = use_context::<AddressBookGen>();
+    let _ab_gen = ab_gen_ctx.0.read();
     // Sender trust state (#51) — three-valued: verified-known (sig OK +
     // contact verified), verified-unknown (sig OK, sender VK not in AB),
     // unverified (no sig / forged sig). Fingerprint short-form is shown

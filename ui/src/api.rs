@@ -689,6 +689,7 @@ pub(crate) async fn node_comms(
     login_controller: Signal<crate::app::LoginController>,
     user: Signal<crate::app::User>,
     inboxes: crate::app::InboxesData,
+    mut ab_gen: crate::app::AddressBookGen,
 ) {
     // todo don't unwrap inside this function, propagate errors to the UI somehow
     use freenet_email_inbox::Inbox as StoredInbox;
@@ -952,6 +953,10 @@ pub(crate) async fn node_comms(
                     // ContactsSection reads ADDRESS_BOOK directly (not via a
                     // Signal) so bump the controller to force re-render.
                     login_controller.write().updated = true;
+                    // Bump generation so MessageList / OpenMessage re-render
+                    // and pick up the new contact's verification state (#134).
+                    let prev = *ab_gen.0.read();
+                    ab_gen.0.set(prev.wrapping_add(1));
                 }
             }
             NodeAction::DeleteContact { alias } => {
@@ -962,6 +967,11 @@ pub(crate) async fn node_comms(
                 } else {
                     crate::app::address_book::remove_contact(&alias);
                     login_controller.write().updated = true;
+                    // Bump generation so inbox rows that showed the
+                    // removed contact as "verified" revert to
+                    // "unknown sender" (#134).
+                    let prev = *ab_gen.0.read();
+                    ab_gen.0.set(prev.wrapping_add(1));
                 }
             }
             NodeAction::RenameIdentity { old, new, identity } => {
