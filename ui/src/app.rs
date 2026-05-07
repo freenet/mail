@@ -70,6 +70,16 @@ pub(crate) enum NodeAction {
         required_tier: freenet_aft_interface::Tier,
         max_age_secs: u64,
     },
+    /// Push a signed `ModifySettings` delta updating the verified-sender
+    /// bypass setting and the `verified_senders` allow-list on the inbox
+    /// contract owned by `identity` (#150). Owner-only — same gate as
+    /// `UpdateInboxPolicy`. The full current `verified_senders` set is
+    /// sent; the contract replaces its stored set atomically.
+    UpdateVerifiedBypass {
+        identity: Box<Identity>,
+        allow_verified_skip_token: bool,
+        verified_senders: std::collections::BTreeSet<Vec<u8>>,
+    },
     CreateDelegate {
         alias: Rc<str>,
         /// ML-DSA-65 signing key used by the AFT token-generator delegate.
@@ -134,19 +144,24 @@ pub(crate) fn app() -> Element {
     // Modal signals lifted to the root so that both the login pane
     // (IdentifiersList) and the inbox (UserInbox → Settings → Contacts)
     // can open these modals. Fixes #158.
+    //
+    // The actual modal *components* are rendered inside their respective
+    // CSS-scope roots (div.fm-pre in IdentifiersList, div.fm-app in
+    // UserInbox) so that the `.veil`/`.modal` CSS rules apply correctly.
+    // These context providers are still here so both subtrees share the
+    // same signal instances.
     use_context_provider(|| Signal::new(login::ImportBackup(false)));
     use_context_provider(|| Signal::new(login::ImportContact(false)));
     use_context_provider(|| Signal::new(login::ShareContact(false)));
     use_context_provider(|| Signal::new(login::SharePending::default()));
-    let import_contact = use_context::<Signal<login::ImportContact>>();
-    let share_contact = use_context::<Signal<login::ShareContact>>();
 
     #[cfg(all(feature = "use-node", not(feature = "no-sync")))]
     {
+        let _ = toast;
         let _sync: Coroutine<NodeAction> = use_coroutine(move |rx| {
             let login_controller = login_controller;
             let user = user;
-            let fut = crate::api::node_comms(rx, login_controller, user, inbox_data, ab_gen, toast)
+            let fut = crate::api::node_comms(rx, login_controller, user, inbox_data, ab_gen)
                 .map(|_| Ok(JsValue::NULL));
             let _ = wasm_bindgen_futures::future_to_promise(fut);
             async {}.boxed_local()
@@ -233,15 +248,6 @@ pub(crate) fn app() -> Element {
     rsx! {
         document::Title { "{app_name}" }
         {body}
-        // Modals are rendered at the root so they are reachable from both
-        // the login pane (IdentifiersList) and the inbox (UserInbox). Their
-        // signals are provided above. (#158)
-        if share_contact.read().0 {
-            login::ShareContactModal {}
-        }
-        if import_contact.read().0 {
-            login::ImportContactForm {}
-        }
     }
 }
 
@@ -1097,6 +1103,9 @@ fn UserInbox() -> Element {
     };
     let app_class = format!("fm-app{serif_class}");
 
+    let import_contact = use_context::<Signal<crate::app::login::ImportContact>>();
+    let share_contact = use_context::<Signal<crate::app::login::ShareContact>>();
+
     rsx! {
         div {
             class: "{app_class}",
@@ -1116,6 +1125,16 @@ fn UserInbox() -> Element {
                 ComposeSheet {}
             }
             ToastView {}
+            // Modals rendered inside div.fm-app so that `.veil`/`.modal`
+            // CSS rules (scoped to .fm-app via @scope) apply correctly.
+            // Signals are provided at app() root so Settings → Contacts
+            // buttons can toggle them without re-providing. (#158)
+            if share_contact.read().0 {
+                login::ShareContactModal {}
+            }
+            if import_contact.read().0 {
+                login::ImportContactForm {}
+            }
         }
     }
 }

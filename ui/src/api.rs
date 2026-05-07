@@ -272,6 +272,7 @@ mod inbox_management {
                     minimum_tier: required_tier,
                     max_age_secs,
                     private: Default::default(),
+                    ..InboxSettings::default()
                 },
                 Vec::new(),
             );
@@ -691,7 +692,6 @@ pub(crate) async fn node_comms(
     user: Signal<crate::app::User>,
     inboxes: crate::app::InboxesData,
     ab_gen: crate::app::AddressBookGen,
-    _toast: crate::toast::ToastQueue,
 ) {
     // todo don't unwrap inside this function, propagate errors to the UI somehow
     use freenet_email_inbox::Inbox as StoredInbox;
@@ -779,7 +779,7 @@ pub(crate) async fn node_comms(
     // The toast signal is passed so the pump can notify the user when an
     // AFT token is spent automatically (#159).
     #[cfg(target_family = "wasm")]
-    permission_pump::spawn(user, toast);
+    permission_pump::spawn(user);
 
     static IDENTITIES_KEY: OnceLock<DelegateKey> = OnceLock::new();
     IDENTITIES_KEY.set(identities_key.clone()).unwrap();
@@ -952,6 +952,58 @@ pub(crate) async fn node_comms(
                     }
                 }
             }
+            NodeAction::UpdateVerifiedBypass {
+                identity,
+                allow_verified_skip_token,
+                verified_senders,
+            } => {
+                // Same lookup pattern as UpdateInboxPolicy.
+                let target_vk = identity.ml_dsa_vk_bytes();
+                let mut found = None;
+                for cell in inboxes.snapshot() {
+                    let key_owner = {
+                        let m = cell.borrow();
+                        crate::inbox::InboxModel::contract_identity(&m.key)
+                    };
+                    if let Some(owner) = key_owner
+                        && owner.ml_dsa_vk_bytes() == target_vk
+                    {
+                        found = Some(cell);
+                        break;
+                    }
+                }
+                let Some(cell) = found else {
+                    crate::log::error(
+                        format!(
+                            "UpdateVerifiedBypass: no loaded inbox for alias `{}`",
+                            identity.alias()
+                        ),
+                        None,
+                    );
+                    return;
+                };
+                let prepared = {
+                    let mut model = cell.borrow_mut();
+                    model
+                        .update_verified_bypass_prepare(allow_verified_skip_token, verified_senders)
+                };
+                match prepared {
+                    Ok(request) => {
+                        if let Err(e) = client.send(request.into()).await {
+                            crate::log::error(
+                                format!("UpdateVerifiedBypass send failed: {e}"),
+                                Some(TryNodeAction::SendMessage),
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        crate::log::error(
+                            format!("UpdateVerifiedBypass prepare failed: {e}"),
+                            Some(TryNodeAction::SendMessage),
+                        );
+                    }
+                }
+            }
             NodeAction::CreateContact { contact } => {
                 if let Err(e) =
                     identity_management::create_contact_api_call(&mut client, &contact).await
@@ -960,7 +1012,7 @@ pub(crate) async fn node_comms(
                         format!("failed to store contact {}: {e}", contact.local_alias),
                         None,
                     );
-                } else if let Err(e) = crate::app::address_book::insert_contact(contact) {
+                } else if let Err(e) = crate::app::address_book::insert_contact(contact.clone()) {
                     crate::log::error(format!("address book rejected contact: {e}"), None);
                 } else {
                     // ContactsSection reads ADDRESS_BOOK directly (not via a
@@ -970,6 +1022,72 @@ pub(crate) async fn node_comms(
                     // and pick up the new contact's verification state (#134).
                     let prev = *ab_gen.0.read();
                     *ab_gen.0.write() = prev.wrapping_add(1);
+
+                    // #150: if this contact was just marked verified AND the
+                    // active identity has the bypass toggle ON, push an updated
+                    // `verified_senders` set to the inbox contract so the new
+                    // VK is immediately exempted from the token requirement.
+                    if contact.verified {
+                        let active_alias = user.read().logged_id().map(|id| id.alias.to_string());
+                        if let Some(alias) = active_alias {
+                            let aft_prefs = crate::local_state::identity_settings_for(&alias).aft;
+                            if aft_prefs.allow_verified_skip_token {
+                                // Rebuild the full set from the address book
+                                // (post-insert, so the new contact is included).
+                                let verified_senders: std::collections::BTreeSet<Vec<u8>> =
+                                    crate::app::address_book::all_contacts()
+                                        .into_iter()
+                                        .filter(|c| c.verified)
+                                        .map(|c| c.ml_dsa_vk_bytes)
+                                        .collect();
+                                // Find the inbox model for this identity.
+                                let target_vk =
+                                    user.read().logged_id().map(|id| id.ml_dsa_vk_bytes());
+                                if let Some(target_vk) = target_vk {
+                                    let mut found = None;
+                                    for cell in inboxes.snapshot() {
+                                        let key_owner = {
+                                            let m = cell.borrow();
+                                            InboxModel::contract_identity(&m.key)
+                                        };
+                                        if let Some(owner) = key_owner
+                                            && owner.ml_dsa_vk_bytes() == target_vk
+                                        {
+                                            found = Some(cell);
+                                            break;
+                                        }
+                                    }
+                                    if let Some(cell) = found {
+                                        let prepared = {
+                                            let mut model = cell.borrow_mut();
+                                            model.update_verified_bypass_prepare(
+                                                true,
+                                                verified_senders,
+                                            )
+                                        };
+                                        match prepared {
+                                            Ok(request) => {
+                                                if let Err(e) = client.send(request.into()).await {
+                                                    crate::log::error(
+                                                        format!(
+                                                            "verified-bypass sync on CreateContact failed: {e}"
+                                                        ),
+                                                        None,
+                                                    );
+                                                }
+                                            }
+                                            Err(e) => {
+                                                crate::log::error(
+                                                    format!("verified-bypass prepare failed: {e}"),
+                                                    None,
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
             NodeAction::DeleteContact { alias } => {
@@ -985,6 +1103,65 @@ pub(crate) async fn node_comms(
                     // "unknown sender" (#134).
                     let prev = *ab_gen.0.read();
                     *ab_gen.0.write() = prev.wrapping_add(1);
+
+                    // #150: if bypass is ON for the active identity, rebuild
+                    // the `verified_senders` set (minus the deleted contact)
+                    // and push it to the inbox contract.
+                    let active_alias = user.read().logged_id().map(|id| id.alias.to_string());
+                    if let Some(active_alias) = active_alias {
+                        let aft_prefs =
+                            crate::local_state::identity_settings_for(&active_alias).aft;
+                        if aft_prefs.allow_verified_skip_token {
+                            let verified_senders: std::collections::BTreeSet<Vec<u8>> =
+                                crate::app::address_book::all_contacts()
+                                    .into_iter()
+                                    .filter(|c| c.verified)
+                                    .map(|c| c.ml_dsa_vk_bytes)
+                                    .collect();
+                            let target_vk = user.read().logged_id().map(|id| id.ml_dsa_vk_bytes());
+                            if let Some(target_vk) = target_vk {
+                                let mut found = None;
+                                for cell in inboxes.snapshot() {
+                                    let key_owner = {
+                                        let m = cell.borrow();
+                                        InboxModel::contract_identity(&m.key)
+                                    };
+                                    if let Some(owner) = key_owner
+                                        && owner.ml_dsa_vk_bytes() == target_vk
+                                    {
+                                        found = Some(cell);
+                                        break;
+                                    }
+                                }
+                                if let Some(cell) = found {
+                                    let prepared = {
+                                        let mut model = cell.borrow_mut();
+                                        model.update_verified_bypass_prepare(true, verified_senders)
+                                    };
+                                    match prepared {
+                                        Ok(request) => {
+                                            if let Err(e) = client.send(request.into()).await {
+                                                crate::log::error(
+                                                    format!(
+                                                        "verified-bypass sync on DeleteContact failed: {e}"
+                                                    ),
+                                                    None,
+                                                );
+                                            }
+                                        }
+                                        Err(e) => {
+                                            crate::log::error(
+                                                format!(
+                                                    "verified-bypass prepare on delete failed: {e}"
+                                                ),
+                                                None,
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
             NodeAction::RenameIdentity { old, new, identity } => {
@@ -1767,7 +1944,7 @@ pub(crate) async fn node_comms(
 /// doesn't block the request/response pipeline.
 #[cfg(all(target_family = "wasm", feature = "use-node"))]
 pub(crate) mod permission_pump {
-    use dioxus::prelude::{ReadableExt, WritableExt};
+    use dioxus::prelude::ReadableExt;
     use mail_local_state::PermissionDecision;
     use wasm_bindgen::JsCast as _;
     use wasm_bindgen::JsValue;
@@ -1967,7 +2144,6 @@ pub(crate) mod permission_pump {
         origin: &str,
         seen: &mut std::collections::HashSet<String>,
         user: dioxus::prelude::Signal<crate::app::User>,
-        mut toast: dioxus::prelude::Signal<Option<String>>,
     ) {
         let prompts = match fetch_pending(origin).await {
             Ok(p) => p,
@@ -2022,17 +2198,7 @@ pub(crate) mod permission_pump {
                             .unwrap_or_else(|| "a contact".to_string());
                         let action_label = if index == 0 { "approved" } else { "denied" };
                         let msg = format!("Token {action_label} for {recipient_label}");
-                        toast.set(Some(msg));
-                        // Auto-clear the toast after 2.5 s to mirror the
-                        // app-wide `spawn_toast_clear` convention.
-                        let mut toast_clear = toast;
-                        dioxus::core::spawn_forever(async move {
-                            gloo_timers::future::sleep(std::time::Duration::from_millis(2500))
-                                .await;
-                            if toast_clear.read().is_some() {
-                                toast_clear.set(None);
-                            }
-                        });
+                        crate::toast::push_toast(msg, crate::toast::ToastLevel::Info);
                     }
                     Err(e) => {
                         crate::log::error(
@@ -2064,12 +2230,9 @@ pub(crate) mod permission_pump {
     /// connection is established. Under `no-sync` or non-WASM builds this
     /// function does not exist (the caller is also `#[cfg(…)]`).
     ///
-    /// `toast` is the app-wide toast signal; the pump writes to it whenever
-    /// it auto-responds to a pending permission prompt (#159).
-    pub(crate) fn spawn(
-        user: dioxus::prelude::Signal<crate::app::User>,
-        toast: dioxus::prelude::Signal<Option<String>>,
-    ) {
+    /// When the pump auto-responds to a pending permission prompt it emits a
+    /// toast via [`crate::toast::push_toast`] (#159).
+    pub(crate) fn spawn(user: dioxus::prelude::Signal<crate::app::User>) {
         let Some(origin) = gateway_origin() else {
             crate::log::error("permission pump: could not derive gateway origin", None);
             return;
@@ -2077,7 +2240,7 @@ pub(crate) mod permission_pump {
         dioxus::core::spawn_forever(async move {
             let mut seen = std::collections::HashSet::<String>::new();
             loop {
-                tick(&origin, &mut seen, user, toast).await;
+                tick(&origin, &mut seen, user).await;
                 gloo_timers::future::sleep(std::time::Duration::from_millis(
                     PUMP_INTERVAL_MS as u64,
                 ))

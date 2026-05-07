@@ -74,6 +74,64 @@ pub fn make_settings_with_policy(minimum_tier: Tier, max_age_secs: u64) -> Inbox
         minimum_tier,
         max_age_secs,
         private: Default::default(),
+        ..InboxSettings::default()
+    }
+}
+
+/// Build `InboxSettings` with the verified-sender bypass enabled and the
+/// given set of verified ML-DSA-65 verifying key bytes. Used by tests for
+/// `#150`.
+pub fn make_settings_with_bypass(
+    minimum_tier: Tier,
+    verified_sender_vk_bytes: Vec<u8>,
+) -> InboxSettings {
+    use std::collections::BTreeSet;
+    let mut vs = BTreeSet::new();
+    vs.insert(verified_sender_vk_bytes);
+    InboxSettings {
+        minimum_tier,
+        allow_verified_skip_token: true,
+        verified_senders: vs,
+        ..InboxSettings::default()
+    }
+}
+
+/// Build a `Message` carrying the given sender verifying key but NO valid
+/// token. The message is signed by `sender_sk` over `content` so that the
+/// verified-sender bypass path — which requires a valid ML-DSA-65 detached
+/// signature — accepts it.
+///
+/// Pass the signing key whose verifying key bytes are in `sender_vk_bytes`
+/// (i.e. `MlDsaKeypair::verifying_key(sender_sk).encode().to_vec()`).
+pub fn make_message_no_token(
+    content: Vec<u8>,
+    assignment_hash: [u8; 32],
+    sender_vk_bytes: Vec<u8>,
+    token_record_id: ContractInstanceId,
+    sender_sk: &MlDsaSigningKey<MlDsa65>,
+) -> freenet_email_inbox::Message {
+    use chrono::Utc;
+    use freenet_aft_interface::TokenAssignment;
+    // Sentinel token assignment — all fields zeroed / default. The
+    // contract bypasses the token check when the sender is in
+    // `verified_senders`, so this placeholder is never validated.
+    let dummy_assignment = TokenAssignment {
+        tier: Tier::Min10,
+        time_slot: Utc::now(),
+        generator: vec![0u8; 1952], // ML-DSA-65 VK length
+        signature: vec![0u8; 3309], // ML-DSA-65 sig length
+        assignment_hash,
+        token_record: token_record_id,
+    };
+    // Sign the content (ciphertext blob) with the sender's key.
+    // The contract verifies this on the bypass path via verify_sender_signature.
+    let sig: ml_dsa::Signature<MlDsa65> = MlDsaSigner::sign(sender_sk, &content);
+    let signature_bytes: Vec<u8> = sig.encode().to_vec();
+    freenet_email_inbox::Message {
+        content,
+        token_assignment: dummy_assignment,
+        sender_vk: sender_vk_bytes,
+        signature: signature_bytes,
     }
 }
 
@@ -229,4 +287,42 @@ pub fn assignment_hash_for(seed: &[u8]) -> [u8; 32] {
 pub fn token_record_id_for(seed: &[u8]) -> ContractInstanceId {
     let bytes = assignment_hash_for(seed);
     ContractInstanceId::new(bytes)
+}
+
+/// Build a signed `UpdateData::Delta(ModifySettings)` payload. The settings
+/// are serialised, signed with `owner_sk`, and wrapped in an `UpdateInbox`
+/// enum so `update_state`'s Delta arm can decode it.
+///
+/// This mirrors what `InboxModel::settings_modify_prepare` does in the UI
+/// crate — the contract verifies the owner's ML-DSA-65 signature against
+/// `InboxParams.pub_key` before applying the new settings.
+pub fn modify_settings_delta(
+    owner_sk: &MlDsaSigningKey<MlDsa65>,
+    settings: freenet_email_inbox::InboxSettings,
+) -> UpdateData<'static> {
+    let serialized = serde_json::to_vec(&settings).expect("serialize settings");
+    let sig: ml_dsa::Signature<MlDsa65> = MlDsaSigner::sign(owner_sk, &serialized);
+    let signature: Box<[u8]> = sig.encode().to_vec().into_boxed_slice();
+    let delta = UpdateInbox::ModifySettings {
+        signature,
+        settings,
+    };
+    let bytes = serde_json::to_vec(&delta).expect("serialize delta");
+    UpdateData::Delta(StateDelta::from(bytes))
+}
+
+/// Build `InboxSettings` with bypass enabled for **multiple** VK byte vectors.
+/// Used by tests that exercise a batch of verified + unverified senders.
+pub fn make_settings_with_bypass_multi(
+    minimum_tier: Tier,
+    verified_sender_vk_bytes: impl IntoIterator<Item = Vec<u8>>,
+) -> freenet_email_inbox::InboxSettings {
+    use std::collections::BTreeSet;
+    let vs: BTreeSet<Vec<u8>> = verified_sender_vk_bytes.into_iter().collect();
+    freenet_email_inbox::InboxSettings {
+        minimum_tier,
+        allow_verified_skip_token: true,
+        verified_senders: vs,
+        ..freenet_email_inbox::InboxSettings::default()
+    }
 }
