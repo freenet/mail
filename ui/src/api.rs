@@ -1881,15 +1881,13 @@ pub(crate) mod permission_pump {
         for vk_bytes in pending_recipient_vk_bytes {
             if let Some(contact) = address_book::contact_by_vk(vk_bytes) {
                 let fp = contact.fingerprint_full();
-                if let Some(decision) = prefs.permission_decisions.get(&fp) {
+                if let Some(decision) =
+                    crate::app::settings::resolve_permission_decision(&prefs, &fp, contact.verified)
+                {
                     return Some(match decision {
                         PermissionDecision::Accept => 0,
                         PermissionDecision::Deny => 1,
                     });
-                }
-                // Priority 2: auto-accept verified contacts.
-                if prefs.auto_accept_verified_contacts && contact.verified {
-                    return Some(0);
                 }
             } else if prefs.auto_accept_verified_contacts {
                 // The VK might belong to one of the user's own identities

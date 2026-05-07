@@ -239,6 +239,7 @@ impl AftRecords {
 
     /// Snapshot and return the pending recipient VK bytes list, then clear
     /// it. Called by the permission pump after applying a response.
+    #[cfg(all(target_family = "wasm", feature = "use-node"))]
     pub fn drain_pending_recipient_vk_bytes() -> Vec<Vec<u8>> {
         PENDING_RECIPIENT_VK_BYTES.with(|vec| {
             let mut v = vec.borrow_mut();
@@ -250,6 +251,7 @@ impl AftRecords {
 
     /// Non-destructive snapshot of pending recipient VK bytes. Called by
     /// the permission pump when evaluating policy without consuming state.
+    #[cfg(all(target_family = "wasm", feature = "use-node"))]
     pub fn peek_pending_recipient_vk_bytes() -> Vec<Vec<u8>> {
         PENDING_RECIPIENT_VK_BYTES.with(|vec| vec.borrow().clone())
     }
