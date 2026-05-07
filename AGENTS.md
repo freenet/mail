@@ -107,7 +107,6 @@ supported build target and what it's used for.
 | `use-node`    | Default. Enables the WebSocket bridge to a local Freenet node and all contract calls.    |
 | `example-data`| Seeds the UI with two mock identities (`address1`, `address2`) and mock inboxes.          |
 | `no-sync`     | Disables the WebSocket bridge entirely. Must be combined with `example-data` to be useful.|
-| `wip-settings`| Surfaces Settings controls whose backend isn't fully wired (AFT screen, read_receipts, pad_length, display_name). Off by default so released builds don't expose no-op toggles. |
 | `contract`    | (inbox crate, not ui) Enables the inbox contract's `ContractInterface` impl.             |
 
 **Supported combinations:**

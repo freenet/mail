@@ -78,13 +78,3 @@ example-data = []
 # (and `--no-default-features`) for the offline dev loop.
 no-sync = []
 use-node = []
-# Show Settings controls whose backend isn't fully wired yet. Off by
-# default so released builds don't surface no-op toggles. Enable for
-# dev/preview to keep the UI shape visible while contract/delegate
-# work catches up. Items gated:
-#  - AFT screen (entire screen + nav entry; #85 blocks tier+max_age
-#    becoming recipient-configurable via InboxParams)
-#  - Privacy → read_receipts (#69 not implemented)
-#  - Privacy → pad_length (no impl)
-#  - Account → display_name (no consumer of the field)
-wip-settings = []
