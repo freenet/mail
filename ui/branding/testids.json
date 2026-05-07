@@ -31,6 +31,7 @@
   "fmArchiveReply": "fm-archive-reply",
   "fmComposeSheet": "fm-compose-sheet",
   "fmSend": "fm-send",
+  "fmComposeRecipientHint": "fm-compose-recipient-hint",
   "fmToast": "fm-toast",
   "fmActionCreate": "fm-action-create",
   "fmActionImport": "fm-action-import",

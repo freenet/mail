@@ -2332,6 +2332,9 @@ fn ComposeSheet() -> Element {
                     format!("couldn't find key for `{to_val}`"),
                     Some(TryNodeAction::GetAlias),
                 );
+                toast.set(Some(format!(
+                    "Recipient `{to_val}` is not in your address book. Import their contact card before sending."
+                )));
                 return;
             }
         };
@@ -2541,7 +2544,9 @@ fn ComposeSheet() -> Element {
                     }
                 }
                 {
-                    recipient_lookup.read().as_ref().map(|r| {
+                    let to_val = to.read().clone();
+                    let lookup = recipient_lookup.read().clone();
+                    if let Some(r) = lookup {
                         let (badge_class, badge_label): (&str, &str) =
                             if r.is_own {
                                 ("badge badge-trust", "you")
@@ -2567,7 +2572,17 @@ fn ComposeSheet() -> Element {
                                 }
                             }
                         }
-                    })
+                    } else if !to_val.is_empty() {
+                        rsx! {
+                            div {
+                                class: "sheet-recipient-hint",
+                                "data-testid": testid::FM_COMPOSE_RECIPIENT_HINT,
+                                "Not in address book — import their contact card first."
+                            }
+                        }
+                    } else {
+                        rsx! {}
+                    }
                 }
                 div { class: "sheet-field",
                     span { class: "field-lbl", "Re" }
