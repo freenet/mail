@@ -2689,11 +2689,7 @@ mod inbox_sort_tests {
     /// Messages with distinct timestamps should be sorted newest-first.
     #[test]
     fn sort_by_time_desc() {
-        let mut v = vec![
-            make_msg(1, 1_000),
-            make_msg(2, 3_000),
-            make_msg(3, 2_000),
-        ];
+        let mut v = vec![make_msg(1, 1_000), make_msg(2, 3_000), make_msg(3, 2_000)];
         v.sort_by(sort_cmp_inbox);
         let ids: Vec<u64> = v.iter().map(|m| m.id).collect();
         assert_eq!(ids, vec![2, 3, 1]);
@@ -2704,11 +2700,7 @@ mod inbox_sort_tests {
     #[test]
     fn tie_break_by_id_desc() {
         let ts = 5_000;
-        let mut v = vec![
-            make_msg(10, ts),
-            make_msg(30, ts),
-            make_msg(20, ts),
-        ];
+        let mut v = vec![make_msg(10, ts), make_msg(30, ts), make_msg(20, ts)];
         v.sort_by(sort_cmp_inbox);
         let ids: Vec<u64> = v.iter().map(|m| m.id).collect();
         // Regardless of input order, higher id must come first.
