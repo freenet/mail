@@ -13,9 +13,9 @@ mod common;
 use chrono::{Duration, Utc};
 use common::{
     add_messages_delta, assignment_hash_for, fixed_valid_slot, inbox_verifying_key,
-    make_inbox_keypair, make_inbox_state, make_inbox_value, make_message, make_params,
-    make_settings_with_policy, make_token_assignment, make_token_generator_keypair,
-    make_token_record, related_state_update, token_record_id_for,
+    make_inbox_keypair, make_inbox_state, make_inbox_value, make_message, make_message_no_token,
+    make_params, make_settings_with_bypass, make_settings_with_policy, make_token_assignment,
+    make_token_generator_keypair, make_token_record, related_state_update, token_record_id_for,
 };
 use freenet_aft_interface::Tier;
 use freenet_email_inbox::{Inbox, InboxSettings};
@@ -418,6 +418,157 @@ fn backup_restore_keypair_round_trip() {
         result,
         ValidateResult::Valid,
         "restored key must produce valid inbox state"
+    );
+}
+
+// ─── #150: verified-sender bypass ────────────────────────────────────────
+
+/// When `allow_verified_skip_token == true` AND the sender's VK is in
+/// `verified_senders`, the message is accepted without a valid AFT token.
+#[test]
+fn verified_bypass_on_accepts_message_without_token() {
+    let owner_sk = make_inbox_keypair();
+    let owner_vk = inbox_verifying_key(&owner_sk);
+    let sender_sk = make_inbox_keypair();
+    let sender_vk = inbox_verifying_key(&sender_sk);
+    let sender_vk_bytes = sender_vk.encode().to_vec();
+    let params = make_params(&owner_vk);
+
+    let token_record_id = token_record_id_for(b"bypass-record");
+    let assignment_hash = assignment_hash_for(b"bypass-msg");
+    let message = make_message_no_token(
+        b"hello without token".to_vec(),
+        assignment_hash,
+        sender_vk_bytes.clone(),
+        token_record_id,
+    );
+
+    let settings = make_settings_with_bypass(Tier::Min10, sender_vk_bytes);
+    let initial_state = make_inbox_state(&owner_sk, vec![], Utc::now(), settings);
+
+    // No RelatedState carrying a token record — the contract must accept without one.
+    let updates = vec![add_messages_delta(vec![message])];
+    let modification =
+        Inbox::update_state(params, initial_state, updates).expect("update_state should succeed");
+    let new_state = unwrap_valid(modification);
+    let parsed: serde_json::Value = serde_json::from_slice(new_state.as_ref()).expect("inbox json");
+    assert_eq!(
+        parsed["messages"].as_array().map(|m| m.len()).unwrap_or(0),
+        1,
+        "verified-bypass message must be accepted without an AFT token"
+    );
+}
+
+/// When `allow_verified_skip_token == true` but the sender is NOT in
+/// `verified_senders`, the token check is still enforced.
+#[test]
+fn verified_bypass_on_but_unverified_sender_still_requires_token() {
+    let owner_sk = make_inbox_keypair();
+    let owner_vk = inbox_verifying_key(&owner_sk);
+    let (gen_sk, gen_vk_bytes) = make_token_generator_keypair();
+
+    // A different (unrelated) sender is in the verified set.
+    let other_sk = make_inbox_keypair();
+    let other_vk = inbox_verifying_key(&other_sk);
+    let other_vk_bytes = other_vk.encode().to_vec();
+    let params = make_params(&owner_vk);
+
+    // Use yet another keypair as the actual sender — not in verified_senders.
+    let unverified_sk = make_inbox_keypair();
+    let unverified_vk = inbox_verifying_key(&unverified_sk);
+    let unverified_vk_bytes = unverified_vk.encode().to_vec();
+
+    let token_record_id = token_record_id_for(b"unverified-record");
+    let assignment_hash = assignment_hash_for(b"unverified-msg");
+
+    // Use a dummy no-token message so the assignment is invalid.
+    let message = make_message_no_token(
+        b"unverified payload".to_vec(),
+        assignment_hash,
+        unverified_vk_bytes,
+        token_record_id,
+    );
+
+    // Bypass on, but for `other_vk_bytes` — not for the actual sender.
+    let settings = make_settings_with_bypass(Tier::Min10, other_vk_bytes);
+    // We need a real (but irrelevant) token record so the missing-related
+    // gate doesn't fire — we want to hit the token-validity rejection.
+    let dummy_assignment = make_token_assignment(
+        &gen_sk,
+        gen_vk_bytes,
+        Tier::Min10,
+        fixed_valid_slot(),
+        assignment_hash,
+        token_record_id,
+    );
+    let record = make_token_record(dummy_assignment);
+    let initial_state = make_inbox_state(&owner_sk, vec![], Utc::now(), settings);
+
+    let updates = vec![
+        add_messages_delta(vec![message]),
+        related_state_update(token_record_id, record),
+    ];
+    let result = Inbox::update_state(params, initial_state, updates);
+    assert!(
+        result.is_err(),
+        "unverified sender must still require a valid token; got {result:?}"
+    );
+}
+
+/// When `allow_verified_skip_token == false` (default), even a sender
+/// whose VK is in `verified_senders` must provide a valid AFT token.
+#[test]
+fn verified_bypass_off_requires_token_even_for_verified_sender() {
+    let owner_sk = make_inbox_keypair();
+    let owner_vk = inbox_verifying_key(&owner_sk);
+    let sender_sk = make_inbox_keypair();
+    let sender_vk = inbox_verifying_key(&sender_sk);
+    let sender_vk_bytes = sender_vk.encode().to_vec();
+    let params = make_params(&owner_vk);
+
+    let token_record_id = token_record_id_for(b"bypass-off-record");
+    let assignment_hash = assignment_hash_for(b"bypass-off-msg");
+
+    let message = make_message_no_token(
+        b"token required".to_vec(),
+        assignment_hash,
+        sender_vk_bytes.clone(),
+        token_record_id,
+    );
+
+    // Verified sender is in the set, but bypass is OFF.
+    use std::collections::BTreeSet;
+    let mut vs = BTreeSet::new();
+    vs.insert(sender_vk_bytes);
+    let settings = freenet_email_inbox::InboxSettings {
+        minimum_tier: Tier::Min10,
+        allow_verified_skip_token: false, // explicitly OFF
+        verified_senders: vs,
+        ..freenet_email_inbox::InboxSettings::default()
+    };
+
+    // Use a real (but irrelevant) token record so missing-related doesn't
+    // fire — we want to reach the token-validity rejection.
+    let (gen_sk, gen_vk_bytes) = make_token_generator_keypair();
+    let dummy_assignment = make_token_assignment(
+        &gen_sk,
+        gen_vk_bytes,
+        Tier::Min10,
+        fixed_valid_slot(),
+        assignment_hash,
+        token_record_id,
+    );
+    let record = make_token_record(dummy_assignment);
+    let initial_state = make_inbox_state(&owner_sk, vec![], Utc::now(), settings);
+
+    let updates = vec![
+        add_messages_delta(vec![message]),
+        related_state_update(token_record_id, record),
+    ];
+    let result = Inbox::update_state(params, initial_state, updates);
+    assert!(
+        result.is_err(),
+        "bypass OFF must enforce token even for verified sender; got {result:?}"
     );
 }
 

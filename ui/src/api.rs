@@ -952,6 +952,58 @@ pub(crate) async fn node_comms(
                     }
                 }
             }
+            NodeAction::UpdateVerifiedBypass {
+                identity,
+                allow_verified_skip_token,
+                verified_senders,
+            } => {
+                // Same lookup pattern as UpdateInboxPolicy.
+                let target_vk = identity.ml_dsa_vk_bytes();
+                let mut found = None;
+                for cell in inboxes.snapshot() {
+                    let key_owner = {
+                        let m = cell.borrow();
+                        crate::inbox::InboxModel::contract_identity(&m.key)
+                    };
+                    if let Some(owner) = key_owner
+                        && owner.ml_dsa_vk_bytes() == target_vk
+                    {
+                        found = Some(cell);
+                        break;
+                    }
+                }
+                let Some(cell) = found else {
+                    crate::log::error(
+                        format!(
+                            "UpdateVerifiedBypass: no loaded inbox for alias `{}`",
+                            identity.alias()
+                        ),
+                        None,
+                    );
+                    return;
+                };
+                let prepared = {
+                    let mut model = cell.borrow_mut();
+                    model
+                        .update_verified_bypass_prepare(allow_verified_skip_token, verified_senders)
+                };
+                match prepared {
+                    Ok(request) => {
+                        if let Err(e) = client.send(request.into()).await {
+                            crate::log::error(
+                                format!("UpdateVerifiedBypass send failed: {e}"),
+                                Some(TryNodeAction::SendMessage),
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        crate::log::error(
+                            format!("UpdateVerifiedBypass prepare failed: {e}"),
+                            Some(TryNodeAction::SendMessage),
+                        );
+                    }
+                }
+            }
             NodeAction::CreateContact { contact } => {
                 if let Err(e) =
                     identity_management::create_contact_api_call(&mut client, &contact).await
@@ -960,7 +1012,7 @@ pub(crate) async fn node_comms(
                         format!("failed to store contact {}: {e}", contact.local_alias),
                         None,
                     );
-                } else if let Err(e) = crate::app::address_book::insert_contact(contact) {
+                } else if let Err(e) = crate::app::address_book::insert_contact(contact.clone()) {
                     crate::log::error(format!("address book rejected contact: {e}"), None);
                 } else {
                     // ContactsSection reads ADDRESS_BOOK directly (not via a
@@ -970,6 +1022,72 @@ pub(crate) async fn node_comms(
                     // and pick up the new contact's verification state (#134).
                     let prev = *ab_gen.0.read();
                     *ab_gen.0.write() = prev.wrapping_add(1);
+
+                    // #150: if this contact was just marked verified AND the
+                    // active identity has the bypass toggle ON, push an updated
+                    // `verified_senders` set to the inbox contract so the new
+                    // VK is immediately exempted from the token requirement.
+                    if contact.verified {
+                        let active_alias = user.read().logged_id().map(|id| id.alias.to_string());
+                        if let Some(alias) = active_alias {
+                            let aft_prefs = crate::local_state::identity_settings_for(&alias).aft;
+                            if aft_prefs.allow_verified_skip_token {
+                                // Rebuild the full set from the address book
+                                // (post-insert, so the new contact is included).
+                                let verified_senders: std::collections::BTreeSet<Vec<u8>> =
+                                    crate::app::address_book::all_contacts()
+                                        .into_iter()
+                                        .filter(|c| c.verified)
+                                        .map(|c| c.ml_dsa_vk_bytes)
+                                        .collect();
+                                // Find the inbox model for this identity.
+                                let target_vk =
+                                    user.read().logged_id().map(|id| id.ml_dsa_vk_bytes());
+                                if let Some(target_vk) = target_vk {
+                                    let mut found = None;
+                                    for cell in inboxes.snapshot() {
+                                        let key_owner = {
+                                            let m = cell.borrow();
+                                            InboxModel::contract_identity(&m.key)
+                                        };
+                                        if let Some(owner) = key_owner
+                                            && owner.ml_dsa_vk_bytes() == target_vk
+                                        {
+                                            found = Some(cell);
+                                            break;
+                                        }
+                                    }
+                                    if let Some(cell) = found {
+                                        let prepared = {
+                                            let mut model = cell.borrow_mut();
+                                            model.update_verified_bypass_prepare(
+                                                true,
+                                                verified_senders,
+                                            )
+                                        };
+                                        match prepared {
+                                            Ok(request) => {
+                                                if let Err(e) = client.send(request.into()).await {
+                                                    crate::log::error(
+                                                        format!(
+                                                            "verified-bypass sync on CreateContact failed: {e}"
+                                                        ),
+                                                        None,
+                                                    );
+                                                }
+                                            }
+                                            Err(e) => {
+                                                crate::log::error(
+                                                    format!("verified-bypass prepare failed: {e}"),
+                                                    None,
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
             NodeAction::DeleteContact { alias } => {
@@ -985,6 +1103,65 @@ pub(crate) async fn node_comms(
                     // "unknown sender" (#134).
                     let prev = *ab_gen.0.read();
                     *ab_gen.0.write() = prev.wrapping_add(1);
+
+                    // #150: if bypass is ON for the active identity, rebuild
+                    // the `verified_senders` set (minus the deleted contact)
+                    // and push it to the inbox contract.
+                    let active_alias = user.read().logged_id().map(|id| id.alias.to_string());
+                    if let Some(active_alias) = active_alias {
+                        let aft_prefs =
+                            crate::local_state::identity_settings_for(&active_alias).aft;
+                        if aft_prefs.allow_verified_skip_token {
+                            let verified_senders: std::collections::BTreeSet<Vec<u8>> =
+                                crate::app::address_book::all_contacts()
+                                    .into_iter()
+                                    .filter(|c| c.verified)
+                                    .map(|c| c.ml_dsa_vk_bytes)
+                                    .collect();
+                            let target_vk = user.read().logged_id().map(|id| id.ml_dsa_vk_bytes());
+                            if let Some(target_vk) = target_vk {
+                                let mut found = None;
+                                for cell in inboxes.snapshot() {
+                                    let key_owner = {
+                                        let m = cell.borrow();
+                                        InboxModel::contract_identity(&m.key)
+                                    };
+                                    if let Some(owner) = key_owner
+                                        && owner.ml_dsa_vk_bytes() == target_vk
+                                    {
+                                        found = Some(cell);
+                                        break;
+                                    }
+                                }
+                                if let Some(cell) = found {
+                                    let prepared = {
+                                        let mut model = cell.borrow_mut();
+                                        model.update_verified_bypass_prepare(true, verified_senders)
+                                    };
+                                    match prepared {
+                                        Ok(request) => {
+                                            if let Err(e) = client.send(request.into()).await {
+                                                crate::log::error(
+                                                    format!(
+                                                        "verified-bypass sync on DeleteContact failed: {e}"
+                                                    ),
+                                                    None,
+                                                );
+                                            }
+                                        }
+                                        Err(e) => {
+                                            crate::log::error(
+                                                format!(
+                                                    "verified-bypass prepare on delete failed: {e}"
+                                                ),
+                                                None,
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
             NodeAction::RenameIdentity { old, new, identity } => {

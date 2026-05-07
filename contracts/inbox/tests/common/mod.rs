@@ -74,6 +74,54 @@ pub fn make_settings_with_policy(minimum_tier: Tier, max_age_secs: u64) -> Inbox
         minimum_tier,
         max_age_secs,
         private: Default::default(),
+        ..InboxSettings::default()
+    }
+}
+
+/// Build `InboxSettings` with the verified-sender bypass enabled and the
+/// given set of verified ML-DSA-65 verifying key bytes. Used by tests for
+/// `#150`.
+pub fn make_settings_with_bypass(
+    minimum_tier: Tier,
+    verified_sender_vk_bytes: Vec<u8>,
+) -> InboxSettings {
+    use std::collections::BTreeSet;
+    let mut vs = BTreeSet::new();
+    vs.insert(verified_sender_vk_bytes);
+    InboxSettings {
+        minimum_tier,
+        allow_verified_skip_token: true,
+        verified_senders: vs,
+        ..InboxSettings::default()
+    }
+}
+
+/// Build a `Message` carrying the given sender verifying key but NO valid
+/// token. Used by verified-bypass tests where the sender skips minting.
+pub fn make_message_no_token(
+    content: Vec<u8>,
+    assignment_hash: [u8; 32],
+    sender_vk_bytes: Vec<u8>,
+    token_record_id: ContractInstanceId,
+) -> freenet_email_inbox::Message {
+    use chrono::Utc;
+    use freenet_aft_interface::TokenAssignment;
+    // Sentinel token assignment — all fields zeroed / default. The
+    // contract bypasses the token check when the sender is in
+    // `verified_senders`, so this placeholder is never validated.
+    let dummy_assignment = TokenAssignment {
+        tier: Tier::Min10,
+        time_slot: Utc::now(),
+        generator: vec![0u8; 1952], // ML-DSA-65 VK length
+        signature: vec![0u8; 3309], // ML-DSA-65 sig length
+        assignment_hash,
+        token_record: token_record_id,
+    };
+    freenet_email_inbox::Message {
+        content,
+        token_assignment: dummy_assignment,
+        sender_vk: sender_vk_bytes,
+        signature: Vec::new(),
     }
 }
 

@@ -206,6 +206,13 @@ pub struct IdentityAftPrefs {
     /// response is posted automatically. Implements issue #149 Part 2.
     #[serde(default)]
     pub permission_decisions: HashMap<String, PermissionDecision>,
+    /// Mirror of `InboxSettings.allow_verified_skip_token` in the inbox
+    /// contract. When `true`, messages from contacts the user has verified
+    /// in the address book are accepted without an AFT token. The UI keeps
+    /// this in sync with the contract-side setting via `ModifySettings`
+    /// deltas. Default `false` — every message requires a token.
+    #[serde(default)]
+    pub allow_verified_skip_token: bool,
 }
 
 fn default_max_age_days() -> u64 {
@@ -222,6 +229,7 @@ impl Default for IdentityAftPrefs {
             bounce_message: String::new(),
             auto_accept_verified_contacts: false,
             permission_decisions: HashMap::new(),
+            allow_verified_skip_token: false,
         }
     }
 }
@@ -965,6 +973,7 @@ mod boundary_tests {
                 bounce_message: "rate-limited".into(),
                 auto_accept_verified_contacts: false,
                 permission_decisions: HashMap::new(),
+                allow_verified_skip_token: false,
             },
             privacy: IdentityPrivacyPrefs {
                 verify_on_send: false,

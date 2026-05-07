@@ -70,6 +70,16 @@ pub(crate) enum NodeAction {
         required_tier: freenet_aft_interface::Tier,
         max_age_secs: u64,
     },
+    /// Push a signed `ModifySettings` delta updating the verified-sender
+    /// bypass setting and the `verified_senders` allow-list on the inbox
+    /// contract owned by `identity` (#150). Owner-only — same gate as
+    /// `UpdateInboxPolicy`. The full current `verified_senders` set is
+    /// sent; the contract replaces its stored set atomically.
+    UpdateVerifiedBypass {
+        identity: Box<Identity>,
+        allow_verified_skip_token: bool,
+        verified_senders: std::collections::BTreeSet<Vec<u8>>,
+    },
     CreateDelegate {
         alias: Rc<str>,
         /// ML-DSA-65 signing key used by the AFT token-generator delegate.

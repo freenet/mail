@@ -233,6 +233,15 @@ struct InternalSettings {
     /// `max_age_secs` half of the recipient anti-flood policy. Sent
     /// alongside `minimum_tier` in `ModifySettings` deltas.
     max_age_secs: u64,
+    /// Mirror of `InboxSettings.allow_verified_skip_token` (#150). When
+    /// `true`, messages from senders in `verified_senders` bypass the AFT
+    /// token requirement. Updated via `ModifySettings` deltas along with
+    /// `verified_senders`.
+    allow_verified_skip_token: bool,
+    /// Set of ML-DSA-65 verifying key bytes (1952 bytes each) that are
+    /// allowed to skip the AFT token when `allow_verified_skip_token` is
+    /// `true`. Kept in sync with the contract-side `verified_senders` set.
+    verified_senders: std::collections::BTreeSet<Vec<u8>>,
     /// ML-DSA-65 signing key used to authorise modifications to the inbox
     /// contract state (add/remove messages, settings updates). The corresponding
     /// verifying key is embedded in `InboxParams` and becomes part of the
@@ -267,6 +276,8 @@ impl InternalSettings {
             ml_dsa_signing_key,
             minimum_tier: stored_settings.minimum_tier,
             max_age_secs: stored_settings.max_age_secs,
+            allow_verified_skip_token: stored_settings.allow_verified_skip_token,
+            verified_senders: stored_settings.verified_senders,
         })
     }
 
@@ -274,6 +285,8 @@ impl InternalSettings {
         Ok(StoredSettings {
             minimum_tier: self.minimum_tier,
             max_age_secs: self.max_age_secs,
+            allow_verified_skip_token: self.allow_verified_skip_token,
+            verified_senders: self.verified_senders.clone(),
             private: vec![],
         })
     }
@@ -899,6 +912,25 @@ impl InboxModel {
     ) -> Result<ContractRequest<'static>, DynError> {
         self.settings.minimum_tier = minimum_tier;
         self.settings.max_age_secs = max_age_secs;
+        self.settings_modify_prepare()
+    }
+
+    /// Apply the verified-sender bypass flag and (optionally) mutate the
+    /// `verified_senders` set, then return a signed `ModifySettings` delta
+    /// ready for dispatch to the inbox contract (#150).
+    pub fn update_verified_bypass_prepare(
+        &mut self,
+        allow_verified_skip_token: bool,
+        verified_senders: std::collections::BTreeSet<Vec<u8>>,
+    ) -> Result<ContractRequest<'static>, DynError> {
+        self.settings.allow_verified_skip_token = allow_verified_skip_token;
+        self.settings.verified_senders = verified_senders;
+        self.settings_modify_prepare()
+    }
+
+    /// Shared implementation: serialize current settings, sign, wrap in a
+    /// `ModifySettings` delta, and return the `ContractRequest::Update`.
+    fn settings_modify_prepare(&self) -> Result<ContractRequest<'static>, DynError> {
         let settings = self.settings.to_stored()?;
         let serialized = serde_json::to_vec(&settings)?;
         let signing_key = self.settings.ml_dsa_signing_key.as_ref();
@@ -964,6 +996,8 @@ mod tests {
                     next_msg_id: 0,
                     minimum_tier: Tier::Hour1,
                     max_age_secs: freenet_email_inbox::DEFAULT_MAX_AGE_SECS,
+                    allow_verified_skip_token: false,
+                    verified_senders: std::collections::BTreeSet::new(),
                     ml_dsa_signing_key,
                 },
                 key: ContractKey::from_params_and_code(

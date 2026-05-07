@@ -651,6 +651,18 @@ pub(crate) fn resolve_permission_decision(
     None
 }
 
+/// Collect the ML-DSA-65 verifying key bytes of every contact the user has
+/// explicitly marked as verified in the address book. Used to keep the
+/// `verified_senders` set in the inbox contract in sync with the local
+/// address book when the bypass toggle changes.
+fn collect_verified_sender_vk_bytes() -> std::collections::BTreeSet<Vec<u8>> {
+    address_book::all_contacts()
+        .into_iter()
+        .filter(|c| c.verified)
+        .map(|c| c.ml_dsa_vk_bytes)
+        .collect()
+}
+
 #[allow(non_snake_case)]
 fn ScrAft() -> Element {
     let (alias_key, ident) = use_identity_settings();
@@ -658,14 +670,12 @@ fn ScrAft() -> Element {
     let selected_tier = aft_now.required_tier.clone();
     let max_age_days = aft_now.max_age_days;
     let auto_accept_verified = aft_now.auto_accept_verified_contacts;
+    let allow_verified_skip_token = aft_now.allow_verified_skip_token;
     let actions = use_coroutine_handle::<crate::app::NodeAction>();
 
-    // #85: dispatch a `ModifySettings` delta to the inbox contract so
-    // the new policy actually gates incoming sends — without this the
-    // change is local-state-only and senders keep minting at the old
-    // tier.
-    let push_policy = move |alias: &str, tier_str: &str, max_age_days: u64| {
-        let identity = crate::app::address_book::lookup(alias)
+    /// Resolve the current identity for dispatcher helpers.
+    fn identity_for_alias(alias: &str) -> Option<crate::app::login::Identity> {
+        crate::app::address_book::lookup(alias)
             .filter(|r| r.is_own)
             .and_then(|_| {
                 crate::app::login::Identity::get_aliases()
@@ -673,8 +683,15 @@ fn ScrAft() -> Element {
                     .iter()
                     .find(|i| i.alias.as_ref() == alias)
                     .cloned()
-            });
-        let Some(identity) = identity else {
+            })
+    }
+
+    // #85: dispatch a `ModifySettings` delta to the inbox contract so
+    // the new policy actually gates incoming sends — without this the
+    // change is local-state-only and senders keep minting at the old
+    // tier.
+    let push_policy = move |alias: &str, tier_str: &str, max_age_days: u64| {
+        let Some(identity) = identity_for_alias(alias) else {
             crate::log::error(
                 format!("AFT settings: no own identity for alias `{alias}`"),
                 None,
@@ -778,6 +795,43 @@ fn ScrAft() -> Element {
         // Reset form.
         add_fp.set(String::new());
         add_accept.set(true);
+    };
+
+    // #150: toggle "Don't require tokens from verified senders". When
+    // turned ON, push the current verified-senders set from the address
+    // book alongside the flag. When turned OFF, push an empty set (the
+    // contract enforces the flag, not the set content, but clearing the
+    // set avoids stale data accumulating in the contract state).
+    let alias_key_v = alias_key.clone();
+    let ident_v = ident.clone();
+    let on_verified_bypass = move |_| {
+        let new_flag = !ident_v.aft.allow_verified_skip_token;
+        let mut next = ident_v.clone();
+        next.aft.allow_verified_skip_token = new_flag;
+        local_state::persist_identity_settings(alias_key_v.clone(), next);
+
+        let Some(identity) = identity_for_alias(&alias_key_v) else {
+            crate::log::error(
+                format!(
+                    "AFT verified-bypass toggle: no own identity for `{}`",
+                    alias_key_v
+                ),
+                None,
+            );
+            return;
+        };
+        // When turning ON, snapshot the verified VKs from the address book.
+        // When turning OFF, send an empty set to clear stale entries.
+        let verified_senders = if new_flag {
+            collect_verified_sender_vk_bytes()
+        } else {
+            std::collections::BTreeSet::new()
+        };
+        actions.send(crate::app::NodeAction::UpdateVerifiedBypass {
+            identity: Box::new(identity),
+            allow_verified_skip_token: new_flag,
+            verified_senders,
+        });
     };
 
     rsx! {
@@ -952,6 +1006,20 @@ fn ScrAft() -> Element {
                             }
                         }
                     }
+                }
+            }
+            Card {
+                title: "Verified-sender bypass",
+                sub: "Trade the spam shield for convenience with trusted contacts. Use with care: a compromised verified contact can send unlimited messages to your inbox.",
+                SettingRow {
+                    label: "Don't require tokens from verified senders",
+                    help: "When on, messages from contacts you've verified (fingerprint confirmed) skip the AFT token check. Verified contacts are managed in Settings → Contacts.",
+                    control: rsx! {
+                        Toggle {
+                            on: allow_verified_skip_token,
+                            ontoggle: on_verified_bypass,
+                        }
+                    },
                 }
             }
         }

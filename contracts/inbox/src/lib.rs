@@ -8,7 +8,7 @@
 // the false-positive dead-code lints when the feature is off.
 #![cfg_attr(not(feature = "contract"), allow(dead_code))]
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt::Display;
 
 use chrono::{DateTime, Utc};
@@ -116,6 +116,20 @@ pub struct InboxSettings {
     /// not enforce age (no clock available in WASM).
     #[serde(default = "default_max_age_secs")]
     pub max_age_secs: u64,
+    /// When `true`, incoming messages whose sender ML-DSA-65 verifying
+    /// key is listed in `verified_senders` are accepted without a valid
+    /// AFT token. Default `false` — every message requires a token.
+    /// Mutable via `ModifySettings`.
+    #[serde(default)]
+    pub allow_verified_skip_token: bool,
+    /// Set of ML-DSA-65 verifying keys (FIPS 204 encoded, 1952 bytes
+    /// each) whose owners are exempted from the AFT token requirement
+    /// when `allow_verified_skip_token` is `true`. Populated by the
+    /// recipient when they mark a contact as verified in the address
+    /// book; cleared when the contact is removed or un-verified.
+    /// The keys are public — stored in plaintext in the inbox state.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub verified_senders: BTreeSet<Vec<u8>>,
     #[serde(skip_serializing_if = "Vec::is_empty", default = "Vec::default")]
     pub private: EncryptedContent,
 }
@@ -129,6 +143,8 @@ impl Default for InboxSettings {
         Self {
             minimum_tier: Tier::Min10,
             max_age_secs: DEFAULT_MAX_AGE_SECS,
+            allow_verified_skip_token: false,
+            verified_senders: BTreeSet::new(),
             private: Default::default(),
         }
     }
@@ -243,10 +259,23 @@ impl Display for VerificationError {
 /// `can_update_settings` already gates settings updates on the owner's
 /// ML-DSA signature (verified against `params.pub_key`), so only the
 /// inbox owner can change the policy.
+///
+/// When `allow_verified_skip_token` is `true` and `sender_vk` is
+/// non-empty and listed in `verified_senders`, the AFT token
+/// requirement is bypassed entirely for that sender.
 fn verify_token_policy(
     settings: &InboxSettings,
     assignment: &TokenAssignment,
+    sender_vk: &[u8],
 ) -> Result<(), VerificationError> {
+    // Verified-sender bypass: skip the token check when the feature is on
+    // and this sender's ML-DSA-65 VK is in the allow-list.
+    if settings.allow_verified_skip_token
+        && !sender_vk.is_empty()
+        && settings.verified_senders.contains(sender_vk)
+    {
+        return Ok(());
+    }
     if assignment.tier != settings.minimum_tier {
         return Err(VerificationError::PolicyTierMismatch {
             expected: settings.minimum_tier,
@@ -316,13 +345,24 @@ impl Inbox {
             if known.contains(&message.token_assignment.assignment_hash) {
                 continue;
             }
-            let records = allocation_records
-                .get(&message.token_assignment.token_record)
-                .ok_or_else(|| {
-                    VerificationError::MissingContracts(vec![message.token_assignment.token_record])
-                })?;
-            if !records.assignment_exists(&message.token_assignment) {
-                return Err(VerificationError::TokenAssignmentMismatch);
+            // Verified-sender bypass: skip allocation-record lookup when the
+            // sender is in the owner's verified-senders list and the bypass
+            // feature is enabled. The `add_message` call below will re-check
+            // the same condition before skipping `is_valid`.
+            let bypass_token = self.settings.allow_verified_skip_token
+                && !message.sender_vk.is_empty()
+                && self.settings.verified_senders.contains(&message.sender_vk);
+            if !bypass_token {
+                let records = allocation_records
+                    .get(&message.token_assignment.token_record)
+                    .ok_or_else(|| {
+                        VerificationError::MissingContracts(vec![
+                            message.token_assignment.token_record,
+                        ])
+                    })?;
+                if !records.assignment_exists(&message.token_assignment) {
+                    return Err(VerificationError::TokenAssignmentMismatch);
+                }
             }
             self.add_message(message)?;
         }
@@ -336,6 +376,14 @@ impl Inbox {
         let mut some_missing = false;
         let mut missing = vec![];
         for message in &self.messages {
+            // Verified-sender bypass: skip allocation-record lookup and
+            // token validity check for messages from verified senders.
+            let bypass_token = self.settings.allow_verified_skip_token
+                && !message.sender_vk.is_empty()
+                && self.settings.verified_senders.contains(&message.sender_vk);
+            if bypass_token {
+                continue;
+            }
             let Some(records) = allocation_records.get(&message.token_assignment.token_record)
             else {
                 missing.push(message.token_assignment.token_record);
@@ -348,7 +396,11 @@ impl Inbox {
             if !records.assignment_exists(&message.token_assignment) {
                 return Err(VerificationError::TokenAssignmentMismatch);
             }
-            verify_token_policy(&self.settings, &message.token_assignment)?;
+            verify_token_policy(
+                &self.settings,
+                &message.token_assignment,
+                &message.sender_vk,
+            )?;
             let verifying_key = decode_token_generator_vk(&message.token_assignment.generator)
                 .ok_or(VerificationError::InvalidTokenGeneratorKey)?;
             message
@@ -363,13 +415,24 @@ impl Inbox {
     }
 
     fn add_message(&mut self, message: Message) -> Result<(), VerificationError> {
-        verify_token_policy(&self.settings, &message.token_assignment)?;
-        let verifying_key = decode_token_generator_vk(&message.token_assignment.generator)
-            .ok_or(VerificationError::InvalidTokenGeneratorKey)?;
-        message
-            .token_assignment
-            .is_valid(&verifying_key)
-            .map_err(VerificationError::InvalidToken)?;
+        verify_token_policy(
+            &self.settings,
+            &message.token_assignment,
+            &message.sender_vk,
+        )?;
+        // When the verified-sender bypass is active we skip the token assignment
+        // validity check entirely — there is no token to validate.
+        let bypass_token = self.settings.allow_verified_skip_token
+            && !message.sender_vk.is_empty()
+            && self.settings.verified_senders.contains(&message.sender_vk);
+        if !bypass_token {
+            let verifying_key = decode_token_generator_vk(&message.token_assignment.generator)
+                .ok_or(VerificationError::InvalidTokenGeneratorKey)?;
+            message
+                .token_assignment
+                .is_valid(&verifying_key)
+                .map_err(VerificationError::InvalidToken)?;
+        }
         self.messages.push(message);
         Ok(())
     }
@@ -583,7 +646,15 @@ impl ContractInterface for Inbox {
                 UpdateData::Delta(d) => match UpdateInbox::try_from(d)? {
                     UpdateInbox::AddMessages { mut messages } => {
                         for m in &messages {
-                            missing_related.push(m.token_assignment.token_record);
+                            // Skip requesting the AFT allocation record for
+                            // verified-bypass messages — there is no token to
+                            // look up.
+                            let is_bypass = inbox.settings.allow_verified_skip_token
+                                && !m.sender_vk.is_empty()
+                                && inbox.settings.verified_senders.contains(&m.sender_vk);
+                            if !is_bypass {
+                                missing_related.push(m.token_assignment.token_record);
+                            }
                         }
                         new_messages.append(&mut messages);
                     }
@@ -617,7 +688,12 @@ impl ContractInterface for Inbox {
                     match UpdateInbox::try_from(delta)? {
                         UpdateInbox::AddMessages { mut messages } => {
                             for m in &messages {
-                                missing_related.push(m.token_assignment.token_record);
+                                let is_bypass = inbox.settings.allow_verified_skip_token
+                                    && !m.sender_vk.is_empty()
+                                    && inbox.settings.verified_senders.contains(&m.sender_vk);
+                                if !is_bypass {
+                                    missing_related.push(m.token_assignment.token_record);
+                                }
                             }
                             new_messages.append(&mut messages);
                         }
