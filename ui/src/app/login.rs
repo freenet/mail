@@ -895,8 +895,6 @@ pub(super) fn Identities() -> Element {
                                 let backup = IdentityBackup::from_identity(&backup_alias);
                                 match serde_json::to_vec_pretty(&backup) {
                                     Ok(json) => {
-                                        use ml_dsa::signature::Keypair;
-                                        use ml_kem::kem::KeyExport;
                                         let words = crate::app::address_book::fingerprint_words(
                                             &backup_alias.ml_dsa_vk_bytes(),
                                             &backup_alias.ml_kem_ek_bytes(),
