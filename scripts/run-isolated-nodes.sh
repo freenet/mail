@@ -162,13 +162,21 @@ up() {
     sleep 2
     if [ -f "$PEER_DATA/secrets/transport_keypair" ]; then
         echo "peer transport_keypair head: $(head -c 32 "$PEER_DATA/secrets/transport_keypair")"
+    else
+        echo "peer transport_keypair: NOT WRITTEN (peer likely crashed during init — see $PEER_LOGS)"
     fi
-    local n
-    # `grep -c` over multiple files emits `<file>:<count>` lines; sum
-    # the counts via cut+awk so the bare integer comparison below
-    # doesn't trip on a `:0:`-suffixed string.
-    n=$(grep -c "Attempting connection to gateway" "$PEER_LOGS"/freenet.*.log 2>/dev/null \
-        | awk -F: '{ sum += $NF } END { print sum + 0 }')
+    # Use shopt nullglob so the freenet.*.log glob doesn't pass a
+    # literal pattern to grep when the peer crashed before producing
+    # any rolled log file. `set -e + pipefail` would abort the whole
+    # `up()` call on grep's exit-2 in that case.
+    local n=0
+    shopt -s nullglob
+    local peer_logs=( "$PEER_LOGS"/freenet.*.log )
+    shopt -u nullglob
+    if (( ${#peer_logs[@]} > 0 )); then
+        n=$(grep -c "Attempting connection to gateway" "${peer_logs[@]}" 2>/dev/null \
+            | awk -F: '{ sum += $NF } END { print sum + 0 }')
+    fi
     if [ "${n:-0}" -gt 1 ]; then
         echo "WARNING: peer is dialing $n gateways — isolation broken (check HOME override)"
     fi
