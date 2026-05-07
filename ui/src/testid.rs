@@ -103,6 +103,10 @@ pub(crate) const FM_CONTACT_VERIFY: &str = "fm-contact-verify";
 pub(crate) const FM_VERIFY_CONTACT_MODAL: &str = "fm-verify-contact-modal";
 pub(crate) const FM_VERIFY_CONTACT_SUBMIT: &str = "fm-verify-contact-submit";
 
+// Contacts settings screen — Import… / Share my card buttons (inbox-side triggers for #158)
+pub(crate) const FM_CONTACTS_IMPORT_BTN: &str = "fm-contacts-import-btn";
+pub(crate) const FM_CONTACTS_SHARE_BTN: &str = "fm-contacts-share-btn";
+
 // Settings
 pub(crate) const FM_SETTINGS_BTN: &str = "fm-settings-btn";
 pub(crate) const FM_SETTINGS_SHELL: &str = "fm-settings-shell";
@@ -191,6 +195,8 @@ mod tests {
             ("fmContactVerify", super::FM_CONTACT_VERIFY),
             ("fmVerifyContactModal", super::FM_VERIFY_CONTACT_MODAL),
             ("fmVerifyContactSubmit", super::FM_VERIFY_CONTACT_SUBMIT),
+            ("fmContactsImportBtn", super::FM_CONTACTS_IMPORT_BTN),
+            ("fmContactsShareBtn", super::FM_CONTACTS_SHARE_BTN),
         ];
         assert_eq!(
             json.len(),

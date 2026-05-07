@@ -1443,3 +1443,105 @@ test.describe("ContactCard #85 — recipient anti-flood policy", () => {
     await expect(page.locator('[data-testid="fm-import-fp"]')).toHaveCount(0);
   });
 });
+
+// ── Regression: #158 — contact modals dead inside inbox ──────────────────────
+//
+// Before the fix the ImportContact / ShareContact / SharePending signals were
+// provided only by the login pane (IdentifiersList). Once the user logged in
+// the login pane unmounted, taking the signal providers with it.  Any attempt
+// to open a modal from Settings → Contacts inside the inbox would silently
+// no-op because `use_context` found no provider.
+//
+// The fix lifts the three signals to the app() root so they survive the
+// login → inbox transition.  These tests guard the regression path:
+//   1. enter the inbox (signals survive the mount transition)
+//   2. open Settings → Contacts via the sidebar button
+//   3. click Import… → ImportContactForm modal must appear
+//   4. close modal, click Share my card → ShareContactModal must appear
+//
+// A separate pair of tests confirms the same modals still open from the
+// pre-login screen (IdentifiersList) so we don't regress the original flow.
+test.describe("Regression #158: contact modals mount inside inbox", () => {
+  test("Import… button inside inbox opens ImportContactForm modal", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await waitForApp(page);
+    await selectIdentity(page, "address1");
+
+    // Open Settings → Contacts via the sidebar button.
+    await page.locator('[data-testid="fm-sidebar-contacts"]').click();
+    await page.locator('[data-testid="fm-settings-shell"]').waitFor({ timeout: 5_000 });
+
+    // Click the Import… button that lives inside the Contacts settings screen.
+    await page.locator('[data-testid="fm-contacts-import-btn"]').click();
+
+    // The modal must appear — before the fix this was a silent no-op.
+    const importModal = page.locator('[data-testid="fm-import-contact-modal"]');
+    await expect(importModal).toBeVisible({ timeout: 5_000 });
+
+    // Dismiss via the modal's close button.
+    await importModal.locator(".modal-x").click();
+    await expect(importModal).toHaveCount(0, { timeout: 3_000 });
+  });
+
+  test("Share my card button inside inbox opens ShareContactModal", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await waitForApp(page);
+    await selectIdentity(page, "address1");
+
+    // Open Settings → Contacts via the sidebar button.
+    await page.locator('[data-testid="fm-sidebar-contacts"]').click();
+    await page.locator('[data-testid="fm-settings-shell"]').waitFor({ timeout: 5_000 });
+
+    // Click the Share my card button inside the Contacts settings screen.
+    await page.locator('[data-testid="fm-contacts-share-btn"]').click();
+
+    // The modal must appear — before the fix this was a silent no-op.
+    const shareModal = page.locator('[data-testid="fm-share-modal"]');
+    await expect(shareModal).toBeVisible({ timeout: 5_000 });
+
+    // Share modal should contain the contact:// token for the active identity.
+    await expect(shareModal.locator(".token-block")).toContainText("contact://");
+
+    // Dismiss.
+    await shareModal.locator(".modal-x").click();
+    await expect(shareModal).toHaveCount(0, { timeout: 3_000 });
+  });
+
+  // Confirm the pre-login flows that triggered these modals from the
+  // identity list are still intact after the signal lift.
+  test("Import… button on login pane still opens ImportContactForm modal", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await waitForApp(page);
+
+    // Pre-login: fm-contact-import is the import trigger on the identity list.
+    await page.locator('[data-testid="fm-contact-import"]').click();
+    const importModal = page.locator('[data-testid="fm-import-contact-modal"]');
+    await expect(importModal).toBeVisible({ timeout: 5_000 });
+
+    await importModal.locator(".modal-x").click();
+    await expect(importModal).toHaveCount(0, { timeout: 3_000 });
+  });
+
+  test("Share button on identity row still opens ShareContactModal", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await waitForApp(page);
+
+    // Pre-login: fm-id-share on an identity row triggers the share modal.
+    await page
+      .locator('[data-testid="fm-id-row"][data-alias="address1"] [data-testid="fm-id-share"]')
+      .click();
+    const shareModal = page.locator('[data-testid="fm-share-modal"]');
+    await expect(shareModal).toBeVisible({ timeout: 5_000 });
+
+    await shareModal.locator(".modal-x").click();
+    await expect(shareModal).toHaveCount(0, { timeout: 3_000 });
+  });
+});
