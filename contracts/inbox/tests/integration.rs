@@ -100,7 +100,7 @@ fn update_accepts_add_message_with_valid_token() {
     let assignment = make_token_assignment(
         &gen_sk,
         gen_vk_bytes,
-        Tier::Day1,
+        Tier::Min10,
         fixed_valid_slot(),
         assignment_hash_for(b"msg-1"),
         token_record_id,
@@ -250,7 +250,7 @@ fn update_dedups_replay_of_previously_added_message() {
     let assignment = make_token_assignment(
         &gen_sk,
         gen_vk_bytes,
-        Tier::Day1,
+        Tier::Min10,
         fixed_valid_slot(),
         assignment_hash_for(b"replayed-msg"),
         token_record_id,

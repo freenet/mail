@@ -127,7 +127,7 @@ fn default_max_age_secs() -> u64 {
 impl Default for InboxSettings {
     fn default() -> Self {
         Self {
-            minimum_tier: Tier::Day1,
+            minimum_tier: Tier::Min10,
             max_age_secs: DEFAULT_MAX_AGE_SECS,
             private: Default::default(),
         }

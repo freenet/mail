@@ -188,7 +188,7 @@ fn default_max_age_days() -> u64 {
 impl Default for IdentityAftPrefs {
     fn default() -> Self {
         Self {
-            required_tier: "Day1".to_string(),
+            required_tier: "Min10".to_string(),
             max_age_days: default_max_age_days(),
             allow_known: true,
             allow_anon: false,
@@ -895,13 +895,13 @@ mod boundary_tests {
     }
 
     /// `AliasState` written before the Settings feature deserialises with
-    /// default `settings` (Day1, allow-known on, signature off, etc.).
+    /// default `settings` (Min10, allow-known on, signature off, etc.).
     /// Pre-Settings state must keep loading.
     #[test]
     fn alias_state_missing_settings_defaults_loaded() {
         let json = br#"{"drafts":{},"read":[],"kept":{},"sent":{},"archived":{},"deleted":[]}"#;
         let s: AliasState = serde_json::from_slice(json).expect("should deserialise");
-        assert_eq!(s.settings.aft.required_tier, "Day1");
+        assert_eq!(s.settings.aft.required_tier, "Min10");
         assert!(s.settings.aft.allow_known);
         assert!(!s.settings.aft.allow_anon);
         assert!(s.settings.privacy.verify_on_send);

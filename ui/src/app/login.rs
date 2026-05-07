@@ -117,7 +117,7 @@ impl Identity {
             description,
             ml_dsa_signing_key,
             ml_kem_dk,
-            freenet_aft_interface::Tier::Day1,
+            freenet_aft_interface::Tier::Min10,
             freenet_email_inbox::DEFAULT_MAX_AGE_SECS,
         )
     }
@@ -335,7 +335,7 @@ impl Identity {
             alias: alias.clone(),
             id: existing_id.unwrap_or_else(UserId::new),
             description: description.clone(),
-            required_tier: freenet_aft_interface::Tier::Day1,
+            required_tier: freenet_aft_interface::Tier::Min10,
             max_age_secs: freenet_email_inbox::DEFAULT_MAX_AGE_SECS,
             ml_dsa_signing_key: Arc::clone(&ml_dsa_signing_key),
             ml_kem_dk: ml_kem_dk.clone(),
@@ -984,7 +984,7 @@ pub(super) fn CreateAliasForm() -> Element {
             alias: alias.clone(),
             ml_dsa_key: ml_dsa.clone(),
             contract_type: ContractType::InboxContract,
-            required_tier: freenet_aft_interface::Tier::Day1,
+            required_tier: freenet_aft_interface::Tier::Min10,
             max_age_secs: freenet_email_inbox::DEFAULT_MAX_AGE_SECS,
         });
         actions.send(NodeAction::CreateDelegate {
@@ -995,7 +995,7 @@ pub(super) fn CreateAliasForm() -> Element {
             alias: alias.clone(),
             ml_dsa_key: ml_dsa.clone(),
             contract_type: ContractType::AFTContract,
-            required_tier: freenet_aft_interface::Tier::Day1,
+            required_tier: freenet_aft_interface::Tier::Min10,
             max_age_secs: freenet_email_inbox::DEFAULT_MAX_AGE_SECS,
         });
         actions.send(NodeAction::CreateIdentity {
@@ -1380,7 +1380,7 @@ fn ImportForm() -> Element {
                                 alias: alias.clone(),
                                 ml_dsa_key: ml_dsa.clone(),
                                 contract_type: ContractType::InboxContract,
-                                required_tier: freenet_aft_interface::Tier::Day1,
+                                required_tier: freenet_aft_interface::Tier::Min10,
                                 max_age_secs: freenet_email_inbox::DEFAULT_MAX_AGE_SECS,
                             });
                             actions.send(NodeAction::CreateDelegate {
@@ -1391,7 +1391,7 @@ fn ImportForm() -> Element {
                                 alias: alias.clone(),
                                 ml_dsa_key: ml_dsa.clone(),
                                 contract_type: ContractType::AFTContract,
-                                required_tier: freenet_aft_interface::Tier::Day1,
+                                required_tier: freenet_aft_interface::Tier::Min10,
                                 max_age_secs: freenet_email_inbox::DEFAULT_MAX_AGE_SECS,
                             });
                             actions.send(NodeAction::CreateIdentity {
