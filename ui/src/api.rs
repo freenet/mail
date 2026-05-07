@@ -1766,6 +1766,7 @@ pub(crate) async fn node_comms(
 /// doesn't block the request/response pipeline.
 #[cfg(all(target_family = "wasm", feature = "use-node"))]
 pub(crate) mod permission_pump {
+    use dioxus::prelude::{ReadableExt, WritableExt};
     use mail_local_state::PermissionDecision;
     use wasm_bindgen::JsCast as _;
     use wasm_bindgen::JsValue;
@@ -1908,8 +1909,6 @@ pub(crate) mod permission_pump {
         pending_recipient_vk_bytes: &[Vec<u8>],
         user: dioxus::prelude::Signal<crate::app::User>,
     ) -> Option<u8> {
-        use dioxus::prelude::ReadableExt;
-
         // Identify which of the user's identities is doing the send.
         let active_alias = {
             let user_guard = user.read();
