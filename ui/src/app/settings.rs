@@ -958,11 +958,13 @@ fn ScrContacts() -> Element {
                     }
                     button {
                         class: "fm-btn-secondary",
+                        "data-testid": crate::testid::FM_CONTACTS_IMPORT_BTN,
                         onclick: on_import,
                         "Import…"
                     }
                     button {
                         class: "fm-btn-primary",
+                        "data-testid": crate::testid::FM_CONTACTS_SHARE_BTN,
                         onclick: on_share,
                         "Share my card"
                     }

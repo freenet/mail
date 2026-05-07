@@ -68,5 +68,8 @@
 
   "fmContactVerify": "fm-contact-verify",
   "fmVerifyContactModal": "fm-verify-contact-modal",
-  "fmVerifyContactSubmit": "fm-verify-contact-submit"
+  "fmVerifyContactSubmit": "fm-verify-contact-submit",
+
+  "fmContactsImportBtn": "fm-contacts-import-btn",
+  "fmContactsShareBtn": "fm-contacts-share-btn"
 }

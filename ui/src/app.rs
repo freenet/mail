@@ -131,6 +131,15 @@ pub(crate) fn app() -> Element {
     // it without an extra Signal thread-local.
     use_context_provider(|| Signal::new(Option::<String>::None));
     let toast = use_context::<Signal<Option<String>>>();
+    // Modal signals lifted to the root so that both the login pane
+    // (IdentifiersList) and the inbox (UserInbox → Settings → Contacts)
+    // can open these modals. Fixes #158.
+    use_context_provider(|| Signal::new(login::ImportBackup(false)));
+    use_context_provider(|| Signal::new(login::ImportContact(false)));
+    use_context_provider(|| Signal::new(login::ShareContact(false)));
+    use_context_provider(|| Signal::new(login::SharePending::default()));
+    let import_contact = use_context::<Signal<login::ImportContact>>();
+    let share_contact = use_context::<Signal<login::ShareContact>>();
 
     #[cfg(all(feature = "use-node", not(feature = "no-sync")))]
     {
@@ -224,6 +233,15 @@ pub(crate) fn app() -> Element {
     rsx! {
         document::Title { "{app_name}" }
         {body}
+        // Modals are rendered at the root so they are reachable from both
+        // the login pane (IdentifiersList) and the inbox (UserInbox). Their
+        // signals are provided above. (#158)
+        if share_contact.read().0 {
+            login::ShareContactModal {}
+        }
+        if import_contact.read().0 {
+            login::ImportContactForm {}
+        }
     }
 }
 
@@ -1050,20 +1068,10 @@ fn matches_search(m: &Message, q: &str) -> bool {
 #[allow(non_snake_case)]
 fn UserInbox() -> Element {
     use_context_provider(|| Signal::new(menu::MenuSelection::default()));
-    // Toast signal is provided by app() at the root; UserInbox uses it via
-    // use_context. No re-provide here.
-    // SettingsShell.AccountIdentity reads `Signal<ImportBackup>` to drive
-    // its Restore action through the same modal as the login pane. The
-    // login flow also provides this; we re-provide here so Settings can
-    // be opened from inside the inbox without the login pane in scope.
-    use_context_provider(|| Signal::new(crate::app::login::ImportBackup(false)));
-    // ScrContacts (Settings → Contacts) reads these three signals to drive
-    // its Import / Share buttons. Login pane also provides them; re-provide
-    // here so opening Settings → Contacts from the sidebar (#131) doesn't
-    // panic with "Could not find context".
-    use_context_provider(|| Signal::new(crate::app::login::ImportContact(false)));
-    use_context_provider(|| Signal::new(crate::app::login::ShareContact(false)));
-    use_context_provider(|| Signal::new(crate::app::login::SharePending::default()));
+    // ImportBackup / ImportContact / ShareContact / SharePending are all
+    // provided by app() at the root (lifted in #158 fix) so that the modals
+    // are reachable from both the login pane and the inbox view.
+    // No re-provides needed here.
 
     let menu_selection = use_context::<Signal<menu::MenuSelection>>();
     let settings_open = menu_selection.read().settings().is_some();
