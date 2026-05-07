@@ -35,6 +35,8 @@ interface TestIds {
   fmArchiveUnarchive: string;
   fmComposeSheet: string;
   fmSend: string;
+  fmComposeAutocomplete: string;
+  fmComposeAutocompleteItem: string;
   fmToast: string;
   fmActionCreate: string;
   fmActionImport: string;

@@ -588,6 +588,17 @@ impl User {
         for id in &identities {
             Identity::register_example(id.clone());
         }
+        // Seed a pre-imported contact so the compose-sheet autocomplete
+        // has something to suggest in offline / Playwright test mode.
+        let _ = address_book::insert_contact(address_book::Contact {
+            local_alias: "alice-example".into(),
+            description: "Example contact for offline testing".into(),
+            ml_dsa_vk_bytes: vec![0xAA; 1952],
+            ml_kem_ek_bytes: vec![0xBB; 1184],
+            required_tier: freenet_aft_interface::Tier::Min10,
+            max_age_secs: freenet_email_inbox::DEFAULT_MAX_AGE_SECS,
+            verified: true,
+        });
         User {
             logged: false,
             identified: true,
@@ -2243,6 +2254,10 @@ fn ComposeSheet() -> Element {
     let mut title = use_signal(|| initial_subj.clone());
     let mut content = use_signal(|| initial_body.clone());
     let draft_id = use_signal(|| initial_draft_id.clone());
+    // Autocomplete state: index of the highlighted suggestion (-1 = none).
+    let mut ac_highlighted: Signal<i32> = use_signal(|| -1i32);
+    // Whether the autocomplete dropdown is open. Cleared by Escape or selection.
+    let mut ac_open: Signal<bool> = use_signal(|| true);
     // Monotonic token bumped by every keystroke. The debounced delegate save
     // captures the token at scheduling time and only fires the wire call if
     // it still matches when the timer elapses — older keystrokes are silently
@@ -2299,6 +2314,17 @@ fn ComposeSheet() -> Element {
     });
 
     let recipient_lookup = use_memo(move || address_book::lookup(&to.read()));
+
+    // Autocomplete suggestions: case-insensitive substring over all contacts.
+    // Empty when input is blank or exactly matches a known alias.
+    let ac_suggestions = use_memo(move || {
+        let needle = to.read().clone();
+        // Exact match → no suggestions (user already resolved the contact).
+        if needle.is_empty() || address_book::lookup(&needle).is_some() {
+            return vec![];
+        }
+        address_book::filter_contacts(&needle, 8)
+    });
 
     let alias = user_alias.clone();
     let alias_for_delete = user_alias.clone();
@@ -2533,14 +2559,111 @@ fn ComposeSheet() -> Element {
                         }
                     }
                 }
-                div { class: "sheet-field",
+                div { class: "sheet-field compose-autocomplete-wrap",
                     span { class: "field-lbl", "To" }
                     input {
                         class: "field-input",
                         r#type: "text",
                         placeholder: "alias or address",
                         value: "{to}",
-                        oninput: move |ev| { to.set(ev.value()); autosave(()); },
+                        oninput: move |ev| {
+                            to.set(ev.value());
+                            ac_highlighted.set(-1);
+                            ac_open.set(true);
+                            autosave(());
+                        },
+                        onkeydown: move |ev| {
+                            let suggestions = ac_suggestions.read();
+                            let len = suggestions.len() as i32;
+                            // Always intercept Escape even when no suggestions are visible.
+                            if ev.key() == Key::Escape {
+                                ac_open.set(false);
+                                ac_highlighted.set(-1);
+                                return;
+                            }
+                            if len == 0 || !*ac_open.read() {
+                                return;
+                            }
+                            match ev.key() {
+                                Key::ArrowDown => {
+                                    let next = (*ac_highlighted.read() + 1).min(len - 1);
+                                    ac_highlighted.set(next);
+                                }
+                                Key::ArrowUp => {
+                                    let prev = (*ac_highlighted.read() - 1).max(-1);
+                                    ac_highlighted.set(prev);
+                                }
+                                Key::Enter => {
+                                    let idx = *ac_highlighted.read();
+                                    if idx >= 0 && idx < len {
+                                        let alias = suggestions[idx as usize].local_alias.to_string();
+                                        to.set(alias);
+                                        ac_highlighted.set(-1);
+                                        ac_open.set(false);
+                                        autosave(());
+                                    }
+                                }
+                                _ => {}
+                            }
+                        },
+                        // Dismiss on blur — small delay so mousedown on an item fires first.
+                        onblur: move |_| {
+                            spawn(async move {
+                                gloo_timers::future::TimeoutFuture::new(150).await;
+                                ac_open.set(false);
+                                ac_highlighted.set(-1);
+                            });
+                        },
+                        onfocus: move |_| { ac_open.set(true); },
+                    }
+                    // Dropdown — rendered inside the same relative wrapper.
+                    {
+                        let suggestions = ac_suggestions.read().clone();
+                        let highlighted = *ac_highlighted.read();
+                        let open = *ac_open.read();
+                        if open && !suggestions.is_empty() {
+                            rsx! {
+                                div {
+                                    class: "compose-autocomplete",
+                                    "data-testid": testid::FM_COMPOSE_AUTOCOMPLETE,
+                                    for (idx, contact) in suggestions.iter().enumerate() {
+                                        {
+                                            let alias = contact.local_alias.to_string();
+                                            let alias_fill = alias.clone();
+                                            let fp_short = contact.fingerprint_short();
+                                            let (trust_class, trust_label) = if contact.verified {
+                                                ("known", "✓")
+                                            } else {
+                                                ("unknown", "⚠")
+                                            };
+                                            let item_class = if highlighted == idx as i32 {
+                                                "compose-ac-item highlighted"
+                                            } else {
+                                                "compose-ac-item"
+                                            };
+                                            rsx! {
+                                                div {
+                                                    key: "{alias}",
+                                                    class: "{item_class}",
+                                                    "data-testid": testid::FM_COMPOSE_AUTOCOMPLETE_ITEM,
+                                                    onmousedown: move |_| {
+                                                        to.set(alias_fill.clone());
+                                                        ac_highlighted.set(-1);
+                                                        ac_open.set(false);
+                                                        autosave(());
+                                                    },
+                                                    span { class: "compose-ac-alias", "{alias}" }
+                                                    span { class: "compose-ac-trust {trust_class}", "{trust_label}" }
+                                                    span { class: "compose-ac-fp", "{fp_short}" }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            rsx! {}
+                        }
                     }
                 }
                 {

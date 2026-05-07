@@ -157,7 +157,7 @@ impl ContactCard {
 // ── Storage types ─────────────────────────────────────────────────────────────
 
 /// A contact whose public keys were imported via a `ContactCard`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Contact {
     pub local_alias: Rc<str>,
     pub description: String,
@@ -359,6 +359,30 @@ pub fn all_contacts() -> Vec<Contact> {
         contacts.sort_by(|a, b| a.local_alias.cmp(&b.local_alias));
         contacts
     })
+}
+
+/// Filter contacts by a case-insensitive substring needle.
+///
+/// Match priority: `local_alias` first, then `description`, then
+/// `fingerprint_short`. Returns up to `limit` matches, sorted by alias.
+/// Used by the compose-sheet autocomplete dropdown.
+///
+/// Returns an empty `Vec` when `needle` is empty so callers never show
+/// the dropdown on a blank To field.
+pub fn filter_contacts(needle: &str, limit: usize) -> Vec<Contact> {
+    if needle.is_empty() {
+        return vec![];
+    }
+    let needle_lc = needle.to_lowercase();
+    all_contacts()
+        .into_iter()
+        .filter(|c| {
+            c.local_alias.to_lowercase().contains(&needle_lc)
+                || c.description.to_lowercase().contains(&needle_lc)
+                || c.fingerprint_short().to_lowercase().contains(&needle_lc)
+        })
+        .take(limit)
+        .collect()
 }
 
 /// Look up a contact by ML-DSA verifying key (#51 — sender trust). Returns
@@ -625,6 +649,58 @@ mod tests {
         assert!(lookup("eve").is_some());
         remove_contact("eve");
         assert!(lookup("eve").is_none());
+    }
+
+    #[test]
+    fn filter_contacts_empty_needle_returns_nothing() {
+        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+        insert_contact(make_contact("alice", 1, 2)).unwrap();
+        assert!(
+            filter_contacts("", 8).is_empty(),
+            "blank needle must return []"
+        );
+    }
+
+    #[test]
+    fn filter_contacts_case_insensitive_alias_substring() {
+        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+        insert_contact(make_contact("Alice", 1, 2)).unwrap();
+        insert_contact(make_contact("bob", 3, 4)).unwrap();
+        insert_contact(make_contact("alice-work", 5, 6)).unwrap();
+
+        // "ali" should match "Alice" and "alice-work", not "bob".
+        let mut results = filter_contacts("ali", 8);
+        results.sort_by(|a, b| a.local_alias.cmp(&b.local_alias));
+        assert_eq!(results.len(), 2, "expected 2 matches for 'ali'");
+        assert_eq!(&*results[0].local_alias, "Alice");
+        assert_eq!(&*results[1].local_alias, "alice-work");
+
+        // Case-insensitive: "ALI" should also match both.
+        let upper = filter_contacts("ALI", 8);
+        assert_eq!(upper.len(), 2, "case-insensitive match for 'ALI'");
+    }
+
+    #[test]
+    fn filter_contacts_matches_description() {
+        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+        let mut c = make_contact("carol", 7, 8);
+        c.description = "work colleague".into();
+        insert_contact(c).unwrap();
+
+        let results = filter_contacts("colleague", 8);
+        assert_eq!(results.len(), 1);
+        assert_eq!(&*results[0].local_alias, "carol");
+    }
+
+    #[test]
+    fn filter_contacts_respects_limit() {
+        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+        for i in 0..10u8 {
+            insert_contact(make_contact(&format!("user{i}"), i, i.wrapping_add(1))).unwrap();
+        }
+        // "user" matches all 10, but limit=3 caps the result.
+        let results = filter_contacts("user", 3);
+        assert_eq!(results.len(), 3);
     }
 
     #[test]

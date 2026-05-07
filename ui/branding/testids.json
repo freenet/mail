@@ -32,6 +32,8 @@
   "fmComposeSheet": "fm-compose-sheet",
   "fmSend": "fm-send",
   "fmComposeRecipientHint": "fm-compose-recipient-hint",
+  "fmComposeAutocomplete": "fm-compose-autocomplete",
+  "fmComposeAutocompleteItem": "fm-compose-autocomplete-item",
   "fmToast": "fm-toast",
   "fmActionCreate": "fm-action-create",
   "fmActionImport": "fm-action-import",

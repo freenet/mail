@@ -64,6 +64,8 @@ pub(crate) const FM_ARCHIVE_REPLY: &str = "fm-archive-reply";
 pub(crate) const FM_COMPOSE_SHEET: &str = "fm-compose-sheet";
 pub(crate) const FM_SEND: &str = "fm-send";
 pub(crate) const FM_COMPOSE_RECIPIENT_HINT: &str = "fm-compose-recipient-hint";
+pub(crate) const FM_COMPOSE_AUTOCOMPLETE: &str = "fm-compose-autocomplete";
+pub(crate) const FM_COMPOSE_AUTOCOMPLETE_ITEM: &str = "fm-compose-autocomplete-item";
 
 // Toast
 pub(crate) const FM_TOAST: &str = "fm-toast";
@@ -151,6 +153,11 @@ mod tests {
             ("fmComposeSheet", super::FM_COMPOSE_SHEET),
             ("fmSend", super::FM_SEND),
             ("fmComposeRecipientHint", super::FM_COMPOSE_RECIPIENT_HINT),
+            ("fmComposeAutocomplete", super::FM_COMPOSE_AUTOCOMPLETE),
+            (
+                "fmComposeAutocompleteItem",
+                super::FM_COMPOSE_AUTOCOMPLETE_ITEM,
+            ),
             ("fmToast", super::FM_TOAST),
             ("fmActionCreate", super::FM_ACTION_CREATE),
             ("fmActionImport", super::FM_ACTION_IMPORT),
