@@ -1086,4 +1086,193 @@ mod tests {
         // Wrong-length VK and signature bytes both bail out cleanly.
         assert!(!verify_message_signature(b"x", &[0u8; 5], &[0u8; 5]));
     }
+
+    // ─── #150 UI-side bypass helpers ──────────────────────────────────────
+
+    fn make_test_inbox(ml_dsa_key: Arc<MlDsaSigningKey<MlDsa65>>) -> InboxModel {
+        let ml_kem_dk = DecapsulationKey::<MlKem768>::from_seed({
+            use rand::RngCore;
+            let mut seed = [0u8; 64];
+            rand::thread_rng().fill_bytes(&mut seed);
+            seed.into()
+        });
+        InboxModel::new(ml_dsa_key, ml_kem_dk).unwrap()
+    }
+
+    /// `update_verified_bypass_prepare` with a single verified VK must flip
+    /// `allow_verified_skip_token` to `true` on the model and return a
+    /// `ContractRequest::Update` wrapping a `ModifySettings` delta with the
+    /// correct field values.
+    #[test]
+    fn update_verified_bypass_prepare_sets_flag_and_returns_request() {
+        let sk = Arc::new(fresh_signing_key());
+        let vk_bytes = MlDsaKeypair::verifying_key(sk.as_ref()).encode().to_vec();
+        let mut inbox = make_test_inbox(sk);
+
+        let mut vs = std::collections::BTreeSet::new();
+        vs.insert(vk_bytes.clone());
+
+        let request = inbox
+            .update_verified_bypass_prepare(true, vs.clone())
+            .expect("prepare should succeed");
+
+        // The internal model must reflect the new state.
+        assert!(
+            inbox.settings.allow_verified_skip_token,
+            "allow_verified_skip_token must be true after prepare"
+        );
+        assert!(
+            inbox.settings.verified_senders.contains(&vk_bytes),
+            "verified_senders must contain the supplied VK"
+        );
+
+        // The returned request must be an Update wrapping a Delta.
+        match request {
+            freenet_stdlib::client_api::ContractRequest::Update { data, .. } => {
+                if let UpdateData::Delta(d) = data {
+                    let decoded: freenet_email_inbox::UpdateInbox =
+                        serde_json::from_slice(&d).expect("delta must decode as UpdateInbox");
+                    if let freenet_email_inbox::UpdateInbox::ModifySettings { settings, .. } =
+                        decoded
+                    {
+                        assert!(
+                            settings.allow_verified_skip_token,
+                            "delta must carry allow_verified_skip_token=true"
+                        );
+                        assert!(
+                            settings.verified_senders.contains(&vk_bytes),
+                            "delta must carry the verified VK"
+                        );
+                    } else {
+                        panic!("expected ModifySettings delta variant");
+                    }
+                } else {
+                    panic!("expected UpdateData::Delta");
+                }
+            }
+            other => panic!("expected ContractRequest::Update, got {other:?}"),
+        }
+    }
+
+    /// Toggling bypass ON with multiple contacts populates `verified_senders`
+    /// with all of them in one `ModifySettings` delta.
+    #[test]
+    fn update_verified_bypass_populate_multiple_vks() {
+        let owner_sk = Arc::new(fresh_signing_key());
+        let mut inbox = make_test_inbox(owner_sk);
+
+        // Simulate N address-book contacts.
+        let mut vs = std::collections::BTreeSet::new();
+        for i in 0u8..5 {
+            let contact_sk = fresh_signing_key();
+            let vk = MlDsaKeypair::verifying_key(&contact_sk);
+            let mut vk_bytes = vk.encode().to_vec();
+            // Ensure distinct entries (they should be by key but let's be safe).
+            *vk_bytes.last_mut().unwrap() ^= i;
+            vs.insert(vk_bytes);
+        }
+
+        let request = inbox
+            .update_verified_bypass_prepare(true, vs.clone())
+            .expect("prepare should succeed");
+
+        assert_eq!(
+            inbox.settings.verified_senders.len(),
+            vs.len(),
+            "model must hold all supplied VKs"
+        );
+
+        // Delta must also carry all of them.
+        if let freenet_stdlib::client_api::ContractRequest::Update {
+            data: UpdateData::Delta(d),
+            ..
+        } = request
+        {
+            let decoded: freenet_email_inbox::UpdateInbox =
+                serde_json::from_slice(&d).expect("delta decode");
+            if let freenet_email_inbox::UpdateInbox::ModifySettings { settings, .. } = decoded {
+                assert_eq!(
+                    settings.verified_senders.len(),
+                    vs.len(),
+                    "delta must carry all VKs"
+                );
+            } else {
+                panic!("expected ModifySettings variant");
+            }
+        } else {
+            panic!("unexpected request type");
+        }
+    }
+
+    /// Toggling bypass OFF must NOT clear `verified_senders` — the set
+    /// persists so it can be reused if the user toggles bypass back on.
+    #[test]
+    fn toggle_bypass_off_retains_verified_senders() {
+        let owner_sk = Arc::new(fresh_signing_key());
+        let mut inbox = make_test_inbox(owner_sk);
+
+        let contact_sk = fresh_signing_key();
+        let vk_bytes = MlDsaKeypair::verifying_key(&contact_sk).encode().to_vec();
+        let mut vs = std::collections::BTreeSet::new();
+        vs.insert(vk_bytes.clone());
+
+        // Toggle ON — populates the set.
+        inbox
+            .update_verified_bypass_prepare(true, vs.clone())
+            .expect("prepare ON");
+
+        // Toggle OFF — sends an empty-VK set to the contract but the model
+        // stores whatever the caller passes. The UI contract is: when
+        // toggling OFF the caller passes the current set unchanged so that
+        // re-enabling restores the same bypass list.
+        //
+        // Simulate the toggle-OFF flow: bypass=false but keep the same vs.
+        inbox
+            .update_verified_bypass_prepare(false, vs.clone())
+            .expect("prepare OFF");
+
+        // The model retains the senders (they were passed by the caller).
+        assert!(
+            inbox.settings.verified_senders.contains(&vk_bytes),
+            "verified_senders must be retained when toggling bypass OFF"
+        );
+        assert!(
+            !inbox.settings.allow_verified_skip_token,
+            "allow_verified_skip_token must be false after toggling OFF"
+        );
+    }
+
+    /// `update_verified_bypass_prepare` with bypass ON and an empty set
+    /// must produce a delta with `allow_verified_skip_token=true` and an
+    /// empty `verified_senders` collection — the contract will accept it
+    /// (nobody bypasses) and the model must reflect the same.
+    #[test]
+    fn toggle_bypass_on_empty_set_produces_correct_delta() {
+        let owner_sk = Arc::new(fresh_signing_key());
+        let mut inbox = make_test_inbox(owner_sk);
+
+        let request = inbox
+            .update_verified_bypass_prepare(true, Default::default())
+            .expect("prepare");
+
+        assert!(inbox.settings.allow_verified_skip_token);
+        assert!(inbox.settings.verified_senders.is_empty());
+
+        if let freenet_stdlib::client_api::ContractRequest::Update {
+            data: UpdateData::Delta(d),
+            ..
+        } = request
+        {
+            let decoded: freenet_email_inbox::UpdateInbox =
+                serde_json::from_slice(&d).expect("delta decode");
+            if let freenet_email_inbox::UpdateInbox::ModifySettings { settings, .. } = decoded {
+                assert!(settings.allow_verified_skip_token);
+                assert!(settings.verified_senders.is_empty());
+            } else {
+                panic!("expected ModifySettings");
+            }
+        } else {
+            panic!("unexpected request type");
+        }
+    }
 }

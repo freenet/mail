@@ -278,3 +278,41 @@ pub fn token_record_id_for(seed: &[u8]) -> ContractInstanceId {
     let bytes = assignment_hash_for(seed);
     ContractInstanceId::new(bytes)
 }
+
+/// Build a signed `UpdateData::Delta(ModifySettings)` payload. The settings
+/// are serialised, signed with `owner_sk`, and wrapped in an `UpdateInbox`
+/// enum so `update_state`'s Delta arm can decode it.
+///
+/// This mirrors what `InboxModel::settings_modify_prepare` does in the UI
+/// crate — the contract verifies the owner's ML-DSA-65 signature against
+/// `InboxParams.pub_key` before applying the new settings.
+pub fn modify_settings_delta(
+    owner_sk: &MlDsaSigningKey<MlDsa65>,
+    settings: freenet_email_inbox::InboxSettings,
+) -> UpdateData<'static> {
+    let serialized = serde_json::to_vec(&settings).expect("serialize settings");
+    let sig: ml_dsa::Signature<MlDsa65> = MlDsaSigner::sign(owner_sk, &serialized);
+    let signature: Box<[u8]> = sig.encode().to_vec().into_boxed_slice();
+    let delta = UpdateInbox::ModifySettings {
+        signature,
+        settings,
+    };
+    let bytes = serde_json::to_vec(&delta).expect("serialize delta");
+    UpdateData::Delta(StateDelta::from(bytes))
+}
+
+/// Build `InboxSettings` with bypass enabled for **multiple** VK byte vectors.
+/// Used by tests that exercise a batch of verified + unverified senders.
+pub fn make_settings_with_bypass_multi(
+    minimum_tier: Tier,
+    verified_sender_vk_bytes: impl IntoIterator<Item = Vec<u8>>,
+) -> freenet_email_inbox::InboxSettings {
+    use std::collections::BTreeSet;
+    let vs: BTreeSet<Vec<u8>> = verified_sender_vk_bytes.into_iter().collect();
+    freenet_email_inbox::InboxSettings {
+        minimum_tier,
+        allow_verified_skip_token: true,
+        verified_senders: vs,
+        ..freenet_email_inbox::InboxSettings::default()
+    }
+}

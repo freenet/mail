@@ -994,6 +994,56 @@ mod boundary_tests {
         assert_eq!(s.last_backup_at, Some(1_700_000_000_000));
     }
 
+    /// `IdentityAftPrefs` serialized before `allow_verified_skip_token` was
+    /// added (i.e. older on-disk data that doesn't have the field) must
+    /// deserialize with the field defaulting to `false`. Verifies the
+    /// `#[serde(default)]` annotation works correctly for forward-compat.
+    #[test]
+    fn identity_aft_prefs_missing_allow_verified_skip_token_defaults_false() {
+        // JSON that was written by an older version — no `allow_verified_skip_token` key.
+        let json = br#"{"required_tier":"Min10","allow_known":true,"allow_anon":false,"bounce_message":""}"#;
+        let prefs: IdentityAftPrefs = serde_json::from_slice(json).expect("should deserialise");
+        assert!(
+            !prefs.allow_verified_skip_token,
+            "missing allow_verified_skip_token must default to false"
+        );
+    }
+
+    /// Round-trip `IdentityAftPrefs` with `allow_verified_skip_token = true`
+    /// to confirm the field survives serde.
+    #[test]
+    fn identity_aft_prefs_allow_verified_skip_token_round_trips() {
+        let prefs = IdentityAftPrefs {
+            required_tier: "Hour1".into(),
+            max_age_days: 30,
+            allow_known: true,
+            allow_anon: false,
+            bounce_message: String::new(),
+            allow_verified_skip_token: true,
+        };
+        let bytes = serde_json::to_vec(&prefs).expect("serialize");
+        let back: IdentityAftPrefs = serde_json::from_slice(&bytes).expect("deserialize");
+        assert!(
+            back.allow_verified_skip_token,
+            "allow_verified_skip_token=true must survive serde round-trip"
+        );
+        assert_eq!(back.required_tier, "Hour1");
+        assert_eq!(back.max_age_days, 30);
+    }
+
+    /// `IdentitySettings` JSON from before `allow_verified_skip_token` was
+    /// introduced still deserializes correctly with the field defaulting to
+    /// `false` inside the nested `aft` bucket.
+    #[test]
+    fn identity_settings_aft_missing_allow_verified_skip_token_defaults_false() {
+        let json = br#"{"display_name":"","signature":"","auto_sign":true,"aft":{"required_tier":"Day1","allow_known":true,"allow_anon":false,"bounce_message":""},"privacy":{"verify_on_send":true,"hide_unsigned":false,"pad_length":true,"read_receipts":false}}"#;
+        let s: IdentitySettings = serde_json::from_slice(json).expect("should deserialise");
+        assert!(
+            !s.aft.allow_verified_skip_token,
+            "allow_verified_skip_token must default to false for old IdentitySettings data"
+        );
+    }
+
     #[test]
     fn round_trip_global_settings() {
         let mut state = LocalState::default();

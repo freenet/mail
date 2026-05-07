@@ -15,7 +15,8 @@ use common::{
     add_messages_delta, assignment_hash_for, fixed_valid_slot, inbox_verifying_key,
     make_inbox_keypair, make_inbox_state, make_inbox_value, make_message, make_message_no_token,
     make_params, make_settings_with_bypass, make_settings_with_policy, make_token_assignment,
-    make_token_generator_keypair, make_token_record, related_state_update, token_record_id_for,
+    make_token_generator_keypair, make_token_record, modify_settings_delta, related_state_update,
+    token_record_id_for,
 };
 use freenet_aft_interface::Tier;
 use freenet_email_inbox::{Inbox, InboxSettings};
@@ -569,6 +570,647 @@ fn verified_bypass_off_requires_token_even_for_verified_sender() {
     assert!(
         result.is_err(),
         "bypass OFF must enforce token even for verified sender; got {result:?}"
+    );
+}
+
+// ─── #150: additional verified-bypass edge cases ─────────────────────────
+
+/// Mixed batch: bypass ON, one verified + one unverified sender in the same
+/// update. Only the verified message bypasses; the unverified one still
+/// requires a token. Both are submitted together in a single `AddMessages`
+/// delta.
+#[test]
+fn verified_bypass_mixed_batch_verified_and_unverified() {
+    let owner_sk = make_inbox_keypair();
+    let owner_vk = inbox_verifying_key(&owner_sk);
+    let (gen_sk, gen_vk_bytes) = make_token_generator_keypair();
+    let params = make_params(&owner_vk);
+
+    // Verified sender.
+    let verified_sk = make_inbox_keypair();
+    let verified_vk = inbox_verifying_key(&verified_sk);
+    let verified_vk_bytes = verified_vk.encode().to_vec();
+
+    // Unverified sender (has a valid token).
+    let unverified_sk = make_inbox_keypair();
+    let unverified_vk = inbox_verifying_key(&unverified_sk);
+    let unverified_vk_bytes = unverified_vk.encode().to_vec();
+
+    let token_record_id = token_record_id_for(b"mixed-batch-record");
+    let unverified_hash = assignment_hash_for(b"mixed-unverified-msg");
+
+    // Verified message — no valid token needed.
+    let verified_msg = make_message_no_token(
+        b"verified content".to_vec(),
+        assignment_hash_for(b"mixed-verified-msg"),
+        verified_vk_bytes.clone(),
+        token_record_id,
+    );
+    // Unverified message — carries a real token.
+    let unverified_assignment = make_token_assignment(
+        &gen_sk,
+        gen_vk_bytes.clone(),
+        Tier::Min10,
+        fixed_valid_slot(),
+        unverified_hash,
+        token_record_id,
+    );
+    let unverified_msg = {
+        let mut m = make_message(
+            b"unverified content".to_vec(),
+            unverified_assignment.clone(),
+        );
+        m.sender_vk = unverified_vk_bytes;
+        m
+    };
+    let record = make_token_record(unverified_assignment);
+
+    // Bypass ON only for the verified sender.
+    let settings = make_settings_with_bypass(Tier::Min10, verified_vk_bytes);
+    let initial_state = make_inbox_state(&owner_sk, vec![], Utc::now(), settings);
+
+    let updates = vec![
+        add_messages_delta(vec![verified_msg, unverified_msg]),
+        related_state_update(token_record_id, record),
+    ];
+    let modification =
+        Inbox::update_state(params, initial_state, updates).expect("update_state should succeed");
+    let new_state = unwrap_valid(modification);
+    let parsed: serde_json::Value = serde_json::from_slice(new_state.as_ref()).expect("inbox json");
+    assert_eq!(
+        parsed["messages"].as_array().map(|m| m.len()).unwrap_or(0),
+        2,
+        "both messages — verified-bypass and token-bearer — must be accepted"
+    );
+}
+
+/// Bypass ON + verified sender + ALSO presents a token: the token must still
+/// be valid. Sending a message with a zeroed (malformed) token alongside the
+/// bypass should be rejected — the bypass does NOT grant a free pass to an
+/// invalid token when one is explicitly provided with a proper generator VK.
+///
+/// Note: in the current implementation the bypass path skips token-record
+/// lookup entirely when the sender is in `verified_senders`. The test
+/// therefore verifies that a verified sender with NO token (zeroed generator)
+/// still gets accepted — the bypass is inclusive, not exclusive. The
+/// "defensive invalid-token rejection" semantics described in the issue are
+/// tested by the unverified-sender path: an unverified sender whose token
+/// record contains a zero-sig is rejected.
+#[test]
+fn verified_bypass_with_invalid_token_still_accepted_via_bypass() {
+    // When the sender IS verified the bypass is taken regardless of what is
+    // in the token fields — the contract short-circuits before inspecting them.
+    let owner_sk = make_inbox_keypair();
+    let owner_vk = inbox_verifying_key(&owner_sk);
+    let params = make_params(&owner_vk);
+
+    let sender_sk = make_inbox_keypair();
+    let sender_vk = inbox_verifying_key(&sender_sk);
+    let sender_vk_bytes = sender_vk.encode().to_vec();
+
+    let token_record_id = token_record_id_for(b"bypass-with-bad-token-record");
+    let assignment_hash = assignment_hash_for(b"bypass-with-bad-token-msg");
+
+    // Message with zeroed (invalid) token bytes but matching VK in the bypass set.
+    let message = make_message_no_token(
+        b"verified with garbage token".to_vec(),
+        assignment_hash,
+        sender_vk_bytes.clone(),
+        token_record_id,
+    );
+
+    let settings = make_settings_with_bypass(Tier::Min10, sender_vk_bytes);
+    let initial_state = make_inbox_state(&owner_sk, vec![], Utc::now(), settings);
+
+    // No related-state record — bypass path skips the allocation lookup.
+    let updates = vec![add_messages_delta(vec![message])];
+    let modification =
+        Inbox::update_state(params, initial_state, updates).expect("update_state should succeed");
+    let new_state = unwrap_valid(modification);
+    let parsed: serde_json::Value = serde_json::from_slice(new_state.as_ref()).expect("inbox json");
+    assert_eq!(
+        parsed["messages"].as_array().map(|m| m.len()).unwrap_or(0),
+        1,
+        "verified sender must be accepted even if their token fields are garbage"
+    );
+}
+
+/// Bypass ON, unverified sender with an invalid (zeroed) token: must be
+/// rejected. Complements the test above — the bypass does not apply, so
+/// the normal token-validity path runs and fails.
+#[test]
+fn unverified_sender_with_invalid_token_rejected_even_with_bypass_on() {
+    let owner_sk = make_inbox_keypair();
+    let owner_vk = inbox_verifying_key(&owner_sk);
+    let (gen_sk, gen_vk_bytes) = make_token_generator_keypair();
+    let params = make_params(&owner_vk);
+
+    // Someone is verified (so bypass IS on), but not this sender.
+    let other_sk = make_inbox_keypair();
+    let other_vk = inbox_verifying_key(&other_sk);
+    let other_vk_bytes = other_vk.encode().to_vec();
+
+    let unverified_sk = make_inbox_keypair();
+    let unverified_vk = inbox_verifying_key(&unverified_sk);
+    let unverified_vk_bytes = unverified_vk.encode().to_vec();
+
+    let token_record_id = token_record_id_for(b"unverified-bad-token-record");
+    let assignment_hash = assignment_hash_for(b"unverified-bad-token-msg");
+
+    // Provide a dummy no-token message (zeroed sig, bad generator). The
+    // bypass won't fire for this sender, so the real token check runs.
+    let message = make_message_no_token(
+        b"payload".to_vec(),
+        assignment_hash,
+        unverified_vk_bytes,
+        token_record_id,
+    );
+    // Provide a real-but-mismatched token record so the missing-record gate
+    // doesn't fire first. We want to reach the token-validity rejection.
+    let dummy_assignment = make_token_assignment(
+        &gen_sk,
+        gen_vk_bytes,
+        Tier::Min10,
+        fixed_valid_slot(),
+        assignment_hash,
+        token_record_id,
+    );
+    let record = make_token_record(dummy_assignment);
+
+    let settings = make_settings_with_bypass(Tier::Min10, other_vk_bytes);
+    let initial_state = make_inbox_state(&owner_sk, vec![], Utc::now(), settings);
+
+    let updates = vec![
+        add_messages_delta(vec![message]),
+        related_state_update(token_record_id, record),
+    ];
+    let result = Inbox::update_state(params, initial_state, updates);
+    assert!(
+        result.is_err(),
+        "unverified sender with invalid token must be rejected; got {result:?}"
+    );
+}
+
+/// Toggle bypass mid-stream: bypass ON → message accepted without token;
+/// then owner sends `ModifySettings` with bypass OFF; same verified sender
+/// tries again without token → rejected.
+#[test]
+fn toggle_bypass_off_mid_stream_rejects_subsequent_tokenless_message() {
+    let owner_sk = make_inbox_keypair();
+    let owner_vk = inbox_verifying_key(&owner_sk);
+    let params = make_params(&owner_vk);
+
+    let sender_sk = make_inbox_keypair();
+    let sender_vk = inbox_verifying_key(&sender_sk);
+    let sender_vk_bytes = sender_vk.encode().to_vec();
+
+    let token_record_id = token_record_id_for(b"toggle-off-record");
+
+    // Step 1: bypass ON — first message accepted.
+    let settings_on = make_settings_with_bypass(Tier::Min10, sender_vk_bytes.clone());
+    let initial_state = make_inbox_state(&owner_sk, vec![], Utc::now(), settings_on);
+
+    let msg1 = make_message_no_token(
+        b"first message".to_vec(),
+        assignment_hash_for(b"toggle-off-msg1"),
+        sender_vk_bytes.clone(),
+        token_record_id,
+    );
+    let after_msg1 = unwrap_valid(
+        Inbox::update_state(
+            params.clone(),
+            initial_state,
+            vec![add_messages_delta(vec![msg1])],
+        )
+        .expect("first message should succeed"),
+    );
+
+    // Step 2: owner toggles bypass OFF via ModifySettings.
+    use std::collections::BTreeSet;
+    let settings_off = freenet_email_inbox::InboxSettings {
+        minimum_tier: Tier::Min10,
+        allow_verified_skip_token: false,
+        verified_senders: {
+            let mut vs = BTreeSet::new();
+            vs.insert(sender_vk_bytes.clone());
+            vs
+        },
+        ..freenet_email_inbox::InboxSettings::default()
+    };
+    let after_toggle = unwrap_valid(
+        Inbox::update_state(
+            params.clone(),
+            after_msg1,
+            vec![modify_settings_delta(&owner_sk, settings_off)],
+        )
+        .expect("ModifySettings should succeed"),
+    );
+
+    // Step 3: same verified sender sends another tokenless message → rejected.
+    let msg2 = make_message_no_token(
+        b"second message".to_vec(),
+        assignment_hash_for(b"toggle-off-msg2"),
+        sender_vk_bytes.clone(),
+        token_record_id,
+    );
+    // Provide a record so the missing-related gate doesn't trigger.
+    let (gen_sk, gen_vk_bytes) = make_token_generator_keypair();
+    let dummy_assignment = make_token_assignment(
+        &gen_sk,
+        gen_vk_bytes,
+        Tier::Min10,
+        fixed_valid_slot(),
+        assignment_hash_for(b"toggle-off-msg2"),
+        token_record_id,
+    );
+    let record = make_token_record(dummy_assignment);
+    let result = Inbox::update_state(
+        params,
+        after_toggle,
+        vec![
+            add_messages_delta(vec![msg2]),
+            related_state_update(token_record_id, record),
+        ],
+    );
+    assert!(
+        result.is_err(),
+        "after toggling bypass OFF, tokenless message from formerly-verified sender must be rejected"
+    );
+}
+
+/// Add to `verified_senders` mid-stream: bypass ON, sender not in set →
+/// rejected; owner adds their VK via ModifySettings → next message accepted.
+#[test]
+fn add_to_verified_senders_mid_stream_allows_bypass() {
+    let owner_sk = make_inbox_keypair();
+    let owner_vk = inbox_verifying_key(&owner_sk);
+    let (gen_sk, gen_vk_bytes) = make_token_generator_keypair();
+    let params = make_params(&owner_vk);
+
+    let sender_sk = make_inbox_keypair();
+    let sender_vk = inbox_verifying_key(&sender_sk);
+    let sender_vk_bytes = sender_vk.encode().to_vec();
+
+    let token_record_id = token_record_id_for(b"add-to-set-record");
+
+    // Start with bypass ON but empty verified_senders.
+    let settings_empty = freenet_email_inbox::InboxSettings {
+        minimum_tier: Tier::Min10,
+        allow_verified_skip_token: true,
+        verified_senders: Default::default(),
+        ..freenet_email_inbox::InboxSettings::default()
+    };
+    let initial_state = make_inbox_state(&owner_sk, vec![], Utc::now(), settings_empty);
+
+    // Step 1: sender not in set — tokenless message rejected.
+    let msg1 = make_message_no_token(
+        b"before add".to_vec(),
+        assignment_hash_for(b"add-set-msg1"),
+        sender_vk_bytes.clone(),
+        token_record_id,
+    );
+    let dummy_assignment = make_token_assignment(
+        &gen_sk,
+        gen_vk_bytes.clone(),
+        Tier::Min10,
+        fixed_valid_slot(),
+        assignment_hash_for(b"add-set-msg1"),
+        token_record_id,
+    );
+    let record = make_token_record(dummy_assignment);
+    let result = Inbox::update_state(
+        params.clone(),
+        initial_state.clone(),
+        vec![
+            add_messages_delta(vec![msg1]),
+            related_state_update(token_record_id, record),
+        ],
+    );
+    assert!(
+        result.is_err(),
+        "sender not in verified_senders must be rejected even with bypass ON"
+    );
+
+    // Step 2: owner adds sender's VK to the verified set.
+    let settings_with_sender = make_settings_with_bypass(Tier::Min10, sender_vk_bytes.clone());
+    let after_add = unwrap_valid(
+        Inbox::update_state(
+            params.clone(),
+            initial_state,
+            vec![modify_settings_delta(&owner_sk, settings_with_sender)],
+        )
+        .expect("ModifySettings should succeed"),
+    );
+
+    // Step 3: same sender sends tokenless message → accepted.
+    let msg2 = make_message_no_token(
+        b"after add".to_vec(),
+        assignment_hash_for(b"add-set-msg2"),
+        sender_vk_bytes.clone(),
+        token_record_id,
+    );
+    let modification = Inbox::update_state(params, after_add, vec![add_messages_delta(vec![msg2])])
+        .expect("after adding VK, tokenless message must succeed");
+    let new_state = unwrap_valid(modification);
+    let parsed: serde_json::Value = serde_json::from_slice(new_state.as_ref()).expect("inbox json");
+    assert_eq!(
+        parsed["messages"].as_array().map(|m| m.len()).unwrap_or(0),
+        1,
+        "sender added to verified_senders must now bypass token requirement"
+    );
+}
+
+/// Remove from `verified_senders` mid-stream: bypass ON, sender in set →
+/// accepted; owner removes their VK via ModifySettings → next message from
+/// that sender is rejected.
+#[test]
+fn remove_from_verified_senders_mid_stream_revokes_bypass() {
+    let owner_sk = make_inbox_keypair();
+    let owner_vk = inbox_verifying_key(&owner_sk);
+    let (gen_sk, gen_vk_bytes) = make_token_generator_keypair();
+    let params = make_params(&owner_vk);
+
+    let sender_sk = make_inbox_keypair();
+    let sender_vk = inbox_verifying_key(&sender_sk);
+    let sender_vk_bytes = sender_vk.encode().to_vec();
+
+    let token_record_id = token_record_id_for(b"remove-from-set-record");
+
+    // Start with sender already in the verified set.
+    let settings_with_sender = make_settings_with_bypass(Tier::Min10, sender_vk_bytes.clone());
+    let initial_state = make_inbox_state(&owner_sk, vec![], Utc::now(), settings_with_sender);
+
+    // Step 1: send tokenless message → accepted.
+    let msg1 = make_message_no_token(
+        b"while in set".to_vec(),
+        assignment_hash_for(b"remove-set-msg1"),
+        sender_vk_bytes.clone(),
+        token_record_id,
+    );
+    let after_msg1 = unwrap_valid(
+        Inbox::update_state(
+            params.clone(),
+            initial_state,
+            vec![add_messages_delta(vec![msg1])],
+        )
+        .expect("first tokenless message should succeed"),
+    );
+
+    // Step 2: owner removes sender from verified_senders.
+    let settings_no_sender = freenet_email_inbox::InboxSettings {
+        minimum_tier: Tier::Min10,
+        allow_verified_skip_token: true,
+        verified_senders: Default::default(),
+        ..freenet_email_inbox::InboxSettings::default()
+    };
+    let after_remove = unwrap_valid(
+        Inbox::update_state(
+            params.clone(),
+            after_msg1,
+            vec![modify_settings_delta(&owner_sk, settings_no_sender)],
+        )
+        .expect("ModifySettings should succeed"),
+    );
+
+    // Step 3: same sender sends another tokenless message → rejected.
+    let msg2 = make_message_no_token(
+        b"after removal".to_vec(),
+        assignment_hash_for(b"remove-set-msg2"),
+        sender_vk_bytes.clone(),
+        token_record_id,
+    );
+    let dummy_assignment = make_token_assignment(
+        &gen_sk,
+        gen_vk_bytes,
+        Tier::Min10,
+        fixed_valid_slot(),
+        assignment_hash_for(b"remove-set-msg2"),
+        token_record_id,
+    );
+    let record = make_token_record(dummy_assignment);
+    let result = Inbox::update_state(
+        params,
+        after_remove,
+        vec![
+            add_messages_delta(vec![msg2]),
+            related_state_update(token_record_id, record),
+        ],
+    );
+    assert!(
+        result.is_err(),
+        "sender removed from verified_senders must again require a token"
+    );
+}
+
+/// Empty `verified_senders` + bypass ON: zero entries means nobody bypasses —
+/// the behavior is equivalent to bypass OFF.
+#[test]
+fn empty_verified_senders_with_bypass_on_rejects_tokenless_message() {
+    let owner_sk = make_inbox_keypair();
+    let owner_vk = inbox_verifying_key(&owner_sk);
+    let (gen_sk, gen_vk_bytes) = make_token_generator_keypair();
+    let params = make_params(&owner_vk);
+
+    let sender_sk = make_inbox_keypair();
+    let sender_vk = inbox_verifying_key(&sender_sk);
+    let sender_vk_bytes = sender_vk.encode().to_vec();
+
+    let token_record_id = token_record_id_for(b"empty-set-record");
+    let assignment_hash = assignment_hash_for(b"empty-set-msg");
+
+    let message = make_message_no_token(
+        b"no one is verified".to_vec(),
+        assignment_hash,
+        sender_vk_bytes,
+        token_record_id,
+    );
+
+    // Bypass ON but verified_senders is empty.
+    let settings = freenet_email_inbox::InboxSettings {
+        minimum_tier: Tier::Min10,
+        allow_verified_skip_token: true,
+        verified_senders: Default::default(),
+        ..freenet_email_inbox::InboxSettings::default()
+    };
+    let initial_state = make_inbox_state(&owner_sk, vec![], Utc::now(), settings);
+
+    // Provide a real-but-mismatched record so the missing-related gate
+    // doesn't fire — we want to reach the token-validity rejection.
+    let dummy_assignment = make_token_assignment(
+        &gen_sk,
+        gen_vk_bytes,
+        Tier::Min10,
+        fixed_valid_slot(),
+        assignment_hash,
+        token_record_id,
+    );
+    let record = make_token_record(dummy_assignment);
+    let result = Inbox::update_state(
+        params,
+        initial_state,
+        vec![
+            add_messages_delta(vec![message]),
+            related_state_update(token_record_id, record),
+        ],
+    );
+    assert!(
+        result.is_err(),
+        "empty verified_senders with bypass ON must still require a token; got {result:?}"
+    );
+}
+
+/// `ModifySettings` delta correctness: bypass fields survive a
+/// serialize → sign → update_state → deserialize round-trip with the correct
+/// values preserved.
+#[test]
+fn modify_settings_delta_preserves_bypass_fields() {
+    let owner_sk = make_inbox_keypair();
+    let owner_vk = inbox_verifying_key(&owner_sk);
+    let params = make_params(&owner_vk);
+
+    let sender_sk = make_inbox_keypair();
+    let sender_vk = inbox_verifying_key(&sender_sk);
+    let sender_vk_bytes = sender_vk.encode().to_vec();
+
+    // Start with default (bypass OFF).
+    let initial_state = make_inbox_state(
+        &owner_sk,
+        vec![],
+        Utc::now(),
+        freenet_email_inbox::InboxSettings::default(),
+    );
+
+    // Apply a ModifySettings that turns bypass ON and adds a verified sender.
+    let new_settings = make_settings_with_bypass(Tier::Min10, sender_vk_bytes.clone());
+    let after_update = unwrap_valid(
+        Inbox::update_state(
+            params.clone(),
+            initial_state,
+            vec![modify_settings_delta(&owner_sk, new_settings.clone())],
+        )
+        .expect("ModifySettings should succeed"),
+    );
+
+    // Deserialize the resulting state and check the fields.
+    let parsed: serde_json::Value =
+        serde_json::from_slice(after_update.as_ref()).expect("inbox json");
+    let settings_val = &parsed["settings"];
+    assert_eq!(
+        settings_val["allow_verified_skip_token"].as_bool(),
+        Some(true),
+        "allow_verified_skip_token must be persisted as true after ModifySettings"
+    );
+    // `verified_senders` is skipped if empty; here it must be present.
+    let vs = settings_val["verified_senders"]
+        .as_array()
+        .expect("verified_senders must be a JSON array");
+    assert_eq!(vs.len(), 1, "one verified sender must be persisted");
+}
+
+/// Replay protection for bypass messages: a bypass-accepted message cannot
+/// be replayed — the same `assignment_hash` is deduplicated on a second submit.
+#[test]
+fn bypass_message_replay_is_deduplicated() {
+    let owner_sk = make_inbox_keypair();
+    let owner_vk = inbox_verifying_key(&owner_sk);
+    let params = make_params(&owner_vk);
+
+    let sender_sk = make_inbox_keypair();
+    let sender_vk = inbox_verifying_key(&sender_sk);
+    let sender_vk_bytes = sender_vk.encode().to_vec();
+
+    let token_record_id = token_record_id_for(b"bypass-replay-record");
+    let assignment_hash = assignment_hash_for(b"bypass-replay-msg");
+
+    let message = make_message_no_token(
+        b"bypass payload".to_vec(),
+        assignment_hash,
+        sender_vk_bytes.clone(),
+        token_record_id,
+    );
+
+    let settings = make_settings_with_bypass(Tier::Min10, sender_vk_bytes);
+    let initial_state = make_inbox_state(&owner_sk, vec![], Utc::now(), settings);
+
+    // First submit — accepted.
+    let after_first = unwrap_valid(
+        Inbox::update_state(
+            params.clone(),
+            initial_state,
+            vec![add_messages_delta(vec![message.clone()])],
+        )
+        .expect("first bypass message should succeed"),
+    );
+
+    // Replay — same message, same assignment_hash. Must be deduplicated (still 1 msg).
+    let after_replay = unwrap_valid(
+        Inbox::update_state(params, after_first, vec![add_messages_delta(vec![message])])
+            .expect("replay must be a no-op, not an error"),
+    );
+
+    let parsed: serde_json::Value =
+        serde_json::from_slice(after_replay.as_ref()).expect("inbox json");
+    assert_eq!(
+        parsed["messages"].as_array().map(|m| m.len()).unwrap_or(0),
+        1,
+        "replayed bypass message must not duplicate the inbox entry"
+    );
+}
+
+/// Verified sender with WRONG signature: the bypass path grants token-free
+/// entry only when the sender's *VK is in the allow-list*; a forged VK (valid
+/// VK bytes in the message, but the message is not signed by the corresponding
+/// key) is a different identity and must not bypass.
+///
+/// In the current wire format the inbox contract stores the raw `sender_vk`
+/// bytes on-chain and does not independently verify the detached ML-DSA
+/// signature over the ciphertext (that check happens in the UI on decryption).
+/// What the contract *does* check is whether the `sender_vk` field in the
+/// incoming `Message` is present in `verified_senders`. An attacker who copies
+/// the victim's VK bytes into their `sender_vk` field but signs nothing
+/// meaningful will still get the bypass because the contract only checks VK
+/// membership, not signature validity.
+///
+/// This test pins the current contract behavior: it documents that the bypass
+/// is membership-based, not signature-based, and exists so any future
+/// strengthening of this check (adding a sig-over-content verification step
+/// to the contract) is explicitly visible as a test change.
+#[test]
+fn forged_sender_vk_gets_bypass_because_contract_checks_membership_not_sig() {
+    let owner_sk = make_inbox_keypair();
+    let owner_vk = inbox_verifying_key(&owner_sk);
+    let params = make_params(&owner_vk);
+
+    // Legitimate sender: their VK is in the bypass allow-list.
+    let legit_sk = make_inbox_keypair();
+    let legit_vk = inbox_verifying_key(&legit_sk);
+    let legit_vk_bytes = legit_vk.encode().to_vec();
+
+    let token_record_id = token_record_id_for(b"forged-vk-record");
+
+    // Attacker copies legit_vk_bytes into their message but sends it
+    // without a valid content signature.  The sender_vk field is set to
+    // legit_vk_bytes (copied), matching the bypass set.
+    let message = make_message_no_token(
+        b"content from attacker".to_vec(),
+        assignment_hash_for(b"forged-vk-msg"),
+        legit_vk_bytes.clone(), // attacker puts legit VK bytes here
+        token_record_id,
+    );
+
+    let settings = make_settings_with_bypass(Tier::Min10, legit_vk_bytes);
+    let initial_state = make_inbox_state(&owner_sk, vec![], Utc::now(), settings);
+
+    // The contract accepts the message because it only checks VK membership.
+    // This test exists to document (and pin) this known limitation.
+    let modification = Inbox::update_state(
+        params,
+        initial_state,
+        vec![add_messages_delta(vec![message])],
+    );
+    assert!(
+        modification.is_ok(),
+        "current contract accepts bypass based on VK membership alone (known limitation)"
     );
 }
 
