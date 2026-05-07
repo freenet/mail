@@ -774,10 +774,9 @@ fn ScrInbox() -> Element {
 
 #[allow(non_snake_case)]
 fn ScrContacts() -> Element {
-    // Subscribe to address-book changes. The address book bumps an internal
-    // generation when contacts are added / removed; treat the trash button
-    // as an explicit re-render trigger.
-    let mut tick = use_signal(|| 0u32);
+    // Subscribe to address-book generation so additions *and* removals
+    // (dispatched via NodeAction::DeleteContact) both trigger a re-render.
+    let ab_gen = use_context::<crate::app::AddressBookGen>();
     let mut search = use_signal(String::new);
 
     let mut menu_selection = use_context::<Signal<menu::MenuSelection>>();
@@ -785,6 +784,7 @@ fn ScrContacts() -> Element {
     let mut share_contact_form = use_context::<Signal<crate::app::login::ShareContact>>();
     let mut share_pending = use_context::<Signal<crate::app::login::SharePending>>();
     let user = use_context::<Signal<User>>();
+    let actions = use_coroutine_handle::<crate::app::NodeAction>();
 
     let on_import = move |_| {
         menu_selection.write().close_settings();
@@ -808,7 +808,7 @@ fn ScrContacts() -> Element {
     };
 
     let needle = search.read().to_lowercase();
-    let _ = tick.read(); // re-run the memo when `tick` bumps.
+    let _ = ab_gen.0.read(); // re-run when a contact is added or removed.
     let contacts: Vec<address_book::Contact> = address_book::all_contacts()
         .into_iter()
         .filter(|c| {
@@ -888,9 +888,9 @@ fn ScrContacts() -> Element {
                                         class: "fm-btn-secondary",
                                         style: "height: 26px; padding: 0 9px; font-size: 11px;",
                                         onclick: move |_| {
-                                            address_book::remove_contact(&alias_for_remove);
-                                            let prev = *tick.read();
-                                            tick.set(prev + 1);
+                                            actions.send(crate::app::NodeAction::DeleteContact {
+                                                alias: alias_for_remove.clone(),
+                                            });
                                         },
                                         "Remove"
                                     }

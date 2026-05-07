@@ -684,11 +684,13 @@ mod identity_management {
 }
 
 #[cfg(feature = "use-node")]
+#[allow(unused_mut)]
 pub(crate) async fn node_comms(
     mut rx: UnboundedReceiver<crate::app::NodeAction>,
     login_controller: Signal<crate::app::LoginController>,
     user: Signal<crate::app::User>,
     inboxes: crate::app::InboxesData,
+    mut ab_gen: crate::app::AddressBookGen,
 ) {
     // todo don't unwrap inside this function, propagate errors to the UI somehow
     use freenet_email_inbox::Inbox as StoredInbox;
@@ -778,6 +780,7 @@ pub(crate) async fn node_comms(
         user: Signal<crate::app::User>,
         mut login_controller: Signal<crate::app::LoginController>,
         inboxes: &InboxesData,
+        mut ab_gen: crate::app::AddressBookGen,
     ) {
         let mut client = api.sender_half();
         match req {
@@ -952,6 +955,10 @@ pub(crate) async fn node_comms(
                     // ContactsSection reads ADDRESS_BOOK directly (not via a
                     // Signal) so bump the controller to force re-render.
                     login_controller.write().updated = true;
+                    // Bump generation so MessageList / OpenMessage re-render
+                    // and pick up the new contact's verification state (#134).
+                    let prev = *ab_gen.0.read();
+                    *ab_gen.0.write() = prev.wrapping_add(1);
                 }
             }
             NodeAction::DeleteContact { alias } => {
@@ -962,6 +969,11 @@ pub(crate) async fn node_comms(
                 } else {
                     crate::app::address_book::remove_contact(&alias);
                     login_controller.write().updated = true;
+                    // Bump generation so inbox rows that showed the
+                    // removed contact as "verified" revert to
+                    // "unknown sender" (#134).
+                    let prev = *ab_gen.0.read();
+                    *ab_gen.0.write() = prev.wrapping_add(1);
                 }
             }
             NodeAction::RenameIdentity { old, new, identity } => {
@@ -1317,8 +1329,8 @@ pub(crate) async fn node_comms(
                 let found = inbox_management::CREATED_INBOX.with(|keys| {
                     let pos = keys.borrow().iter().position(|(_, k)| k == &contract_key);
                     if let Some(pos) = pos {
-                        let (alias, key) = keys.borrow_mut().remove(pos);
-                        crate::log::debug!("inbox contract `{key}` for alias `{alias}` put");
+                        let (_alias, _key) = keys.borrow_mut().remove(pos);
+                        crate::log::debug!("inbox contract `{_key}` for alias `{_alias}` put");
                         return true;
                     }
                     false
@@ -1351,8 +1363,8 @@ pub(crate) async fn node_comms(
                 let found = token_record_management::CREATED_AFT_RECORD.with(|keys| {
                     let pos = keys.borrow().iter().position(|(_, k)| k == &contract_key);
                     if let Some(pos) = pos {
-                        let (alias, key) = keys.borrow_mut().remove(pos);
-                        crate::log::debug!("AFT record `{key}` for alias `{alias}` put");
+                        let (_alias, _key) = keys.borrow_mut().remove(pos);
+                        crate::log::debug!("AFT record `{_key}` for alias `{_alias}` put");
                         return true;
                     }
                     false
@@ -1401,8 +1413,8 @@ pub(crate) async fn node_comms(
                     let found = token_generator_management::CREATED_AFT_GEN.with(|keys| {
                         let pos = keys.borrow().iter().position(|(_, k)| k == &key);
                         if let Some(pos) = pos {
-                            let (alias, key) = keys.borrow_mut().remove(pos);
-                            crate::log::debug!("AFT gen delegate `{key}` for `{alias}` put");
+                            let (_alias, _key) = keys.borrow_mut().remove(pos);
+                            crate::log::debug!("AFT gen delegate `{_key}` for `{_alias}` put");
                             return true;
                         }
                         false
@@ -1646,6 +1658,7 @@ pub(crate) async fn node_comms(
                     user,
                     login_controller,
                     &inboxes,
+                    ab_gen,
                 )
                 .await;
             }
