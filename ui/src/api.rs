@@ -957,7 +957,7 @@ pub(crate) async fn node_comms(
                     // Bump generation so MessageList / OpenMessage re-render
                     // and pick up the new contact's verification state (#134).
                     let prev = *ab_gen.0.read();
-                    ab_gen.0.set(prev.wrapping_add(1));
+                    *ab_gen.0.write() = prev.wrapping_add(1);
                 }
             }
             NodeAction::DeleteContact { alias } => {
@@ -972,7 +972,7 @@ pub(crate) async fn node_comms(
                     // removed contact as "verified" revert to
                     // "unknown sender" (#134).
                     let prev = *ab_gen.0.read();
-                    ab_gen.0.set(prev.wrapping_add(1));
+                    *ab_gen.0.write() = prev.wrapping_add(1);
                 }
             }
             NodeAction::RenameIdentity { old, new, identity } => {
