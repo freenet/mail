@@ -689,7 +689,7 @@ pub(crate) async fn node_comms(
     login_controller: Signal<crate::app::LoginController>,
     user: Signal<crate::app::User>,
     inboxes: crate::app::InboxesData,
-    mut ab_gen: crate::app::AddressBookGen,
+    ab_gen: crate::app::AddressBookGen,
 ) {
     // todo don't unwrap inside this function, propagate errors to the UI somehow
     use freenet_email_inbox::Inbox as StoredInbox;
@@ -779,7 +779,7 @@ pub(crate) async fn node_comms(
         user: Signal<crate::app::User>,
         mut login_controller: Signal<crate::app::LoginController>,
         inboxes: &InboxesData,
-        mut ab_gen: crate::app::AddressBookGen,
+        ab_gen: crate::app::AddressBookGen,
     ) {
         let mut client = api.sender_half();
         match req {
