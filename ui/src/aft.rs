@@ -350,8 +350,6 @@ impl AftRecords {
 
         let inbox_params: Parameters = InboxParams {
             pub_key: recipient_inbox_pub_key,
-            required_tier: recipient_required_tier,
-            max_age_secs: recipient_max_age_secs,
         }
         .try_into()?;
         let inbox_key =

@@ -53,9 +53,21 @@ pub(crate) enum NodeAction {
         /// ML-DSA-65 signing key used for both inbox ownership and AFT
         /// token signing (same key serves both subsystems post-Stage-4).
         ml_dsa_key: Arc<MlDsaSigningKey<MlDsa65>>,
-        /// Recipient anti-flood policy hashed into `InboxParams`. Only
-        /// consulted for `ContractType::InboxContract`; the AFT record
-        /// contract id is derived from the sender's key alone (#85).
+        /// Initial recipient anti-flood policy seeded into the inbox's
+        /// `InboxSettings` at creation. Only consulted for
+        /// `ContractType::InboxContract`; the AFT record contract id is
+        /// derived from the sender's key alone. Owner can mutate later
+        /// via `UpdateInboxPolicy` (#85).
+        required_tier: freenet_aft_interface::Tier,
+        max_age_secs: u64,
+    },
+    /// Push a signed `ModifySettings` delta updating the recipient
+    /// anti-flood policy on the inbox contract owned by `identity`
+    /// (#85). Owner-only; the contract verifies the signature against
+    /// `params.pub_key` before accepting.
+    #[allow(dead_code)] // emitted from the wip-settings AFT screen only
+    UpdateInboxPolicy {
+        identity: Box<Identity>,
         required_tier: freenet_aft_interface::Tier,
         max_age_secs: u64,
     },
@@ -2333,11 +2345,7 @@ fn ComposeSheet() -> Element {
         // `send_message` so we can pair the eventual UpdateResponse back to
         // the Sent row's `SentId`.
         #[cfg(feature = "use-node")]
-        let inbox_key_for_ack = crate::inbox::inbox_key_for(
-            &recipient_vk,
-            recipient.required_tier,
-            recipient.max_age_secs,
-        );
+        let inbox_key_for_ack = crate::inbox::inbox_key_for(&recipient_vk);
 
         // Allocate the SentId up-front so the sync enqueue and the async
         // failure-flip both name the same row.

@@ -37,45 +37,28 @@ const STATE_UPDATE: &[u8; 8] = &[168, 7, 13, 64, 168, 123, 142, 215];
 /// impl on the typed key. `pub_key_decoded()` reconstructs the typed
 /// `VerifyingKey<MlDsa65>` on demand.
 ///
-/// `required_tier` and `max_age_secs` express the recipient's anti-flood
-/// policy: senders must mint AFT tokens at this tier and `max_age` so the
-/// inbox owner controls the per-sender rate cap. They are part of the
-/// contract parameters, so changing them rotates the contract id and
-/// makes the policy authenticated by construction.
+/// This field is part of the contract parameters, so it participates in
+/// `hash(code, params)` and every bit change rotates the contract id.
 ///
-/// All fields participate in `hash(code, params)` — every bit change
-/// rotates the contract id.
+/// The recipient anti-flood policy lives on `InboxSettings` (mutable via
+/// `ModifySettings`) rather than here, so the inbox owner can re-tune
+/// their tier / max-age cap without rotating the contract id and forcing
+/// every existing sender to re-import.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct InboxParams {
     pub pub_key: Vec<u8>,
-    pub required_tier: Tier,
-    pub max_age_secs: u64,
 }
 
-/// Default seconds-component of `max_age` matching pre-#85 behavior
-/// (365 days). Used by `from_verifying_key` and any caller that wants
-/// the historical default without spelling out the constant.
+/// Default seconds-component of `max_age` (365 days). Used by
+/// callers that want the historical default without spelling out
+/// the constant.
 pub const DEFAULT_MAX_AGE_SECS: u64 = 365 * 24 * 3600;
 
 impl InboxParams {
-    /// Convenience constructor from a typed ML-DSA verifying key. Uses
-    /// the legacy default policy (`Tier::Day1`, 365d) so existing
-    /// call-sites that don't care about #85 keep their old behavior
-    /// until they're migrated to pick a policy.
+    /// Convenience constructor from a typed ML-DSA verifying key.
     pub fn from_verifying_key(vk: &MlDsaVerifyingKey<MlDsa65>) -> Self {
         Self {
             pub_key: vk.encode().to_vec(),
-            required_tier: Tier::Day1,
-            max_age_secs: DEFAULT_MAX_AGE_SECS,
-        }
-    }
-
-    /// Constructor that sets the recipient anti-flood policy explicitly.
-    pub fn new(vk: &MlDsaVerifyingKey<MlDsa65>, required_tier: Tier, max_age_secs: u64) -> Self {
-        Self {
-            pub_key: vk.encode().to_vec(),
-            required_tier,
-            max_age_secs,
         }
     }
 
@@ -122,15 +105,30 @@ pub enum UpdateInbox {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct InboxSettings {
+    /// AFT tier the recipient requires for incoming messages. Senders
+    /// must mint tokens at this exact tier; the contract rejects any
+    /// `AddMessages` whose token tier mismatches. Mutable via
+    /// `ModifySettings`, so the recipient can re-tune their flood cap
+    /// without rotating the inbox contract id.
     pub minimum_tier: Tier,
+    /// `max_age_secs` half of the recipient policy. The AFT delegate
+    /// uses it sender-side when computing free slots; the contract does
+    /// not enforce age (no clock available in WASM).
+    #[serde(default = "default_max_age_secs")]
+    pub max_age_secs: u64,
     #[serde(skip_serializing_if = "Vec::is_empty", default = "Vec::default")]
     pub private: EncryptedContent,
+}
+
+fn default_max_age_secs() -> u64 {
+    DEFAULT_MAX_AGE_SECS
 }
 
 impl Default for InboxSettings {
     fn default() -> Self {
         Self {
-            minimum_tier: Tier::Min30,
+            minimum_tier: Tier::Day1,
+            max_age_secs: DEFAULT_MAX_AGE_SECS,
             private: Default::default(),
         }
     }
@@ -235,17 +233,23 @@ impl Display for VerificationError {
     }
 }
 
-/// Enforce recipient `InboxParams` policy on an incoming token. Currently
-/// gates on `required_tier`; `max_age_secs` is enforced sender-side
-/// inside the AFT delegate (which does have a clock) when computing
-/// `next_free_assignment`.
+/// Enforce recipient `InboxSettings` policy on an incoming token.
+/// Currently gates on `minimum_tier`; `max_age_secs` is enforced
+/// sender-side inside the AFT delegate (which does have a clock) when
+/// computing `next_free_assignment`.
+///
+/// Policy lives on settings rather than params so the inbox owner can
+/// re-tune it via `ModifySettings` without rotating the contract id.
+/// `can_update_settings` already gates settings updates on the owner's
+/// ML-DSA signature (verified against `params.pub_key`), so only the
+/// inbox owner can change the policy.
 fn verify_token_policy(
-    params: &InboxParams,
+    settings: &InboxSettings,
     assignment: &TokenAssignment,
 ) -> Result<(), VerificationError> {
-    if assignment.tier != params.required_tier {
+    if assignment.tier != settings.minimum_tier {
         return Err(VerificationError::PolicyTierMismatch {
-            expected: params.required_tier,
+            expected: settings.minimum_tier,
             got: assignment.tier,
         });
     }
@@ -293,7 +297,6 @@ impl Inbox {
 
     fn add_messages(
         &mut self,
-        params: &InboxParams,
         allocation_records: &HashMap<ContractInstanceId, TokenAllocationRecord>,
         messages: Vec<Message>,
     ) -> Result<(), VerificationError> {
@@ -321,14 +324,13 @@ impl Inbox {
             if !records.assignment_exists(&message.token_assignment) {
                 return Err(VerificationError::TokenAssignmentMismatch);
             }
-            self.add_message(params, message)?;
+            self.add_message(message)?;
         }
         Ok(())
     }
 
     fn verify_messages(
         &self,
-        params: &InboxParams,
         allocation_records: &HashMap<ContractInstanceId, TokenAllocationRecord>,
     ) -> Result<(), VerificationError> {
         let mut some_missing = false;
@@ -346,7 +348,7 @@ impl Inbox {
             if !records.assignment_exists(&message.token_assignment) {
                 return Err(VerificationError::TokenAssignmentMismatch);
             }
-            verify_token_policy(params, &message.token_assignment)?;
+            verify_token_policy(&self.settings, &message.token_assignment)?;
             let verifying_key = decode_token_generator_vk(&message.token_assignment.generator)
                 .ok_or(VerificationError::InvalidTokenGeneratorKey)?;
             message
@@ -360,12 +362,8 @@ impl Inbox {
         Ok(())
     }
 
-    fn add_message(
-        &mut self,
-        params: &InboxParams,
-        message: Message,
-    ) -> Result<(), VerificationError> {
-        verify_token_policy(params, &message.token_assignment)?;
+    fn add_message(&mut self, message: Message) -> Result<(), VerificationError> {
+        verify_token_policy(&self.settings, &message.token_assignment)?;
         let verifying_key = decode_token_generator_vk(&message.token_assignment.generator)
             .ok_or(VerificationError::InvalidTokenGeneratorKey)?;
         message
@@ -396,7 +394,7 @@ impl Inbox {
         Ok(StateSummary::from(serialized))
     }
 
-    fn merge(&mut self, params: &InboxParams, other: Self) -> Result<(), ContractError> {
+    fn merge(&mut self, other: Self) -> Result<(), ContractError> {
         // Accept any incoming messages we don't already have. The previous
         // gate (`self.messages.is_empty() && self.last_update < other.last_update`)
         // silently dropped the merge whenever both sides had a default
@@ -411,7 +409,7 @@ impl Inbox {
             .collect();
         for m in other.messages {
             if !known.contains(&m.token_assignment.assignment_hash) {
-                self.add_message(params, m)?;
+                self.add_message(m)?;
             }
         }
         if other.last_update > self.last_update {
@@ -537,7 +535,7 @@ impl ContractInterface for Inbox {
             return Ok(ValidateResult::RequestRelated(missing_related));
         }
 
-        match inbox.verify_messages(&params, &allocation_records) {
+        match inbox.verify_messages(&allocation_records) {
             Ok(_) => Ok(ValidateResult::Valid),
             Err(VerificationError::MissingContracts(ids)) => {
                 Ok(ValidateResult::RequestRelated(ids))
@@ -580,7 +578,7 @@ impl ContractInterface for Inbox {
             match update {
                 UpdateData::State(state) => {
                     let full_inbox = Inbox::try_from(&state)?;
-                    inbox.merge(&params, full_inbox)?;
+                    inbox.merge(full_inbox)?;
                 }
                 UpdateData::Delta(d) => match UpdateInbox::try_from(d)? {
                     UpdateInbox::AddMessages { mut messages } => {
@@ -656,7 +654,7 @@ impl ContractInterface for Inbox {
 
         if missing_related.is_empty() {
             inbox
-                .add_messages(&params, &allocation_records, new_messages)
+                .add_messages(&allocation_records, new_messages)
                 .map_err(|err| ContractError::Other(format!("{err}")))?;
             inbox.remove_messages(rm_messages);
             // FIXME: uncomment next line, right now it pulls the `time` dep on the web UI if we enable which is not what we want

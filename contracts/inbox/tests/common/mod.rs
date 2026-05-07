@@ -64,16 +64,17 @@ pub fn make_params(owner_vk: &MlDsaVerifyingKey<MlDsa65>) -> Parameters<'static>
         .expect("inbox params -> parameters")
 }
 
-/// `make_params` variant that pins an explicit recipient policy, used
-/// by tests that exercise the tier-mismatch enforcement path (#85).
-pub fn make_params_with_policy(
-    owner_vk: &MlDsaVerifyingKey<MlDsa65>,
-    required_tier: Tier,
-    max_age_secs: u64,
-) -> Parameters<'static> {
-    InboxParams::new(owner_vk, required_tier, max_age_secs)
-        .try_into()
-        .expect("inbox params -> parameters")
+/// Build an `InboxSettings` with explicit recipient policy. Used by
+/// tests that exercise the tier-mismatch enforcement path (#85). The
+/// policy lives on settings (mutable) rather than params (immutable),
+/// so this is what tests should tweak when simulating an owner that
+/// has tightened their flood cap.
+pub fn make_settings_with_policy(minimum_tier: Tier, max_age_secs: u64) -> InboxSettings {
+    InboxSettings {
+        minimum_tier,
+        max_age_secs,
+        private: Default::default(),
+    }
 }
 
 /// Pick a deterministic, valid `Tier::Min1` slot well in the past so that

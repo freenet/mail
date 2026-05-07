@@ -177,4 +177,6 @@ jobs:
           path: |
             ~/freenet-mail-iso/gw/logs/
             ~/freenet-mail-iso/peer/logs/
+            ~/freenet-mail-iso/gw/data/secrets/
+            ~/freenet-mail-iso/peer/data/secrets/
           if-no-files-found: ignore
