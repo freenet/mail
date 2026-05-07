@@ -369,26 +369,58 @@ pub fn all_contacts() -> Vec<Contact> {
 
 /// Filter contacts by a case-insensitive substring needle.
 ///
-/// Match priority: `local_alias` first, then `description`, then
-/// `fingerprint_short`. Returns up to `limit` matches, sorted by alias.
-/// Used by the compose-sheet autocomplete dropdown.
+/// Match tiers (highest priority first):
+///   1. Alias prefix match  — the alias starts with `needle`
+///   2. Alias substring match — the alias contains `needle` (but not as prefix)
+///   3. Fingerprint-short match — the three-word fingerprint contains `needle`
 ///
-/// Returns an empty `Vec` when `needle` is empty so callers never show
-/// the dropdown on a blank To field.
+/// Description is **not** matched to prevent a contact whose description
+/// happens to equal another contact's alias from shadowing that alias in the
+/// dropdown (adversarial shadowing). Within each tier, verified contacts
+/// sort before unverified; ties are broken alphabetically by alias.
+///
+/// Returns up to `limit` matches. Returns an empty `Vec` when `needle` is
+/// empty so callers never show the dropdown on a blank To field.
 pub fn filter_contacts(needle: &str, limit: usize) -> Vec<Contact> {
     if needle.is_empty() {
         return vec![];
     }
     let needle_lc = needle.to_lowercase();
-    all_contacts()
+
+    // Assign a tier score: 0 = alias prefix, 1 = alias substring, 2 = fp match.
+    // Contacts that match none are excluded.
+    let mut scored: Vec<(u8, Contact)> = all_contacts()
         .into_iter()
-        .filter(|c| {
-            c.local_alias.to_lowercase().contains(&needle_lc)
-                || c.description.to_lowercase().contains(&needle_lc)
-                || c.fingerprint_short().to_lowercase().contains(&needle_lc)
+        .filter_map(|c| {
+            let alias_lc = c.local_alias.to_lowercase();
+            if alias_lc.starts_with(&needle_lc) {
+                Some((0u8, c))
+            } else if alias_lc.contains(&needle_lc) {
+                Some((1u8, c))
+            } else {
+                // Perf: compute fingerprint only when alias didn't match.
+                // fingerprint_short() does BLAKE3 + 3 BIP-39 lookups; calling
+                // it once here (and only for non-alias matches) avoids
+                // recomputing it per keystroke for every contact in the book.
+                let fp = c.fingerprint_short().to_lowercase();
+                if fp.contains(&needle_lc) {
+                    Some((2u8, c))
+                } else {
+                    None
+                }
+            }
         })
-        .take(limit)
-        .collect()
+        .collect();
+
+    // Stable sort: tier ASC, then verified DESC (true > false → invert),
+    // then alias ASC for ties within the same tier+trust bucket.
+    scored.sort_by(|(t_a, c_a), (t_b, c_b)| {
+        t_a.cmp(t_b)
+            .then(c_b.verified.cmp(&c_a.verified)) // verified-first
+            .then(c_a.local_alias.cmp(&c_b.local_alias))
+    });
+
+    scored.into_iter().map(|(_, c)| c).take(limit).collect()
 }
 
 /// Look up a contact by ML-DSA verifying key (#51 — sender trust). Returns
@@ -712,9 +744,10 @@ mod tests {
         insert_contact(make_contact("alice-work", 5, 6)).unwrap();
 
         // "ali" should match "Alice" and "alice-work", not "bob".
-        let mut results = filter_contacts("ali", 8);
-        results.sort_by(|a, b| a.local_alias.cmp(&b.local_alias));
+        let results = filter_contacts("ali", 8);
         assert_eq!(results.len(), 2, "expected 2 matches for 'ali'");
+        // Both "Alice" and "alice-work" contain "ali" as a prefix; alphabetical
+        // order within the same tier puts "Alice" before "alice-work".
         assert_eq!(&*results[0].local_alias, "Alice");
         assert_eq!(&*results[1].local_alias, "alice-work");
 
@@ -723,16 +756,46 @@ mod tests {
         assert_eq!(upper.len(), 2, "case-insensitive match for 'ALI'");
     }
 
+    /// Description matches are intentionally NOT surfaced (adversarial-shadowing
+    /// fix). A contact whose description contains the needle must not appear.
     #[test]
-    fn filter_contacts_matches_description() {
+    fn filter_contacts_does_not_match_description() {
         ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
         let mut c = make_contact("carol", 7, 8);
         c.description = "work colleague".into();
         insert_contact(c).unwrap();
 
+        // "colleague" only appears in the description, not the alias or
+        // fingerprint — must return no results.
         let results = filter_contacts("colleague", 8);
-        assert_eq!(results.len(), 1);
-        assert_eq!(&*results[0].local_alias, "carol");
+        assert!(
+            results.is_empty(),
+            "description-only match must be suppressed (adversarial shadowing fix)"
+        );
+    }
+
+    /// Alias-prefix matches sort before alias-substring matches, and verified
+    /// contacts sort before unverified within the same tier.
+    #[test]
+    fn filter_contacts_tier_and_verified_sort() {
+        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+        // "alice" is a prefix match for "ali" — tier 0.
+        let mut alice = make_contact("alice", 1, 2);
+        alice.verified = true;
+        insert_contact(alice).unwrap();
+        // "alice-work" is also a prefix match for "ali" — tier 0, not verified.
+        insert_contact(make_contact("alice-work", 5, 6)).unwrap();
+        // "malice" contains "ali" but doesn't start with it — tier 1.
+        insert_contact(make_contact("malice", 9, 10)).unwrap();
+
+        let results = filter_contacts("ali", 8);
+        assert_eq!(results.len(), 3);
+        // Tier 0 verified: "alice"
+        assert_eq!(&*results[0].local_alias, "alice");
+        // Tier 0 unverified: "alice-work"
+        assert_eq!(&*results[1].local_alias, "alice-work");
+        // Tier 1 (substring): "malice"
+        assert_eq!(&*results[2].local_alias, "malice");
     }
 
     #[test]
