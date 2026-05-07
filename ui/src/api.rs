@@ -1951,10 +1951,10 @@ pub(crate) mod permission_pump {
             if let Some(index) = auto_index {
                 match post_respond(origin, &prompt.nonce, index).await {
                     Ok(()) => {
-                        crate::log::info!(
+                        crate::log::info(format!(
                             "permission pump: auto-responded nonce={} index={index}",
                             prompt.nonce
-                        );
+                        ));
                         seen.insert(prompt.nonce.clone());
                         // Once a decision is applied, drain the pending
                         // recipients so the next send starts fresh.
@@ -1997,7 +1997,7 @@ pub(crate) mod permission_pump {
             );
             return;
         };
-        dioxus_core::spawn_forever(async move {
+        dioxus::core::spawn_forever(async move {
             let mut seen = std::collections::HashSet::<String>::new();
             loop {
                 tick(&origin, &mut seen, user).await;

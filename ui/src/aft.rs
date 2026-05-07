@@ -140,9 +140,9 @@ impl AftRecords {
         let contract_key =
             ContractKey::from_params(TOKEN_RECORD_CODE_HASH, params).map_err(|e| format!("{e}"))?;
         Self::get_state(client, contract_key).await?;
-        let alias = identity.alias();
+        let _alias = identity.alias();
         crate::log::debug!(
-            "subscribing to AFT updates for `{contract_key}`, belonging to alias `{alias}`"
+            "subscribing to AFT updates for `{contract_key}`, belonging to alias `{_alias}`"
         );
         if !contract_to_id.contains_key(&contract_key) {
             Self::subscribe(client, contract_key).await?;
