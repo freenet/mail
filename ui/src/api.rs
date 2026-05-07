@@ -691,7 +691,7 @@ pub(crate) async fn node_comms(
     user: Signal<crate::app::User>,
     inboxes: crate::app::InboxesData,
     ab_gen: crate::app::AddressBookGen,
-    mut toast: Signal<Option<String>>,
+    _toast: crate::toast::ToastQueue,
 ) {
     // todo don't unwrap inside this function, propagate errors to the UI somehow
     use freenet_email_inbox::Inbox as StoredInbox;
@@ -1016,7 +1016,6 @@ pub(crate) async fn node_comms(
         mut login_controller: dioxus::prelude::Signal<crate::app::LoginController>,
         user: Signal<crate::app::User>,
         mut ab_gen: crate::app::AddressBookGen,
-        mut toast: Signal<Option<String>>,
     ) {
         let mut client = WEB_API_SENDER.get().unwrap().clone();
         let res = match res {
@@ -1605,8 +1604,10 @@ pub(crate) async fn node_comms(
                                         format!("token assignment failure: {reason}"),
                                         Some(TryNodeAction::SendMessage),
                                     );
-                                    toast
-                                        .set(Some(crate::aft::format_failure_toast(&reason, None)));
+                                    crate::toast::push_toast(
+                                        crate::aft::format_failure_toast(&reason, None),
+                                        crate::toast::ToastLevel::Error,
+                                    );
                                     let drained = AftRecords::drain_pending_for_delegate(&key);
                                     for (inbox_key, _hash) in drained {
                                         crate::inbox::fail_pending_sent_for_inbox(
@@ -1665,7 +1666,6 @@ pub(crate) async fn node_comms(
                     login_controller,
                     user,
                     ab_gen,
-                    toast,
                 )
                 .await;
             }
@@ -1698,14 +1698,14 @@ pub(crate) async fn node_comms(
                         // string to keep the check stable across refactors.
                         if matches!(action, TryNodeAction::SendMessage) {
                             let msg_str = msg.to_string();
-                            let user_msg = if msg_str.contains("failed to get token record") {
+                            let user_msg = if msg_str.contains(crate::aft::NO_TOKEN_RECORD_MSG_PREFIX) {
                                 crate::aft::format_no_record_toast()
                             } else {
                                 format!(
                                     "Can't send: {msg_str}. Check Settings → AFT or try again."
                                 )
                             };
-                            toast.set(Some(user_msg));
+                            crate::toast::push_toast(user_msg, crate::toast::ToastLevel::Error);
                         }
                     }
                     Some(Ok(_)) => {}
@@ -1731,9 +1731,10 @@ pub(crate) async fn node_comms(
                         ),
                         Some(TryNodeAction::SendMessage),
                     );
-                    toast.set(Some(
+                    crate::toast::push_toast(
                         crate::aft::format_expired_assignment_toast(assignment.tier),
-                    ));
+                        crate::toast::ToastLevel::Error,
+                    );
                 }
             }
         }

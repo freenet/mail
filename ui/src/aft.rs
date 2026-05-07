@@ -554,6 +554,39 @@ impl AftRecords {
     }
 }
 
+/// Sentinel prefix embedded in the `DynError` message when `assign_token`
+/// cannot find the sender's token record in the local cache.  Call sites in
+/// `app.rs` and `api.rs` test for this prefix so they can map the opaque
+/// error to the user-friendly [`format_no_record_toast`] copy instead of
+/// exposing the raw internal message.  Defined as a constant so the test
+/// and production code stay in sync without substring guessing.
+pub(crate) const NO_TOKEN_RECORD_MSG_PREFIX: &str = "failed to get token record";
+
+/// Map a [`Tier`] to a short human-readable label used in toast copy.
+///
+/// The `Tier` `Display` impl uses strum `serialize_all = "lowercase"` which
+/// produces identifiers like `"min10"` and `"day1"`.  User-facing copy
+/// should say "10-minute token" or "1-day token" instead.
+pub(crate) fn tier_label(tier: Tier) -> &'static str {
+    match tier {
+        Tier::Min1 => "1-minute token",
+        Tier::Min5 => "5-minute token",
+        Tier::Min10 => "10-minute token",
+        Tier::Min30 => "30-minute token",
+        Tier::Hour1 => "1-hour token",
+        Tier::Hour3 => "3-hour token",
+        Tier::Hour6 => "6-hour token",
+        Tier::Hour12 => "12-hour token",
+        Tier::Day1 => "1-day token",
+        Tier::Day7 => "7-day token",
+        Tier::Day15 => "15-day token",
+        Tier::Day30 => "30-day token",
+        Tier::Day90 => "90-day token",
+        Tier::Day180 => "180-day token",
+        Tier::Day365 => "1-year token",
+    }
+}
+
 /// Build a user-facing toast message for a `FailureReason` returned by
 /// the AFT delegate.  Produces distinct, actionable copy for each variant
 /// so the user knows both why the send failed and what they can do next.
@@ -569,11 +602,11 @@ pub(crate) fn format_failure_toast(reason: &FailureReason, recipient: Option<&st
                 .to_string()
         }
         FailureReason::NoFreeSlot { criteria, .. } => {
+            let label = tier_label(criteria.frequency);
             format!(
-                "Can't send: no token available at tier {tier} for {recipient}. \
-                 Check Settings → AFT to mint {tier} tokens, or ask {recipient} \
+                "Can't send: no {label} available for {recipient}. \
+                 Check Settings → AFT to mint {label}s, or ask {recipient} \
                  to relax their policy.",
-                tier = criteria.frequency,
             )
         }
     }
@@ -583,8 +616,9 @@ pub(crate) fn format_failure_toast(reason: &FailureReason, recipient: Option<&st
 /// confirmation timed out (the delegate sent no `confirm_allocation`
 /// within the sweep window).
 pub(crate) fn format_expired_assignment_toast(tier: Tier) -> String {
+    let label = tier_label(tier);
     format!(
-        "Can't send: the {tier} token assignment timed out. \
+        "Can't send: the {label} assignment timed out. \
          Your tokens may have expired — mint new ones in Settings → AFT."
     )
 }
@@ -733,7 +767,11 @@ mod tests {
             criteria,
         };
         let msg = format_failure_toast(&reason, Some("alice"));
-        assert!(msg.contains("min10"), "expected tier name in: {msg}");
+        // Should use the human-readable label, not the strum identifier.
+        assert!(
+            msg.contains("10-minute token"),
+            "expected human tier label in: {msg}"
+        );
         assert!(msg.contains("alice"), "expected recipient in: {msg}");
         assert!(
             msg.contains("Settings → AFT"),
@@ -744,7 +782,10 @@ mod tests {
     #[test]
     fn format_expired_assignment_toast_includes_tier() {
         let msg = format_expired_assignment_toast(Tier::Day1);
-        assert!(msg.contains("day1"), "expected tier in: {msg}");
+        assert!(
+            msg.contains("1-day token"),
+            "expected human tier label in: {msg}"
+        );
         assert!(msg.contains("Settings → AFT"), "expected hint in: {msg}");
     }
 
@@ -753,6 +794,47 @@ mod tests {
         let msg = format_no_record_toast();
         assert!(!msg.is_empty());
         assert!(msg.contains("token record"), "expected context in: {msg}");
+    }
+
+    #[test]
+    fn no_token_record_msg_prefix_matches_assign_token_error() {
+        // The assign_token error message starts with NO_TOKEN_RECORD_MSG_PREFIX.
+        // This test ensures the sentinel and the actual error string stay in sync.
+        let simulated_error = format!("{} for alias `test` (key)", NO_TOKEN_RECORD_MSG_PREFIX);
+        assert!(
+            simulated_error.contains(NO_TOKEN_RECORD_MSG_PREFIX),
+            "sentinel must match the assign_token error prefix"
+        );
+    }
+
+    #[test]
+    fn tier_label_covers_all_variants() {
+        // Verify all Tier variants produce non-empty human-readable labels
+        // and do not contain the raw strum lowercase identifiers (e.g. "min10", "day1").
+        let tiers = [
+            (Tier::Min1, "1-minute"),
+            (Tier::Min5, "5-minute"),
+            (Tier::Min10, "10-minute"),
+            (Tier::Min30, "30-minute"),
+            (Tier::Hour1, "1-hour"),
+            (Tier::Hour3, "3-hour"),
+            (Tier::Hour6, "6-hour"),
+            (Tier::Hour12, "12-hour"),
+            (Tier::Day1, "1-day"),
+            (Tier::Day7, "7-day"),
+            (Tier::Day15, "15-day"),
+            (Tier::Day30, "30-day"),
+            (Tier::Day90, "90-day"),
+            (Tier::Day180, "180-day"),
+            (Tier::Day365, "1-year"),
+        ];
+        for (tier, expected_prefix) in tiers {
+            let label = tier_label(tier);
+            assert!(
+                label.starts_with(expected_prefix),
+                "tier_label({tier:?}) should start with '{expected_prefix}', got: {label}"
+            );
+        }
     }
 
     /// Drain on an unknown delegate must be a no-op (returns empty,

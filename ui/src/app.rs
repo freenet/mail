@@ -126,11 +126,11 @@ pub(crate) fn app() -> Element {
     // `.read()` re-render and pick up the updated verification state.
     use_context_provider(|| AddressBookGen(Signal::new(0u32)));
     let ab_gen = use_context::<AddressBookGen>();
-    // Toast signal is provided at the root so both the node-comms coroutine
-    // (which surfaces async AFT failures) and all UI components can write/read
-    // it without an extra Signal thread-local.
-    use_context_provider(|| Signal::new(Option::<String>::None));
-    let toast = use_context::<Signal<Option<String>>>();
+    // Toast queue is provided at the root so both the node-comms coroutine
+    // (which surfaces async AFT failures) and all UI components can push/read
+    // toasts without an extra Signal thread-local.
+    use_context_provider(|| crate::toast::ToastQueue::new(Vec::new()));
+    let toast = use_context::<crate::toast::ToastQueue>();
     // Modal signals lifted to the root so that both the login pane
     // (IdentifiersList) and the inbox (UserInbox → Settings → Contacts)
     // can open these modals. Fixes #158.
@@ -1775,7 +1775,6 @@ fn quote_body(body: &str) -> String {
 #[component]
 fn OpenArchivedMessage(msg_id: u64, msg: mail_local_state::ArchivedMessage) -> Element {
     let mut menu_selection = use_context::<Signal<menu::MenuSelection>>();
-    let mut toast = use_context::<Signal<Option<String>>>();
     let user = use_context::<Signal<User>>();
     let client = crate::api::WEB_API_SENDER.get().unwrap();
 
@@ -1850,8 +1849,7 @@ fn OpenArchivedMessage(msg_id: u64, msg: mail_local_state::ArchivedMessage) -> E
                             }
                         }
                         menu_selection.write().at_inbox_list();
-                        toast.set(Some("Deleted".to_string()));
-                        spawn_toast_clear();
+                        crate::toast::push_toast("Deleted", crate::toast::ToastLevel::Success);
                     },
                     "Delete"
                 }
@@ -1984,7 +1982,6 @@ fn OpenSentMessage(msg: mail_local_state::SentMessage) -> Element {
 #[component]
 fn OpenMessage(msg: Message) -> Element {
     let mut menu_selection = use_context::<Signal<menu::MenuSelection>>();
-    let mut toast = use_context::<Signal<Option<String>>>();
     let client = crate::api::WEB_API_SENDER.get().unwrap();
     let mut inbox = use_context::<Signal<InboxView>>();
     let inbox_data = use_context::<InboxesData>();
@@ -2137,9 +2134,10 @@ fn OpenMessage(msg: Message) -> Element {
                             // is a follow-up — the affordance is wired now
                             // so the verified-unknown flow has a path
                             // (#51).
-                            toast.set(Some(
-                                "Open the address book to add this sender".into(),
-                            ));
+                            crate::toast::push_toast(
+                                "Open the address book to add this sender",
+                                crate::toast::ToastLevel::Info,
+                            );
                         },
                         "Add to address book"
                     }
@@ -2196,8 +2194,7 @@ fn OpenMessage(msg: Message) -> Element {
                             .unwrap();
                         DELAYED_ACTIONS.with(|queue| { queue.borrow_mut().push(result); });
                         menu_selection.write().at_inbox_list();
-                        toast.set(Some("Archived".to_string()));
-                        spawn_toast_clear();
+                        crate::toast::push_toast("Archived", crate::toast::ToastLevel::Success);
                     },
                     "Archive"
                 }
@@ -2234,8 +2231,7 @@ fn OpenMessage(msg: Message) -> Element {
                             .unwrap();
                         DELAYED_ACTIONS.with(|queue| { queue.borrow_mut().push(result); });
                         menu_selection.write().at_inbox_list();
-                        toast.set(Some("Deleted".to_string()));
-                        spawn_toast_clear();
+                        crate::toast::push_toast("Deleted", crate::toast::ToastLevel::Success);
                     },
                     "Delete"
                 }
@@ -2254,38 +2250,11 @@ fn OpenMessage(msg: Message) -> Element {
     }
 }
 
-fn spawn_toast_clear() {
-    let mut toast = use_context::<Signal<Option<String>>>();
-    spawn(async move {
-        gloo_timers::future::TimeoutFuture::new(2200).await;
-        toast.set(None);
-    });
-}
-
-#[allow(non_snake_case)]
-fn ToastView() -> Element {
-    let toast = use_context::<Signal<Option<String>>>();
-    let value = toast.read().clone();
-    if let Some(text) = value {
-        rsx! {
-            div {
-                class: "toast",
-                "data-testid": testid::FM_TOAST,
-                role: "status",
-                "aria-live": "assertive",
-                span { class: "pulse-dot" }
-                span { "{text}" }
-            }
-        }
-    } else {
-        rsx! {}
-    }
-}
+use crate::toast::ToastView;
 
 #[allow(non_snake_case)]
 fn ComposeSheet() -> Element {
     let mut menu_selection = use_context::<Signal<menu::MenuSelection>>();
-    let mut toast = use_context::<Signal<Option<String>>>();
     let client = crate::api::WEB_API_SENDER.get().unwrap();
     let mut inbox = use_context::<Signal<InboxView>>();
     let user = use_context::<Signal<User>>();
@@ -2435,10 +2404,12 @@ fn ComposeSheet() -> Element {
                     format!("couldn't find key for `{to_val}`"),
                     Some(TryNodeAction::GetAlias),
                 );
-                toast.set(Some(format!(
-                    "Recipient `{to_val}` is not in your address book. Import their contact card before sending."
-                )));
-                spawn_toast_clear();
+                crate::toast::push_toast(
+                    format!(
+                        "Recipient `{to_val}` is not in your address book. Import their contact card before sending."
+                    ),
+                    crate::toast::ToastLevel::Error,
+                );
                 return;
             }
         };
@@ -2451,10 +2422,12 @@ fn ComposeSheet() -> Element {
                 format!("verify_on_send is on; recipient `{to_val}` is not a verified contact"),
                 Some(TryNodeAction::GetAlias),
             );
-            toast.set(Some(format!(
-                "Recipient `{to_val}` is not verified. Verify the fingerprint in Contacts before sending."
-            )));
-            spawn_toast_clear();
+            crate::toast::push_toast(
+                format!(
+                    "Recipient `{to_val}` is not verified. Verify the fingerprint in Contacts before sending."
+                ),
+                crate::toast::ToastLevel::Warning,
+            );
             return;
         }
         let recipient_ek = match address_book::ek_from_bytes(&recipient.ml_kem_ek_bytes) {
@@ -2542,13 +2515,12 @@ fn ComposeSheet() -> Element {
             Err(e) => {
                 let msg = e.to_string();
                 crate::log::error(msg.clone(), Some(TryNodeAction::SendMessage));
-                let user_msg = if msg.contains("failed to get token record") {
+                let user_msg = if msg.contains(crate::aft::NO_TOKEN_RECORD_MSG_PREFIX) {
                     crate::aft::format_no_record_toast()
                 } else {
                     format!("Can't send: {msg}. Check Settings → AFT or try again.")
                 };
-                toast.set(Some(user_msg));
-                spawn_toast_clear();
+                crate::toast::push_toast(user_msg, crate::toast::ToastLevel::Error);
                 false
             }
         };
@@ -2615,8 +2587,7 @@ fn ComposeSheet() -> Element {
         }
         delete_draft_now(());
         menu_selection.write().at_new_msg();
-        toast.set(Some("Sent".to_string()));
-        spawn_toast_clear();
+        crate::toast::push_toast("Sent", crate::toast::ToastLevel::Success);
     };
 
     rsx! {
