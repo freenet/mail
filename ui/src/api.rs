@@ -689,7 +689,7 @@ pub(crate) async fn node_comms(
     login_controller: Signal<crate::app::LoginController>,
     user: Signal<crate::app::User>,
     inboxes: crate::app::InboxesData,
-    ab_gen: crate::app::AddressBookGen,
+    #[allow(unused_mut)] mut ab_gen: crate::app::AddressBookGen,
 ) {
     // todo don't unwrap inside this function, propagate errors to the UI somehow
     use freenet_email_inbox::Inbox as StoredInbox;
