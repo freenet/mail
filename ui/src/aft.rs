@@ -446,7 +446,10 @@ impl AftRecords {
             )
             .into());
         };
-        let nonempty_tier_count = (&records).into_iter().filter(|(_, v)| !v.is_empty()).count();
+        let nonempty_tier_count = (&records)
+            .into_iter()
+            .filter(|(_, v)| !v.is_empty())
+            .count();
         crate::log::info(format!(
             "AFT.assign_token: RECORDS hit alias=`{alias}` nonempty_tiers={count} required_tier={tier:?} max_age_secs={age} (release-visible diagnostic for #174)",
             alias = generator_id.alias(),
