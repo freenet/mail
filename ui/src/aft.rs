@@ -326,11 +326,6 @@ impl AftRecords {
         client: &mut WebApiRequestClient,
         record: TokenAssignment,
     ) -> Result<(), DynError> {
-        crate::log::info(format!(
-            "AFT.allocated_assignment: token received tier={tier:?} assignment_hash={hash} (release-visible diagnostic for #174)",
-            tier = record.tier,
-            hash = bs58::encode(record.assignment_hash).into_string()
-        ));
         let Some(inbox) = PENDING_INBOXES_UPDATES.with(|queue| {
             queue.borrow().iter().find_map(|(inbox, hash)| {
                 if &record.assignment_hash == hash {
@@ -341,10 +336,6 @@ impl AftRecords {
             })
         }) else {
             // unexpected token
-            crate::log::info(format!(
-                "AFT.allocated_assignment: NO matching pending inbox for assignment_hash={hash} — token dropped (release-visible diagnostic for #174)",
-                hash = bs58::encode(record.assignment_hash).into_string()
-            ));
             return Ok(());
         };
 
@@ -434,11 +425,6 @@ impl AftRecords {
         // todo: optimize so we don't clone the whole record and instead use a smart pointer
         let Some(records) = RECORDS.with(|recs| recs.borrow().get(generator_id).cloned()) else {
             // todo: somehow propagate this to the UI so the user retries /or we retry automatically/ later
-            crate::log::info(format!(
-                "AFT.assign_token: RECORDS miss for alias=`{alias}` token_record={key} (release-visible diagnostic for #174)",
-                alias = generator_id.alias(),
-                key = token_record
-            ));
             return Err(format!(
                 "failed to get token record for alias `{alias}` ({key})",
                 alias = generator_id.alias(),
@@ -446,17 +432,6 @@ impl AftRecords {
             )
             .into());
         };
-        let nonempty_tier_count = (&records)
-            .into_iter()
-            .filter(|(_, v)| !v.is_empty())
-            .count();
-        crate::log::info(format!(
-            "AFT.assign_token: RECORDS hit alias=`{alias}` nonempty_tiers={count} required_tier={tier:?} max_age_secs={age} (release-visible diagnostic for #174)",
-            alias = generator_id.alias(),
-            count = nonempty_tier_count,
-            tier = recipient_required_tier,
-            age = recipient_max_age_secs,
-        ));
         // Pick the cheapest tier the sender has available that still satisfies
         // the recipient's minimum (#152). Collect available tiers from the
         // cached record so we prefer a Min10 slot over a Day1 when both exist.
@@ -518,11 +493,6 @@ impl AftRecords {
             alias = identity.alias
         );
         let record = TokenAllocationRecord::try_from(state)?;
-        let nonempty_tiers = (&record).into_iter().filter(|(_, v)| !v.is_empty()).count();
-        crate::log::info(format!(
-            "AFT.set_identity_contract: alias=`{alias}` key={key} nonempty_tiers={nonempty_tiers} (release-visible diagnostic for #174)",
-            alias = identity.alias
-        ));
         RECORDS.with(|recs| {
             let recs = &mut *recs.borrow_mut();
             recs.insert(identity, record);
