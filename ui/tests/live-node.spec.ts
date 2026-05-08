@@ -714,6 +714,10 @@ test.describe("Live node E2E", () => {
         .click();
       await composeAndSend(aliceApp, ALIAS_T4_BOB, "cap test r1", "round one body");
 
+      // Sent rows only render when the Sent folder is selected (app.rs:1545).
+      // Switch alice to Sent so subsequent `fm-sent-card` locators resolve.
+      await aliceApp.locator('[data-testid="fm-folder-sent"]').click();
+
       // Round 1 must NOT flip to Failed within reasonable time.
       // We don't poll for Delivered specifically (transit can take
       // time on iso); we poll for "no Failed row yet" after 30s.
@@ -739,6 +743,7 @@ test.describe("Live node E2E", () => {
 
       // ── Round 2: same minute slot → must Fail ───────────────────
       await composeAndSend(aliceApp, ALIAS_T4_BOB, "cap test r2", "round two body");
+      await aliceApp.locator('[data-testid="fm-folder-sent"]').click();
       const sentR2 = aliceApp
         .locator('[data-testid="fm-sent-card"]')
         .filter({ hasText: "cap test r2" });
@@ -778,6 +783,7 @@ test.describe("Live node E2E", () => {
 
       // ── Round 3: new slot → must succeed ────────────────────────
       await composeAndSend(aliceApp, ALIAS_T4_BOB, "cap test r3", "round three body");
+      await aliceApp.locator('[data-testid="fm-folder-sent"]').click();
       const sentR3 = aliceApp
         .locator('[data-testid="fm-sent-card"]')
         .filter({ hasText: "cap test r3" });
