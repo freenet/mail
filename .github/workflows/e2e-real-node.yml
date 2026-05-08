@@ -21,6 +21,11 @@ on:
     # Nightly at 04:30 UTC.
     - cron: '30 4 * * *'
   workflow_dispatch:
+    inputs:
+      run_aft_cap_test:
+        description: 'Run the >60s AFT cap-enforcement test (#179). Off by default — adds ~100s to the run.'
+        type: boolean
+        default: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -158,6 +163,10 @@ jobs:
         env:
           # Don't tear down on failure — uploads below capture state.
           FREENET_E2E_KEEP: '1'
+          # AFT cap-enforcement test (#179) is opt-in because it
+          # waits >60s for a Min1 slot to roll over. Triggered via
+          # workflow_dispatch input. Tag/cron/PR runs leave it off.
+          FREENET_LIVE_E2E_AFT_CAP: ${{ inputs.run_aft_cap_test == true && '1' || '0' }}
 
       - name: Upload Playwright artifacts
         if: always()
