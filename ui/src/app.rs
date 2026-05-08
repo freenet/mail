@@ -925,6 +925,21 @@ mod menu {
             }
         }
 
+        /// Stable kebab-case identifier for `data-screen` attributes used
+        /// by Playwright tests. Decoupled from `label()` (which is user-
+        /// facing copy and can change).
+        pub fn slug(self) -> &'static str {
+            match self {
+                Self::Account => "account",
+                Self::Privacy => "privacy",
+                Self::Aft => "aft",
+                Self::Inbox => "inbox",
+                Self::Contacts => "contacts",
+                Self::Appearance => "appearance",
+                Self::Advanced => "advanced",
+            }
+        }
+
         pub fn is_global(self) -> bool {
             matches!(self, Self::Appearance | Self::Advanced)
         }

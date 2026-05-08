@@ -251,6 +251,7 @@ fn NavBlock(current: menu::SettingsScreen) -> Element {
                                 key: "{label}",
                                 class: "{class}",
                                 "data-testid": testid::FM_SETTINGS_NAV_ITEM,
+                                "data-screen": item.slug(),
                                 onclick: move |_| menu_selection.write().open_settings(item),
                                 span { class: "glyph", "{glyph}" }
                                 span { class: "label", "{text}" }
@@ -862,6 +863,9 @@ fn ScrAft() -> Element {
                                     class: "{cls}",
                                     r#type: "button",
                                     style: "all: unset; display: flex; flex-direction: column; gap: 4px; cursor: pointer; border: 1px solid var(--line); border-radius: 11px; padding: 12px 12px 10px; background: #fff;",
+                                    "data-testid": "fm-aft-tier",
+                                    "data-tier": "{id}",
+                                    "data-active": "{active}",
                                     onclick: move |_| on_tier_click(id_str.clone()),
                                     div { class: "fm-tier-name", "{id}" }
                                     div { class: "fm-tier-rate", "{rate}" }

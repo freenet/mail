@@ -64,6 +64,8 @@ const ALIAS_T2_ALICE = "alice2";
 const ALIAS_T2_BOB = "bob2";
 const ALIAS_T3_ALICE = "alice3";
 const ALIAS_T3_BOB = "bob3";
+const ALIAS_T4_ALICE = "alice4";
+const ALIAS_T4_BOB = "bob4";
 test.describe("Live node E2E", () => {
   test.skip(
     !process.env.FREENET_EMAIL_BASE_URL?.includes("/v1/contract/web/"),
@@ -602,6 +604,198 @@ test.describe("Live node E2E", () => {
       await bobCtx.tracing
         .stop({ path: "test-results/multi-round-bob-trace.zip" })
         .catch(() => {});
+      await aliceCtx.close().catch(() => {});
+      await bobCtx.close().catch(() => {});
+      stopGwPump();
+      stopPeerPump();
+    }
+  });
+
+  // AFT cap-enforcement (#179). Default tier is Min10 → 10-minute
+  // cooldown can't fit a CI run. Bob switches his inbox to Min1 via
+  // settings before alice imports, so alice's first send mints a Min1
+  // token. Round 1 succeeds. Round 2 within the same 60-second slot
+  // must fail: the local AFT delegate emits NoFreeSlot, api.rs flips
+  // the Sent row Pending → Failed via TokenDelegateMessage::Failure.
+  // After waiting past the slot boundary, round 3 succeeds.
+  //
+  // Heavy: includes a >60s wait. Gated behind FREENET_LIVE_E2E_AFT_CAP=1
+  // until verified stable on iso CI. Once green for a few runs, default
+  // it on by flipping the make-task env in Makefile.toml.
+  test("AFT cap enforces slot collision on Min1 tier (#179)", async ({
+    browser,
+  }) => {
+    test.skip(
+      process.env.FREENET_LIVE_E2E_AFT_CAP !== "1",
+      "set FREENET_LIVE_E2E_AFT_CAP=1 to run the >60s cap-enforcement test",
+    );
+    test.skip(
+      !PEER_BASE_URL,
+      "cap test requires FREENET_EMAIL_BASE_URL to include the contract id",
+    );
+    test.setTimeout(180_000);
+
+    const stopGwPump = startPermissionPump(ISO_GW_ORIGIN);
+    const stopPeerPump = startPermissionPump(ISO_PEER_ORIGIN);
+    const aliceCtx = await browser.newContext();
+    const bobCtx = await browser.newContext();
+    const alicePage = await aliceCtx.newPage();
+    const bobPage = await bobCtx.newPage();
+    try {
+      await Promise.all([
+        alicePage.goto(""),
+        bobPage.goto(PEER_BASE_URL),
+      ]);
+      await Promise.all([
+        createIdentity(alicePage, ALIAS_T4_ALICE),
+        createIdentity(bobPage, ALIAS_T4_BOB),
+      ]);
+
+      const aliceApp = alicePage.frameLocator("iframe#app");
+      const bobApp = bobPage.frameLocator("iframe#app");
+
+      // ── Bob shares his card BEFORE switching tier. The card is
+      // derived from the verifying key (stable across tier changes;
+      // tier lives in mutable InboxSettings, not InboxParams), so the
+      // share text captured here remains valid after the tier flip.
+      await bobApp
+        .locator(`[data-testid="fm-id-row"][data-alias="${ALIAS_T4_BOB}"] [data-testid="fm-id-share"]`)
+        .click();
+      const shareModal = bobApp.locator('[data-testid="fm-share-modal"]');
+      await shareModal.waitFor({ timeout: 5_000 });
+      const bobCard = (await shareModal.getAttribute("data-share-text")) ?? "";
+      expect(bobCard, "bob share text contains contact:// payload").toMatch(
+        /verify: .+\ncontact:\/\//,
+      );
+      await shareModal.locator(".modal-x").click();
+
+      // ── Bob opens his inbox so UpdateInboxPolicy has a loaded model
+      // to mutate (api.rs:907 silently no-ops if the inbox isn't loaded).
+      await bobApp
+        .locator(`[data-testid="fm-id-row"][data-alias="${ALIAS_T4_BOB}"] [data-testid="fm-id-open"]`)
+        .first()
+        .click();
+
+      // ── Bob navigates to Settings → AFT → Min1 ──────────────────
+      await bobApp.locator('[data-testid="fm-settings-btn"]').click();
+      await bobApp
+        .locator('[data-testid="fm-settings-nav-item"][data-screen="aft"]')
+        .click();
+      const min1Btn = bobApp.locator(
+        '[data-testid="fm-aft-tier"][data-tier="Min1"]',
+      );
+      await min1Btn.click();
+      await expect(
+        min1Btn,
+        "Min1 tier button is active after click (settings persisted locally)",
+      ).toHaveAttribute("data-active", "true", { timeout: 5_000 });
+      // Close settings → back to mailbox so subsequent assertions
+      // target inbox UI, not settings UI.
+      await bobApp.locator('[data-testid="fm-settings-back"]').click();
+
+      // ── Alice imports bob (verified) ────────────────────────────
+      await aliceApp.locator('[data-testid="fm-contact-import"]').click();
+      const importModal = aliceApp.locator(
+        '[data-testid="fm-import-contact-modal"]',
+      );
+      await importModal.locator("textarea").fill(bobCard);
+      await aliceApp
+        .locator('input[placeholder="e.g. Alice (work)"]')
+        .fill(ALIAS_T4_BOB);
+      const verifyCheck = aliceApp.locator('[data-testid="fm-verify-check"]');
+      await verifyCheck.waitFor({ timeout: 15_000 });
+      await verifyCheck.click();
+      await aliceApp.locator('[data-testid="fm-import-submit"]').click();
+
+      // ── Alice opens her inbox and sends round 1 ─────────────────
+      await aliceApp
+        .locator(`[data-testid="fm-id-row"][data-alias="${ALIAS_T4_ALICE}"] [data-testid="fm-id-open"]`)
+        .first()
+        .click();
+      await composeAndSend(aliceApp, ALIAS_T4_BOB, "cap test r1", "round one body");
+
+      // Round 1 must NOT flip to Failed within reasonable time.
+      // We don't poll for Delivered specifically (transit can take
+      // time on iso); we poll for "no Failed row yet" after 30s.
+      const sentR1 = aliceApp
+        .locator('[data-testid="fm-sent-card"]')
+        .filter({ hasText: "cap test r1" });
+      await expect(sentR1, "round 1 Sent card surfaces").toBeVisible({
+        timeout: 10_000,
+      });
+      // Negative — within 30s the row should not be Failed.
+      // (Pending → Delivered is fine; Pending stays acceptable.)
+      await expect
+        .poll(
+          async () =>
+            (await sentR1.getAttribute("data-delivery-state")) ?? "",
+          {
+            message:
+              "round 1 must not flip to Failed (cap should accept the first Min1 send)",
+            timeout: 30_000,
+          },
+        )
+        .not.toBe("Failed");
+
+      // ── Round 2: same minute slot → must Fail ───────────────────
+      await composeAndSend(aliceApp, ALIAS_T4_BOB, "cap test r2", "round two body");
+      const sentR2 = aliceApp
+        .locator('[data-testid="fm-sent-card"]')
+        .filter({ hasText: "cap test r2" });
+      await expect(sentR2, "round 2 Sent card surfaces").toBeVisible({
+        timeout: 10_000,
+      });
+      // The delegate's NoFreeSlot path runs synchronously after the
+      // user-permission accept fires; the Pending → Failed transition
+      // in api.rs:1798 should land within ~10s. Allow 30s headroom.
+      await expect
+        .poll(
+          async () =>
+            (await sentR2.getAttribute("data-delivery-state")) ?? "",
+          {
+            message:
+              "round 2 must flip to Failed (Min1 slot already taken by round 1)",
+            timeout: 30_000,
+          },
+        )
+        .toBe("Failed");
+
+      // gw log should mention the AFT failure (delegate-level NoFreeSlot
+      // surfaces as a Failure record in `token assignment failure`).
+      // The contract-side slot-collision message is a fallback — accept
+      // either signal so we're not wedded to one log path.
+      expect(
+        grepLog(/token assignment failure|slot.*collision|NoFreeSlot/),
+        "gw log surfaces an AFT cap rejection during round 2",
+      ).toBe(true);
+
+      // ── Wait past the Min1 slot boundary (60s slot windows). The
+      // delegate computes slots as floor(now / 60s); if round 1 minted
+      // at 12:34:55 and round 2 hit at 12:34:58, both share slot N.
+      // Sleeping 75s guarantees we're in slot N+1 regardless of where
+      // round 1 landed in the 60-second window.
+      await alicePage.waitForTimeout(75_000);
+
+      // ── Round 3: new slot → must succeed ────────────────────────
+      await composeAndSend(aliceApp, ALIAS_T4_BOB, "cap test r3", "round three body");
+      const sentR3 = aliceApp
+        .locator('[data-testid="fm-sent-card"]')
+        .filter({ hasText: "cap test r3" });
+      await expect(sentR3, "round 3 Sent card surfaces").toBeVisible({
+        timeout: 10_000,
+      });
+      await expect
+        .poll(
+          async () =>
+            (await sentR3.getAttribute("data-delivery-state")) ?? "",
+          {
+            message:
+              "round 3 must not flip to Failed (new slot opened after 60s wait)",
+            timeout: 60_000,
+          },
+        )
+        .not.toBe("Failed");
+    } finally {
       await aliceCtx.close().catch(() => {});
       await bobCtx.close().catch(() => {});
       stopGwPump();
