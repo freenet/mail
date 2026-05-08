@@ -227,8 +227,18 @@ test.describe("Live node E2E", () => {
       ]);
 
       // ── Bob shares his contact card ─────────────────────────────
+      // Scope to bob2's row, NOT `.first()`. Identity rows are sorted
+      // alphabetically (login.rs:380), so .first() returns the
+      // alphabetically-first identity on the node — which on a peer that
+      // already saw bob1/bob2 in earlier tests is NOT the one this test
+      // just created. (#174 root cause: in test 3, .first() returned
+      // bob2's row, alice imported bob2's keys under local alias "bob3",
+      // and her send went to bob2's inbox — orphan UPDATE since no UI
+      // was watching that inbox.)
       const bobApp = bobPage.frameLocator("iframe#app");
-      await bobApp.locator('[data-testid="fm-id-share"]').first().click();
+      await bobApp
+        .locator(`[data-testid="fm-id-row"][data-alias="${ALIAS_T2_BOB}"] [data-testid="fm-id-share"]`)
+        .click();
       const shareModal = bobApp.locator('[data-testid="fm-share-modal"]');
       await shareModal.waitFor({ timeout: 5_000 });
       const bobCard = (await shareModal.getAttribute("data-share-text")) ?? "";
@@ -427,11 +437,12 @@ test.describe("Live node E2E", () => {
 
       // Alice imports bob so round 1 (alice→bob) can resolve. Bob's
       // import of alice is deferred to inside the round-2 conditional
-      // — it's only needed for the reply path, and doing it eagerly
-      // here added an address-book write race that prevented round 1
-      // UPDATE from firing on bob3's inbox (observed in #173 CI run
-      // 25542986416).
-      await bobApp.locator('[data-testid="fm-id-share"]').first().click();
+      // — it's only needed for the reply path. Scope share to the
+      // bob3 row specifically; .first() picks bob2 alphabetically when
+      // the peer delegate already saw bob2 in test 2 (#174 root cause).
+      await bobApp
+        .locator(`[data-testid="fm-id-row"][data-alias="${ALIAS_T3_BOB}"] [data-testid="fm-id-share"]`)
+        .click();
       const bobShare = bobApp.locator('[data-testid="fm-share-modal"]');
       await bobShare.waitFor({ timeout: 5_000 });
       const bobCard = (await bobShare.getAttribute("data-share-text")) ?? "";
@@ -510,7 +521,11 @@ test.describe("Live node E2E", () => {
       // the 60s window). Tracked separately; gated until reproducible.
       if (process.env.FREENET_LIVE_E2E_REPLY === "1") {
         // Bob needs to import alice first so the reply can resolve.
-        await aliceApp.locator('[data-testid="fm-id-share"]').first().click();
+        // Scope to alice3 row specifically (#174 — gw delegate accumulates
+        // alice1/alice2/alice3 across tests; .first() returns alice1).
+        await aliceApp
+          .locator(`[data-testid="fm-id-row"][data-alias="${ALIAS_T3_ALICE}"] [data-testid="fm-id-share"]`)
+          .click();
         const aliceShare = aliceApp.locator('[data-testid="fm-share-modal"]');
         await aliceShare.waitFor({ timeout: 5_000 });
         const aliceCard =
