@@ -425,19 +425,17 @@ test.describe("Live node E2E", () => {
       const aliceApp = alicePage.frameLocator("iframe#app");
       const bobApp = bobPage.frameLocator("iframe#app");
 
-      // Exchange contacts BOTH ways: alice imports bob, bob imports alice.
+      // Alice imports bob so round 1 (alice→bob) can resolve. Bob's
+      // import of alice is deferred to inside the round-2 conditional
+      // — it's only needed for the reply path, and doing it eagerly
+      // here added an address-book write race that prevented round 1
+      // UPDATE from firing on bob3's inbox (observed in #173 CI run
+      // 25542986416).
       await bobApp.locator('[data-testid="fm-id-share"]').first().click();
       const bobShare = bobApp.locator('[data-testid="fm-share-modal"]');
       await bobShare.waitFor({ timeout: 5_000 });
       const bobCard = (await bobShare.getAttribute("data-share-text")) ?? "";
       await bobShare.locator(".modal-x").click();
-
-      await aliceApp.locator('[data-testid="fm-id-share"]').first().click();
-      const aliceShare = aliceApp.locator('[data-testid="fm-share-modal"]');
-      await aliceShare.waitFor({ timeout: 5_000 });
-      const aliceCard =
-        (await aliceShare.getAttribute("data-share-text")) ?? "";
-      await aliceShare.locator(".modal-x").click();
 
       await aliceApp.locator('[data-testid="fm-contact-import"]').click();
       await aliceApp
@@ -452,18 +450,6 @@ test.describe("Live node E2E", () => {
       await aliceVerify.waitFor({ timeout: 15_000 });
       await aliceVerify.click();
       await aliceApp.locator('[data-testid="fm-import-submit"]').click();
-
-      await bobApp.locator('[data-testid="fm-contact-import"]').click();
-      await bobApp
-        .locator('[data-testid="fm-import-contact-modal"] textarea')
-        .fill(aliceCard);
-      await bobApp
-        .locator('input[placeholder="e.g. Alice (work)"]')
-        .fill(ALIAS_T3_ALICE);
-      const bobVerify = bobApp.locator('[data-testid="fm-verify-check"]');
-      await bobVerify.waitFor({ timeout: 15_000 });
-      await bobVerify.click();
-      await bobApp.locator('[data-testid="fm-import-submit"]').click();
 
       // Open both inboxes.
       await aliceApp
@@ -523,6 +509,26 @@ test.describe("Live node E2E", () => {
       // logs — bob's UPDATE doesn't surface in alice's inbox within
       // the 60s window). Tracked separately; gated until reproducible.
       if (process.env.FREENET_LIVE_E2E_REPLY === "1") {
+        // Bob needs to import alice first so the reply can resolve.
+        await aliceApp.locator('[data-testid="fm-id-share"]').first().click();
+        const aliceShare = aliceApp.locator('[data-testid="fm-share-modal"]');
+        await aliceShare.waitFor({ timeout: 5_000 });
+        const aliceCard =
+          (await aliceShare.getAttribute("data-share-text")) ?? "";
+        await aliceShare.locator(".modal-x").click();
+
+        await bobApp.locator('[data-testid="fm-contact-import"]').click();
+        await bobApp
+          .locator('[data-testid="fm-import-contact-modal"] textarea')
+          .fill(aliceCard);
+        await bobApp
+          .locator('input[placeholder="e.g. Alice (work)"]')
+          .fill(ALIAS_T3_ALICE);
+        const bobVerify = bobApp.locator('[data-testid="fm-verify-check"]');
+        await bobVerify.waitFor({ timeout: 15_000 });
+        await bobVerify.click();
+        await bobApp.locator('[data-testid="fm-import-submit"]').click();
+
         await composeAndSend(bobApp, ALIAS_T3_ALICE, "round two reply", "reply body");
         await expect(
           aliceApp.getByText(/round two reply/i),
