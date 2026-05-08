@@ -51,6 +51,19 @@ const PEER_BASE_URL = CONTRACT_ID
 // first run's AFT slot / identity-management state. Keep this spec
 // single-shot; flake is a real bug, not a transient.
 test.describe.configure({ retries: 0 });
+
+// Each test gets unique alias names so identity-management delegate
+// state on the gw (and peer) doesn't collide across tests in the same
+// run. The harness wipes once at the start of `cargo make
+// test-e2e-real-node`, but the 3 specs run sequentially against the
+// same iso net — without per-test suffixes, test 2's "alice" creation
+// hits `Identity::get_alias` Some-branch (alias already registered),
+// `pending` never sets, and `fm-create-confirm` never renders.
+const ALIAS_T1_ALICE = "alice1";
+const ALIAS_T2_ALICE = "alice2";
+const ALIAS_T2_BOB = "bob2";
+const ALIAS_T3_ALICE = "alice3";
+const ALIAS_T3_BOB = "bob3";
 test.describe("Live node E2E", () => {
   test.skip(
     !process.env.FREENET_EMAIL_BASE_URL?.includes("/v1/contract/web/"),
@@ -91,12 +104,12 @@ test.describe("Live node E2E", () => {
         "APP_NAME brand block",
       ).toContainText(APP_NAME, { timeout: 60_000 });
 
-      // ── Step 1: create identity "alice" ────────────────────────────
+      // ── Step 1: create identity ─────────────────────────────────────
       // Pre-login first-run shows two action-cards. Click the create one,
       // which lands on the alias-input form; the legacy "John Smith"
       // placeholder is replaced with `e.g. mira`.
       await app.locator('[data-testid="fm-id-create"]').click();
-      await app.locator('[data-testid="fm-create-alias-input"]').fill("alice");
+      await app.locator('[data-testid="fm-create-alias-input"]').fill(ALIAS_T1_ALICE);
       // Form stage's "Generate" button → reveal stage → "Continue to inbox".
       await app.locator('[data-testid="fm-create-submit"]').click();
       await app.locator('[data-testid="fm-create-confirm"]').click();
@@ -106,10 +119,10 @@ test.describe("Live node E2E", () => {
       // CreateIdentity. The reload-tolerant fallback this test used
       // to carry hid the bug — assert directly that alice is visible
       // within the first-run keygen + delegate round-trip window.
-      const alice = app.locator('[data-testid="fm-id-row"][data-alias="alice"]');
+      const alice = app.locator(`[data-testid="fm-id-row"][data-alias="${ALIAS_T1_ALICE}"]`);
       await expect(
         alice,
-        "alice must appear without reload (regression for #76)",
+        "identity must appear without reload (regression for #76)",
       ).toBeVisible({ timeout: 30_000 });
 
       // ── Step 2: reload-persistence (covers PR #37) ────────────────
@@ -120,8 +133,8 @@ test.describe("Live node E2E", () => {
         "app re-mounts after reload",
       ).toContainText(APP_NAME, { timeout: 60_000 });
       await expect(
-        appAfterReload.locator('[data-testid="fm-id-row"][data-alias="alice"]'),
-        "alice persists across reload",
+        appAfterReload.locator(`[data-testid="fm-id-row"][data-alias="${ALIAS_T1_ALICE}"]`),
+        "identity persists across reload",
       ).toBeVisible({ timeout: 30_000 });
 
       // ── Step 3: assert delegate registered + Init idempotent ──────
@@ -131,7 +144,9 @@ test.describe("Live node E2E", () => {
         .poll(
           () =>
             grepLog(
-              /create alias .*alice|set_aliases count=\d+|init skipped — secret already exists/,
+              new RegExp(
+                `create alias .*${ALIAS_T1_ALICE}|set_aliases count=\\d+|init skipped — secret already exists`,
+              ),
             ),
           {
             message:
@@ -159,7 +174,7 @@ test.describe("Live node E2E", () => {
       // in v0.2.54.
       const downloadPromise = page.waitForEvent("download", { timeout: 5_000 });
       await appAfterReload
-        .locator('[data-testid="fm-id-row"][data-alias="alice"] [data-testid="fm-id-backup"]')
+        .locator(`[data-testid="fm-id-row"][data-alias="${ALIAS_T1_ALICE}"] [data-testid="fm-id-backup"]`)
         .click();
       const download = await downloadPromise;
       expect(
@@ -207,8 +222,8 @@ test.describe("Live node E2E", () => {
       ]);
 
       await Promise.all([
-        createIdentity(alicePage, "alice"),
-        createIdentity(bobPage, "bob"),
+        createIdentity(alicePage, ALIAS_T2_ALICE),
+        createIdentity(bobPage, ALIAS_T2_BOB),
       ]);
 
       // ── Bob shares his contact card ─────────────────────────────
@@ -231,7 +246,7 @@ test.describe("Live node E2E", () => {
       await importModal.locator("textarea").fill(bobCard);
       await aliceApp
         .locator('input[placeholder="e.g. Alice (work)"]')
-        .fill("bob");
+        .fill(ALIAS_T2_BOB);
       // Tick the "I verified these six words" checkbox so the contact
       // is stored verified. `verify_on_send` defaults to true, so an
       // unverified import silently rejects the send (toast: "Recipient
@@ -250,17 +265,17 @@ test.describe("Live node E2E", () => {
       // surface briefly post-reload). Either row points at the same
       // identity, so opening the first is correct.
       await aliceApp
-        .locator('[data-testid="fm-id-row"][data-alias="alice"] [data-testid="fm-id-open"]')
+        .locator(`[data-testid="fm-id-row"][data-alias="${ALIAS_T2_ALICE}"] [data-testid="fm-id-open"]`)
         .first()
         .click();
       await aliceApp.locator('[data-testid="fm-compose-btn"]').click();
       const aliceSheet = aliceApp.locator('[data-testid="fm-compose-sheet"]');
       await aliceSheet
         .locator('input[placeholder="alias or address"]')
-        .fill("bob");
+        .fill(ALIAS_T2_BOB);
       await expect(
         aliceApp.getByTestId("compose-recipient-fingerprint"),
-        "fingerprint badge resolves for bob",
+        `fingerprint badge resolves for ${ALIAS_T2_BOB}`,
       ).toBeVisible({ timeout: 15_000 });
       await aliceSheet
         .locator('input[placeholder="subject"]')
@@ -290,7 +305,7 @@ test.describe("Live node E2E", () => {
       // panic): regardless of which layer eats the message, bob's
       // inbox staying empty is the user-visible signal.
       await bobApp
-        .locator('[data-testid="fm-id-row"][data-alias="bob"] [data-testid="fm-id-open"]')
+        .locator(`[data-testid="fm-id-row"][data-alias="${ALIAS_T2_BOB}"] [data-testid="fm-id-open"]`)
         .first()
         .click();
       await expect(
@@ -403,26 +418,24 @@ test.describe("Live node E2E", () => {
     try {
       await Promise.all([alicePage.goto(""), bobPage.goto(PEER_BASE_URL)]);
       await Promise.all([
-        createIdentity(alicePage, "alice"),
-        createIdentity(bobPage, "bob"),
+        createIdentity(alicePage, ALIAS_T3_ALICE),
+        createIdentity(bobPage, ALIAS_T3_BOB),
       ]);
 
       const aliceApp = alicePage.frameLocator("iframe#app");
       const bobApp = bobPage.frameLocator("iframe#app");
 
-      // Exchange contacts BOTH ways: alice imports bob, bob imports alice.
+      // Alice imports bob so round 1 (alice→bob) can resolve. Bob's
+      // import of alice is deferred to inside the round-2 conditional
+      // — it's only needed for the reply path, and doing it eagerly
+      // here added an address-book write race that prevented round 1
+      // UPDATE from firing on bob3's inbox (observed in #173 CI run
+      // 25542986416).
       await bobApp.locator('[data-testid="fm-id-share"]').first().click();
       const bobShare = bobApp.locator('[data-testid="fm-share-modal"]');
       await bobShare.waitFor({ timeout: 5_000 });
       const bobCard = (await bobShare.getAttribute("data-share-text")) ?? "";
       await bobShare.locator(".modal-x").click();
-
-      await aliceApp.locator('[data-testid="fm-id-share"]').first().click();
-      const aliceShare = aliceApp.locator('[data-testid="fm-share-modal"]');
-      await aliceShare.waitFor({ timeout: 5_000 });
-      const aliceCard =
-        (await aliceShare.getAttribute("data-share-text")) ?? "";
-      await aliceShare.locator(".modal-x").click();
 
       await aliceApp.locator('[data-testid="fm-contact-import"]').click();
       await aliceApp
@@ -430,7 +443,7 @@ test.describe("Live node E2E", () => {
         .fill(bobCard);
       await aliceApp
         .locator('input[placeholder="e.g. Alice (work)"]')
-        .fill("bob");
+        .fill(ALIAS_T3_BOB);
       // verify_on_send defaults true; tick checkbox so import is verified
       // (#105 root cause: silent send rejection on unverified contact).
       const aliceVerify = aliceApp.locator('[data-testid="fm-verify-check"]');
@@ -438,34 +451,22 @@ test.describe("Live node E2E", () => {
       await aliceVerify.click();
       await aliceApp.locator('[data-testid="fm-import-submit"]').click();
 
-      await bobApp.locator('[data-testid="fm-contact-import"]').click();
-      await bobApp
-        .locator('[data-testid="fm-import-contact-modal"] textarea')
-        .fill(aliceCard);
-      await bobApp
-        .locator('input[placeholder="e.g. Alice (work)"]')
-        .fill("alice");
-      const bobVerify = bobApp.locator('[data-testid="fm-verify-check"]');
-      await bobVerify.waitFor({ timeout: 15_000 });
-      await bobVerify.click();
-      await bobApp.locator('[data-testid="fm-import-submit"]').click();
-
       // Open both inboxes.
       await aliceApp
         .locator(
-          '[data-testid="fm-id-row"][data-alias="alice"] [data-testid="fm-id-open"]',
+          `[data-testid="fm-id-row"][data-alias="${ALIAS_T3_ALICE}"] [data-testid="fm-id-open"]`,
         )
         .first()
         .click();
       await bobApp
         .locator(
-          '[data-testid="fm-id-row"][data-alias="bob"] [data-testid="fm-id-open"]',
+          `[data-testid="fm-id-row"][data-alias="${ALIAS_T3_BOB}"] [data-testid="fm-id-open"]`,
         )
         .first()
         .click();
 
       // ── Round 1: alice → bob ────────────────────────────────────
-      await composeAndSend(aliceApp, "bob", "round one", "first body");
+      await composeAndSend(aliceApp, ALIAS_T3_BOB, "round one", "first body");
       await expect(
         bobApp.getByText(/round one/i),
         "bob receives round one",
@@ -494,7 +495,7 @@ test.describe("Live node E2E", () => {
       await bobApp.locator(".brand-name").first().waitFor({ timeout: 30_000 });
       await bobApp
         .locator(
-          '[data-testid="fm-id-row"][data-alias="bob"] [data-testid="fm-id-open"]',
+          `[data-testid="fm-id-row"][data-alias="${ALIAS_T3_BOB}"] [data-testid="fm-id-open"]`,
         )
         .first()
         .click();
@@ -508,7 +509,27 @@ test.describe("Live node E2E", () => {
       // logs — bob's UPDATE doesn't surface in alice's inbox within
       // the 60s window). Tracked separately; gated until reproducible.
       if (process.env.FREENET_LIVE_E2E_REPLY === "1") {
-        await composeAndSend(bobApp, "alice", "round two reply", "reply body");
+        // Bob needs to import alice first so the reply can resolve.
+        await aliceApp.locator('[data-testid="fm-id-share"]').first().click();
+        const aliceShare = aliceApp.locator('[data-testid="fm-share-modal"]');
+        await aliceShare.waitFor({ timeout: 5_000 });
+        const aliceCard =
+          (await aliceShare.getAttribute("data-share-text")) ?? "";
+        await aliceShare.locator(".modal-x").click();
+
+        await bobApp.locator('[data-testid="fm-contact-import"]').click();
+        await bobApp
+          .locator('[data-testid="fm-import-contact-modal"] textarea')
+          .fill(aliceCard);
+        await bobApp
+          .locator('input[placeholder="e.g. Alice (work)"]')
+          .fill(ALIAS_T3_ALICE);
+        const bobVerify = bobApp.locator('[data-testid="fm-verify-check"]');
+        await bobVerify.waitFor({ timeout: 15_000 });
+        await bobVerify.click();
+        await bobApp.locator('[data-testid="fm-import-submit"]').click();
+
+        await composeAndSend(bobApp, ALIAS_T3_ALICE, "round two reply", "reply body");
         await expect(
           aliceApp.getByText(/round two reply/i),
           "alice receives bob's reply",
@@ -522,7 +543,7 @@ test.describe("Live node E2E", () => {
       // Set FREENET_LIVE_E2E_AFT_CAP_RAISED=1 once the cap is lifted
       // (test contract or alternative tier) to re-enable.
       if (process.env.FREENET_LIVE_E2E_AFT_CAP_RAISED === "1") {
-        await composeAndSend(aliceApp, "bob", "round three", "third body");
+        await composeAndSend(aliceApp, ALIAS_T3_BOB, "round three", "third body");
         await expect(
           bobApp.getByText(/round three/i),
           "bob receives round three (AFT slot still free)",

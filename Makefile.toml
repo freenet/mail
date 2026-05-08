@@ -717,5 +717,6 @@ cd "$ROOT/ui/tests" && \
     FREENET_EMAIL_BASE_URL="$BASE_URL" \
     FREENET_ISO_GW_PORT="$GW_PORT" \
     FREENET_ISO_GW_LOG_DIR="$ISO_ROOT/gw/logs" \
+    FREENET_ISO_PEER_LOG_DIR="$ISO_ROOT/peer/logs" \
     npx playwright test live-node.spec.ts --project=chromium
 '''
