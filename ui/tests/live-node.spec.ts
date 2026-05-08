@@ -435,11 +435,12 @@ test.describe("Live node E2E", () => {
       const aliceApp = alicePage.frameLocator("iframe#app");
       const bobApp = bobPage.frameLocator("iframe#app");
 
-      // Alice imports bob so round 1 (alice→bob) can resolve. Bob's
-      // import of alice is deferred to inside the round-2 conditional
-      // — it's only needed for the reply path. Scope share to the
-      // bob3 row specifically; .first() picks bob2 alphabetically when
-      // the peer delegate already saw bob2 in test 2 (#174 root cause).
+      // Capture both share cards up-front while we're still on the
+      // home view. fm-id-share / fm-id-row only exist on the
+      // pre-login screen; once an inbox is opened, the home view
+      // unmounts and these locators stop resolving.
+      // Scope each share locator by data-alias (#174 — peer delegate
+      // accumulates bob2/bob3, gw delegate accumulates alice1/2/3).
       await bobApp
         .locator(`[data-testid="fm-id-row"][data-alias="${ALIAS_T3_BOB}"] [data-testid="fm-id-share"]`)
         .click();
@@ -448,6 +449,16 @@ test.describe("Live node E2E", () => {
       const bobCard = (await bobShare.getAttribute("data-share-text")) ?? "";
       await bobShare.locator(".modal-x").click();
 
+      await aliceApp
+        .locator(`[data-testid="fm-id-row"][data-alias="${ALIAS_T3_ALICE}"] [data-testid="fm-id-share"]`)
+        .click();
+      const aliceShareEarly = aliceApp.locator('[data-testid="fm-share-modal"]');
+      await aliceShareEarly.waitFor({ timeout: 5_000 });
+      const aliceCard =
+        (await aliceShareEarly.getAttribute("data-share-text")) ?? "";
+      await aliceShareEarly.locator(".modal-x").click();
+
+      // Alice imports bob so round 1 (alice→bob) can resolve.
       await aliceApp.locator('[data-testid="fm-contact-import"]').click();
       await aliceApp
         .locator('[data-testid="fm-import-contact-modal"] textarea')
@@ -461,6 +472,21 @@ test.describe("Live node E2E", () => {
       await aliceVerify.waitFor({ timeout: 15_000 });
       await aliceVerify.click();
       await aliceApp.locator('[data-testid="fm-import-submit"]').click();
+
+      // Bob imports alice up-front too — needed for round-2 reply
+      // (FREENET_LIVE_E2E_REPLY). fm-contact-import is on the home
+      // view; once bob opens his inbox, it unmounts.
+      await bobApp.locator('[data-testid="fm-contact-import"]').click();
+      await bobApp
+        .locator('[data-testid="fm-import-contact-modal"] textarea')
+        .fill(aliceCard);
+      await bobApp
+        .locator('input[placeholder="e.g. Alice (work)"]')
+        .fill(ALIAS_T3_ALICE);
+      const bobVerify = bobApp.locator('[data-testid="fm-verify-check"]');
+      await bobVerify.waitFor({ timeout: 15_000 });
+      await bobVerify.click();
+      await bobApp.locator('[data-testid="fm-import-submit"]').click();
 
       // Open both inboxes.
       await aliceApp
@@ -516,34 +542,12 @@ test.describe("Live node E2E", () => {
       ).toBeVisible({ timeout: 30_000 });
 
       // ── Round 2: bob → alice (reply path) ────────────────────────
-      // Flaky on iso (~33% miss rate, no failing assertion in
-      // logs — bob's UPDATE doesn't surface in alice's inbox within
-      // the 60s window). Tracked separately; gated until reproducible.
-      if (process.env.FREENET_LIVE_E2E_REPLY === "1") {
-        // Bob needs to import alice first so the reply can resolve.
-        // Scope to alice3 row specifically (#174 — gw delegate accumulates
-        // alice1/alice2/alice3 across tests; .first() returns alice1).
-        await aliceApp
-          .locator(`[data-testid="fm-id-row"][data-alias="${ALIAS_T3_ALICE}"] [data-testid="fm-id-share"]`)
-          .click();
-        const aliceShare = aliceApp.locator('[data-testid="fm-share-modal"]');
-        await aliceShare.waitFor({ timeout: 5_000 });
-        const aliceCard =
-          (await aliceShare.getAttribute("data-share-text")) ?? "";
-        await aliceShare.locator(".modal-x").click();
-
-        await bobApp.locator('[data-testid="fm-contact-import"]').click();
-        await bobApp
-          .locator('[data-testid="fm-import-contact-modal"] textarea')
-          .fill(aliceCard);
-        await bobApp
-          .locator('input[placeholder="e.g. Alice (work)"]')
-          .fill(ALIAS_T3_ALICE);
-        const bobVerify = bobApp.locator('[data-testid="fm-verify-check"]');
-        await bobVerify.waitFor({ timeout: 15_000 });
-        await bobVerify.click();
-        await bobApp.locator('[data-testid="fm-import-submit"]').click();
-
+      // #122: was flaky on iso while #174 was open (round-1 path was
+      // also broken; reply assertion couldn't be exercised).
+      // Re-enabled by default in test-e2e-real-node make task; export
+      // FREENET_LIVE_E2E_REPLY=0 to disable for local debug runs.
+      if (process.env.FREENET_LIVE_E2E_REPLY !== "0") {
+        // Bob already imported alice at setup; just send the reply.
         await composeAndSend(bobApp, ALIAS_T3_ALICE, "round two reply", "reply body");
         await expect(
           aliceApp.getByText(/round two reply/i),

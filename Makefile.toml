@@ -718,5 +718,6 @@ cd "$ROOT/ui/tests" && \
     FREENET_ISO_GW_PORT="$GW_PORT" \
     FREENET_ISO_GW_LOG_DIR="$ISO_ROOT/gw/logs" \
     FREENET_ISO_PEER_LOG_DIR="$ISO_ROOT/peer/logs" \
+    FREENET_LIVE_E2E_REPLY="${FREENET_LIVE_E2E_REPLY:-1}" \
     npx playwright test live-node.spec.ts --project=chromium
 '''
