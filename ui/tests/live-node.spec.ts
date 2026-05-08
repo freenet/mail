@@ -473,6 +473,21 @@ test.describe("Live node E2E", () => {
       await aliceVerify.click();
       await aliceApp.locator('[data-testid="fm-import-submit"]').click();
 
+      // Bob imports alice up-front too — needed for round-2 reply
+      // (FREENET_LIVE_E2E_REPLY). fm-contact-import is on the home
+      // view; once bob opens his inbox, it unmounts.
+      await bobApp.locator('[data-testid="fm-contact-import"]').click();
+      await bobApp
+        .locator('[data-testid="fm-import-contact-modal"] textarea')
+        .fill(aliceCard);
+      await bobApp
+        .locator('input[placeholder="e.g. Alice (work)"]')
+        .fill(ALIAS_T3_ALICE);
+      const bobVerify = bobApp.locator('[data-testid="fm-verify-check"]');
+      await bobVerify.waitFor({ timeout: 15_000 });
+      await bobVerify.click();
+      await bobApp.locator('[data-testid="fm-import-submit"]').click();
+
       // Open both inboxes.
       await aliceApp
         .locator(
@@ -532,20 +547,7 @@ test.describe("Live node E2E", () => {
       // Re-enabled by default in test-e2e-real-node make task; export
       // FREENET_LIVE_E2E_REPLY=0 to disable for local debug runs.
       if (process.env.FREENET_LIVE_E2E_REPLY !== "0") {
-        // Bob imports alice using the card captured at setup (above —
-        // fm-id-share isn't reachable from inside the inbox view).
-        await bobApp.locator('[data-testid="fm-contact-import"]').click();
-        await bobApp
-          .locator('[data-testid="fm-import-contact-modal"] textarea')
-          .fill(aliceCard);
-        await bobApp
-          .locator('input[placeholder="e.g. Alice (work)"]')
-          .fill(ALIAS_T3_ALICE);
-        const bobVerify = bobApp.locator('[data-testid="fm-verify-check"]');
-        await bobVerify.waitFor({ timeout: 15_000 });
-        await bobVerify.click();
-        await bobApp.locator('[data-testid="fm-import-submit"]').click();
-
+        // Bob already imported alice at setup; just send the reply.
         await composeAndSend(bobApp, ALIAS_T3_ALICE, "round two reply", "reply body");
         await expect(
           aliceApp.getByText(/round two reply/i),
