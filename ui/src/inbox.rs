@@ -435,10 +435,11 @@ impl DecryptedMessage {
         from: &Identity,
     ) -> Result<(), DynError> {
         let (hash, _) = self.assignment_hash_and_signed_content()?;
-        crate::log::debug!(
-            "requesting token for assignment hash: {}",
+        crate::log::info(format!(
+            "send.start_sending: from=`{}` assignment_hash={} (release-visible diagnostic for #174)",
+            from.alias(),
             bs58::encode(hash).into_string()
-        );
+        ));
         let inbox_pub_key_bytes = inbox_params_pub_key_bytes(&recipient_ml_dsa_vk);
         let delegate_key = AftRecords::assign_token(
             client,
@@ -456,6 +457,10 @@ impl DecryptedMessage {
         .map_err(|e| format!("{e}"))?;
         let inbox_key =
             ContractKey::from_params(INBOX_CODE_HASH, params).map_err(|e| format!("{e}"))?;
+        crate::log::info(format!(
+            "send.start_sending: token requested, awaiting AFT delegate response from=`{}` inbox_key={inbox_key} (release-visible diagnostic for #174)",
+            from.alias()
+        ));
         AftRecords::pending_assignment(delegate_key, inbox_key);
 
         PENDING_INBOXES_UPDATE.with(|map| {
