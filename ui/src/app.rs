@@ -1303,6 +1303,15 @@ fn Sidebar() -> Element {
                             }
                         }
                     }
+                    div { class: "conn-row",
+                        span { class: "lbl", "version" }
+                        span {
+                            class: "val",
+                            "data-testid": testid::FM_SIDEBAR_VERSION,
+                            title: "Webapp build version",
+                            "{crate::app_version()}"
+                        }
+                    }
                 }
                 button {
                     class: "nav-item",

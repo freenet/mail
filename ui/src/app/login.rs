@@ -28,6 +28,7 @@ struct CreateAlias(bool);
 #[allow(non_snake_case)]
 fn Topbar() -> Element {
     let app_name = crate::app_name();
+    let app_version = crate::app_version();
     rsx! {
         header { class: "topbar",
             div { class: "brand",
@@ -41,6 +42,7 @@ fn Topbar() -> Element {
             div { class: "topbar-state",
                 span { class: "pulse-dot" }
                 span { "local · ready" }
+                span { class: "topbar-version", title: "Webapp build version", "{app_version}" }
             }
         }
     }
