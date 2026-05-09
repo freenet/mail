@@ -1,6 +1,6 @@
 [package]
 name = "freenet-email-ui"
-version = "0.0.1"
+version.workspace = true
 edition = "2024"
 license.workspace = true
 publish = false
