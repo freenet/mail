@@ -77,6 +77,14 @@
       font-family: "Geist Mono", monospace; font-size: 9px; letter-spacing: 0.08em;
       text-transform: uppercase; color: var(--ink4);
     }
+    .topbar-version {
+      margin-left: 6px;
+      padding: 2px 6px;
+      border: 1px solid var(--ink5);
+      border-radius: 3px;
+      font-size: 8.5px; letter-spacing: 0.06em;
+      color: var(--ink3);
+    }
     .pulse-dot {
       width: 5px; height: 5px; border-radius: 50%; background: var(--trust); flex: 0 0 5px;
       animation: fm-keypulse 3s ease infinite;

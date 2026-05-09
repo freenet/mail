@@ -17,6 +17,7 @@
   "fmComposeSendingAs": "fm-compose-sending-as",
   "fmSidebarFingerprint": "fm-sidebar-fingerprint",
   "fmSidebarContacts": "fm-sidebar-contacts",
+  "fmSidebarVersion": "fm-sidebar-version",
   "fmReply": "fm-reply",
   "fmDelete": "fm-delete",
   "fmArchive": "fm-archive",

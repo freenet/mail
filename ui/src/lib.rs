@@ -53,6 +53,18 @@ mod branding {
 
 pub(crate) use branding::app_name;
 
+/// Build version string for the UI, shown in the header chip and the
+/// sidebar connection card. Renders as `vX.Y.Z` from the
+/// `freenet-email-ui` crate version. Useful when two peers run
+/// different builds of the webapp — without a visible version it's
+/// easy to chase ghost bugs from a stale published-contract on one
+/// side. We deliberately keep this short (`v…`) so it fits next to
+/// the existing chips; the `title=` attribute can carry build metadata
+/// if we later want a longer string.
+pub(crate) fn app_version() -> &'static str {
+    concat!("v", env!("CARGO_PKG_VERSION"))
+}
+
 /// The base58-encoded `ContractInstanceId` of the signed webapp contract
 /// produced by `cargo make update-published-contract`.
 ///
