@@ -1093,6 +1093,60 @@ pub(crate) async fn node_comms(
                     let prev = *ab_gen.0.read();
                     *ab_gen.0.write() = prev.wrapping_add(1);
 
+                    // #191: prime the local node with the contact's inbox
+                    // contract so a future Send works. The webapp dispatches
+                    // sends as `UpdateData::Delta`, which the originating
+                    // node tries to apply locally before forwarding to a
+                    // hosting peer. That local apply needs the contract's
+                    // wasm + parameters cached, which we don't have until
+                    // we've seen the contract once. A `Get` with
+                    // `return_contract_code=true, subscribe=true` populates
+                    // the local store and registers us as a subscriber so
+                    // future updates also propagate back to the sender's
+                    // node when delivered. Without this, send fails with
+                    // "missing contract parameters" at update.rs:619 and
+                    // the message silently never reaches the recipient.
+                    match crate::app::address_book::vk_from_bytes(&contact.ml_dsa_vk_bytes) {
+                        Ok(vk) => match crate::inbox::inbox_key_for(&vk) {
+                            Ok(inbox_key) => {
+                                let req = freenet_stdlib::client_api::ContractRequest::Get {
+                                    key: inbox_key.into(),
+                                    return_contract_code: true,
+                                    subscribe: true,
+                                    blocking_subscribe: false,
+                                };
+                                if let Err(e) = client.send(req.into()).await {
+                                    crate::log::error(
+                                        format!(
+                                            "prime contact inbox {inbox_key} for {} failed: {e}",
+                                            contact.local_alias
+                                        ),
+                                        None,
+                                    );
+                                } else {
+                                    crate::log::info(format!(
+                                        "primed contact inbox {inbox_key} for {} (#191)",
+                                        contact.local_alias
+                                    ));
+                                }
+                            }
+                            Err(e) => crate::log::error(
+                                format!(
+                                    "derive inbox_key for contact {}: {e}",
+                                    contact.local_alias
+                                ),
+                                None,
+                            ),
+                        },
+                        Err(e) => crate::log::error(
+                            format!(
+                                "decode ml_dsa_vk for contact {}: {e}",
+                                contact.local_alias
+                            ),
+                            None,
+                        ),
+                    }
+
                     // #150: if this contact was just marked verified AND the
                     // active identity has the bypass toggle ON, push an updated
                     // `verified_senders` set to the inbox contract so the new
