@@ -619,12 +619,85 @@ pub(crate) fn backup_filename(alias: &str, words: &[&str; 6]) -> String {
 
 /// Trigger a browser file-download of `json_bytes` as `filename`.
 ///
-/// Creates a `Blob`, wraps it in an object URL, synthesises a temporary
-/// `<a download>` element, clicks it, then revokes the URL.
+/// Two paths:
+///   * **Inside the gateway's sandboxed iframe** (the production case):
+///     postMessage the bytes to the shell page, which runs in the real
+///     origin and can issue an `<a download>` against a non-opaque
+///     blob URL. Reason: an `<a download>` clicked inside a
+///     null-origin sandboxed iframe either silently fails (Firefox)
+///     or hands the OS a file the user can't find (Chrome) — see #187.
+///     The shell's `download` handler matches the existing `clipboard`
+///     proxy pattern.
+///   * **Standalone** (dev server, Playwright, raw `dx serve`):
+///     fall back to the original local `<a download>` path. There is
+///     no parent shell to delegate to and no opaque-origin restriction.
 ///
 /// Returns `Ok(())` on success or an error string describing the failure.
 #[cfg(target_family = "wasm")]
 pub(crate) fn trigger_browser_download(filename: &str, json_bytes: &[u8]) -> Result<(), String> {
+    let window = web_sys::window().ok_or_else(|| "no browser window context".to_string())?;
+    // `window.parent` always returns a window. Compare against `window`
+    // itself: when they are the same object we're at the top level
+    // (no shell to delegate to). Otherwise we're embedded — try the
+    // shell-proxied path first.
+    let parent = window.parent().ok().flatten();
+    let in_iframe = parent
+        .as_ref()
+        .map(|p| !web_sys::js_sys::Object::is(p.as_ref(), window.as_ref()))
+        .unwrap_or(false);
+
+    if in_iframe {
+        match shell_proxy_download(parent.as_ref(), filename, json_bytes) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                // Don't fall through to the local `<a download>` path —
+                // inside a sandboxed iframe that path is the broken one
+                // we're trying to avoid. Surface the error so the user
+                // sees a toast / log entry instead of silent failure.
+                return Err(format!("shell download proxy failed: {e}"));
+            }
+        }
+    }
+
+    local_anchor_download(filename, json_bytes)
+}
+
+/// Shell-proxied download: postMessage the payload to the parent
+/// gateway shell, which performs the download from its own origin.
+/// See `path_handlers.rs` for the matching `download` handler.
+#[cfg(target_family = "wasm")]
+fn shell_proxy_download(
+    parent: Option<&web_sys::Window>,
+    filename: &str,
+    json_bytes: &[u8],
+) -> Result<(), String> {
+    use base64::Engine;
+    use web_sys::js_sys;
+
+    let parent = parent.ok_or_else(|| "no parent window".to_string())?;
+    let payload = base64::engine::general_purpose::STANDARD.encode(json_bytes);
+
+    let msg = js_sys::Object::new();
+    js_sys::Reflect::set(&msg, &"__freenet_shell__".into(), &true.into())
+        .map_err(|e| format!("set marker: {e:?}"))?;
+    js_sys::Reflect::set(&msg, &"type".into(), &"download".into())
+        .map_err(|e| format!("set type: {e:?}"))?;
+    js_sys::Reflect::set(&msg, &"filename".into(), &filename.into())
+        .map_err(|e| format!("set filename: {e:?}"))?;
+    js_sys::Reflect::set(&msg, &"mimeType".into(), &"application/json".into())
+        .map_err(|e| format!("set mimeType: {e:?}"))?;
+    js_sys::Reflect::set(&msg, &"base64".into(), &payload.into())
+        .map_err(|e| format!("set base64: {e:?}"))?;
+
+    parent
+        .post_message(&msg, "*")
+        .map_err(|e| format!("postMessage: {e:?}"))
+}
+
+/// Local `<a download>` path. Used when the webapp is served outside
+/// the gateway shell (dev / Playwright / `dx serve`).
+#[cfg(target_family = "wasm")]
+fn local_anchor_download(filename: &str, json_bytes: &[u8]) -> Result<(), String> {
     use wasm_bindgen::JsCast;
     use web_sys::{Blob, BlobPropertyBag, HtmlAnchorElement, Url, js_sys};
 
