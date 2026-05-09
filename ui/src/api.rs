@@ -1464,7 +1464,27 @@ pub(crate) async fn node_comms(
                                 token_rec_to_id.insert(key, identity);
                             }
                             _ => {
-                                unreachable!("tried to get wrong contract key: {key}")
+                                // GetResponse for a contact's inbox: arrives
+                                // because the rehydrate-prime path (#191) and
+                                // CreateContact handler send Get-with-subscribe
+                                // for every known contact to populate the local
+                                // node's contract store + register interest.
+                                // We only care about the side-effects (subscribe,
+                                // local store populated); the state itself is
+                                // useless to the webapp because a contact's
+                                // inbox is opaque (encrypted to the contact's
+                                // ml_kem key, not ours).
+                                if crate::app::address_book::is_contact_inbox_key(&key) {
+                                    crate::log::debug!(
+                                        "GetResponse: contact inbox {key} \
+                                        primed (#191) — drop"
+                                    );
+                                } else {
+                                    crate::log::error(
+                                        format!("GetResponse for unknown contract key: {key}"),
+                                        None,
+                                    );
+                                }
                             }
                         }
                     }

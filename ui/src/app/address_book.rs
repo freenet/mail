@@ -351,6 +351,28 @@ pub fn lookup(alias: &str) -> Option<Recipient> {
     })
 }
 
+/// True if `key` is the inbox `ContractKey` of any known contact.
+///
+/// Used by the api.rs GetResponse handler to swallow responses produced by
+/// the rehydrate-prime / CreateContact-prime paths (#191). The webapp
+/// can't render a contact's inbox (the messages are encrypted to the
+/// contact's ml_kem key, not ours) — the prime is fire-and-forget.
+pub fn is_contact_inbox_key(key: &freenet_stdlib::prelude::ContractKey) -> bool {
+    use crate::inbox::inbox_key_for;
+    ADDRESS_BOOK.with(|ab| {
+        ab.borrow().values().any(|e| match e {
+            Entry::Contact(c) => match vk_from_bytes(&c.ml_dsa_vk_bytes) {
+                Ok(vk) => match inbox_key_for(&vk) {
+                    Ok(contact_key) => contact_key.id() == key.id(),
+                    Err(_) => false,
+                },
+                Err(_) => false,
+            },
+            Entry::Own(_) => false,
+        })
+    })
+}
+
 /// All contacts (non-own entries), sorted by alias.
 pub fn all_contacts() -> Vec<Contact> {
     ADDRESS_BOOK.with(|ab| {
@@ -870,5 +892,85 @@ mod tests {
         let decoded =
             ContactCard::decode(&share_text).expect("share text with verify line should decode");
         assert_eq!(decoded.ml_dsa_vk_bytes, card.ml_dsa_vk_bytes);
+    }
+
+    /// Regression for the api.rs:1467 panic ("tried to get wrong contract
+    /// key: …"): GetResponse for a contact's inbox key (produced by the
+    /// rehydrate-prime / CreateContact-prime paths from #191) must be
+    /// recognisable so the api.rs handler can swallow it instead of
+    /// panicking.
+    ///
+    /// We exercise the helper end-to-end with a real ML-DSA-65 keypair
+    /// so `vk_from_bytes` and `inbox_key_for` produce the same key the
+    /// node would echo back in a GetResponse.
+    #[test]
+    fn is_contact_inbox_key_recognises_imported_contact() {
+        use ml_dsa::{KeyGen, MlDsa65, signature::Keypair as MlDsaKeypair};
+        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+
+        // Real ML-DSA-65 keypair so vk_from_bytes succeeds.
+        let sk = MlDsa65::from_seed(&[7u8; 32].into());
+        let vk_bytes = MlDsaKeypair::verifying_key(&sk).encode().to_vec();
+
+        let contact = Contact {
+            local_alias: "bob".into(),
+            description: String::new(),
+            ml_dsa_vk_bytes: vk_bytes.clone(),
+            ml_kem_ek_bytes: vec![0u8; 1184],
+            required_tier: Tier::Day1,
+            max_age_secs: DEFAULT_MAX_AGE_SECS,
+            verified: false,
+        };
+        insert_contact(contact).unwrap();
+
+        let vk = vk_from_bytes(&vk_bytes).expect("vk decodes");
+        let key = crate::inbox::inbox_key_for(&vk).expect("inbox_key_for");
+        assert!(
+            is_contact_inbox_key(&key),
+            "is_contact_inbox_key must return true for an imported contact's inbox key",
+        );
+    }
+
+    #[test]
+    fn is_contact_inbox_key_returns_false_for_unrelated_key() {
+        use ml_dsa::{KeyGen, MlDsa65, signature::Keypair as MlDsaKeypair};
+        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+
+        // Insert one contact.
+        let sk_a = MlDsa65::from_seed(&[1u8; 32].into());
+        let vk_a_bytes = MlDsaKeypair::verifying_key(&sk_a).encode().to_vec();
+        insert_contact(Contact {
+            local_alias: "alice".into(),
+            description: String::new(),
+            ml_dsa_vk_bytes: vk_a_bytes,
+            ml_kem_ek_bytes: vec![0u8; 1184],
+            required_tier: Tier::Day1,
+            max_age_secs: DEFAULT_MAX_AGE_SECS,
+            verified: false,
+        })
+        .unwrap();
+
+        // Probe with a *different* keypair's inbox key — must not match.
+        let sk_b = MlDsa65::from_seed(&[2u8; 32].into());
+        let vk_b = MlDsaKeypair::verifying_key(&sk_b);
+        let other_key = crate::inbox::inbox_key_for(&vk_b).expect("inbox_key_for");
+        assert!(
+            !is_contact_inbox_key(&other_key),
+            "is_contact_inbox_key must return false for a key that is not any known contact's inbox",
+        );
+    }
+
+    #[test]
+    fn is_contact_inbox_key_empty_book_returns_false() {
+        use ml_dsa::{KeyGen, MlDsa65, signature::Keypair as MlDsaKeypair};
+        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+
+        let sk = MlDsa65::from_seed(&[3u8; 32].into());
+        let vk = MlDsaKeypair::verifying_key(&sk);
+        let key = crate::inbox::inbox_key_for(&vk).expect("inbox_key_for");
+        assert!(
+            !is_contact_inbox_key(&key),
+            "is_contact_inbox_key on an empty address book must return false",
+        );
     }
 }
