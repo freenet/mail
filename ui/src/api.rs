@@ -555,7 +555,7 @@ mod identity_management {
         Ok(())
     }
 
-    async fn create_alias_api_call(
+    pub(super) async fn create_alias_api_call(
         client: &mut WebApiRequestClient,
         alias: Rc<str>,
         description: String,
@@ -787,7 +787,13 @@ pub(crate) async fn node_comms(
     async fn handle_action(
         req: NodeAction,
         api: &WebApi,
-        token_rec_to_id: &mut HashMap<ContractKey, Identity>,
+        // Forwarded by callers but not consumed in `handle_action` since
+        // #185 moved the eager identity persist out of `alias_creation`
+        // (which had been the sole consumer). The map is still owned by
+        // `responses_loop` for the PutResponse / DelegateResponse handlers
+        // below; we accept it here so the call sites don't have to thread
+        // a smaller param list.
+        _token_rec_to_id: &mut HashMap<ContractKey, Identity>,
         user: Signal<crate::app::User>,
         mut login_controller: Signal<crate::app::LoginController>,
         inboxes: &InboxesData,
@@ -816,28 +822,92 @@ pub(crate) async fn node_comms(
                 ml_kem_dk,
                 description,
             } => {
+                // #185 / #186: persist the keypair to the identity-management
+                // delegate IMMEDIATELY and surface the identity in the UI
+                // BEFORE waiting on any contract PUT acks. The keypair is
+                // the canonical record; inbox + AFT contracts derive
+                // deterministically from it and can be republished later.
+                // Previously this only ran inside `alias_creation`, which
+                // was gated on three PutResponses — any one timing out on
+                // a slow real-net silently dropped the identity.
                 use ml_dsa::signature::Keypair;
                 let identity_key = ml_dsa_key.as_ref().verifying_key().encode().to_vec();
-                let created = identity_management::PENDING_CONFIRMATION.with(|pend| {
+                let ml_kem_dk_inner = *ml_kem_dk;
+                identity_management::PENDING_CONFIRMATION.with(|pend| {
                     let pend = &mut *pend.borrow_mut();
                     let pend = pend.entry(identity_key.clone()).or_default();
                     crate::log::debug!("waiting for confirmation for identity {alias}");
                     pend.alias = Some(alias.clone());
                     pend.description = description.clone();
                     pend.ml_dsa_key = Some(ml_dsa_key.clone());
-                    pend.ml_kem_dk = Some(*ml_kem_dk);
-                    pend.created()
+                    pend.ml_kem_dk = Some(ml_kem_dk_inner.clone());
                 });
-                if created {
-                    identity_management::alias_creation(
-                        &mut client,
-                        &identity_key,
-                        token_rec_to_id,
-                        user,
-                        login_controller,
-                    )
-                    .await;
+
+                // ── Step 1: persist to identity-management delegate ──
+                // Local-only operation, fast, reliable. Even if every
+                // subsequent step fails, the keys are safe and the
+                // identity is recoverable on next page load.
+                if let Err(e) = identity_management::create_alias_api_call(
+                    &mut client,
+                    alias.clone(),
+                    description.clone(),
+                    ml_dsa_key.clone(),
+                    ml_kem_dk_inner.clone(),
+                )
+                .await
+                {
+                    crate::log::error(
+                        format!("identity delegate persist failed: {e}"),
+                        Some(TryNodeAction::CreateIdentity(alias.to_string())),
+                    );
+                    crate::toast::push_toast(
+                        format!("Couldn't save identity `{alias}`: {e}"),
+                        crate::toast::ToastLevel::Error,
+                    );
+                    return;
                 }
+
+                // ── Step 2: derive contract keys + populate ALIASES ──
+                // `inbox_key` is `hash(wasm, InboxParams::from(vk))` —
+                // deterministic, no network round-trip needed.
+                let inbox_key =
+                    match crate::inbox::inbox_key_for(&ml_dsa_key.as_ref().verifying_key()) {
+                        Ok(k) => k,
+                        Err(e) => {
+                            crate::log::error(
+                                format!("derive inbox_key for {alias}: {e}"),
+                                Some(TryNodeAction::CreateIdentity(alias.to_string())),
+                            );
+                            return;
+                        }
+                    };
+                identity_management::PENDING_CONFIRMATION.with(|pend| {
+                    let pend = &mut *pend.borrow_mut();
+                    if let Some(slot) = pend.get_mut(&identity_key) {
+                        // Stash the deterministic inbox_key so the
+                        // PutResponse handler matches even if the network
+                        // ack arrives before the eager set_alias below
+                        // (or never, in which case we already have the
+                        // key locally).
+                        if slot.inbox_key.is_none() {
+                            slot.inbox_key = Some(inbox_key);
+                        }
+                    }
+                });
+                let identity = crate::app::login::Identity::set_alias(
+                    alias.clone(),
+                    description,
+                    ml_dsa_key.clone(),
+                    ml_kem_dk_inner,
+                    inbox_key,
+                    user,
+                );
+                crate::inbox::InboxModel::set_contract_identity(inbox_key, identity.clone());
+                // ALIASES is a thread_local RefCell, not a Signal —
+                // mutating it doesn't wake the Identities component.
+                // Bump the controller so the row appears without a
+                // page reload (#186 fix).
+                login_controller.write().updated = true;
             }
             NodeAction::CreateContract {
                 ml_dsa_key,
