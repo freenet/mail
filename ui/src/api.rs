@@ -1139,10 +1139,7 @@ pub(crate) async fn node_comms(
                             ),
                         },
                         Err(e) => crate::log::error(
-                            format!(
-                                "decode ml_dsa_vk for contact {}: {e}",
-                                contact.local_alias
-                            ),
+                            format!("decode ml_dsa_vk for contact {}: {e}", contact.local_alias),
                             None,
                         ),
                     }
