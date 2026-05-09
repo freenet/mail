@@ -1831,6 +1831,62 @@ pub(crate) async fn node_comms(
                                                 }
                                             }
                                         }
+                                        // #191: rehydrate path also needs to prime
+                                        // every restored contact's inbox contract.
+                                        // CreateContact primes on first import, but
+                                        // contacts persisted in the identity-management
+                                        // delegate come back via `set_aliases` →
+                                        // `insert_contact` without round-tripping the
+                                        // CreateContact handler. After a page reload
+                                        // the local node's contract store is empty,
+                                        // so the first send to a known contact would
+                                        // fail with "missing contract parameters".
+                                        for contact in crate::app::address_book::all_contacts() {
+                                            match crate::app::address_book::vk_from_bytes(
+                                                &contact.ml_dsa_vk_bytes,
+                                            ) {
+                                                Ok(vk) => match crate::inbox::inbox_key_for(&vk) {
+                                                    Ok(inbox_key) => {
+                                                        let req = freenet_stdlib::client_api::ContractRequest::Get {
+                                                            key: inbox_key.into(),
+                                                            return_contract_code: true,
+                                                            subscribe: true,
+                                                            blocking_subscribe: false,
+                                                        };
+                                                        if let Err(e) =
+                                                            client.send(req.into()).await
+                                                        {
+                                                            crate::log::error(
+                                                                format!(
+                                                                    "rehydrate prime contact inbox {inbox_key} for {} failed: {e}",
+                                                                    contact.local_alias
+                                                                ),
+                                                                None,
+                                                            );
+                                                        } else {
+                                                            crate::log::info(format!(
+                                                                "rehydrate primed contact inbox {inbox_key} for {} (#191)",
+                                                                contact.local_alias
+                                                            ));
+                                                        }
+                                                    }
+                                                    Err(e) => crate::log::error(
+                                                        format!(
+                                                            "rehydrate derive inbox_key for contact {}: {e}",
+                                                            contact.local_alias
+                                                        ),
+                                                        None,
+                                                    ),
+                                                },
+                                                Err(e) => crate::log::error(
+                                                    format!(
+                                                        "rehydrate decode ml_dsa_vk for contact {}: {e}",
+                                                        contact.local_alias
+                                                    ),
+                                                    None,
+                                                ),
+                                            }
+                                        }
                                     }
                                     Err(e) => {
                                         crate::log::error(
