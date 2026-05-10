@@ -674,6 +674,69 @@ impl ContractInterface for Inbox {
         state: State<'static>,
         updates: Vec<UpdateData<'static>>,
     ) -> Result<UpdateModification<'static>, ContractError> {
+        // Surface every rejection path with the underlying error message
+        // so receiver-side diagnosis isn't blind. The host-side runtime
+        // log only shows "execution error: invalid contract update" with
+        // no detail; this is the only signal that distinguishes (e.g.)
+        // a stale-token rebroadcast from a sigverify failure or a
+        // `requires(missing)` request. See freenet/freenet-core#4077.
+        let result = Self::update_state_impl(parameters, state, updates);
+        if let Err(ref e) = result {
+            freenet_stdlib::log::info(&format!("inbox.update_state REJECTED: {e}"));
+        }
+        result
+    }
+
+    fn summarize_state(
+        _parameters: Parameters<'static>,
+        state: State<'static>,
+    ) -> Result<StateSummary<'static>, ContractError> {
+        let inbox = Inbox::try_from(&state)?;
+        inbox.summarize()
+    }
+
+    fn get_state_delta(
+        _parameters: Parameters<'static>,
+        state: State<'static>,
+        summary: StateSummary<'static>,
+    ) -> Result<StateDelta<'static>, ContractError> {
+        let inbox = Inbox::try_from(&state)?;
+        let summary = InboxSummary::try_from(summary)?;
+        let new_messages: Vec<Message> = inbox
+            .messages
+            .into_iter()
+            .filter(|m| !summary.0.contains(&m.token_assignment.assignment_hash))
+            .collect();
+        // The delta must match the wire shape that `update_state`'s
+        // `UpdateData::Delta` arm expects: a `UpdateInbox::AddMessages`
+        // enum, not a bare `Inbox` struct. Serializing the inbox struct
+        // produces `{"messages":[...]}` which the receiver fails to
+        // decode as `UpdateInbox` ("unknown variant `messages`, expected
+        // one of AddMessages, RemoveMessages, ModifySettings"). The
+        // delta producer + consumer must agree on the JSON shape.
+        let delta = UpdateInbox::AddMessages {
+            messages: new_messages,
+        };
+        let serialized =
+            serde_json::to_vec(&delta).map_err(|err| ContractError::Deser(format!("{err}")))?;
+        Ok(StateDelta::from(serialized))
+    }
+}
+
+#[cfg(feature = "contract")]
+impl Inbox {
+    /// Real body of `update_state`. Split out from the trait method so
+    /// the trait method can wrap it with diagnostic logging on
+    /// rejection: the host-runtime collapses any `ContractError` to
+    /// `execution error: invalid contract update` in its log, hiding
+    /// which of the dozen rejection paths fired (sigverify,
+    /// token-policy, replay, missing-related, etc.). See
+    /// freenet/freenet-core#4077 for the diagnosis trail this enables.
+    fn update_state_impl(
+        parameters: Parameters<'static>,
+        state: State<'static>,
+        updates: Vec<UpdateData<'static>>,
+    ) -> Result<UpdateModification<'static>, ContractError> {
         freenet_stdlib::log::info(&format!(
             "inbox.update_state called: state_size={} updates={}",
             state.as_ref().len(),
@@ -802,41 +865,6 @@ impl ContractInterface for Inbox {
         } else {
             Ok(UpdateModification::requires(missing_related)?)
         }
-    }
-
-    fn summarize_state(
-        _parameters: Parameters<'static>,
-        state: State<'static>,
-    ) -> Result<StateSummary<'static>, ContractError> {
-        let inbox = Inbox::try_from(&state)?;
-        inbox.summarize()
-    }
-
-    fn get_state_delta(
-        _parameters: Parameters<'static>,
-        state: State<'static>,
-        summary: StateSummary<'static>,
-    ) -> Result<StateDelta<'static>, ContractError> {
-        let inbox = Inbox::try_from(&state)?;
-        let summary = InboxSummary::try_from(summary)?;
-        let new_messages: Vec<Message> = inbox
-            .messages
-            .into_iter()
-            .filter(|m| !summary.0.contains(&m.token_assignment.assignment_hash))
-            .collect();
-        // The delta must match the wire shape that `update_state`'s
-        // `UpdateData::Delta` arm expects: a `UpdateInbox::AddMessages`
-        // enum, not a bare `Inbox` struct. Serializing the inbox struct
-        // produces `{"messages":[...]}` which the receiver fails to
-        // decode as `UpdateInbox` ("unknown variant `messages`, expected
-        // one of AddMessages, RemoveMessages, ModifySettings"). The
-        // delta producer + consumer must agree on the JSON shape.
-        let delta = UpdateInbox::AddMessages {
-            messages: new_messages,
-        };
-        let serialized =
-            serde_json::to_vec(&delta).map_err(|err| ContractError::Deser(format!("{err}")))?;
-        Ok(StateDelta::from(serialized))
     }
 }
 
