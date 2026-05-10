@@ -1573,7 +1573,29 @@ pub(crate) async fn node_comms(
                                 token_rec_to_id.insert(key, identity);
                             }
                             _ => {
-                                unreachable!("tried to get wrong contract key: {key}")
+                                // UpdateNotification for a contact's inbox:
+                                // arrives because the rehydrate-prime path
+                                // (#191) subscribed us to every contact's
+                                // inbox to populate the local node's store.
+                                // The state is opaque (encrypted to the
+                                // contact's ml_kem key, not ours), so we
+                                // can't decrypt or display it — just drop
+                                // the notification. Without this guard the
+                                // arm panicked with `unreachable!` and took
+                                // the whole webapp down (#198).
+                                if crate::app::address_book::is_contact_inbox_key(&key) {
+                                    crate::log::debug!(
+                                        "UpdateNotification: contact inbox \
+                                        {key} (#198) — drop"
+                                    );
+                                } else {
+                                    crate::log::error(
+                                        format!(
+                                            "UpdateNotification for unknown contract key: {key}"
+                                        ),
+                                        None,
+                                    );
+                                }
                             }
                         }
                     }
