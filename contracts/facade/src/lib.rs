@@ -45,7 +45,7 @@
 use byteorder::{BigEndian, ReadBytesExt};
 use ciborium::{de::from_reader, ser::into_writer};
 use ed25519_dalek::VerifyingKey;
-use freenet_email_core::facade::{FACADE_MAX_PREV_APP_IDS, FacadeMetadata, signed_payload};
+use freenet_email_facade_types::{FACADE_MAX_PREV_APP_IDS, FacadeMetadata, signed_payload};
 use freenet_stdlib::prelude::*;
 use std::io::{Cursor, Read};
 
@@ -258,7 +258,7 @@ fn read_pointer_version(state: &[u8]) -> Result<u64, ContractError> {
 mod tests {
     use super::*;
     use ed25519_dalek::{Signer, SigningKey};
-    use freenet_email_core::facade::FacadePointer;
+    use freenet_email_facade_types::FacadePointer;
     use rand::rngs::OsRng;
 
     fn make_keypair() -> (SigningKey, VerifyingKey) {

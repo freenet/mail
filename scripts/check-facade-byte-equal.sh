@@ -15,7 +15,9 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-WASM_OUT="$ROOT/target/wasm32-unknown-unknown/release/freenet_email_facade.wasm"
+# Issue #198: facade lives in its own workspace at contracts/facade/ with
+# a separate Cargo.lock. Build artifacts go under contracts/facade/target/.
+WASM_OUT="$ROOT/contracts/facade/target/wasm32-unknown-unknown/release/freenet_email_facade.wasm"
 COMMITTED="$ROOT/published-contract/facade.wasm"
 
 if [ ! -f "$COMMITTED" ]; then
@@ -23,13 +25,11 @@ if [ ! -f "$COMMITTED" ]; then
     exit 0
 fi
 
-# Build with the same flags the publish pipeline uses.
+# Build with the same flags the publish pipeline uses. Use the facade's
+# own manifest + lockfile (issue #198).
 (
-    cd "$ROOT"
-    CARGO_TARGET_DIR="$ROOT/target" cargo build \
-        --release \
-        --target wasm32-unknown-unknown \
-        -p freenet-email-facade
+    cd "$ROOT/contracts/facade"
+    cargo build --release --target wasm32-unknown-unknown
 )
 
 if ! cmp -s "$WASM_OUT" "$COMMITTED"; then

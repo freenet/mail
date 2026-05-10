@@ -276,9 +276,34 @@ point. Phase 3 (issue #200 sub-task) flips the UI to embed the facade id
 exclusively. Phase 2 (issue #199) handles per-identity inbox + AFT
 contract migration.
 
+**Lockfile isolation (issue #198)**: the facade contract and its shared
+types crate live OUTSIDE the freenet-email workspace:
+
+- `contracts/facade-types/` — tiny crate with `FacadePointer`,
+  `FacadeMetadata`, `signed_payload()`, `FACADE_MAX_PREV_APP_IDS`. Its
+  only deps are `ed25519-dalek` and `serde`.
+- `contracts/facade/` — the on-chain contract crate. Path-deps on
+  `freenet-email-facade-types`. Has its own `Cargo.lock` with `=x.y.z`
+  pins on `byteorder`, `ciborium`, `ed25519-dalek`, `freenet-stdlib`.
+
+Both are listed in `[workspace.exclude]` of the root `Cargo.toml`. The
+freenet-email workspace re-exports the same types via
+`freenet-email-core::facade::*` (path-dep on `freenet-email-facade-types`)
+so signer + UI keep their existing imports unchanged.
+
+Net effect: bumping `dioxus`, `chrono`, `ml-dsa`, or any other
+workspace dep cannot rotate `facade.wasm`, because cargo resolves the
+facade build against `contracts/facade/Cargo.lock` — not the workspace
+lockfile. To deliberately bump a facade dep, edit the `=x.y.z` pin in
+`contracts/facade/Cargo.toml` (and pair with a snapshot regeneration +
+release-id update; see #200).
+
 **Build hygiene**: `scripts/check-facade-byte-equal.sh` rebuilds the
-facade and `cmp`s against `published-contract/facade.wasm`. CI runs this
-step in `check-contract-wasm.yml`.
+facade (using the facade-local manifest at `contracts/facade/`) and
+`cmp`s against `published-contract/facade.wasm`. CI runs this step in
+`check-contract-wasm.yml`. The main `build.yml` workflow also runs
+`cargo fmt`, `cargo clippy`, `cargo test`, and a wasm32 release build
+inside `contracts/facade/` so PRs that touch facade are still gated.
 
 **Status (Phase 1)**: the committed snapshot is not yet present —
 `facade.wasm` is platform-specific (a wasm32 release build on macOS

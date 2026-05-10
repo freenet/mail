@@ -6,6 +6,10 @@ on:
     branches:
       - main
 
+# Note: this workflow also runs the facade contract build/lint/test step
+# even though facade is outside the main workspace (issue #198). See the
+# "Build + lint + test facade contract" step below.
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -94,6 +98,18 @@ jobs:
 
       - name: Run inbox integration tests
         run: cargo make test-inbox
+
+      # Issue #198: facade is OUTSIDE the workspace (own Cargo.lock). The
+      # main workspace build/clippy/test commands above don't reach it.
+      # Build, lint, and test it here so PRs that touch facade types or
+      # contract logic are still gated.
+      - name: Build + lint + test facade contract (own workspace)
+        run: |
+          cd contracts/facade
+          cargo fmt -- --check
+          cargo clippy --all-targets -- -D warnings
+          cargo test
+          cargo build --release --target wasm32-unknown-unknown
 
   ui-playwright-tests:
     runs-on: ubicloud-standard-8

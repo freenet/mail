@@ -233,10 +233,19 @@ bash "$ROOT/scripts/build-loader.sh" "$APP_ID"
 '''
 
 [tasks.build-facade]
-description = "Build the facade contract WASM (stable across releases)"
+description = "Build the facade contract WASM (stable across releases). Issue #198: facade lives outside the workspace with its own Cargo.lock."
 dependencies = ["build-facade-loader"]
-command = "cargo"
-args = ["build", "--profile", "${BUILD_PROFILE}", "--target", "${CONTRACT_TARGET}", "-p", "freenet-email-facade"]
+script_runner = "bash"
+script = '''
+set -euo pipefail
+ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
+# Run cargo against the facade-local manifest. Setting CARGO_TARGET_DIR
+# to the facade's own target/ keeps the wasm output co-located with its
+# lockfile and avoids polluting the workspace target/ (which would also
+# create a circular CARGO_TARGET_DIR conflict).
+cd "$ROOT/contracts/facade"
+cargo build --profile "${BUILD_PROFILE}" --target "${CONTRACT_TARGET}"
+'''
 
 [tasks.sign-facade-state-test]
 description = "Sign a facade state blob using the committed test key (current_app_id from published-contract)"
@@ -306,7 +315,7 @@ script_runner = "bash"
 script = '''
 set -euo pipefail
 ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
-WASM="$ROOT/target/wasm32-unknown-unknown/release/freenet_email_facade.wasm"
+WASM="$ROOT/contracts/facade/target/wasm32-unknown-unknown/release/freenet_email_facade.wasm"
 PARAMS="$ROOT/target/facade/facade.parameters"
 if [ ! -f "$WASM" ]; then
     echo "error: $WASM not found" >&2

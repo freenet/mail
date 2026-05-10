@@ -5,6 +5,7 @@ on:
     paths:
       - 'contracts/web-container/**'
       - 'contracts/facade/**'
+      - 'contracts/facade-types/**'
       - 'contracts/facade-loader/**'
       - 'common/**'
       - 'ui/**'
@@ -18,6 +19,7 @@ on:
     paths:
       - 'contracts/web-container/**'
       - 'contracts/facade/**'
+      - 'contracts/facade-types/**'
       - 'contracts/facade-loader/**'
       - 'common/**'
       - 'ui/**'

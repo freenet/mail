@@ -4,16 +4,27 @@ members = [
     "common",
     "ui",
     # contracts/* expansion — explicit list keeps facade-loader/ (data-only)
-    # out of the workspace.
+    # and facade/ + facade-types/ (issue #198: own lockfile) out of the
+    # workspace.
     "contracts/inbox",
     "contracts/web-container",
-    "contracts/facade",
     "modules/antiflood-tokens/interfaces",
     "modules/antiflood-tokens/contracts/token-allocation-record",
     "modules/antiflood-tokens/delegates/token-generator",
     "modules/identity-management",
     "modules/mail-local-state",
     "tools/web-container-sign",
+]
+# Issue #198: facade contract has its OWN lockfile so workspace dep churn
+# (dioxus, chrono, ml-dsa, etc.) doesn't rotate facade.wasm bytes. This
+# is the core mechanism that gives the facade a stable contract ID across
+# releases. See contracts/facade/Cargo.toml + contracts/facade-types/.
+exclude = [
+    "contracts/facade",
+    "contracts/facade-types",
+    # facade-loader/ is data-only (HTML), but listing it keeps cargo from
+    # complaining about the missing Cargo.toml when it walks the tree.
+    "contracts/facade-loader",
 ]
 
 [workspace.package]

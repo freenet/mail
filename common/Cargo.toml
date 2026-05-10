@@ -9,3 +9,8 @@ publish = false
 ed25519-dalek = { workspace = true, default-features = false, features = ["alloc", "serde"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+# Issue #198: facade types live in their own crate outside the workspace
+# (own Cargo.lock) so the facade contract's wasm stays byte-stable across
+# workspace dep churn. Core re-exports them so signer + UI keep the same
+# import surface.
+freenet-email-facade-types = { path = "../contracts/facade-types" }

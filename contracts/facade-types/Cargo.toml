@@ -1,0 +1,30 @@
+[package]
+name = "freenet-email-facade-types"
+version = "0.1.0"
+edition = "2024"
+license = "LGPL-3.0-or-later"
+publish = false
+description = "Shared FacadePointer / FacadeMetadata / signed_payload for the freenet-email facade contract (issue #200)"
+
+# Standalone crate — NOT a workspace member. The facade contract depends
+# on this crate via path; the freenet-email workspace re-exports it from
+# common/ via path so signer + UI keep the same import surface. Pinning
+# deps tightly here keeps the facade wasm bytes from drifting whenever a
+# workspace dep is bumped (which is the entire point of issue #198).
+#
+# Two consumers compile this crate:
+# 1. The facade contract (also outside the workspace) — produces
+#    facade.wasm, must be byte-stable across releases.
+# 2. The freenet-email workspace (signer, integration tests) — consumes
+#    via path-dep through common/. Workspace lockfile churn does NOT
+#    rotate the facade wasm because the facade has its own lockfile.
+#
+# Pinning: keep version specs strict (`=x.y.z`) for any dep whose minor
+# bump changes serialized output. ed25519-dalek and ciborium are the
+# obvious risks. serde is conservative on its serialization format but
+# pinning to a minor would over-constrain — we trust serde 1.x stability.
+
+[dependencies]
+ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["alloc", "serde"] }
+serde = { version = "1", features = ["derive"] }
+

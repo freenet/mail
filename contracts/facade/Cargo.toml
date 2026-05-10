@@ -2,23 +2,34 @@
 name = "freenet-email-facade"
 version = "0.0.1"
 edition = "2024"
-license.workspace = true
+license = "LGPL-3.0-or-later"
 publish = false
 
-# The facade contract MUST stay byte-deterministic across releases — its
-# whole reason to exist (issue #200) is a stable contract ID. Keep deps
-# minimal and pinned exactly. Bumping any of these rotates the facade ID
-# and breaks every bookmarked URL.
+# Issue #198 / #200. The facade contract MUST stay byte-deterministic
+# across releases — its whole reason to exist is a stable contract ID.
+#
+# This crate is INTENTIONALLY OUTSIDE the freenet-email workspace
+# (`exclude` in the root Cargo.toml). It carries its own Cargo.lock so
+# workspace dep churn (dioxus, chrono, ml-dsa, freenet-stdlib bumps used
+# elsewhere) does NOT re-resolve facade transitive deps and rotate the
+# facade wasm bytes.
+#
+# All deps are pinned with `=` so cargo cannot pick a higher
+# semver-compatible release. Bumping any of these is a deliberate act
+# that should be paired with regenerating the published facade snapshot
+# and updating the published facade-id (which breaks every existing
+# bookmark). Do not loosen these pins without that conversation.
+
 [dependencies]
-byteorder = { workspace = true }
-ciborium = { workspace = true }
-freenet-email-core = { workspace = true }
-freenet-stdlib = { workspace = true, features = ["contract"] }
-ed25519-dalek = { workspace = true, default-features = false, features = ["alloc", "serde"] }
+byteorder = "=1.5.0"
+ciborium = "=0.2.2"
+ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["alloc", "serde"] }
+freenet-stdlib = { version = "=0.3.5", features = ["contract"] }
+freenet-email-facade-types = { path = "../facade-types" }
 
 [dev-dependencies]
-ed25519-dalek = { workspace = true, features = ["rand_core"] }
-rand = { workspace = true, features = ["std_rng", "getrandom"] }
+ed25519-dalek = { version = "=2.1.1", features = ["rand_core"] }
+rand = { version = "=0.8.5", features = ["std_rng", "getrandom"] }
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -30,4 +41,15 @@ freenet-main-contract = []
 trace = ["freenet-stdlib/trace"]
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-rand = { workspace = true }
+rand = "=0.8.5"
+
+# Same release profile as the workspace root so the wasm32 build settings
+# stay identical (opt-level 'z', lto, codegen-units=1, strip, abort).
+# These MUST match or the cross-workspace builds will produce different
+# bytes for the same source.
+[profile.release]
+opt-level = 'z'
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
