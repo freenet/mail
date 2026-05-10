@@ -1,0 +1,33 @@
+[package]
+name = "freenet-email-facade"
+version = "0.0.1"
+edition = "2024"
+license.workspace = true
+publish = false
+
+# The facade contract MUST stay byte-deterministic across releases — its
+# whole reason to exist (issue #200) is a stable contract ID. Keep deps
+# minimal and pinned exactly. Bumping any of these rotates the facade ID
+# and breaks every bookmarked URL.
+[dependencies]
+byteorder = { workspace = true }
+ciborium = { workspace = true }
+freenet-email-core = { workspace = true }
+freenet-stdlib = { workspace = true, features = ["contract"] }
+ed25519-dalek = { workspace = true, default-features = false, features = ["alloc", "serde"] }
+
+[dev-dependencies]
+ed25519-dalek = { workspace = true, features = ["rand_core"] }
+rand = { workspace = true, features = ["std_rng", "getrandom"] }
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["freenet-main-contract"]
+contract = ["freenet-stdlib/contract"]
+freenet-main-contract = []
+trace = ["freenet-stdlib/trace"]
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rand = { workspace = true }

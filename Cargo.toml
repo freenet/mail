@@ -3,7 +3,11 @@ resolver = "2"
 members = [
     "common",
     "ui",
-    "contracts/*",
+    # contracts/* expansion — explicit list keeps facade-loader/ (data-only)
+    # out of the workspace.
+    "contracts/inbox",
+    "contracts/web-container",
+    "contracts/facade",
     "modules/antiflood-tokens/interfaces",
     "modules/antiflood-tokens/contracts/token-allocation-record",
     "modules/antiflood-tokens/delegates/token-generator",

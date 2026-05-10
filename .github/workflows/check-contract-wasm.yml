@@ -4,6 +4,8 @@ on:
   pull_request:
     paths:
       - 'contracts/web-container/**'
+      - 'contracts/facade/**'
+      - 'contracts/facade-loader/**'
       - 'common/**'
       - 'ui/**'
       - 'published-contract/**'
@@ -15,6 +17,8 @@ on:
     branches: [main]
     paths:
       - 'contracts/web-container/**'
+      - 'contracts/facade/**'
+      - 'contracts/facade-loader/**'
       - 'common/**'
       - 'ui/**'
       - 'published-contract/**'
@@ -97,3 +101,20 @@ jobs:
             exit 0
           fi
           echo "✅ published-contract/ is in sync with source."
+
+      # Issue #200 / Phase 1. Facade contract id MUST stay stable across
+      # releases — its whole reason to exist is a stable bookmarkable URL.
+      # If the freshly built facade.wasm differs from the committed
+      # snapshot, the workspace dep graph drifted into facade.wasm. That
+      # rotates the facade id and breaks every bookmark. Treat as a
+      # release-blocker rather than informational.
+      - name: Verify facade wasm byte-equality (issue #200)
+        run: |
+          if [ ! -f published-contract/facade.wasm ]; then
+            echo "::warning::published-contract/facade.wasm missing — first commit of the facade?"
+            echo "Skipping byte-equality check. Generate it once with:"
+            echo "  cargo make update-published-facade"
+            echo "  git add published-contract/facade.{wasm,parameters} published-contract/facade-id.txt"
+            exit 0
+          fi
+          bash scripts/check-facade-byte-equal.sh

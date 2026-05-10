@@ -1,0 +1,9 @@
+[contract]
+type = "webapp"
+lang = "rust"
+
+[webapp]
+lang = "rust"
+# Loader assets ship under contracts/facade-loader/dist/. Built by
+# `cargo make build-facade-loader` before `cargo make build-facade`.
+state-sources = { source_dirs = ["../facade-loader/dist"] }

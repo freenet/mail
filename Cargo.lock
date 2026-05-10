@@ -1600,6 +1600,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "freenet-email-facade"
+version = "0.0.1"
+dependencies = [
+ "byteorder",
+ "ciborium",
+ "ed25519-dalek",
+ "freenet-email-core",
+ "freenet-stdlib",
+ "rand 0.8.5",
+]
+
+[[package]]
 name = "freenet-email-inbox"
 version = "0.0.1"
 dependencies = [

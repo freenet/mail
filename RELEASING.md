@@ -192,6 +192,39 @@ There are two ways to cover the real round trip:
 Post the liveness result and whichever of (1) or (2) you ran as a
 comment on the release tracking issue.
 
+## Facade contract update (issue #200, Phase 1)
+
+The web-container contract id rotates per release (issue #198). The
+facade contract gives users a stable bookmarkable URL across releases.
+See AGENTS.md §"Facade contract" for the architecture.
+
+Per release, after `scripts/release.sh` finishes (which leaves the new
+web-container id in `published-contract/contract-id.txt`), flip the
+facade pointer:
+
+```bash
+# 1. Re-render the loader with the new current_app_id baked in.
+cargo make build-facade-loader
+
+# 2. Sign a new facade state pointing at the new app id with bumped version.
+cargo make sign-facade-state          # uses production key
+
+# 3. Push the UPDATE to the network.
+fdev execute update \
+    "$(cat published-contract/facade-id.txt)" \
+    target/facade/facade.state \
+    network
+```
+
+The facade itself is published **once per environment** (test sandbox
++ production). Subsequent releases only flip its state. If
+`published-contract/facade.wasm` is missing or
+`scripts/check-facade-byte-equal.sh` fails, treat it as a release
+blocker: the facade id has rotated and every existing bookmark just
+broke. Investigate which workspace dep change leaked into the facade
+wasm and either revert it or accept the rotation deliberately and
+update the published facade id.
+
 ## Recovery
 
 ### Publish failed halfway
