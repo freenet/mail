@@ -4546,6 +4546,8 @@ dependencies = [
  "clap",
  "ed25519-dalek",
  "freenet-email-core",
+ "freenet-email-facade",
+ "freenet-stdlib",
  "rand 0.8.5",
  "serde",
  "tempfile",

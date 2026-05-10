@@ -217,13 +217,17 @@ fdev execute update \
 ```
 
 The facade itself is published **once per environment** (test sandbox
-+ production). Subsequent releases only flip its state. If
-`published-contract/facade.wasm` is missing or
-`scripts/check-facade-byte-equal.sh` fails, treat it as a release
-blocker: the facade id has rotated and every existing bookmark just
-broke. Investigate which workspace dep change leaked into the facade
-wasm and either revert it or accept the rotation deliberately and
-update the published facade id.
++ production). Subsequent releases only flip its state.
+
+**Phase 1 status**: the committed `published-contract/facade.{wasm,
+parameters}` snapshot is not yet present in this repo. The byte-equality
+CI gate is informational until rustc is pinned and the snapshot is
+rebuilt on Linux CI. Until then, regenerate the wasm locally before any
+publish (`cargo make update-published-facade`) and verify the resulting
+contract id matches whatever was last published to the network — there
+is no in-repo source of truth to compare against yet. Once the snapshot
+lands, this paragraph should be replaced with: "If
+`scripts/check-facade-byte-equal.sh` fails, treat as a release blocker."
 
 ## Recovery
 

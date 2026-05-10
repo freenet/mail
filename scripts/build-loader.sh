@@ -18,10 +18,12 @@ fi
 
 CURRENT_APP_ID="$1"
 
-# Sanity: app IDs are base58 of a 32-byte hash. Length is ~43-44 chars and
-# must be base58 alphabet. Catches obvious mistakes (path/URL pasted in).
-if ! printf '%s' "$CURRENT_APP_ID" | grep -Eq '^[1-9A-HJ-NP-Za-km-z]{32,50}$'; then
-    echo "error: '$CURRENT_APP_ID' does not look like a base58 contract id" >&2
+# Sanity: app IDs are base58 of a 32-byte hash, which always encodes to
+# 43 or 44 chars depending on the leading-byte zero count. Reject anything
+# else — narrow regex catches paths, URLs, and truncated/extended ids that
+# would otherwise be silently accepted and later rejected on-chain.
+if ! printf '%s' "$CURRENT_APP_ID" | grep -Eq '^[1-9A-HJ-NP-Za-km-z]{43,44}$'; then
+    echo "error: '$CURRENT_APP_ID' does not look like a base58-encoded 32-byte contract id (expected 43-44 base58 chars)" >&2
     exit 1
 fi
 
@@ -30,10 +32,31 @@ SRC="$ROOT/contracts/facade-loader/src/index.html.tmpl"
 DIST_DIR="$ROOT/contracts/facade-loader/dist"
 DEST="$DIST_DIR/index.html"
 
+if [ ! -f "$SRC" ]; then
+    echo "error: $SRC not found" >&2
+    exit 1
+fi
+
+# Refuse to substitute against a template that doesn't contain the
+# placeholder — silent no-op would produce a broken loader that redirects
+# to /v1/contract/web/__CURRENT_APP_ID__/.
+if ! grep -q '__CURRENT_APP_ID__' "$SRC"; then
+    echo "error: $SRC has no __CURRENT_APP_ID__ placeholder" >&2
+    exit 1
+fi
+
 mkdir -p "$DIST_DIR"
 
-# sed escape: contract IDs are base58 with no `/`, `&`, or `\`, so a plain
-# substitution is safe.
+# sed escape: base58 alphabet excludes `|`, `/`, `\`, `&` — plain
+# substitution with `|` delimiter is safe.
 sed "s|__CURRENT_APP_ID__|$CURRENT_APP_ID|g" "$SRC" > "$DEST"
+
+# Belt-and-braces: if any placeholder survived (template malformed,
+# multiple placeholders missed by sed pattern), bail.
+if grep -q '__CURRENT_APP_ID__' "$DEST"; then
+    echo "error: $DEST still contains __CURRENT_APP_ID__ after substitution" >&2
+    rm -f "$DEST"
+    exit 1
+fi
 
 echo "wrote $DEST (current_app_id=$CURRENT_APP_ID, $(wc -c < "$DEST") bytes)"

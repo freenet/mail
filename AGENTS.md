@@ -278,10 +278,18 @@ contract migration.
 
 **Build hygiene**: `scripts/check-facade-byte-equal.sh` rebuilds the
 facade and `cmp`s against `published-contract/facade.wasm`. CI runs this
-in `check-contract-wasm.yml` as a release-blocker. If the facade wasm
-intentionally needs to change (e.g. a deliberate protocol upgrade),
-regenerate the snapshot with `cargo make update-published-facade` and
-update this document with the new facade id.
+step in `check-contract-wasm.yml`.
+
+**Status (Phase 1)**: the committed snapshot is not yet present —
+`facade.wasm` is platform-specific (a wasm32 release build on macOS
+produces different bytes than the Linux runner the CI workflow uses)
+and `rust-toolchain.toml` only pins `channel = "stable"`, so any rustc
+bump can rotate the bytes. Until both are addressed (rebuild on Linux
+CI with a pinned rustc), the byte-equality CI step runs in
+**informational** mode (it warns on drift but does not fail the PR),
+mirroring the same pre-Phase-5 stance as the web-container snapshot.
+Don't treat the absence of the snapshot as a green light to ignore
+facade rotations — when it lands, this becomes a release blocker.
 
 ### Reproducibility caveats
 

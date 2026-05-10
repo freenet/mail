@@ -23,3 +23,7 @@ anyhow = "1"
 
 [dev-dependencies]
 tempfile = "3"
+# Integration test: feed signer output into the on-chain validator to
+# catch framing/endianness drift between signer and contract (issue #200).
+freenet-email-facade = { path = "../../contracts/facade" }
+freenet-stdlib = { workspace = true }

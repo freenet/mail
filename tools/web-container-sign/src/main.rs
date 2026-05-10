@@ -32,7 +32,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
-use freenet_email_core::facade::{FACADE_MAX_PREV_APP_IDS, FacadeMetadata, FacadePointer, signed_payload as facade_signed_payload};
+use freenet_email_core::facade::{
+    FACADE_MAX_PREV_APP_IDS, FacadeMetadata, FacadePointer, signed_payload as facade_signed_payload,
+};
 use freenet_email_core::web_container::WebContainerMetadata;
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
@@ -197,13 +199,30 @@ fn cmd_sign_facade_state(
         if v >= version {
             bail!("--prev version {v} must be strictly less than current version {version}");
         }
-        let id = decode_app_id(id_str)
-            .with_context(|| format!("decoding --prev app_id {id_str}"))?;
+        let id =
+            decode_app_id(id_str).with_context(|| format!("decoding --prev app_id {id_str}"))?;
         prev_app_ids.push((v, id));
     }
 
-    let loader_bytes = fs::read(loader)
-        .with_context(|| format!("reading loader archive {}", loader.display()))?;
+    let loader_bytes =
+        fs::read(loader).with_context(|| format!("reading loader archive {}", loader.display()))?;
+
+    // Best-effort consistency check: the loader is normally rendered by
+    // scripts/build-loader.sh, which embeds `current_app_id` directly into
+    // the HTML. If the loader bytes don't contain the id we're signing,
+    // the operator probably forgot to re-render the loader before re-signing
+    // — the signed pointer would then redirect users to a different app
+    // than the loader does. Catch this silently-broken state here.
+    if !loader_bytes
+        .windows(current_app_id_b58.len())
+        .any(|w| w == current_app_id_b58.as_bytes())
+    {
+        bail!(
+            "loader at {} does not contain current_app_id '{current_app_id_b58}'. \
+             Re-run scripts/build-loader.sh before signing, or pass --skip-loader-check (not implemented).",
+            loader.display()
+        );
+    }
 
     let pointer = FacadePointer {
         version,
@@ -245,7 +264,11 @@ fn cmd_sign_facade_state(
         "signed facade state: version={version} current_app_id={current_app_id_b58} prev={}",
         prev.len()
     );
-    println!("  loader:     {} ({} bytes)", loader.display(), loader_bytes.len());
+    println!(
+        "  loader:     {} ({} bytes)",
+        loader.display(),
+        loader_bytes.len()
+    );
     println!("  state:      {} ({} bytes)", output.display(), state.len());
     println!("  parameters: {}", parameters.display());
     println!(
@@ -522,10 +545,11 @@ mod tests {
         let parameters = dir.path().join("facade.parameters");
 
         cmd_generate(&key_file, true).unwrap();
-        fs::write(&loader, b"<html>loader</html>").unwrap();
-
         let app_id = [0xABu8; 32];
         let app_id_b58 = bs58::encode(app_id).into_string();
+        // Loader must embed current_app_id (signer enforces this; mirrors
+        // what scripts/build-loader.sh produces).
+        fs::write(&loader, format!("<html>id={app_id_b58}</html>")).unwrap();
         let prev_id = [0xCDu8; 32];
         let prev_b58 = format!("100:{}", bs58::encode(prev_id).into_string());
 
@@ -559,7 +583,10 @@ mod tests {
         assert_eq!(metadata.pointer.version, 200);
         assert_eq!(metadata.pointer.current_app_id, app_id);
         assert_eq!(metadata.pointer.prev_app_ids, vec![(100u64, prev_id)]);
-        assert_eq!(loader_bytes, b"<html>loader</html>");
+        assert_eq!(
+            loader_bytes,
+            format!("<html>id={app_id_b58}</html>").into_bytes()
+        );
 
         let payload = facade_signed_payload(&metadata.pointer, &loader_bytes);
         vk.verify(&payload, &metadata.signature).unwrap();
@@ -586,5 +613,32 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("strictly less"));
+    }
+
+    /// Regression for review-finding B6: signer rejects when the loader
+    /// bytes don't embed the current_app_id. Catches the silent
+    /// inconsistency where operator passes mismatching --loader and
+    /// --current-app-id (e.g. forgot to re-render the loader).
+    #[test]
+    fn sign_facade_state_rejects_loader_without_current_app_id() {
+        let dir = tempdir().unwrap();
+        let key_file = dir.path().join("keys.toml");
+        let loader = dir.path().join("loader");
+        cmd_generate(&key_file, true).unwrap();
+        // Loader does NOT contain the app id we'll sign.
+        fs::write(&loader, b"<html>stale loader</html>").unwrap();
+
+        let app_id_b58 = bs58::encode([0xAAu8; 32]).into_string();
+        let err = cmd_sign_facade_state(
+            &loader,
+            &app_id_b58,
+            &[],
+            42,
+            &key_file,
+            &dir.path().join("s"),
+            &dir.path().join("p"),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("does not contain current_app_id"));
     }
 }

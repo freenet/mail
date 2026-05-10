@@ -47,7 +47,8 @@ pub struct FacadeMetadata {
 /// signer agree byte-for-byte without depending on map-ordering quirks of a
 /// serializer.
 pub fn signed_payload(pointer: &FacadePointer, loader_bytes: &[u8]) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(8 + 32 + 4 + pointer.prev_app_ids.len() * 40 + loader_bytes.len());
+    let mut buf =
+        Vec::with_capacity(8 + 32 + 4 + pointer.prev_app_ids.len() * 40 + loader_bytes.len());
     buf.extend_from_slice(&pointer.version.to_be_bytes());
     buf.extend_from_slice(&pointer.current_app_id);
     buf.extend_from_slice(&(pointer.prev_app_ids.len() as u32).to_be_bytes());
