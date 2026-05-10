@@ -239,6 +239,58 @@ key, because the ID is `hash(wasm, parameters)` and the 32-byte
 overwritten by `cargo make update-published-contract-prod` on every
 real release.
 
+### Facade contract — stable URL across releases (issue #200, Phase 1)
+
+The web-container contract id rotates whenever workspace `Cargo.lock`
+churn shifts the wasm bytes (issue #198). To give users a permanent
+bookmarkable URL, the project ships a **facade** contract whose id is
+designed to stay byte-stable across every release.
+
+```
+contracts/facade/                 stable wasm — never rebuilt for a release
+contracts/facade-loader/          static HTML+JS shell served by the facade
+published-contract/facade.wasm    committed snapshot; CI enforces byte-equality
+published-contract/facade-id.txt  the stable contract id users bookmark
+published-contract/facade.parameters
+                                  32-byte ed25519 verifying key (same prod key
+                                  as web-container; the "publisher identity")
+```
+
+Per release the facade WASM is unchanged. Only the facade contract's
+state changes — its `current_app_id` pointer is flipped via
+`fdev execute update`, signing with the same production key. The loader
+HTML is rendered with the new app id baked in by
+`scripts/build-loader.sh` and embedded in the new state. `prev_app_ids`
+keeps a small ring of previous pointers for client-side rollback.
+
+State framing matches the web-container's `[meta_len][meta][web_len][web]`,
+but `meta` carries `FacadePointer { version, current_app_id, prev_app_ids }`
+instead of just a webapp signature. Signature payload is canonicalized
+hand-rolled bytes (see `freenet_email_core::facade::signed_payload`) to
+sidestep CBOR map-ordering concerns.
+
+**Phase 1 scope**: facade lives alongside the web-container, not yet
+replacing it. The UI is still served at the rotating web-container id;
+the facade is published once per environment as the new stable entry
+point. Phase 3 (issue #200 sub-task) flips the UI to embed the facade id
+exclusively. Phase 2 (issue #199) handles per-identity inbox + AFT
+contract migration.
+
+**Build hygiene**: `scripts/check-facade-byte-equal.sh` rebuilds the
+facade and `cmp`s against `published-contract/facade.wasm`. CI runs this
+step in `check-contract-wasm.yml`.
+
+**Status (Phase 1)**: the committed snapshot is not yet present —
+`facade.wasm` is platform-specific (a wasm32 release build on macOS
+produces different bytes than the Linux runner the CI workflow uses)
+and `rust-toolchain.toml` only pins `channel = "stable"`, so any rustc
+bump can rotate the bytes. Until both are addressed (rebuild on Linux
+CI with a pinned rustc), the byte-equality CI step runs in
+**informational** mode (it warns on drift but does not fail the PR),
+mirroring the same pre-Phase-5 stance as the web-container snapshot.
+Don't treat the absence of the snapshot as a green light to ignore
+facade rotations — when it lands, this becomes a release blocker.
+
 ### Reproducibility caveats
 
 The signed-payload version is the **unix timestamp at signing time**
