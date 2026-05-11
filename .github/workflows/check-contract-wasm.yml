@@ -42,7 +42,10 @@ jobs:
           fetch-depth: 2
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        # Pinned (issue #206): facade.wasm bytes are sensitive to rustc
+        # version. Stable-channel bumps would silently rotate the facade
+        # contract id. Keep in sync with rust-toolchain.toml.
+        uses: dtolnay/rust-toolchain@1.95.0
         with:
           targets: wasm32-unknown-unknown
 
@@ -104,24 +107,36 @@ jobs:
           fi
           echo "✅ published-contract/ is in sync with source."
 
-      # Issue #200 / Phase 1. Facade contract id is intended to stay
-      # stable across releases. The byte-equality check enforces that the
-      # rebuilt facade.wasm matches the committed snapshot. INFORMATIONAL
-      # for now: the snapshot must be produced on the same OS/toolchain
-      # the runner uses (Linux + pinned rustc) before this can be a hard
-      # gate. Tracked under follow-up to issue #200 — until then, run the
-      # check and surface a warning if it fails so we can monitor drift
-      # without blocking PRs.
-      - name: Verify facade wasm byte-equality (issue #200, informational)
+      # Issue #206 (closes the Phase 1 informational gate). The facade
+      # contract id is intended to stay byte-stable across releases.
+      # Both prerequisites are now in place:
+      #   • rustc pinned in rust-toolchain.toml (and the dtolnay action
+      #     in this workflow uses the same pinned version).
+      #   • Snapshot at published-contract/facade.{wasm,parameters,id.txt}
+      #     produced under linux/amd64 with that pinned rustc.
+      # Any drift in the rebuilt wasm is now a release blocker —
+      # the rebuild MUST match the committed snapshot byte-for-byte.
+      - name: Verify facade wasm byte-equality (issue #206)
+        id: facade-verify
         run: |
           if [ ! -f published-contract/facade.wasm ]; then
-            echo "::warning::published-contract/facade.wasm not yet committed."
-            echo "First commit pending: rebuild on Linux CI with pinned rustc, then commit."
-            exit 0
+            echo "::error::published-contract/facade.wasm missing."
+            echo "Bootstrap the snapshot via scripts/build-facade-snapshot-linux.sh"
+            echo "and commit published-contract/facade.{wasm,parameters,id.txt}."
+            exit 1
           fi
-          if ! bash scripts/check-facade-byte-equal.sh; then
-            echo "::warning::facade wasm drift detected — see log above."
-            echo "Until rustc is pinned and the snapshot is rebuilt on Linux CI,"
-            echo "this is informational. See follow-up issue tracked under #200."
-            exit 0
-          fi
+          bash scripts/check-facade-byte-equal.sh
+
+      # Bootstrap helper (#206): on drift, upload the freshly-built
+      # facade.wasm so an operator can download it, recompute the
+      # contract id, and commit the canonical CI-built snapshot. Local
+      # docker amd64 emulation (qemu) produces different bytes from
+      # native ubicloud amd64 — only CI bytes are canonical.
+      - name: Upload rebuilt facade.wasm on drift
+        if: failure() && steps.facade-verify.conclusion == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: facade-wasm-rebuilt-${{ github.sha }}
+          path: contracts/facade/target/wasm32-unknown-unknown/release/freenet_email_facade.wasm
+          if-no-files-found: warn
+          retention-days: 7

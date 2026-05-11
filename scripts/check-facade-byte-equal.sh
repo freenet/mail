@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Issue #200 / Phase 1.
+# Issue #200 + #206.
 #
 # The facade contract's reason to exist is a stable contract ID across
 # releases. Contract id = hash(facade_wasm, facade_parameters). Both must
@@ -7,10 +7,20 @@
 # and compares against the committed `published-contract/facade.wasm`.
 #
 # A drift here means a workspace dep change leaked into facade.wasm
-# (typical cause: dioxus / chrono / freenet-stdlib / ed25519-dalek bump).
+# (typical cause: dioxus / chrono / freenet-stdlib / ed25519-dalek bump)
+# OR a rustc bump that wasn't paired with a snapshot regeneration.
 # That rotates the facade contract id and breaks every bookmarked URL.
 # Fix the regression OR consciously accept the rotation, regenerate the
-# committed snapshot, and bump documentation.
+# committed snapshot via scripts/build-facade-snapshot-linux.sh, and bump
+# documentation.
+#
+# Snapshot canonicalization (issue #206): the committed bytes are
+# produced on linux/amd64 with the rustc version pinned in
+# rust-toolchain.toml. CI runs on linux/amd64 with the same pin, so the
+# rebuild matches. Other host arch/OS combos (e.g. macOS arm64 dev
+# machines) produce different wasm bytes — same source, different
+# codegen — and will trigger a spurious failure here. Detect non-canonical
+# hosts and skip with a warning so local devs aren't blocked.
 
 set -euo pipefail
 
@@ -22,6 +32,19 @@ COMMITTED="$ROOT/published-contract/facade.wasm"
 
 if [ ! -f "$COMMITTED" ]; then
     echo "warn: $COMMITTED missing — first run? Skipping byte-equality check." >&2
+    exit 0
+fi
+
+# Snapshot canonicalization (issue #206). The committed bytes only match
+# rebuilds on the same canonical host the snapshot was produced on:
+# linux/amd64 with the pinned rustc. Skip with a warning otherwise.
+HOST_OS=$(uname -s)
+HOST_ARCH=$(uname -m)
+if [ "$HOST_OS" != "Linux" ] || [ "$HOST_ARCH" != "x86_64" ]; then
+    echo "warn: facade byte-equality check is canonical only on linux/amd64."
+    echo "      This host is $HOST_OS/$HOST_ARCH — skipping rebuild + compare."
+    echo "      To rebuild the snapshot deliberately, run:"
+    echo "        scripts/build-facade-snapshot-linux.sh"
     exit 0
 fi
 

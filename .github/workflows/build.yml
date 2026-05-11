@@ -26,7 +26,9 @@ jobs:
           submodules: recursive
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        # Pinned (issue #206): keep in sync with rust-toolchain.toml.
+        # See check-contract-wasm.yml for the rationale.
+        uses: dtolnay/rust-toolchain@1.95.0
         with:
           targets: wasm32-unknown-unknown
           components: rustfmt, clippy
@@ -140,7 +142,8 @@ jobs:
           submodules: recursive
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        # Pinned (issue #206): keep in sync with rust-toolchain.toml.
+        uses: dtolnay/rust-toolchain@1.95.0
         with:
           targets: wasm32-unknown-unknown
 

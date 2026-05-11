@@ -1,4 +1,9 @@
 [toolchain]
-channel = "stable"
+# Pinned (issue #206): facade.wasm bytes — and therefore the facade
+# contract id — are sensitive to rustc/LLVM version. A stable-channel
+# bump rotates the bytes and breaks every bookmarked URL. Bumping this
+# pin is a deliberate act paired with `cargo make update-published-facade`
+# + commit of the new snapshot + a release-notes mention.
+channel = "1.95.0"
 targets = ["wasm32-unknown-unknown"]
 components = ["rustfmt", "clippy"]

@@ -237,19 +237,24 @@ fdev publish \
     network
 ```
 
-**Phase 1/3 status**: the committed `published-contract/facade.{wasm,
-parameters,id.txt}` snapshot is not yet present in this repo. The
-byte-equality CI gate is informational until rustc is pinned and the
-snapshot is rebuilt on Linux CI (issue #206). Until then:
+**Snapshot stability (#206)**: the committed
+`published-contract/facade.{wasm,parameters,id.txt}` snapshot is the
+canonical artifact. CI rebuilds it under linux/amd64 with the rustc
+version pinned in `rust-toolchain.toml` and fails the PR on any
+byte-level drift. **If `scripts/check-facade-byte-equal.sh` fails on
+CI, treat it as a release blocker** — either revert the change that
+rotated the bytes or regenerate the snapshot deliberately:
 
-- Regenerate the wasm locally before any publish
-  (`cargo make update-published-facade`).
-- The Phase 3 facade-flip in `release.sh` will warn + skip until you
-  commit `published-contract/facade-id.txt`. Run the one-time publish
-  steps above first.
+```bash
+scripts/build-facade-snapshot-linux.sh
+git add published-contract/facade.{wasm,parameters,id.txt}
+```
 
-Once the snapshot lands, this paragraph should be replaced with: "If
-`scripts/check-facade-byte-equal.sh` fails, treat as a release blocker."
+Bumping the rustc pin or any `=x.y.z` dep pin under
+`contracts/facade/Cargo.toml` rotates the bytes and requires a paired
+snapshot regeneration in the same PR. Rotating the snapshot also
+rotates the facade contract id, which breaks every existing bookmark —
+treat it as a deliberate, announced action.
 
 ## Recovery
 

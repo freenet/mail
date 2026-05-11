@@ -336,16 +336,41 @@ facade (using the facade-local manifest at `contracts/facade/`) and
 `cargo fmt`, `cargo clippy`, `cargo test`, and a wasm32 release build
 inside `contracts/facade/` so PRs that touch facade are still gated.
 
-**Status (Phase 1)**: the committed snapshot is not yet present —
-`facade.wasm` is platform-specific (a wasm32 release build on macOS
-produces different bytes than the Linux runner the CI workflow uses)
-and `rust-toolchain.toml` only pins `channel = "stable"`, so any rustc
-bump can rotate the bytes. Until both are addressed (rebuild on Linux
-CI with a pinned rustc), the byte-equality CI step runs in
-**informational** mode (it warns on drift but does not fail the PR),
-mirroring the same pre-Phase-5 stance as the web-container snapshot.
-Don't treat the absence of the snapshot as a green light to ignore
-facade rotations — when it lands, this becomes a release blocker.
+**Status (#206 closed)**: the committed snapshot at
+`published-contract/facade.{wasm,parameters,id.txt}` is the canonical
+artifact. It was produced under linux/amd64 with the rustc version
+pinned in `rust-toolchain.toml` (currently 1.95.0). The CI byte-equality
+step in `check-contract-wasm.yml` is now a **release blocker**: any
+rebuild that doesn't match the committed bytes fails the PR.
+
+To regenerate the snapshot deliberately (e.g. after bumping the rustc
+pin or a `=x.y.z` dep pin in `contracts/facade/Cargo.toml`):
+
+**On native linux/amd64**:
+
+```bash
+scripts/build-facade-snapshot-linux.sh
+git add published-contract/facade.{wasm,parameters,id.txt}
+git commit -m "chore(facade): regenerate snapshot — <reason>"
+```
+
+**On macOS / arm64 / anything else**: qemu emulation produces wasm
+bytes that drift from CI's native amd64 build (verified empirically),
+so local rebuilds can't match the gate. Use the CI-bootstrap path:
+
+1. Push the change with whatever facade.wasm bytes are on disk (any
+   non-empty file works — gate WILL fail).
+2. The `check-contract-wasm.yml` job rebuilds and uploads the
+   canonical wasm as workflow artifact `facade-wasm-rebuilt-<sha>`.
+3. Download via
+   `gh run download <run-id> -n facade-wasm-rebuilt-<sha>`.
+4. Replace `published-contract/facade.wasm`, recompute the id with
+   `fdev get-contract-id --code … --parameters …`, write to
+   `published-contract/facade-id.txt`, commit, push.
+5. CI passes.
+
+The local `check-facade-byte-equal.sh` skips with a warning on
+non-canonical hosts so dev rebuilds aren't blocked.
 
 ### Reproducibility caveats
 

@@ -5,9 +5,8 @@
 #   published-contract/web_container_contract.wasm  (paired with contract-id.txt)
 #   published-contract/facade.wasm                  (paired with facade-id.txt; issue #200)
 #
-# The facade snapshot is not yet committed (Phase 1 ships informational-only;
-# see AGENTS.md §"Facade contract"). The hook still allowlists the path so
-# whoever lands the Linux-built snapshot doesn't get blocked.
+# The facade snapshot lives in published-contract/. CI rebuilds and
+# byte-compares it on every PR (#206). See AGENTS.md §"Facade contract".
 #
 # Any other .wasm file showing up in a commit is almost certainly an
 # accidental `target/` or `build/` artifact that slipped past .gitignore.
