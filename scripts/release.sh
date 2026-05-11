@@ -188,6 +188,54 @@ CONTRACT_ID=$(cat published-contract/contract-id.txt)
 echo ""
 echo "  ✓ published contract id: $CONTRACT_ID"
 echo ""
+
+# ─── Facade pointer flip (issue #200 Phase 3) ──────────────────────────────
+#
+# The web-container contract id rotates per release (#198 root cause).
+# Users hit the facade contract instead — a stable bookmarkable URL whose
+# state points at the current release's webapp. Per release we re-render
+# the facade loader with the new current_app_id baked in, sign a new
+# facade state with bumped version, and UPDATE the facade contract.
+#
+# Conditional: only runs when published-contract/facade-id.txt exists
+# (i.e. the facade has been published once and its id committed). Until
+# then, this step warns + skips so the rest of the release still goes
+# through. See #200 Phase 1 (PR #205) and #206 (Linux-built snapshot).
+
+if [ -f published-contract/facade-id.txt ]; then
+    FACADE_ID=$(cat published-contract/facade-id.txt | tr -d '[:space:]')
+    echo "═══ Flipping facade pointer (issue #200) ════════════════════════════"
+    echo "  facade contract id: $FACADE_ID"
+    echo "  pointing at:        $CONTRACT_ID"
+
+    # Re-render the loader with the new current_app_id and sign the
+    # facade state with the production key (same key that signs the
+    # web-container — facade reuses it).
+    FACADE_CURRENT_APP_ID="$CONTRACT_ID" cargo make build-facade-loader
+    cargo make sign-facade-state
+
+    FACADE_STATE="$REPO_ROOT/target/facade/facade.state"
+    if [ ! -f "$FACADE_STATE" ]; then
+        die "facade state not produced at $FACADE_STATE — sign step failed?"
+    fi
+
+    confirm "Push facade UPDATE to the network now?"
+
+    # `network` mode is the production target; `local` would publish to a
+    # `freenet local` sandbox. fdev execute update takes positional args
+    # KEY DELTA [RELEASE].
+    fdev execute update "$FACADE_ID" "$FACADE_STATE" network
+
+    echo "  ✓ facade UPDATEd; bookmarked URL stays stable across releases"
+    echo ""
+else
+    echo "  ⚠️  published-contract/facade-id.txt not committed yet."
+    echo "      Skipping facade pointer flip (issue #200 Phase 1 prerequisite)."
+    echo "      Once the facade is published once and the id committed, this"
+    echo "      step will run automatically per release."
+    echo ""
+fi
+
 echo "Diff in published-contract/:"
 git status --short -- published-contract/
 echo ""
@@ -242,9 +290,20 @@ echo ""
 echo "✅ released $TAG"
 echo ""
 echo "Next steps:"
-echo "  1. Wait ~30s for the contract to propagate"
-echo "  2. Run: scripts/smoke-test-production.sh <gateway-url>"
-echo "     (the gateway URL will look like"
-echo "      http://<gateway-host>:<port>/contract/web/$CONTRACT_ID/)"
-echo "  3. Post the smoke-test result as a comment on issue #9"
+echo "  1. Wait ~30s for the contract (and facade UPDATE, if applicable)"
+echo "     to propagate"
+echo "  2. Smoke-test against the rotating webapp id:"
+echo "       scripts/smoke-test-production.sh \\"
+echo "         http://<gw>:<port>/contract/web/$CONTRACT_ID/"
+if [ -f published-contract/facade-id.txt ]; then
+    FACADE_ID_FOR_NOTES=$(cat published-contract/facade-id.txt | tr -d '[:space:]')
+    echo "  3. Smoke-test against the STABLE facade URL (issue #200):"
+    echo "       scripts/smoke-test-production.sh \\"
+    echo "         http://<gw>:<port>/contract/web/$FACADE_ID_FOR_NOTES/"
+    echo "     The facade URL is what users bookmark and what stays stable"
+    echo "     across releases."
+    echo "  4. Post the smoke-test result as a comment on issue #9"
+else
+    echo "  3. Post the smoke-test result as a comment on issue #9"
+fi
 echo ""

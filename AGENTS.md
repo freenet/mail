@@ -272,9 +272,15 @@ sidestep CBOR map-ordering concerns.
 **Phase 1 scope**: facade lives alongside the web-container, not yet
 replacing it. The UI is still served at the rotating web-container id;
 the facade is published once per environment as the new stable entry
-point. Phase 3 (issue #200 sub-task) flips the UI to embed the facade id
-exclusively. Phase 2 (issue #199) handles per-identity inbox + AFT
-contract migration.
+point.
+
+**Phase 3 scope (#200)**: `scripts/release.sh` automatically renders +
+signs + UPDATEs the facade pointer per release (so users hitting the
+facade URL get the new app). UI's `lib.rs` logs both
+`WEB_CONTAINER_CONTRACT_ID` and `FACADE_CONTRACT_ID` on startup so
+devtools shows which facade a build references. Both are conditional
+on `published-contract/facade-id.txt` being committed (one-time facade
+publish required first; see RELEASING.md §"Facade contract update").
 
 **Inbox + AFT lockfile isolation (issue #199 Phase A)**: same pattern
 extended to every other on-chain contract:

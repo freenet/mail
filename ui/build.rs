@@ -103,6 +103,20 @@ fn main() {
         }
     }
 
+    // Optional artifacts — present once their respective phase landed.
+    // Missing is fine; we emit an empty FACADE_ID env. Listing it here
+    // makes cargo rebuild when the file appears/changes.
+    //
+    // facade-id.txt: issue #200 Phase 3. Once committed, the UI logs it
+    // alongside the rotating web-container id so devtools shows which
+    // facade this build references.
+    let facade_id_path = root.join("published-contract/facade-id.txt");
+    println!("cargo:rerun-if-changed={}", facade_id_path.display());
+    let facade_id = std::fs::read_to_string(&facade_id_path)
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    println!("cargo:rustc-env=FREENET_EMAIL_FACADE_ID={facade_id}");
+
     if !missing.is_empty() {
         eprintln!();
         eprintln!("error: freenet-email-ui cannot be built because the following");

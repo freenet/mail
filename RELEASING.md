@@ -192,41 +192,63 @@ There are two ways to cover the real round trip:
 Post the liveness result and whichever of (1) or (2) you ran as a
 comment on the release tracking issue.
 
-## Facade contract update (issue #200, Phase 1)
+## Facade contract update (issue #200, Phases 1 + 3)
 
 The web-container contract id rotates per release (issue #198). The
 facade contract gives users a stable bookmarkable URL across releases.
 See AGENTS.md §"Facade contract" for the architecture.
 
-Per release, after `scripts/release.sh` finishes (which leaves the new
-web-container id in `published-contract/contract-id.txt`), flip the
-facade pointer:
+**Phase 3 (#200) — automatic per-release flip**: `scripts/release.sh`
+now does this for you. After the contract publish + before the commit,
+the script:
+
+1. Re-renders the loader with the new `current_app_id` baked in
+   (`cargo make build-facade-loader` with `FACADE_CURRENT_APP_ID` set).
+2. Signs a new facade state with the production key (`cargo make
+   sign-facade-state`).
+3. Prompts to push the facade UPDATE to the network (`fdev execute
+   update <FACADE_ID> target/facade/facade.state network`).
+
+The facade-flip block is **conditional on
+`published-contract/facade-id.txt` being committed** — i.e. the facade
+must have been published once and its id committed first. Until then,
+the script warns and skips the flip; the rest of the release still goes
+through.
+
+**One-time facade publish (per environment)**: before Phase 3 runs for
+the first time on a network, publish the facade contract once and
+commit its id. Manual steps:
 
 ```bash
-# 1. Re-render the loader with the new current_app_id baked in.
-cargo make build-facade-loader
+# Build the facade and produce the snapshot.
+cargo make update-published-facade
+git add published-contract/facade.{wasm,parameters} published-contract/facade-id.txt
+git commit -m "chore(facade): commit production facade snapshot"
 
-# 2. Sign a new facade state pointing at the new app id with bumped version.
-cargo make sign-facade-state          # uses production key
-
-# 3. Push the UPDATE to the network.
-fdev execute update \
-    "$(cat published-contract/facade-id.txt)" \
-    target/facade/facade.state \
+# Publish (PUT) the facade with initial state pointing at the current
+# web-container id. After this, every subsequent release.sh run flips
+# its state via UPDATE.
+cargo make publish-facade-test    # for the local sandbox
+# OR for production:
+fdev publish \
+    --code published-contract/facade.wasm \
+    --parameters published-contract/facade.parameters \
+    contract --state target/facade/facade.state \
     network
 ```
 
-The facade itself is published **once per environment** (test sandbox
-+ production). Subsequent releases only flip its state.
+**Phase 1/3 status**: the committed `published-contract/facade.{wasm,
+parameters,id.txt}` snapshot is not yet present in this repo. The
+byte-equality CI gate is informational until rustc is pinned and the
+snapshot is rebuilt on Linux CI (issue #206). Until then:
 
-**Phase 1 status**: the committed `published-contract/facade.{wasm,
-parameters}` snapshot is not yet present in this repo. The byte-equality
-CI gate is informational until rustc is pinned and the snapshot is
-rebuilt on Linux CI. Until then, regenerate the wasm locally before any
-publish (`cargo make update-published-facade`) and verify the resulting
-contract id matches whatever was last published to the network — there
-is no in-repo source of truth to compare against yet. Once the snapshot
-lands, this paragraph should be replaced with: "If
+- Regenerate the wasm locally before any publish
+  (`cargo make update-published-facade`).
+- The Phase 3 facade-flip in `release.sh` will warn + skip until you
+  commit `published-contract/facade-id.txt`. Run the one-time publish
+  steps above first.
+
+Once the snapshot lands, this paragraph should be replaced with: "If
 `scripts/check-facade-byte-equal.sh` fails, treat as a release blocker."
 
 ## Recovery
