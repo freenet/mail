@@ -117,6 +117,7 @@ jobs:
       # Any drift in the rebuilt wasm is now a release blocker —
       # the rebuild MUST match the committed snapshot byte-for-byte.
       - name: Verify facade wasm byte-equality (issue #206)
+        id: facade-verify
         run: |
           if [ ! -f published-contract/facade.wasm ]; then
             echo "::error::published-contract/facade.wasm missing."
@@ -125,3 +126,17 @@ jobs:
             exit 1
           fi
           bash scripts/check-facade-byte-equal.sh
+
+      # Bootstrap helper (#206): on drift, upload the freshly-built
+      # facade.wasm so an operator can download it, recompute the
+      # contract id, and commit the canonical CI-built snapshot. Local
+      # docker amd64 emulation (qemu) produces different bytes from
+      # native ubicloud amd64 — only CI bytes are canonical.
+      - name: Upload rebuilt facade.wasm on drift
+        if: failure() && steps.facade-verify.conclusion == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: facade-wasm-rebuilt-${{ github.sha }}
+          path: contracts/facade/target/wasm32-unknown-unknown/release/freenet_email_facade.wasm
+          if-no-files-found: warn
+          retention-days: 7
