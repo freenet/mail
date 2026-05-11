@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Issue #206. Rebuild published-contract/facade.{wasm,parameters,id.txt}
-# on a CANONICAL host (linux/amd64 + pinned rustc), so the bytes match
-# what the CI byte-equality gate (check-facade-byte-equal.sh) will see.
+# from source. ONLY canonical on native linux/amd64 hosts — the bytes
+# CI produces under qemu emulation (Docker on macOS / arm64) drift
+# slightly even with identical rustc + source, so emulated rebuilds
+# WILL NOT match the CI byte-equality gate.
 #
 # Use this when:
 #   • Bumping rustc in rust-toolchain.toml.
@@ -9,16 +11,21 @@
 #     contracts/facade-types/Cargo.toml.
 #   • Editing facade source.
 #
-# On linux/amd64 hosts this builds natively. On macOS / arm64 / anything
-# else, it spawns a `rust:<pinned>-slim-bookworm` container under
-# linux/amd64 emulation (qemu via Docker Desktop / OrbStack). The
-# container build is slow (~30s) but byte-deterministic with the native
-# Linux CI rebuild.
+# On non-Linux/amd64 hosts: do NOT use this. Instead rely on the
+# CI bootstrap path:
+#   1. Push the change with whatever facade.wasm bytes you have locally.
+#   2. The check-contract-wasm.yml job will fail byte-equality and
+#      upload the canonical CI-built wasm as a workflow artifact named
+#      `facade-wasm-rebuilt-<sha>`.
+#   3. Download that artifact, replace published-contract/facade.wasm
+#      with its bytes, recompute facade-id.txt via
+#      `fdev get-contract-id`, commit, push.
+#   4. CI passes.
 #
-# After this script succeeds, the new bytes are in published-contract/.
-# Commit them as part of the same PR as the change that caused the
-# rotation. The CI gate will fail until both the bytes AND the change
-# are committed together.
+# After this script succeeds (linux/amd64 only), the new bytes are in
+# published-contract/. Commit them as part of the same PR as the change
+# that caused the rotation. The CI gate fails until both the bytes AND
+# the change land in the same PR.
 
 set -euo pipefail
 
@@ -36,41 +43,20 @@ fi
 
 WASM_OUT="$ROOT/contracts/facade/target/wasm32-unknown-unknown/release/freenet_email_facade.wasm"
 
-build_native() {
-    echo "→ building facade natively (linux/amd64 host with rustc $PINNED_RUSTC)"
-    (
-        cd "$ROOT/contracts/facade"
-        cargo build --release --target wasm32-unknown-unknown
-    )
-}
-
-build_in_docker() {
-    if ! command -v docker >/dev/null 2>&1; then
-        echo "error: docker not available — needed to build under linux/amd64 emulation" >&2
-        echo "       on this host ($(uname -s)/$(uname -m))." >&2
-        exit 1
-    fi
-    local image="rust:${PINNED_RUSTC}-slim-bookworm"
-    echo "→ building facade inside $image (linux/amd64 emulation)"
-    docker run --rm --platform linux/amd64 \
-        -v "$ROOT:/work" \
-        -w /work \
-        "$image" \
-        bash -c '
-            set -euo pipefail
-            rustup target add wasm32-unknown-unknown >/dev/null 2>&1
-            cd contracts/facade
-            cargo build --release --target wasm32-unknown-unknown
-        '
-}
-
 HOST_OS=$(uname -s)
 HOST_ARCH=$(uname -m)
-if [ "$HOST_OS" = "Linux" ] && [ "$HOST_ARCH" = "x86_64" ]; then
-    build_native
-else
-    build_in_docker
+if [ "$HOST_OS" != "Linux" ] || [ "$HOST_ARCH" != "x86_64" ]; then
+    echo "error: this host is $HOST_OS/$HOST_ARCH; canonical snapshot bytes can only" >&2
+    echo "       be produced on native linux/amd64 (qemu emulation drifts vs CI)." >&2
+    echo "       Use the CI bootstrap path documented at the top of this script." >&2
+    exit 1
 fi
+
+echo "→ building facade natively (linux/amd64 host with rustc $PINNED_RUSTC)"
+(
+    cd "$ROOT/contracts/facade"
+    cargo build --release --target wasm32-unknown-unknown
+)
 
 if [ ! -f "$WASM_OUT" ]; then
     echo "error: build claimed to succeed but $WASM_OUT does not exist" >&2
