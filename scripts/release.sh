@@ -221,10 +221,12 @@ if [ -f published-contract/facade-id.txt ]; then
 
     confirm "Push facade UPDATE to the network now?"
 
-    # `network` mode is the production target; `local` would publish to a
-    # `freenet local` sandbox. fdev execute update takes positional args
-    # KEY DELTA [RELEASE].
-    fdev execute update "$FACADE_ID" "$FACADE_STATE" network
+    # fdev execute update takes positional args KEY DELTA [RELEASE].
+    # The RELEASE positional is currently a no-op in fdev (and errors
+    # if set), so we omit it. The update always targets whichever node
+    # the local fdev API points at; since release prerequisites assert
+    # a `freenet network` daemon, the update propagates network-wide.
+    fdev execute update "$FACADE_ID" "$FACADE_STATE"
 
     echo "  ✓ facade UPDATEd; bookmarked URL stays stable across releases"
     echo ""
