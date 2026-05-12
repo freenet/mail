@@ -40,9 +40,34 @@
   var fb = document.getElementById("fallback");
   if (fb) fb.href = target;
 
-  // Use replace() so the loader URL doesn't pollute browser history; the
-  // user's bookmarked facade URL stays the canonical entry point.
-  window.location.replace(target);
+  // The gateway serves contract URLs as a shell page with the contract
+  // content in a sandboxed iframe. The shell page sets
+  // `X-Frame-Options: DENY`, so a same-window `location.replace` from
+  // inside the sandbox would try to load the next contract's shell page
+  // *inside our iframe*, which Firefox/Chrome block as a clickjacking
+  // defense.
+  //
+  // The shell exposes a cross-contract navigation primitive via
+  // postMessage (`__freenet_shell__: 'navigate'`), which performs a
+  // top-level navigation in the same tab. We use that when we're framed.
+  //
+  // When the loader is opened standalone (no parent frame, e.g. a
+  // developer fetching the loader directly), fall back to a same-window
+  // location replace so the UX still works.
+  var framed = false;
+  try { framed = window.parent !== window; } catch (e) { framed = true; }
+
+  if (framed) {
+    window.parent.postMessage({
+      __freenet_shell__: true,
+      type: 'navigate',
+      href: target
+    }, '*');
+  } else {
+    // Use replace() so the loader URL doesn't pollute browser history;
+    // the user's bookmarked facade URL stays the canonical entry point.
+    window.location.replace(target);
+  }
 })();
 </script>
 </body>

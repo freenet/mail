@@ -282,6 +282,121 @@ devtools shows which facade a build references. Both are conditional
 on `published-contract/facade-id.txt` being committed (one-time facade
 publish required first; see RELEASING.md §"Facade contract update").
 
+#### Pointer lifecycle — how the facade actually serves a release
+
+Each release rotates the web-container contract id but leaves the
+facade contract id fixed. The full chain on every release:
+
+1. `cargo make build` rebuilds the UI webapp. Workspace `Cargo.lock`
+   churn shifts wasm bytes, producing a new `published-contract/contract-id.txt`.
+2. `scripts/build-loader.sh <new_app_id>` substitutes the new id into
+   `contracts/facade-loader/src/index.html.tmpl` → writes
+   `contracts/facade-loader/dist/index.html`. This loader is the file
+   the facade actually serves; it's a static HTML+JS page that
+   redirects the browser to the new web-container url.
+3. `cargo make pack-facade-loader` tars + xzs the loader into
+   `target/facade/loader.tar.xz`. The gateway's `WebApp::try_from`
+   pipeline (XzDecoder → tar.unpack) requires this exact framing, see
+   memory `facade_state_framing.md`.
+4. `cargo make sign-facade-state` signs a fresh `FacadePointer { version=now, current_app_id=<new>, prev_app_ids=[<old>] }`
+   with the production key from `~/.config/freenet-email/web-container-keys.toml`.
+   Output: `target/facade/facade.state` (signed `[meta_len][meta][web_len][web]`).
+5. `fdev execute update --as-state <facade_id> target/facade/facade.state`
+   pushes the new state to the network. **`--as-state` is required** —
+   default is `UpdateData::Delta` which a facade-style contract rejects
+   silently as `InvalidUpdate` (memory `fdev_update_needs_as_state.md`).
+6. `scripts/release.sh` commits the new web-container snapshot, tags,
+   pushes.
+
+The facade contract id never changes across any of this. Users
+bookmark `/v1/contract/web/<facade_id>/` once and that URL keeps
+working release after release.
+
+#### Loader must postMessage, not location.replace (v0.1.8)
+
+The gateway wraps every contract URL response in a shell page with a
+sandboxed iframe and `X-Frame-Options: DENY` on the shell. Inside the
+sandbox, the loader cannot `window.location.replace(<new_app_url>)` —
+the new app's gateway response would have to render inside our iframe,
+and XFO DENY blocks that (Firefox: "Firefox Can't Open This Page").
+
+The fix: the loader posts `{__freenet_shell__: true, type: 'navigate', href: <new_app_url>}`
+to `window.parent`. The freenet-core shell already implements
+cross-contract navigation for that message — it does a top-level
+`window.location.assign` outside our iframe, which loads a fresh
+shell for the new contract id. See `path_handlers.rs:836` in
+freenet-core for the handler.
+
+Fallback path: if the loader is opened standalone (e.g. `?__sandbox=1`
+or a dev fetch with no parent frame), it uses `window.location.replace`
+so the dev UX still works.
+
+#### Manual pointer flip / recovery
+
+If `scripts/release.sh` aborts after publish-webapp (e.g. fdev's
+300s timeout — see freenet-core#4102 — fires even though the publish
+landed), resume the pointer flip manually:
+
+```bash
+# 1. Confirm the new webapp actually published.
+curl -sI "http://127.0.0.1:7509/v1/contract/web/$(cat published-contract/contract-id.txt)/" \
+  | head -1   # expect HTTP/1.1 200
+
+# 2. Rebuild loader + repack + re-sign state with the production key.
+cargo make sign-facade-state
+# (chains build-facade-loader → pack-facade-loader → sign)
+
+# 3. Push the pointer update.
+fdev execute update --as-state \
+  "$(cat published-contract/facade-id.txt)" \
+  target/facade/facade.state
+# expect "Contract updated successfully" + StateSummary
+
+# 4. Verify the facade now serves the new loader.
+curl -s "http://127.0.0.1:7509/v1/contract/web/$(cat published-contract/facade-id.txt)/?__sandbox=1" \
+  | grep CURRENT_APP_ID
+# expect the new app id baked in
+
+# 5. Open the facade URL in a browser. The loader should postMessage
+# the shell and the shell should navigate to the new web-container url.
+```
+
+If step 4 returns the old app id, the gateway likely served a stale
+extracted webapp from its on-disk cache. The gateway extracts the
+webapp tar.xz on GetResponse and writes the extracted files to its
+webapp_cache directory; UPDATEs that change the `web` slot don't
+invalidate that cache until the next contract get. Bust the cache by
+hand:
+
+```bash
+# macOS:
+CACHE_DIR="$HOME/Library/Caches/The-Freenet-Project-Inc.freenet/webapp_cache"
+# Linux:
+# CACHE_DIR="$HOME/.cache/freenet/webapp_cache"
+FACADE_ID=$(cat published-contract/facade-id.txt)
+rm -rf "${CACHE_DIR}/${FACADE_ID}" "${CACHE_DIR}/${FACADE_ID}.hash"
+
+# Trigger a GetResponse by hitting the MAIN URL (not ?__sandbox=1).
+# The sandbox endpoint short-circuits on cache miss with a 500.
+curl -s -o /dev/null "http://127.0.0.1:7509/v1/contract/web/${FACADE_ID}/"
+```
+
+This is a freenet-core gateway issue. The pointer is correct on-chain
+(verified by `fdev execute get`); the staleness is local to the
+gateway's extracted-webapp cache. Track downstream as a freenet-core
+issue when you next encounter it.
+
+#### What NOT to commit per release
+
+- `target/facade/facade.state` is signed with the production key and
+  carries a per-build timestamp version. **Do not commit it** — every
+  release re-signs. Only the WASM/parameters/id snapshot under
+  `published-contract/facade.*` is checked into git, and that triplet
+  stays byte-stable across releases by design.
+- `contracts/facade-loader/dist/index.html` is regenerated from
+  `src/index.html.tmpl` at every release. Don't hand-edit dist; edit
+  the tmpl and let `build-loader.sh` re-render.
+
 **Inbox + AFT lockfile isolation (issue #199 Phase A)**: same pattern
 extended to every other on-chain contract:
 
