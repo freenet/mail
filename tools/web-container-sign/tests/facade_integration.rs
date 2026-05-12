@@ -86,4 +86,3 @@ fn placeholder_id_derivation_documented() {
     // signature verification, which is what really matters.
     let _ = OsRng;
 }
-
