@@ -104,6 +104,16 @@ pub(crate) enum NodeAction {
         new: Rc<str>,
         identity: Box<Identity>,
     },
+    /// Delete an own identity from this device. Removes the entry from the
+    /// identity-management delegate and from local in-memory stores
+    /// (ALIASES, User.identities). The inbox + AFT contracts themselves
+    /// remain on-chain but become unreachable from this device: there is
+    /// no on-chain "delete contract" primitive, and without the keypair
+    /// nobody can sign deltas against them anyway. Irreversible without
+    /// the backup file.
+    DeleteIdentity {
+        identity: Box<Identity>,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -173,6 +183,7 @@ pub(crate) fn app() -> Element {
         let _ = toast;
         let mut login_ctl = login_controller;
         let mut ab_gen = ab_gen;
+        let mut user_sig = user;
         let _sync: Coroutine<NodeAction> =
             use_coroutine(move |mut rx: UnboundedReceiver<NodeAction>| async move {
                 use futures::StreamExt;
@@ -207,6 +218,23 @@ pub(crate) fn app() -> Element {
                             // trip.
                             Identity::rename_in_place(&old, &new);
                             login_ctl.write().updated = true;
+                        }
+                        NodeAction::DeleteIdentity { identity } => {
+                            Identity::remove_in_place(&identity.alias);
+                            let mut user_w = user_sig.write();
+                            let was_logged_in = user_w
+                                .logged_id()
+                                .map(|i| i.id == identity.id)
+                                .unwrap_or(false);
+                            user_w.identities.retain(|i| i.id != identity.id);
+                            if was_logged_in {
+                                user_w.logout();
+                            }
+                            drop(user_w);
+                            login_ctl.write().updated = true;
+                            address_book::remove_contact(&identity.alias);
+                            let prev = *ab_gen.0.read();
+                            ab_gen.0.set(prev.wrapping_add(1));
                         }
                         _ => {}
                     }
@@ -683,6 +711,13 @@ impl User {
     pub(crate) fn set_logged_id(&mut self, id: UserId) {
         assert!(id.0 < self.identities.len());
         self.active_id = Some(id);
+    }
+
+    /// Clear the active-identity selection without logging out the user
+    /// entirely. Used when an identity is deleted while open.
+    pub(crate) fn logout(&mut self) {
+        self.logged = false;
+        self.active_id = None;
     }
 }
 

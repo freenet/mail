@@ -643,6 +643,23 @@ mod identity_management {
         send_identity_msg(client, &msg).await
     }
 
+    /// Delete an own identity from the delegate. The delegate stores own
+    /// identities and contacts in the same alias-keyed map, so
+    /// `DeleteIdentity` is the right wire message regardless of kind —
+    /// the UI layer is responsible for confirmation. The inbox/AFT
+    /// contracts on-chain are not touched; without the keypair nobody can
+    /// sign deltas against them anyway, so they're effectively orphaned.
+    pub(super) async fn delete_identity_api_call(
+        client: &mut WebApiRequestClient,
+        alias: &str,
+    ) -> Result<(), DynError> {
+        crate::log::debug!("deleting own identity {alias}");
+        let msg = IdentityMsg::DeleteIdentity {
+            alias: alias.to_string(),
+        };
+        send_identity_msg(client, &msg).await
+    }
+
     /// Rename an own identity by replaying its keypair under a new
     /// alias and deleting the old entry. Issue #32 — the delegate has
     /// no atomic Rename op, so we do delete+create at the UI layer.
@@ -794,7 +811,7 @@ pub(crate) async fn node_comms(
         // below; we accept it here so the call sites don't have to thread
         // a smaller param list.
         _token_rec_to_id: &mut HashMap<ContractKey, Identity>,
-        user: Signal<crate::app::User>,
+        mut user: Signal<crate::app::User>,
         mut login_controller: Signal<crate::app::LoginController>,
         inboxes: &InboxesData,
         mut ab_gen: crate::app::AddressBookGen,
@@ -1301,6 +1318,41 @@ pub(crate) async fn node_comms(
                     Err(e) => {
                         crate::log::error(
                             format!("failed to rename identity {old} → {new}: {e}"),
+                            None,
+                        );
+                    }
+                }
+            }
+            NodeAction::DeleteIdentity { identity } => {
+                let alias = identity.alias.clone();
+                match identity_management::delete_identity_api_call(&mut client, &alias).await {
+                    Ok(()) => {
+                        // Drop from in-memory ALIASES + User.identities so
+                        // the IdentifiersList re-renders without the row.
+                        // The on-chain inbox + AFT contracts stay put
+                        // (no delete primitive); without the keypair they
+                        // become unreachable, which is the security boundary
+                        // users actually care about.
+                        crate::app::login::Identity::remove_in_place(&alias);
+                        let mut user_w = user.write();
+                        let was_logged_in = user_w
+                            .logged_id()
+                            .map(|i| i.id == identity.id)
+                            .unwrap_or(false);
+                        user_w.identities.retain(|i| i.id != identity.id);
+                        if was_logged_in {
+                            user_w.logout();
+                        }
+                        drop(user_w);
+                        // Bump address-book generation so any inbox row that
+                        // had this identity wired up as a sender re-renders.
+                        let prev = *ab_gen.0.read();
+                        ab_gen.0.set(prev.wrapping_add(1));
+                        login_controller.write().updated = true;
+                    }
+                    Err(e) => {
+                        crate::log::error(
+                            format!("failed to delete identity {alias}: {e}"),
                             None,
                         );
                     }

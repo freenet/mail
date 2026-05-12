@@ -90,8 +90,12 @@ pub(crate) const FM_ID_BACKUP: &str = "fm-id-backup";
 pub(crate) const FM_ID_RESTORE: &str = "fm-id-restore";
 pub(crate) const FM_ID_RENAME: &str = "fm-id-rename";
 pub(crate) const FM_ID_SHARE: &str = "fm-id-share";
+pub(crate) const FM_ID_DELETE: &str = "fm-id-delete";
 pub(crate) const FM_RENAME_INPUT: &str = "fm-rename-input";
 pub(crate) const FM_RENAME_SUBMIT: &str = "fm-rename-submit";
+pub(crate) const FM_DELETE_CONFIRM_INPUT: &str = "fm-delete-confirm-input";
+pub(crate) const FM_DELETE_CONFIRM_SUBMIT: &str = "fm-delete-confirm-submit";
+pub(crate) const FM_DELETE_CONFIRM_CANCEL: &str = "fm-delete-confirm-cancel";
 
 // Address book — share / import
 pub(crate) const FM_SHARE_MODAL: &str = "fm-share-modal";
@@ -182,8 +186,12 @@ mod tests {
             ("fmIdRestore", super::FM_ID_RESTORE),
             ("fmIdRename", super::FM_ID_RENAME),
             ("fmIdShare", super::FM_ID_SHARE),
+            ("fmIdDelete", super::FM_ID_DELETE),
             ("fmRenameInput", super::FM_RENAME_INPUT),
             ("fmRenameSubmit", super::FM_RENAME_SUBMIT),
+            ("fmDeleteConfirmInput", super::FM_DELETE_CONFIRM_INPUT),
+            ("fmDeleteConfirmSubmit", super::FM_DELETE_CONFIRM_SUBMIT),
+            ("fmDeleteConfirmCancel", super::FM_DELETE_CONFIRM_CANCEL),
             ("fmShareModal", super::FM_SHARE_MODAL),
             ("fmShareCopy", super::FM_SHARE_COPY),
             ("fmContactImport", super::FM_CONTACT_IMPORT),

@@ -458,6 +458,18 @@ impl Identity {
             }
         })
     }
+
+    /// Drop the entry whose alias matches `alias` from the shared
+    /// `ALIASES` store. Returns `true` if a matching entry was found.
+    /// Used by `NodeAction::DeleteIdentity`.
+    pub(crate) fn remove_in_place(alias: &str) -> bool {
+        ALIASES.with(|aliases| {
+            let aliases = &mut *aliases.borrow_mut();
+            let before = aliases.len();
+            aliases.retain(|a| &*a.alias != alias);
+            aliases.len() != before
+        })
+    }
 }
 
 impl std::hash::Hash for Identity {
@@ -869,10 +881,18 @@ pub(super) fn Identities() -> Element {
         let backup_alias = identity.clone();
         let share_id = identity.clone();
         let rename_id = identity.clone();
+        let delete_id = identity.clone();
         // Per-row rename state. `Some(draft)` means the inline editor is
         // open. Issue #32 — rename is delete+create with the same key.
         let mut rename_draft: Signal<Option<String>> = use_signal(|| None);
         let mut rename_error = use_signal(String::new);
+        // Per-row delete-confirmation state. `true` means the modal is open;
+        // user has to type the alias verbatim before the Delete button
+        // arms. The keypair is destroyed locally so unconfirmed clicks must
+        // not slip through.
+        let mut delete_open = use_signal(|| false);
+        let mut delete_input = use_signal(String::new);
+        let mut delete_error = use_signal(String::new);
 
         let submit_rename = move |_| {
             let next = rename_draft
@@ -906,6 +926,24 @@ pub(super) fn Identities() -> Element {
             });
             rename_draft.set(None);
             rename_error.set(String::new());
+        };
+
+        let submit_delete = {
+            let delete_id = delete_id.clone();
+            move |_| {
+                let typed = delete_input.read().trim().to_string();
+                if typed != *delete_id.alias {
+                    delete_error
+                        .set("Type the alias exactly as shown to confirm.".into());
+                    return;
+                }
+                actions.send(NodeAction::DeleteIdentity {
+                    identity: Box::new(delete_id.clone()),
+                });
+                delete_open.set(false);
+                delete_input.set(String::new());
+                delete_error.set(String::new());
+            }
         };
 
         rsx! {
@@ -1010,6 +1048,17 @@ pub(super) fn Identities() -> Element {
                             "↗"
                         }
                         button {
+                            class: "icon-btn",
+                            title: "Delete this identity from this device",
+                            "data-testid": testid::FM_ID_DELETE,
+                            onclick: move |_| {
+                                delete_open.set(true);
+                                delete_input.set(String::new());
+                                delete_error.set(String::new());
+                            },
+                            "🗑"
+                        }
+                        button {
                             class: "btn btn-primary",
                             "data-testid": testid::FM_ID_OPEN,
                             onclick: move |_| {
@@ -1017,6 +1066,62 @@ pub(super) fn Identities() -> Element {
                                 inbox.write().set_active_id(id);
                             },
                             "Open inbox"
+                        }
+                    }
+                }
+            }
+            if *delete_open.read() {
+                div { class: "veil",
+                    onclick: move |_| {
+                        delete_open.set(false);
+                        delete_input.set(String::new());
+                        delete_error.set(String::new());
+                    },
+                    div { class: "modal",
+                        onclick: move |evt| { evt.stop_propagation(); },
+                        h2 { class: "display md", "Delete identity?" }
+                        p {
+                            "This permanently removes “{delete_id.alias}” and its private keys from this device. "
+                            "Messages already in this inbox become unreadable. "
+                            "On-chain contracts stay where they are — there's no way to delete them — "
+                            "but without the keypair they can't be reached again."
+                        }
+                        p { style: "color:#b91c1c; font-weight:600;",
+                            "Restore the backup file to recover. Without it, this is irreversible."
+                        }
+                        p {
+                            "Type "
+                            code { "{delete_id.alias}" }
+                            " below to confirm."
+                        }
+                        input {
+                            class: "input",
+                            "data-testid": testid::FM_DELETE_CONFIRM_INPUT,
+                            value: "{delete_input.read()}",
+                            oninput: move |evt| { delete_input.set(evt.value()); },
+                        }
+                        if !delete_error.read().is_empty() {
+                            div { class: "field-help", style: "color:#b91c1c;",
+                                "{delete_error.read()}"
+                            }
+                        }
+                        div { style: "display:flex; gap:10px; margin-top:14px;",
+                            button {
+                                class: "btn btn-ghost",
+                                "data-testid": testid::FM_DELETE_CONFIRM_CANCEL,
+                                onclick: move |_| {
+                                    delete_open.set(false);
+                                    delete_input.set(String::new());
+                                    delete_error.set(String::new());
+                                },
+                                "Cancel"
+                            }
+                            button {
+                                class: "btn btn-danger",
+                                "data-testid": testid::FM_DELETE_CONFIRM_SUBMIT,
+                                onclick: submit_delete,
+                                "Delete identity"
+                            }
                         }
                     }
                 }

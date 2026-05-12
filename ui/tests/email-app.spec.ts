@@ -1081,6 +1081,60 @@ test.describe("Rename identity (#32)", () => {
   });
 });
 
+// Delete own identity (offline branch). Online use-node branch round-trips
+// through the identity-management delegate; covered by live-node.spec.ts
+// when the harness includes a delete step.
+test.describe("Delete identity", () => {
+  test("deletes an id-row after confirming the alias verbatim", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await waitForApp(page);
+
+    const row = page.locator('[data-testid="fm-id-row"][data-alias="address2"]');
+    await expect(row).toBeVisible();
+    await row.locator('[data-testid="fm-id-delete"]').click();
+
+    const input = page.locator('[data-testid="fm-delete-confirm-input"]');
+    await input.waitFor({ timeout: 5_000 });
+    await input.fill("address2");
+
+    await page.locator('[data-testid="fm-delete-confirm-submit"]').click();
+
+    await expect(
+      page.locator('[data-testid="fm-id-row"][data-alias="address2"]'),
+    ).toHaveCount(0, { timeout: 5_000 });
+    // address1 stays.
+    await expect(
+      page.locator('[data-testid="fm-id-row"][data-alias="address1"]'),
+    ).toBeVisible();
+  });
+
+  test("refuses to delete without the alias typed verbatim", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await waitForApp(page);
+
+    const row = page.locator('[data-testid="fm-id-row"][data-alias="address1"]');
+    await row.locator('[data-testid="fm-id-delete"]').click();
+
+    const input = page.locator('[data-testid="fm-delete-confirm-input"]');
+    await input.waitFor({ timeout: 5_000 });
+    await input.fill("wrong-alias");
+
+    await page.locator('[data-testid="fm-delete-confirm-submit"]').click();
+
+    await expect(page.getByText(/Type the alias exactly/)).toBeVisible({
+      timeout: 5_000,
+    });
+    // Row still there.
+    await expect(
+      page.locator('[data-testid="fm-id-row"][data-alias="address1"]'),
+    ).toBeVisible();
+  });
+});
+
 // Archive (issue #47/47c). Archive splits from Delete: Archive stashes the
 // message locally and removes it from the inbox contract; Delete only
 // removes (no local trace). Re-PUT-on-unarchive lands in #60.

@@ -53,8 +53,12 @@ interface TestIds {
   fmIdRestore: string;
   fmIdRename: string;
   fmIdShare: string;
+  fmIdDelete: string;
   fmRenameInput: string;
   fmRenameSubmit: string;
+  fmDeleteConfirmInput: string;
+  fmDeleteConfirmSubmit: string;
+  fmDeleteConfirmCancel: string;
   fmShareModal: string;
   fmShareCopy: string;
   fmContactImport: string;
