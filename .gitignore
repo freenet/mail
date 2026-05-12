@@ -16,3 +16,5 @@ ui/tests/playwright-report/
 /design/
 # Per-worktree isolated freenet local node state (run-node task).
 /.run-node/
+# Claude Code scheduled-task runtime lock (per-worktree).
+/.claude/scheduled_tasks.lock
