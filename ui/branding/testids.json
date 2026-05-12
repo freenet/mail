@@ -52,8 +52,12 @@
   "fmIdRestore": "fm-id-restore",
   "fmIdRename": "fm-id-rename",
   "fmIdShare": "fm-id-share",
+  "fmIdDelete": "fm-id-delete",
   "fmRenameInput": "fm-rename-input",
   "fmRenameSubmit": "fm-rename-submit",
+  "fmDeleteConfirmInput": "fm-delete-confirm-input",
+  "fmDeleteConfirmSubmit": "fm-delete-confirm-submit",
+  "fmDeleteConfirmCancel": "fm-delete-confirm-cancel",
 
   "fmShareModal": "fm-share-modal",
   "fmShareCopy": "fm-share-copy",

@@ -43,6 +43,9 @@ manual gap by adding a test, flip status to `auto` and link the test.
 | Backup → restore round-trip (export, wipe, import, identity present) | manual | Compose, generate backup, save file, log out, restore from file, confirm alias + sent + drafts present |
 | Rename identity in place | auto | offline: `renames an id-row in place and surfaces the new alias` |
 | Refuses duplicate alias on rename | auto | offline: `refuses to rename to an alias that already exists` |
+| Delete identity (confirm-modal + row removed) | manual | Open IdentifiersList, click 🗑 on an id-row, type alias verbatim, click Delete identity, confirm row disappears and `Identity::get_alias()` no longer returns it. Inbox + AFT contracts remain on-chain (no on-chain delete primitive). |
+| Delete identity refuses without exact alias match | manual | Open delete modal, type wrong alias, expect inline error "Type the alias exactly as shown to confirm." and no row removal. |
+| Delete identity while logged in clears active id | manual | Open inbox, navigate back to IdentifiersList, delete the currently-active identity, confirm app falls back to the identifiers list and active selection is cleared. |
 | 3+ identities switch + sidebar fingerprint flips | auto (2 ids) / manual (3+) | offline: `fingerprint changes when switching identities` covers 2; 3+ via `cargo make dev-example` + create another + cycle |
 | Switcher in Settings (popover open/close + active row) | manual | Open Settings, click ident switcher button, click a non-active row, verify identity context flipped |
 

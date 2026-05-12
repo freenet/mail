@@ -215,6 +215,96 @@ must have been published once and its id committed first. Until then,
 the script warns and skips the flip; the rest of the release still goes
 through.
 
+### Verifying the pointer flip worked
+
+After release.sh exits, sanity-check that the facade actually points
+at the new webapp:
+
+```bash
+NEW_APP_ID=$(cat published-contract/contract-id.txt)
+FACADE_ID=$(cat published-contract/facade-id.txt)
+
+# 1. Facade serves the loader, and the loader bakes in the new app id.
+curl -s "http://127.0.0.1:7509/v1/contract/web/${FACADE_ID}/?__sandbox=1" \
+  | grep -F "${NEW_APP_ID}"
+# expect: var CURRENT_APP_ID = "<new app id>";
+
+# 2. The new webapp itself serves.
+curl -sI "http://127.0.0.1:7509/v1/contract/web/${NEW_APP_ID}/" | head -1
+# expect: HTTP/1.1 200 OK
+
+# 3. Browser smoke: open the facade URL in a real browser. The loader
+# postMessages the gateway shell, which navigates to the new app.
+echo "open http://127.0.0.1:7509/v1/contract/web/${FACADE_ID}/"
+```
+
+### Manual pointer flip (if release.sh aborts post-publish)
+
+If the script aborts after step 4 (publish webapp) — most commonly
+because `fdev publish` returns a 300s client timeout despite the
+server-side publish succeeding (freenet-core#4102) — the webapp WAS
+published but the facade pointer was not flipped. Resume manually:
+
+```bash
+# Confirm the webapp landed despite fdev's complaint.
+NEW_APP_ID=$(cat published-contract/contract-id.txt)
+curl -sI "http://127.0.0.1:7509/v1/contract/web/${NEW_APP_ID}/" | head -1
+# expect HTTP/1.1 200 — if you get a 4xx/5xx, the publish actually failed
+# and you need to re-run the publish step.
+
+# Re-sign facade state with the new app id and push the pointer update.
+cargo make sign-facade-state
+fdev execute update --as-state \
+    "$(cat published-contract/facade-id.txt)" \
+    target/facade/facade.state
+# expect: "Contract updated successfully" + StateSummary blob
+
+# Verify (same as §"Verifying the pointer flip worked" above).
+
+# Then complete the commit/tag/push that release.sh would have run:
+git add published-contract/contract-id.txt
+git commit -m "chore(release): v<version> — production publish"
+git tag -a "v<version>" -m "freenet-email v<version>"
+git push origin main && git push origin "v<version>"
+```
+
+**Important**: `--as-state` is required on the `fdev execute update`
+invocation. The facade contract's `update_state` only accepts
+`UpdateData::State`; without the flag fdev sends `UpdateData::Delta`
+and the contract silently rejects the update as `InvalidUpdate`.
+
+### Loader template (`contracts/facade-loader/src/index.html.tmpl`)
+
+The loader is a static HTML+JS shell that the facade serves. It
+embeds the current app id via `__CURRENT_APP_ID__` placeholder and
+hands the user off to the new webapp via a shell postMessage:
+
+```js
+window.parent.postMessage({
+    __freenet_shell__: true,
+    type: 'navigate',
+    href: target
+}, '*');
+```
+
+**Why postMessage instead of `window.location.replace`?** The gateway
+wraps every contract URL in a shell page with `X-Frame-Options: DENY`
+and serves the contract inside a sandboxed iframe. A same-window
+`location.replace` from inside the sandbox would try to load the new
+contract's shell page *inside our iframe*, which the browser blocks
+("Firefox Can't Open This Page"). The freenet-core shell already
+handles cross-contract navigation via the `__freenet_shell__`
+postMessage protocol — see `crates/core/src/server/path_handlers.rs`
+line ~836 in freenet-core.
+
+When the loader is opened standalone (`?__sandbox=1` or no parent
+frame), it falls back to `window.location.replace` so dev fetches
+still work.
+
+If you ever need to hand-edit the loader, edit the `.tmpl` file —
+**not** the rendered `dist/index.html`, which is overwritten on every
+build.
+
 **One-time facade publish (per environment)**: before Phase 3 runs for
 the first time on a network, publish the facade contract once and
 commit its id. Manual steps:
