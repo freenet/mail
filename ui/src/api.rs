@@ -1351,10 +1351,7 @@ pub(crate) async fn node_comms(
                         login_controller.write().updated = true;
                     }
                     Err(e) => {
-                        crate::log::error(
-                            format!("failed to delete identity {alias}: {e}"),
-                            None,
-                        );
+                        crate::log::error(format!("failed to delete identity {alias}: {e}"), None);
                     }
                 }
             }

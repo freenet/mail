@@ -933,8 +933,7 @@ pub(super) fn Identities() -> Element {
             move |_| {
                 let typed = delete_input.read().trim().to_string();
                 if typed != *delete_id.alias {
-                    delete_error
-                        .set("Type the alias exactly as shown to confirm.".into());
+                    delete_error.set("Type the alias exactly as shown to confirm.".into());
                     return;
                 }
                 actions.send(NodeAction::DeleteIdentity {
