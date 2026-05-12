@@ -255,9 +255,58 @@ cd "$ROOT/contracts/facade"
 cargo build --profile "${BUILD_PROFILE}" --target "${CONTRACT_TARGET}"
 '''
 
+[tasks.pack-facade-loader]
+description = "Pack the rendered facade loader (dist/index.html) into a tar.xz blob the freenet-core gateway can serve as a webapp."
+dependencies = ["build-facade-loader"]
+script_runner = "bash"
+script = '''
+set -euo pipefail
+ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
+APP_ID="${FACADE_CURRENT_APP_ID:-$(cat "$ROOT/published-contract/contract-id.txt")}"
+DIST_DIR="$ROOT/contracts/facade-loader/dist"
+LOADER_HTML="$DIST_DIR/index.html"
+if [ ! -f "$LOADER_HTML" ]; then
+    echo "error: $LOADER_HTML missing (build-facade-loader should have produced it)" >&2
+    exit 1
+fi
+# Sanity: the rendered HTML MUST embed the current_app_id we're about
+# to sign over, otherwise the facade pointer redirects users to a
+# different app than the loader actually fetches.
+if ! grep -q "$APP_ID" "$LOADER_HTML"; then
+    echo "error: $LOADER_HTML does not embed current_app_id '$APP_ID'." >&2
+    echo "       Re-render with: FACADE_CURRENT_APP_ID=$APP_ID cargo make build-facade-loader" >&2
+    exit 1
+fi
+mkdir -p "$ROOT/target/facade"
+# Use GNU tar for reproducibility (matches compress-webapp). The
+# gateway's WebApp::try_from runs XzDecoder → tar.unpack over these
+# bytes, so the archive must be a real tar+xz containing index.html.
+if command -v gtar >/dev/null 2>&1; then
+    TAR=gtar
+elif tar --version 2>/dev/null | grep -qi 'gnu tar'; then
+    TAR=tar
+else
+    echo "warning: GNU tar not found — facade loader archive will not be" >&2
+    echo "         byte-identical across machines (signing is per-build" >&2
+    echo "         anyway so this only affects diff noise)." >&2
+    TAR=""
+fi
+OUT="$ROOT/target/facade/loader.tar.xz"
+if [ -n "$TAR" ]; then
+    "$TAR" --sort=name \
+        --mtime='2024-01-01 00:00:00 UTC' \
+        --owner=0 --group=0 --numeric-owner \
+        -C "$DIST_DIR" \
+        -cJf "$OUT" index.html
+else
+    tar -C "$DIST_DIR" -cJf "$OUT" index.html
+fi
+echo "wrote $OUT ($(wc -c < "$OUT") bytes)"
+'''
+
 [tasks.sign-facade-state-test]
 description = "Sign a facade state blob using the committed test key (current_app_id from published-contract)"
-dependencies = ["build-facade-loader"]
+dependencies = ["pack-facade-loader"]
 script_runner = "bash"
 script = '''
 set -euo pipefail
@@ -268,9 +317,9 @@ if [ ! -f "$KEY_FILE" ]; then
     exit 1
 fi
 APP_ID="${FACADE_CURRENT_APP_ID:-$(cat "$ROOT/published-contract/contract-id.txt")}"
-LOADER="$ROOT/contracts/facade-loader/dist/index.html"
+LOADER="$ROOT/target/facade/loader.tar.xz"
 if [ ! -f "$LOADER" ]; then
-    echo "error: $LOADER missing (build-facade-loader should have produced it)" >&2
+    echo "error: $LOADER missing (pack-facade-loader should have produced it)" >&2
     exit 1
 fi
 mkdir -p "$ROOT/target/facade"
@@ -287,7 +336,7 @@ echo "test facade state signed at version $version pointing at $APP_ID"
 
 [tasks.sign-facade-state]
 description = "Sign a facade state blob using the PRODUCTION key (current_app_id from published-contract)"
-dependencies = ["build-facade-loader"]
+dependencies = ["pack-facade-loader"]
 script_runner = "bash"
 script = '''
 set -euo pipefail
@@ -299,9 +348,9 @@ if [ ! -f "$KEY_FILE" ]; then
     exit 1
 fi
 APP_ID="${FACADE_CURRENT_APP_ID:-$(cat "$ROOT/published-contract/contract-id.txt")}"
-LOADER="$ROOT/contracts/facade-loader/dist/index.html"
+LOADER="$ROOT/target/facade/loader.tar.xz"
 if [ ! -f "$LOADER" ]; then
-    echo "error: $LOADER missing" >&2
+    echo "error: $LOADER missing (pack-facade-loader should have produced it)" >&2
     exit 1
 fi
 mkdir -p "$ROOT/target/facade"
