@@ -207,22 +207,13 @@ fn cmd_sign_facade_state(
     let loader_bytes =
         fs::read(loader).with_context(|| format!("reading loader archive {}", loader.display()))?;
 
-    // Best-effort consistency check: the loader is normally rendered by
-    // scripts/build-loader.sh, which embeds `current_app_id` directly into
-    // the HTML. If the loader bytes don't contain the id we're signing,
-    // the operator probably forgot to re-render the loader before re-signing
-    // — the signed pointer would then redirect users to a different app
-    // than the loader does. Catch this silently-broken state here.
-    if !loader_bytes
-        .windows(current_app_id_b58.len())
-        .any(|w| w == current_app_id_b58.as_bytes())
-    {
-        bail!(
-            "loader at {} does not contain current_app_id '{current_app_id_b58}'. \
-             Re-run scripts/build-loader.sh before signing, or pass --skip-loader-check (not implemented).",
-            loader.display()
-        );
-    }
+    // Loader bytes are expected to be a tar.xz archive containing
+    // `index.html` (so the freenet-core gateway's WebApp::try_from →
+    // XzDecoder → tar.unpack pipeline can serve them). We can't do the
+    // old "substring contains current_app_id" sanity check on compressed
+    // bytes — that check is now done upstream in the Makefile before
+    // compression. Caller is responsible for re-rendering the loader
+    // and re-packing it before invoking this command.
 
     let pointer = FacadePointer {
         version,
@@ -547,9 +538,9 @@ mod tests {
         cmd_generate(&key_file, true).unwrap();
         let app_id = [0xABu8; 32];
         let app_id_b58 = bs58::encode(app_id).into_string();
-        // Loader must embed current_app_id (signer enforces this; mirrors
-        // what scripts/build-loader.sh produces).
-        fs::write(&loader, format!("<html>id={app_id_b58}</html>")).unwrap();
+        // Signer treats loader bytes opaquely; in real builds these are
+        // tar.xz bytes produced by Makefile.toml's pack-facade-loader.
+        fs::write(&loader, b"opaque-loader-bytes").unwrap();
         let prev_id = [0xCDu8; 32];
         let prev_b58 = format!("100:{}", bs58::encode(prev_id).into_string());
 
@@ -583,10 +574,7 @@ mod tests {
         assert_eq!(metadata.pointer.version, 200);
         assert_eq!(metadata.pointer.current_app_id, app_id);
         assert_eq!(metadata.pointer.prev_app_ids, vec![(100u64, prev_id)]);
-        assert_eq!(
-            loader_bytes,
-            format!("<html>id={app_id_b58}</html>").into_bytes()
-        );
+        assert_eq!(loader_bytes, b"opaque-loader-bytes".to_vec());
 
         let payload = facade_signed_payload(&metadata.pointer, &loader_bytes);
         vk.verify(&payload, &metadata.signature).unwrap();
@@ -615,30 +603,10 @@ mod tests {
         assert!(err.to_string().contains("strictly less"));
     }
 
-    /// Regression for review-finding B6: signer rejects when the loader
-    /// bytes don't embed the current_app_id. Catches the silent
-    /// inconsistency where operator passes mismatching --loader and
-    /// --current-app-id (e.g. forgot to re-render the loader).
-    #[test]
-    fn sign_facade_state_rejects_loader_without_current_app_id() {
-        let dir = tempdir().unwrap();
-        let key_file = dir.path().join("keys.toml");
-        let loader = dir.path().join("loader");
-        cmd_generate(&key_file, true).unwrap();
-        // Loader does NOT contain the app id we'll sign.
-        fs::write(&loader, b"<html>stale loader</html>").unwrap();
-
-        let app_id_b58 = bs58::encode([0xAAu8; 32]).into_string();
-        let err = cmd_sign_facade_state(
-            &loader,
-            &app_id_b58,
-            &[],
-            42,
-            &key_file,
-            &dir.path().join("s"),
-            &dir.path().join("p"),
-        )
-        .unwrap_err();
-        assert!(err.to_string().contains("does not contain current_app_id"));
-    }
+    // Note: the former B6 regression test (signer rejects loader without
+    // current_app_id) was removed because the loader is now passed as
+    // tar.xz-compressed bytes whose substring contents are opaque to the
+    // signer. The id-embedding sanity check now lives upstream in
+    // Makefile.toml's pack-facade-loader step, against the raw HTML
+    // before compression.
 }

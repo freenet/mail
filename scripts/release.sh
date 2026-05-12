@@ -103,6 +103,16 @@ command -v dx >/dev/null || die "dx (dioxus-cli) not in PATH"
 command -v cargo-make >/dev/null || die "cargo-make not in PATH"
 command -v gh >/dev/null || die "gh (GitHub CLI) not in PATH"
 
+# fdev must support the --as-state flag for facade pointer flips.
+# Older builds silently wrap the file as `UpdateData::Delta` and the
+# facade contract then returns `InvalidUpdate`, so the pointer never
+# moves and users hitting the stable facade URL get a stale app.
+if ! fdev execute update --help 2>&1 | grep -q -- '--as-state'; then
+    die "fdev does not support \`--as-state\` (required for facade UPDATE).
+Build a newer fdev from freenet-core HEAD:
+  cargo install --path /path/to/freenet-core/crates/fdev"
+fi
+
 # GNU tar — required for reproducible archive
 if command -v gtar >/dev/null 2>&1; then
     echo "  ✓ GNU tar available (gtar)"
@@ -226,7 +236,12 @@ if [ -f published-contract/facade-id.txt ]; then
     # if set), so we omit it. The update always targets whichever node
     # the local fdev API points at; since release prerequisites assert
     # a `freenet network` daemon, the update propagates network-wide.
-    fdev execute update "$FACADE_ID" "$FACADE_STATE"
+    #
+    # --as-state: facade `update_state` only matches `UpdateData::State`.
+    # Without this flag fdev wraps the file as `UpdateData::Delta` and
+    # the contract returns `InvalidUpdate`. Requires fdev with the
+    # `--as-state` flag (freenet-core PR; older fdev silently fails).
+    fdev execute update --as-state "$FACADE_ID" "$FACADE_STATE"
 
     echo "  ✓ facade UPDATEd; bookmarked URL stays stable across releases"
     echo ""
