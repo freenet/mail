@@ -1636,9 +1636,10 @@ pub(crate) async fn node_comms(
                                     // the card value.
                                     match serde_json::from_slice::<StoredInbox>(state.as_ref()) {
                                         Ok(parsed) => {
-                                            crate::contact_tier_cache::record(
+                                            crate::contact_tier_cache::record_with_last_update(
                                                 key,
                                                 &parsed.settings,
+                                                parsed.last_update,
                                             );
                                         }
                                         Err(e) => {
@@ -1819,9 +1820,10 @@ pub(crate) async fn node_comms(
                                                 state.as_ref(),
                                             ) {
                                                 Ok(parsed) => {
-                                                    crate::contact_tier_cache::record(
+                                                    crate::contact_tier_cache::record_with_last_update(
                                                         key,
                                                         &parsed.settings,
+                                                        parsed.last_update,
                                                     );
                                                 }
                                                 Err(e) => {
@@ -1845,6 +1847,11 @@ pub(crate) async fn node_comms(
                                             >(
                                                 delta.as_ref()
                                             ) {
+                                                // Delta-only — no `last_update`
+                                                // wire-side; `record` stamps
+                                                // `Utc::now()` so the local
+                                                // observation is considered
+                                                // freshest.
                                                 crate::contact_tier_cache::record(key, &settings);
                                             }
                                         }

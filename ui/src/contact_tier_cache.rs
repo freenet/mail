@@ -16,6 +16,7 @@
 use std::collections::HashMap;
 use std::sync::{LazyLock, RwLock};
 
+use chrono::{DateTime, Utc};
 use freenet_aft_interface::Tier;
 use freenet_email_inbox::InboxSettings;
 use freenet_stdlib::prelude::ContractKey;
@@ -30,25 +31,66 @@ pub struct RecipientPolicy {
     pub max_age_secs: u64,
 }
 
-static CACHE: LazyLock<RwLock<HashMap<ContractKey, RecipientPolicy>>> =
+/// Internal cache entry: `RecipientPolicy` plus the `last_update`
+/// stamp from the source `Inbox` state. Used to gate stale records
+/// (`record_with_last_update` ignores incoming snapshots whose
+/// `last_update` is older than what we already have, mirroring the
+/// contract-level last-write-wins in `Inbox::merge`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CacheEntry {
+    policy: RecipientPolicy,
+    last_update: DateTime<Utc>,
+}
+
+static CACHE: LazyLock<RwLock<HashMap<ContractKey, CacheEntry>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
 
 /// Update the cached policy for `key` from a freshly received
-/// `InboxSettings`. Called from GetResponse + UpdateNotification(State)
-/// + ModifySettings-delta handlers in `api.rs`.
-pub fn record(key: ContractKey, settings: &InboxSettings) {
-    let entry = RecipientPolicy {
-        minimum_tier: settings.minimum_tier,
-        max_age_secs: settings.max_age_secs,
+/// `InboxSettings` and the source state's `last_update`. Called from
+/// GetResponse + UpdateNotification(State) + ModifySettings-delta
+/// handlers in `api.rs`. Stale snapshots (older `last_update` than
+/// the one we already have for this key) are silently ignored — the
+/// gateway can serve a cached older state right after we observed a
+/// newer one (cross-node propagation race), and we don't want to
+/// regress the cache.
+pub fn record_with_last_update(
+    key: ContractKey,
+    settings: &InboxSettings,
+    last_update: DateTime<Utc>,
+) {
+    let entry = CacheEntry {
+        policy: RecipientPolicy {
+            minimum_tier: settings.minimum_tier,
+            max_age_secs: settings.max_age_secs,
+        },
+        last_update,
     };
     let mut guard = CACHE.write().expect("contact tier cache poisoned");
-    let prev = guard.insert(key, entry);
-    if prev != Some(entry) {
+    let existing = guard.get(&key).copied();
+    match existing {
+        Some(prev) if prev.last_update > entry.last_update => {
+            // Stale; ignore.
+            return;
+        }
+        _ => {}
+    }
+    let prev_policy = existing.map(|e| e.policy);
+    guard.insert(key, entry);
+    if prev_policy != Some(entry.policy) {
         crate::log::info(format!(
             "contact tier cache: recorded {key} tier={:?} max_age_secs={} (#221)",
-            entry.minimum_tier, entry.max_age_secs
+            entry.policy.minimum_tier, entry.policy.max_age_secs
         ));
     }
+}
+
+/// Convenience: record without a `last_update` (uses the current
+/// epoch — caller doesn't know the source's stamp). Used by the
+/// `ModifySettings`-delta arm where the delta carries the new
+/// settings but not the inbox's whole state. Treats the local
+/// observation as the freshest by stamping `Utc::now()`.
+pub fn record(key: ContractKey, settings: &InboxSettings) {
+    record_with_last_update(key, settings, Utc::now());
 }
 
 /// Look up the cached policy for `key`. Returns `None` on cache miss
@@ -58,12 +100,7 @@ pub fn lookup(key: &ContractKey) -> Option<RecipientPolicy> {
         .read()
         .expect("contact tier cache poisoned")
         .get(key)
-        .copied()
-}
-
-#[cfg(test)]
-pub(crate) fn clear() {
-    CACHE.write().expect("contact tier cache poisoned").clear();
+        .map(|e| e.policy)
 }
 
 #[cfg(test)]
@@ -95,9 +132,14 @@ mod tests {
         }
     }
 
+    // NOTE: these tests share a process-global `CACHE` (LazyLock). Each
+    // test uses a unique `dummy_key(seed)` so entries from parallel
+    // runs don't collide. We avoid `clear()` because cargo test runs
+    // tests in parallel by default and a clear from one test races a
+    // record from another (CI flake on the original `clear()` pattern).
+
     #[test]
     fn record_then_lookup_round_trips() {
-        clear();
         let key = dummy_key(1);
         record(key, &settings_with(Tier::Min1, 60));
         let got = lookup(&key).expect("cache hit");
@@ -107,7 +149,6 @@ mod tests {
 
     #[test]
     fn record_overwrites_on_modify_settings() {
-        clear();
         let key = dummy_key(2);
         record(key, &settings_with(Tier::Min10, DEFAULT_MAX_AGE_SECS));
         record(key, &settings_with(Tier::Min1, 30));
@@ -118,7 +159,7 @@ mod tests {
 
     #[test]
     fn lookup_miss_returns_none() {
-        clear();
+        // seed 3 only used here — entries from other tests use 1, 2.
         assert!(lookup(&dummy_key(3)).is_none());
     }
 }
