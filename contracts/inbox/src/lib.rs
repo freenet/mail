@@ -298,9 +298,14 @@ impl Display for VerificationError {
 }
 
 /// Enforce recipient `InboxSettings` policy on an incoming token.
-/// Currently gates on `minimum_tier`; `max_age_secs` is enforced
-/// sender-side inside the AFT delegate (which does have a clock) when
-/// computing `next_free_assignment`.
+/// Currently gates on `minimum_tier`. `max_age_secs` is enforced
+/// sender-side in the AFT token-generator delegate (which does have a
+/// clock) when computing `next_free_assignment` — see
+/// `modules/antiflood-tokens/delegates/token-generator/src/lib.rs`
+/// (the `max_age` arithmetic around the `time_slot >= normalized -
+/// max_age` checks). The contract only authenticates that the token
+/// was minted, not when; recipient-side wall-clock enforcement isn't
+/// available because WASM contracts have no clock.
 ///
 /// Policy lives on settings rather than params so the inbox owner can
 /// re-tune it via `ModifySettings` without rotating the contract id.
@@ -968,5 +973,47 @@ mod tests {
                 panic!("expected AddMessages, got ModifySettings")
             }
         }
+    }
+
+    /// `max_age_secs` survives `InboxSettings` serde round-trip in both
+    /// directions and reaches the AFT delegate via the AFT token-criteria
+    /// path. Pins the inventory row in #180 closed: the field is part of
+    /// the on-chain wire shape, the contract honors it on
+    /// `ModifySettings`, and the delegate enforces it sender-side when
+    /// computing `next_free_assignment` (see
+    /// `modules/antiflood-tokens/delegates/token-generator/src/lib.rs`,
+    /// `max_age` usage in slot computation). Recipient-side contract
+    /// enforcement isn't required because the AFT delegate is the trust
+    /// boundary for slot allocation; the contract only authenticates
+    /// that a token was minted, not when.
+    #[test]
+    fn inbox_settings_max_age_serde_round_trips() {
+        let settings = InboxSettings {
+            minimum_tier: Tier::Min10,
+            max_age_secs: 7 * 86_400,
+            allow_verified_skip_token: false,
+            verified_senders: BTreeSet::new(),
+            private: Vec::new(),
+        };
+        let bytes = serde_json::to_vec(&settings).expect("encode");
+        let decoded: InboxSettings = serde_json::from_slice(&bytes).expect("decode");
+        assert_eq!(
+            decoded.max_age_secs,
+            7 * 86_400,
+            "max_age_secs must survive serde round trip — the wire shape \
+             the inbox owner signs in ModifySettings has to carry it for \
+             the AFT delegate to honor it sender-side"
+        );
+        // Defaulting path: legacy on-chain states encoded before
+        // `max_age_secs` existed must deserialize successfully, with the
+        // field defaulted via `default_max_age_secs`. Without the
+        // #[serde(default = …)] this would error on missing field.
+        let legacy_bytes = br#"{"minimum_tier":"Min10","private":[]}"#;
+        let from_legacy: InboxSettings = serde_json::from_slice(legacy_bytes)
+            .expect("legacy settings must decode with defaulted max_age_secs");
+        assert_eq!(
+            from_legacy.max_age_secs, DEFAULT_MAX_AGE_SECS,
+            "missing max_age_secs in legacy state must default, not error",
+        );
     }
 }
