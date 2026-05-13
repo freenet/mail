@@ -144,6 +144,7 @@ add/remove protocol.
 | Advanced: custom relay URL takes effect on reload | manual | Set custom_relay + URL, reload, WS connects to that URL |
 | Settings round-trip across reload | manual | Set value, reload, value persists |
 | WIP: AFT tier picker (gated) | blocked | Issue #85 — recipient inbox params not configurable |
+| AFT verified-sender bypass toggle dispatches ModifySettings (#157) | auto | iso: `verified-skip toggle dispatches ModifySettings + flips state (#157)` |
 | WIP: read receipts toggle (gated) | blocked | Issue #69 — feature not implemented |
 | WIP: pad_length toggle (gated) | blocked | No implementation; gated until designed |
 | WIP: display_name field (gated) | blocked | No consumer of the field; gated until wired into Sent/Inbox surfaces |

@@ -66,6 +66,8 @@ const ALIAS_T3_ALICE = "alice3";
 const ALIAS_T3_BOB = "bob3";
 const ALIAS_T4_ALICE = "alice4";
 const ALIAS_T4_BOB = "bob4";
+const ALIAS_T5_ALICE = "alice5";
+const ALIAS_T5_BOB = "bob5";
 test.describe("Live node E2E", () => {
   test.skip(
     !process.env.FREENET_EMAIL_BASE_URL?.includes("/v1/contract/web/"),
@@ -849,6 +851,123 @@ test.describe("Live node E2E", () => {
       await bobCtx.close().catch(() => {});
       stopGwPump();
       stopPeerPump();
+    }
+  });
+
+  // #157 / #180 regression: turning on the verified-sender bypass
+  // toggle in Settings → AFT must dispatch a signed `ModifySettings`
+  // delta to the inbox contract — without it the change is local-only
+  // and senders keep paying the AFT cost. The bypass itself is a
+  // recipient-side policy; this test exercises the ON path's wire
+  // dispatch:
+  //   1. Alice creates an identity, imports bob as a verified contact
+  //   2. Alice opens her inbox + Settings → AFT
+  //   3. Alice flicks the verified-skip toggle ON
+  //   4. The webapp emits `UpdateVerifiedBypass dispatched … allow=true`
+  //      (signed ModifySettings → inbox contract) and the toggle's
+  //      `data-state` flips to "on"
+  // Sender-side cost-avoidance (bob sends without minting + alice
+  // receives) is a separate test gated on AFT cap configurability
+  // (#85 / #179) — once those land, an inverted assertion can verify
+  // the bypass actually frees sends through a depleted cap.
+  test("verified-skip toggle dispatches ModifySettings + flips state (#157)", async ({
+    page,
+  }) => {
+    const stopPermissionPump = startPermissionPump();
+    let bypassDispatched = false;
+    page.on("console", (m) => {
+      if (
+        /UpdateVerifiedBypass dispatched for `.+` allow=true \(#157\)/.test(
+          m.text(),
+        )
+      ) {
+        bypassDispatched = true;
+      }
+    });
+
+    try {
+      await page.goto("");
+      const app = page.frameLocator("iframe#app");
+      await expect(app.locator(".brand-name").first()).toContainText(APP_NAME, {
+        timeout: 60_000,
+      });
+
+      // Create alice + import bob (synthetic contact card — we don't
+      // need a real second peer for this test, just an entry whose VK
+      // alice's settings can list as verified).
+      await createIdentity(page, ALIAS_T5_ALICE);
+
+      // Generate bob's share card by spinning a second browser context
+      // long enough to read his contact:// payload. The actual cross-
+      // node send + receive isn't exercised here; we just need bob's
+      // VK in alice's verified-senders set.
+      const bobCtx = await page.context().browser()!.newContext();
+      try {
+        const bobPage = await bobCtx.newPage();
+        await bobPage.goto(PEER_BASE_URL);
+        await createIdentity(bobPage, ALIAS_T5_BOB);
+        const bobApp = bobPage.frameLocator("iframe#app");
+        await bobApp
+          .locator(`[data-testid="fm-id-row"][data-alias="${ALIAS_T5_BOB}"] [data-testid="fm-id-share"]`)
+          .click();
+        const bobShare = bobApp.locator('[data-testid="fm-share-modal"]');
+        await bobShare.waitFor({ timeout: 5_000 });
+        const bobCard = (await bobShare.getAttribute("data-share-text")) ?? "";
+        expect(bobCard).toMatch(/verify: .+\ncontact:\/\//);
+
+        // Alice imports bob (verified).
+        await app.locator('[data-testid="fm-contact-import"]').click();
+        await app
+          .locator('[data-testid="fm-import-contact-modal"] textarea')
+          .fill(bobCard);
+        await app
+          .locator('input[placeholder="e.g. Alice (work)"]')
+          .fill(ALIAS_T5_BOB);
+        const verifyCheck = app.locator('[data-testid="fm-verify-check"]');
+        await verifyCheck.waitFor({ timeout: 15_000 });
+        await verifyCheck.click();
+        await app.locator('[data-testid="fm-import-submit"]').click();
+        await expect(
+          app.locator(`[data-testid="contact-row"][data-alias="${ALIAS_T5_BOB}"]`),
+          "bob5 imported as verified contact",
+        ).toBeVisible({ timeout: 15_000 });
+      } finally {
+        await bobCtx.close().catch(() => {});
+      }
+
+      // Open alice's inbox so the Settings button is reachable.
+      await app
+        .locator(`[data-testid="fm-id-row"][data-alias="${ALIAS_T5_ALICE}"] [data-testid="fm-id-open"]`)
+        .first()
+        .click();
+      await app.locator('[data-testid="fm-settings-btn"]').click();
+      await app
+        .locator('[data-testid="fm-settings-nav-item"][data-screen="aft"]')
+        .click();
+
+      // Flick the verified-skip toggle ON. The toggle's `data-state`
+      // is "off" by default; after click it must flip to "on" AND the
+      // webapp must dispatch a ModifySettings delta (asserted via the
+      // console log marker).
+      const toggle = app.locator('[data-testid="fm-aft-verified-skip-toggle"]');
+      await toggle.waitFor({ timeout: 10_000 });
+      await expect(toggle).toHaveAttribute("data-state", "off");
+      await toggle.click();
+      await expect(toggle).toHaveAttribute("data-state", "on", {
+        timeout: 5_000,
+      });
+
+      await expect
+        .poll(() => bypassDispatched, {
+          message:
+            "expected `UpdateVerifiedBypass dispatched … allow=true (#157)` " +
+            "console log within 10s of toggle click — otherwise the wire " +
+            "dispatch path didn't fire and the bypass is local-only",
+          timeout: 10_000,
+        })
+        .toBe(true);
+    } finally {
+      stopPermissionPump();
     }
   });
 

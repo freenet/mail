@@ -1081,6 +1081,11 @@ pub(crate) async fn node_comms(
                                 format!("UpdateVerifiedBypass send failed: {e}"),
                                 Some(TryNodeAction::SendMessage),
                             );
+                        } else {
+                            crate::log::info(format!(
+                                "UpdateVerifiedBypass dispatched for `{}` allow={allow_verified_skip_token} (#157)",
+                                identity.alias()
+                            ));
                         }
                     }
                     Err(e) => {
