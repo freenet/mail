@@ -9,14 +9,13 @@ on:
   push:
     tags:
       - 'v*'
+  # #204(D): run on every PR. Cost is ~$0.004/run on ubicloud-standard-8,
+  # 3-4 min wall-clock, and this is the only suite that exercises real
+  # WebSocket / real AFT / real cross-peer UPDATE. The offline Playwright
+  # suite catches UI regressions but cannot catch wire-level bugs like
+  # #198 (UpdateNotification on contact's primed inbox) or
+  # freenet-core#4077 (AFT fetch_related timeout).
   pull_request:
-    # Only run when the harness itself or its inputs change, to keep
-    # PR cost low. Other PRs rely on the standard ui-playwright job.
-    paths:
-      - '.github/workflows/e2e-real-node.yml'
-      - 'scripts/run-isolated-nodes.sh'
-      - 'ui/tests/live-node.spec.ts'
-      - 'Makefile.toml'
   schedule:
     # Nightly at 04:30 UTC.
     - cron: '30 4 * * *'
