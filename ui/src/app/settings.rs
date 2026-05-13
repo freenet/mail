@@ -1026,9 +1026,13 @@ fn ScrAft() -> Element {
                     label: "Don't require tokens from verified senders",
                     help: "When on, messages from contacts you've verified (fingerprint confirmed) skip the AFT token check. Verified contacts are managed in Settings → Contacts.",
                     control: rsx! {
-                        Toggle {
-                            on: allow_verified_skip_token,
-                            ontoggle: on_verified_bypass,
+                        div {
+                            "data-testid": crate::testid::FM_AFT_VERIFIED_SKIP_TOGGLE,
+                            "data-state": if allow_verified_skip_token { "on" } else { "off" },
+                            Toggle {
+                                on: allow_verified_skip_token,
+                                ontoggle: on_verified_bypass,
+                            }
                         }
                     },
                 }

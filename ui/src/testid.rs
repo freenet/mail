@@ -117,6 +117,9 @@ pub(crate) const FM_SETTINGS_BTN: &str = "fm-settings-btn";
 pub(crate) const FM_SETTINGS_SHELL: &str = "fm-settings-shell";
 pub(crate) const FM_SETTINGS_BACK: &str = "fm-settings-back";
 pub(crate) const FM_SETTINGS_NAV_ITEM: &str = "fm-settings-nav-item";
+// AFT verified-sender bypass toggle (Settings → AFT).
+// `data-state` mirrors the bool: "on" / "off".
+pub(crate) const FM_AFT_VERIFIED_SKIP_TOGGLE: &str = "fm-aft-verified-skip-toggle";
 
 #[cfg(test)]
 mod tests {
@@ -207,6 +210,10 @@ mod tests {
             ("fmVerifyContactSubmit", super::FM_VERIFY_CONTACT_SUBMIT),
             ("fmContactsImportBtn", super::FM_CONTACTS_IMPORT_BTN),
             ("fmContactsShareBtn", super::FM_CONTACTS_SHARE_BTN),
+            (
+                "fmAftVerifiedSkipToggle",
+                super::FM_AFT_VERIFIED_SKIP_TOGGLE,
+            ),
         ];
         assert_eq!(
             json.len(),

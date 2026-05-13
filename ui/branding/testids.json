@@ -76,5 +76,7 @@
   "fmVerifyContactSubmit": "fm-verify-contact-submit",
 
   "fmContactsImportBtn": "fm-contacts-import-btn",
-  "fmContactsShareBtn": "fm-contacts-share-btn"
+  "fmContactsShareBtn": "fm-contacts-share-btn",
+
+  "fmAftVerifiedSkipToggle": "fm-aft-verified-skip-toggle"
 }

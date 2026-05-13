@@ -70,6 +70,7 @@ interface TestIds {
   fmVerifyContactSubmit: string;
   fmContactsImportBtn: string;
   fmContactsShareBtn: string;
+  fmAftVerifiedSkipToggle: string;
 }
 
 export const TID: TestIds = JSON.parse(
