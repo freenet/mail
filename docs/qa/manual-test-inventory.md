@@ -143,7 +143,7 @@ add/remove protocol.
 | Appearance: serif_subjects toggle | manual | Toggle, confirm subjects flip font |
 | Advanced: custom relay URL takes effect on reload | manual | Set custom_relay + URL, reload, WS connects to that URL |
 | Settings round-trip across reload | manual | Set value, reload, value persists |
-| WIP: AFT tier picker (gated) | blocked | Issue #85 — recipient inbox params not configurable |
+| AFT tier picker dispatches ModifySettings (#85) | manual | Settings → AFT, click a tier card, expect `UpdateInboxPolicy dispatched … tier=<Tier> (#85)` in console. Multi-send with raised cap blocked on #221 (sender uses stale recipient tier from contact card). |
 | AFT verified-sender bypass toggle dispatches ModifySettings (#157) | auto | iso: `verified-skip toggle dispatches ModifySettings + flips state (#157)` |
 | WIP: read receipts toggle (gated) | blocked | Issue #69 — feature not implemented |
 | WIP: pad_length toggle (gated) | blocked | No implementation; gated until designed |

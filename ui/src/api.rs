@@ -1029,6 +1029,11 @@ pub(crate) async fn node_comms(
                                 format!("UpdateInboxPolicy send failed: {e}"),
                                 Some(TryNodeAction::SendMessage),
                             );
+                        } else {
+                            crate::log::info(format!(
+                                "UpdateInboxPolicy dispatched for `{}` tier={required_tier:?} max_age_secs={max_age_secs} (#85)",
+                                identity.alias()
+                            ));
                         }
                     }
                     Err(e) => {

@@ -246,9 +246,7 @@ test.describe("Live node E2E", () => {
   // FREENET_LIVE_E2E_SEND was the kill switch while #114 (duplicate
   // inbox per alias on shared delegate state) caused intermittent
   // failures. With #114 + #115 fixed and the iso harness verified
-  // green in PR #122, the gate is removed. Set
-  // FREENET_LIVE_E2E_AFT_CAP_RAISED=1 if you want the round-3
-  // alice→bob retry assertion in test 3.
+  // green in PR #122, the gate is removed.
   test("alice → bob across nodes: send + receive end-to-end (#81)", async ({
     browser,
   }) => {
@@ -422,8 +420,8 @@ test.describe("Live node E2E", () => {
     // after #114 + #115 fixes plus the spec-side reload-instead-of-
     // goBack correction (the SPA doesn't push history entries on
     // click, so `goBack` was navigating to about:blank rather than
-    // the inbox). Round 3 stays gated on
-    // FREENET_LIVE_E2E_AFT_CAP_RAISED until #85 lands.
+    // the inbox). Round 3 stays uncoverable until #221 — see the
+    // explanation around round 2 below.
     test.skip(
       !PEER_BASE_URL,
       "cross-node test requires FREENET_EMAIL_BASE_URL to include the contract id",
@@ -599,19 +597,12 @@ test.describe("Live node E2E", () => {
         "alice receives bob's reply",
       ).toBeVisible({ timeout: 60_000 });
 
-      // ── Round 3: alice → bob again ──────────────────────────────
-      // Skipped on iso by default: AFT day-1 cap is 1 slot, and alice
-      // already burned it in round one. Until #85 makes tier
-      // configurable, this round cannot pass on a fresh iso net.
-      // Set FREENET_LIVE_E2E_AFT_CAP_RAISED=1 once the cap is lifted
-      // (test contract or alternative tier) to re-enable.
-      if (process.env.FREENET_LIVE_E2E_AFT_CAP_RAISED === "1") {
-        await composeAndSend(aliceApp, ALIAS_T3_BOB, "round three", "third body");
-        await expect(
-          bobApp.getByText(/round three/i),
-          "bob receives round three (AFT slot still free)",
-        ).toBeVisible({ timeout: 60_000 });
-      }
+      // Round 3 (alice → bob a second time) is currently uncoverable
+      // on iso: bob's contact card encodes the recipient's tier at
+      // share time and the sender mints against that frozen value
+      // (#221), so a recipient-side ModifySettings tier change leaves
+      // the sender minting at the old tier and the contract rejecting.
+      // Re-enable once #221 ships sender-side dynamic tier resolution.
 
       // ── Archive: bob archives round one. Should leave the inbox
       // list and surface in the Archive folder.
