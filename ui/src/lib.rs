@@ -14,6 +14,7 @@ extern crate core;
 pub(crate) mod aft;
 mod api;
 mod app;
+pub(crate) mod contact_tier_cache;
 pub(crate) mod inbox;
 pub(crate) mod local_state;
 pub(crate) mod log;

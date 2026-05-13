@@ -1534,6 +1534,30 @@ pub(crate) async fn node_comms(
                                 // inbox is opaque (encrypted to the contact's
                                 // ml_kem key, not ours).
                                 if crate::app::address_book::is_contact_inbox_key(&key) {
+                                    // Decode the contact's `InboxSettings` so the
+                                    // sender can mint at the recipient's *live*
+                                    // tier rather than the stale value in the
+                                    // contact card (#221). The state envelope
+                                    // is plaintext (only message bodies are
+                                    // encrypted); deser failures degrade the
+                                    // cache to a miss, sender falls back to
+                                    // the card value.
+                                    match serde_json::from_slice::<StoredInbox>(state.as_ref()) {
+                                        Ok(parsed) => {
+                                            crate::contact_tier_cache::record(
+                                                key,
+                                                &parsed.settings,
+                                            );
+                                        }
+                                        Err(e) => {
+                                            crate::log::error(
+                                                format!(
+                                                    "GetResponse: contact inbox {key} settings deser failed: {e}"
+                                                ),
+                                                None,
+                                            );
+                                        }
+                                    }
                                     crate::log::debug!(
                                         "GetResponse: contact inbox {key} \
                                         primed (#191) — drop"
@@ -1643,6 +1667,49 @@ pub(crate) async fn node_comms(
                                 // arm panicked with `unreachable!` and took
                                 // the whole webapp down (#198).
                                 if crate::app::address_book::is_contact_inbox_key(&key) {
+                                    // Refresh the recipient-policy cache when
+                                    // the contact rotates `InboxSettings`
+                                    // (#221). State carries the full snapshot;
+                                    // Delta::ModifySettings carries just the
+                                    // new settings. Anything else (AddMessages,
+                                    // RemoveMessages) is opaque to us.
+                                    match &update {
+                                        UpdateData::State(state) => {
+                                            match serde_json::from_slice::<StoredInbox>(
+                                                state.as_ref(),
+                                            ) {
+                                                Ok(parsed) => {
+                                                    crate::contact_tier_cache::record(
+                                                        key,
+                                                        &parsed.settings,
+                                                    );
+                                                }
+                                                Err(e) => {
+                                                    crate::log::error(
+                                                        format!(
+                                                            "UpdateNotification(State): contact inbox {key} settings deser failed: {e}"
+                                                        ),
+                                                        None,
+                                                    );
+                                                }
+                                            }
+                                        }
+                                        UpdateData::Delta(delta) => {
+                                            if let Ok(
+                                                freenet_email_inbox::UpdateInbox::ModifySettings {
+                                                    settings,
+                                                    ..
+                                                },
+                                            ) = serde_json::from_slice::<
+                                                freenet_email_inbox::UpdateInbox,
+                                            >(
+                                                delta.as_ref()
+                                            ) {
+                                                crate::contact_tier_cache::record(key, &settings);
+                                            }
+                                        }
+                                        _ => {}
+                                    }
                                     crate::log::debug!(
                                         "UpdateNotification: contact inbox \
                                         {key} (#198) — drop"

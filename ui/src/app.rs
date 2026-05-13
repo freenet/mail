@@ -2560,6 +2560,40 @@ fn ComposeSheet() -> Element {
         #[cfg(feature = "use-node")]
         let inbox_key_for_ack = crate::inbox::inbox_key_for(&recipient_vk);
 
+        // #221: prefer the live `InboxSettings` cached from the contact's
+        // inbox state over the values frozen in the contact card. Cards
+        // age out the moment the recipient retunes their tier; the
+        // contract enforces against `InboxSettings.minimum_tier` so
+        // minting at the card's tier silently fails. The cache is
+        // populated by the rehydrate-prime path's Get-with-subscribe
+        // (api.rs) — fall back to the card on miss (first send after
+        // import, before the GetResponse lands).
+        #[cfg(feature = "use-node")]
+        let (recipient_required_tier, recipient_max_age_secs) = match inbox_key_for_ack
+            .as_ref()
+            .ok()
+            .and_then(crate::contact_tier_cache::lookup)
+        {
+            Some(p) => {
+                if p.minimum_tier != recipient.required_tier
+                    || p.max_age_secs != recipient.max_age_secs
+                {
+                    crate::log::info(format!(
+                        "send: contact-tier-cache hit for `{to_val}` tier={:?} max_age_secs={} (overrides stale card tier={:?} max_age_secs={}) (#221)",
+                        p.minimum_tier,
+                        p.max_age_secs,
+                        recipient.required_tier,
+                        recipient.max_age_secs
+                    ));
+                }
+                (p.minimum_tier, p.max_age_secs)
+            }
+            None => (recipient.required_tier, recipient.max_age_secs),
+        };
+        #[cfg(not(feature = "use-node"))]
+        let (recipient_required_tier, recipient_max_age_secs) =
+            (recipient.required_tier, recipient.max_age_secs);
+
         // Allocate the SentId up-front so the sync enqueue and the async
         // failure-flip both name the same row.
         let sent_id = crate::local_state::new_sent_id();
@@ -2581,8 +2615,8 @@ fn ComposeSheet() -> Element {
             &alias,
             recipient_ek,
             recipient_vk,
-            recipient.required_tier,
-            recipient.max_age_secs,
+            recipient_required_tier,
+            recipient_max_age_secs,
             &title_val,
             &content_val,
             ack_meta,

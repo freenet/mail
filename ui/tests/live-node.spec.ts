@@ -68,6 +68,8 @@ const ALIAS_T4_ALICE = "alice4";
 const ALIAS_T4_BOB = "bob4";
 const ALIAS_T5_ALICE = "alice5";
 const ALIAS_T5_BOB = "bob5";
+const ALIAS_T6_ALICE = "alice6";
+const ALIAS_T6_BOB = "bob6";
 test.describe("Live node E2E", () => {
   test.skip(
     !process.env.FREENET_EMAIL_BASE_URL?.includes("/v1/contract/web/"),
@@ -959,6 +961,223 @@ test.describe("Live node E2E", () => {
         .toBe(true);
     } finally {
       stopPermissionPump();
+    }
+  });
+
+  // #221: post-#85 the recipient's `InboxSettings.minimum_tier` is
+  // mutable, but contact cards encode the tier at share time. Without
+  // sender-side dynamic tier resolution, alice would mint at the
+  // card's frozen tier and the recipient's contract would reject with
+  // `PolicyTierMismatch`.
+  //
+  // This was the "FREENET_LIVE_E2E_AFT_CAP_RAISED" row in #180. The
+  // #221 fix lives in the sender:
+  //   1. UI populates a `RecipientPolicy` cache on every GetResponse
+  //      / UpdateNotification for a contact's inbox.
+  //   2. The send path consults the cache before falling back to the
+  //      stale contact-card tier.
+  //
+  // Sender-side cache + send-path wiring are exercised by the rust
+  // unit tests in `ui/src/contact_tier_cache.rs`. A live cross-peer
+  // e2e proving the end-to-end "bob retunes mid-run, alice mints at
+  // new tier, recipient accepts" loop is blocked by two upstream bugs
+  // independent of #221:
+  //
+  // - `Inbox::merge` (contracts/inbox/src/lib.rs) only merges
+  //   `messages` and `last_update`. When the gateway receives a State
+  //   broadcast carrying a ModifySettings result, `settings` is
+  //   silently kept at the old value. Alice's Get-after-retune
+  //   therefore returns gw's stale settings and the cache records the
+  //   old tier.
+  // - The inbox contract's `verify_token_policy` enforces
+  //   `assignment.tier == settings.minimum_tier` (strict equality, not
+  //   `>=`). Any pre-existing message in the inbox at the original
+  //   tier makes a subsequent ModifySettings update fail validation
+  //   ("invalid outcome state").
+  //
+  // Both surface as contract-state behaviour, not sender behaviour.
+  // The e2e is parked behind #223 (contract-side merge + tier
+  // equality fix). #180's AFT_CAP_RAISED row stays closed via the
+  // unit-test coverage in `contact_tier_cache.rs`.
+  test.skip("recipient tier change before first send; sender mints at new tier (#221, #180 AFT_CAP_RAISED row)", async ({
+    browser,
+  }) => {
+    test.skip(
+      !PEER_BASE_URL,
+      "cross-node test requires FREENET_EMAIL_BASE_URL to include the contract id",
+    );
+    const stopGwPump = startPermissionPump(ISO_GW_ORIGIN);
+    const stopPeerPump = startPermissionPump(ISO_PEER_ORIGIN);
+    const aliceCtx = await browser.newContext();
+    const bobCtx = await browser.newContext();
+    const alicePage = await aliceCtx.newPage();
+    const bobPage = await bobCtx.newPage();
+
+    const consoleErrors: string[] = [];
+    let cacheRecordedMin1 = false;
+    let cacheOverrideOnSend = false;
+    let bobUpdatePolicyMin1 = false;
+    for (const [page, label] of [
+      [alicePage, "alice"],
+      [bobPage, "bob"],
+    ] as const) {
+      page.on("console", (m) => {
+        const t = m.text();
+        console.log(`[console:${label}:${m.type()}] ${t}`);
+        if (
+          /WASM PANIC|RuntimeError: unreachable executed|PolicyTierMismatch/.test(
+            t,
+          )
+        ) {
+          consoleErrors.push(`[${label}] ${t}`);
+        }
+        if (
+          label === "alice" &&
+          /contact tier cache: recorded .+ tier=Min1 .+ \(#221\)/.test(t)
+        ) {
+          cacheRecordedMin1 = true;
+        }
+        if (
+          label === "alice" &&
+          /send: contact-tier-cache hit for `.+` tier=Min1 .+ \(#221\)/.test(t)
+        ) {
+          cacheOverrideOnSend = true;
+        }
+        if (
+          label === "bob" &&
+          /UpdateInboxPolicy dispatched for `.+` tier=Min1 .+ \(#85\)/.test(t)
+        ) {
+          bobUpdatePolicyMin1 = true;
+        }
+      });
+      page.on("pageerror", (e) => {
+        console.log(`[pageerror:${label}] ${e.message}`);
+      });
+    }
+
+    try {
+      await Promise.all([alicePage.goto(""), bobPage.goto(PEER_BASE_URL)]);
+      await Promise.all([
+        createIdentity(alicePage, ALIAS_T6_ALICE),
+        createIdentity(bobPage, ALIAS_T6_BOB),
+      ]);
+
+      const aliceApp = alicePage.frameLocator("iframe#app");
+      const bobApp = bobPage.frameLocator("iframe#app");
+
+      // Capture bob's share card (default tier Min10).
+      await bobApp
+        .locator(`[data-testid="fm-id-row"][data-alias="${ALIAS_T6_BOB}"] [data-testid="fm-id-share"]`)
+        .click();
+      const bobShare = bobApp.locator('[data-testid="fm-share-modal"]');
+      await bobShare.waitFor({ timeout: 5_000 });
+      const bobCard = (await bobShare.getAttribute("data-share-text")) ?? "";
+      await bobShare.locator(".modal-x").click();
+      expect(bobCard).toMatch(/verify: .+\ncontact:\/\//);
+
+      // Alice imports bob (verified so verify_on_send doesn't block).
+      await aliceApp.locator('[data-testid="fm-contact-import"]').click();
+      await aliceApp
+        .locator('[data-testid="fm-import-contact-modal"] textarea')
+        .fill(bobCard);
+      await aliceApp
+        .locator('input[placeholder="e.g. Alice (work)"]')
+        .fill(ALIAS_T6_BOB);
+      const aliceVerify = aliceApp.locator('[data-testid="fm-verify-check"]');
+      await aliceVerify.waitFor({ timeout: 15_000 });
+      await aliceVerify.click();
+      await aliceApp.locator('[data-testid="fm-import-submit"]').click();
+
+      // Open both inboxes.
+      await aliceApp
+        .locator(`[data-testid="fm-id-row"][data-alias="${ALIAS_T6_ALICE}"] [data-testid="fm-id-open"]`)
+        .first()
+        .click();
+      await bobApp
+        .locator(`[data-testid="fm-id-row"][data-alias="${ALIAS_T6_BOB}"] [data-testid="fm-id-open"]`)
+        .first()
+        .click();
+
+      // ── Bob switches AFT tier to Min1 via Settings → AFT BEFORE any
+      // send (see header comment for the contract-level reason). ─────
+      await bobApp.locator('[data-testid="fm-settings-btn"]').click();
+      await bobApp
+        .locator('[data-testid="fm-settings-nav-item"][data-screen="aft"]')
+        .click();
+      await bobApp
+        .locator('[data-testid="fm-aft-tier"][data-tier="Min1"]')
+        .click();
+      await expect
+        .poll(() => bobUpdatePolicyMin1, {
+          message:
+            "expected bob's `UpdateInboxPolicy dispatched … tier=Min1 (#85)` " +
+            "console log within 15s of tier-button click",
+          timeout: 15_000,
+        })
+        .toBe(true);
+
+      // Reload alice's page so the rehydrate-prime path re-fetches
+      // every contact's inbox state via Get-with-subscribe. The
+      // GetResponse for bob's inbox lands in the contact-inbox arm of
+      // api.rs and updates the tier cache with the new `minimum_tier`.
+      //
+      // We reload rather than wait on a live UpdateNotification because
+      // post-CreateContact subscriptions on the iso gateway don't
+      // reliably deliver UpdateNotifications to client subscribers
+      // (the gateway sees `is_subscribed=false` for the client on the
+      // subsequent Get; the broadcast propagates between nodes but
+      // doesn't fan out to subscribed clients). That's a separate
+      // gateway-side bug — #221 fixes the sender-side cache lookup
+      // either way, and the rehydrate refresh is the canonical
+      // populated-at-startup path. Filed as a follow-up.
+      //
+      // Wait a beat first so the propagation reaches the gw before
+      // alice's Get pulls the new state.
+      await alicePage.waitForTimeout(3_000);
+      await alicePage.reload();
+      await aliceApp.locator(".brand-name").first().waitFor({ timeout: 30_000 });
+      await aliceApp
+        .locator(`[data-testid="fm-id-row"][data-alias="${ALIAS_T6_ALICE}"] [data-testid="fm-id-open"]`)
+        .first()
+        .click();
+      await expect
+        .poll(() => cacheRecordedMin1, {
+          message:
+            "expected alice's `contact tier cache: recorded … tier=Min1 (#221)` " +
+            "console log within 60s of reload — rehydrate-prime path's " +
+            "GetResponse on bob's contact inbox must populate the cache",
+          timeout: 60_000,
+        })
+        .toBe(true);
+
+      // Back out of Settings on bob's side too so any subsequent UI
+      // navigation doesn't confuse the compose flow on alice.
+      await bobApp.locator('[data-testid="fm-settings-back"]').click();
+
+      // ── alice → bob, sender must mint at Min1 (not Min10 from card). ──
+      await composeAndSend(aliceApp, ALIAS_T6_BOB, "post-retune", "after tier flip");
+      await expect
+        .poll(() => cacheOverrideOnSend, {
+          message:
+            "expected alice's `send: contact-tier-cache hit for … tier=Min1 (#221)` " +
+            "log on send — without this the sender used the stale card tier",
+          timeout: 20_000,
+        })
+        .toBe(true);
+      await expect(
+        bobApp.getByText(/post-retune/i),
+        "bob receives the message after tier retune; sender minted at new tier",
+      ).toBeVisible({ timeout: 60_000 });
+
+      expect(
+        consoleErrors,
+        `no WASM panics / PolicyTierMismatch in either browser context: ${consoleErrors.join("\n")}`,
+      ).toEqual([]);
+    } finally {
+      await aliceCtx.close().catch(() => {});
+      await bobCtx.close().catch(() => {});
+      stopGwPump();
+      stopPeerPump();
     }
   });
 
