@@ -329,7 +329,15 @@ fn verify_token_policy(
     {
         return Ok(());
     }
-    if assignment.tier != settings.minimum_tier {
+    // #223 bug 2: enforce `assignment.tier >= settings.minimum_tier`, not
+    // strict equality. `Tier: Ord` is defined by slot duration (shorter
+    // periods sort lower; `Min1 < Day365`), so `minimum_tier` is a floor —
+    // a sender minting at a stronger (longer-period) tier still satisfies
+    // it. Strict equality contradicted sender-side `pick_spend_tier` in
+    // `ui/src/aft.rs`, and made any `ModifySettings` that lowered the tier
+    // reject the inbox's existing higher-tier messages on reverification
+    // ("invalid outcome state" on the contract host).
+    if assignment.tier < settings.minimum_tier {
         return Err(VerificationError::PolicyTierMismatch {
             expected: settings.minimum_tier,
             got: assignment.tier,
@@ -535,7 +543,18 @@ impl Inbox {
                 self.add_message(m)?;
             }
         }
+        // #223 bug 1: take settings + inbox_signature from `other` when its
+        // `last_update` is strictly newer. Pre-fix, settings was dropped on
+        // every State broadcast, so cross-node `ModifySettings` (peer →
+        // gateway propagation) silently left the gateway holding stale
+        // `minimum_tier` and any subscribed client got the old policy on
+        // every Get. The signature must travel with settings — the contract
+        // owner signs over `STATE_UPDATE` with their (unchanged) ML-DSA
+        // key, but the signature bytes are part of the on-state record and
+        // should reflect the latest authoritative copy.
         if other.last_update > self.last_update {
+            self.settings = other.settings;
+            self.inbox_signature = other.inbox_signature;
             self.last_update = other.last_update;
         }
         Ok(())
@@ -798,6 +817,18 @@ impl Inbox {
                     } => {
                         can_update_settings(&params, &signature, &settings)?;
                         inbox.settings = settings;
+                        // #223 bug 1: bump `last_update` so the new settings
+                        // win the last-write-wins comparison in `merge`.
+                        // Without this, two nodes can hold a `ModifySettings`
+                        // update each with `last_update` equal to the
+                        // pre-update value, and a subsequent State broadcast
+                        // would not propagate settings even with the merge
+                        // fix in place. Monotonic per-node step (1µs) avoids
+                        // pulling a wall clock into wasm.
+                        inbox.last_update = inbox
+                            .last_update
+                            .checked_add_signed(chrono::TimeDelta::microseconds(1))
+                            .unwrap_or(inbox.last_update);
                     }
                 },
                 UpdateData::RelatedState { related_to, state } => {
@@ -837,6 +868,12 @@ impl Inbox {
                         } => {
                             can_update_settings(&params, &signature, &settings)?;
                             inbox.settings = settings;
+                            // See companion comment on the `Delta` arm above
+                            // (#223 bug 1). Same `last_update` bump applies.
+                            inbox.last_update = inbox
+                                .last_update
+                                .checked_add_signed(chrono::TimeDelta::microseconds(1))
+                                .unwrap_or(inbox.last_update);
                         }
                     }
                 }

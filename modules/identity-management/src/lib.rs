@@ -89,6 +89,15 @@ pub struct AliasInfo {
     /// Defaults to `Identity` when deserialising old state that lacks the field.
     #[serde(default)]
     pub kind: EntryKind,
+    /// Inbox contract WASM hash this identity's inbox state was last
+    /// observed under. The UI uses this to detect when the embedded
+    /// `INBOX_CODE_HASH` has rotated (a deliberate contract bump) and
+    /// trigger a per-identity GET-old → PUT-new migration (#213). `None`
+    /// means "never observed" — UI treats that as "no migration needed,
+    /// just stamp the current hash as the baseline". Backwards-compatible
+    /// with old delegate states that lack the field via `#[serde(default)]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inbox_wasm_hash: Option<String>,
 }
 
 #[derive(Deserialize, Serialize, Default, Debug)]
@@ -198,6 +207,7 @@ impl DelegateInterface for IdentityManagement {
                                 key,
                                 extra,
                                 kind: kind.unwrap_or_default(),
+                                inbox_wasm_hash: None,
                             },
                         );
                         let updated = serde_json::to_vec(&manager)
@@ -215,6 +225,25 @@ impl DelegateInterface for IdentityManagement {
                         let updated = serde_json::to_vec(&manager)
                             .map_err(|e| DelegateError::Deser(format!("{e}")))?;
                         ctx.set_secret(&secret_key, &updated);
+                        Ok(vec![])
+                    }
+                    IdentityMsg::UpdateInboxWasmHash { alias, wasm_hash } => {
+                        // Per-field mutation: only flips `inbox_wasm_hash`
+                        // on an existing `AliasInfo`. Avoids re-shipping
+                        // the full record (which would risk clobbering
+                        // `extra` / `kind`) and keeps the UI migration
+                        // path narrow. Silently no-op on missing alias —
+                        // a delete + migrate race shouldn't error out.
+                        let mut manager = match ctx.get_secret(&secret_key) {
+                            Some(value) => IdentityManagement::try_from(value.as_slice())?,
+                            None => IdentityManagement::default(),
+                        };
+                        if let Some(info) = manager.identities.get_mut(alias.as_str()) {
+                            info.inbox_wasm_hash = Some(wasm_hash);
+                            let updated = serde_json::to_vec(&manager)
+                                .map_err(|e| DelegateError::Deser(format!("{e}")))?;
+                            ctx.set_secret(&secret_key, &updated);
+                        }
                         Ok(vec![])
                     }
                     IdentityMsg::GetIdentities => {
@@ -238,7 +267,7 @@ impl DelegateInterface for IdentityManagement {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub enum IdentityMsg {
     Init,
     CreateIdentity {
@@ -252,6 +281,16 @@ pub enum IdentityMsg {
     },
     DeleteIdentity {
         alias: String,
+    },
+    /// Stamp the WASM hash of the inbox contract this identity's state
+    /// was last observed under (#213). The UI sends this after a
+    /// successful PUT during migration so the new hash becomes the
+    /// baseline for the next deliberate contract bump. Backwards-
+    /// compatible: old senders that don't know this variant simply
+    /// don't emit it — `inbox_wasm_hash` stays `None`.
+    UpdateInboxWasmHash {
+        alias: String,
+        wasm_hash: String,
     },
     /// Request the current set of identities. Returns the serialized
     /// `IdentityManagement` as an `ApplicationMessage` response.
@@ -335,6 +374,48 @@ mod boundary_tests {
         assert_eq!(info.kind, EntryKind::Identity);
     }
 
+    /// AliasInfo without an `inbox_wasm_hash` field must deserialise to
+    /// `None` (#213 backwards-compat for state written before the
+    /// migration mechanism shipped).
+    #[test]
+    fn alias_info_missing_inbox_wasm_hash_defaults_to_none() {
+        let json = br#"{"key":[1,2,3],"extra":null,"kind":"identity"}"#;
+        let info: AliasInfo = serde_json::from_slice(json).expect("should deserialise");
+        assert_eq!(info.inbox_wasm_hash, None);
+    }
+
+    /// AliasInfo with an explicit `inbox_wasm_hash` must round-trip.
+    #[test]
+    fn alias_info_with_inbox_wasm_hash_round_trips() {
+        let json = br#"{"key":[1],"extra":null,"kind":"identity","inbox_wasm_hash":"abc123"}"#;
+        let info: AliasInfo = serde_json::from_slice(json).expect("should deserialise");
+        assert_eq!(info.inbox_wasm_hash.as_deref(), Some("abc123"));
+        let reencoded = serde_json::to_vec(&info).expect("should re-serialise");
+        let decoded: AliasInfo =
+            serde_json::from_slice(&reencoded).expect("re-deserialise should succeed");
+        assert_eq!(decoded.inbox_wasm_hash.as_deref(), Some("abc123"));
+    }
+
+    /// `IdentityMsg::UpdateInboxWasmHash` round-trips through serde with
+    /// the expected JSON shape — pins the wire-format contract between
+    /// UI sender and delegate receiver (#213).
+    #[test]
+    fn update_inbox_wasm_hash_round_trips() {
+        let msg = IdentityMsg::UpdateInboxWasmHash {
+            alias: "alice".into(),
+            wasm_hash: "deadbeef".into(),
+        };
+        let bytes = serde_json::to_vec(&msg).expect("serialise");
+        let decoded: IdentityMsg = serde_json::from_slice(&bytes).expect("deserialise");
+        match decoded {
+            IdentityMsg::UpdateInboxWasmHash { alias, wasm_hash } => {
+                assert_eq!(alias, "alice");
+                assert_eq!(wasm_hash, "deadbeef");
+            }
+            other => panic!("expected UpdateInboxWasmHash, got {other:?}"),
+        }
+    }
+
     /// `IdentityMsg::CreateIdentity` without a `kind` field must deserialise
     /// successfully (backwards-compat for senders that pre-date the field).
     #[test]
@@ -358,6 +439,7 @@ mod boundary_tests {
                 key: vec![1],
                 extra: None,
                 kind: EntryKind::Identity,
+                inbox_wasm_hash: None,
             },
         );
         mgr.identities.insert(
@@ -366,6 +448,7 @@ mod boundary_tests {
                 key: vec![2],
                 extra: Some("friend".into()),
                 kind: EntryKind::Contact,
+                inbox_wasm_hash: None,
             },
         );
         let json = serde_json::to_vec(&mgr).unwrap();

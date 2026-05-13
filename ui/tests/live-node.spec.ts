@@ -978,28 +978,13 @@ test.describe("Live node E2E", () => {
   //      stale contact-card tier.
   //
   // Sender-side cache + send-path wiring are exercised by the rust
-  // unit tests in `ui/src/contact_tier_cache.rs`. A live cross-peer
-  // e2e proving the end-to-end "bob retunes mid-run, alice mints at
-  // new tier, recipient accepts" loop is blocked by two upstream bugs
-  // independent of #221:
-  //
-  // - `Inbox::merge` (contracts/inbox/src/lib.rs) only merges
-  //   `messages` and `last_update`. When the gateway receives a State
-  //   broadcast carrying a ModifySettings result, `settings` is
-  //   silently kept at the old value. Alice's Get-after-retune
-  //   therefore returns gw's stale settings and the cache records the
-  //   old tier.
-  // - The inbox contract's `verify_token_policy` enforces
-  //   `assignment.tier == settings.minimum_tier` (strict equality, not
-  //   `>=`). Any pre-existing message in the inbox at the original
-  //   tier makes a subsequent ModifySettings update fail validation
-  //   ("invalid outcome state").
-  //
-  // Both surface as contract-state behaviour, not sender behaviour.
-  // The e2e is parked behind #223 (contract-side merge + tier
-  // equality fix). #180's AFT_CAP_RAISED row stays closed via the
-  // unit-test coverage in `contact_tier_cache.rs`.
-  test.skip("recipient tier change before first send; sender mints at new tier (#221, #180 AFT_CAP_RAISED row)", async ({
+  // unit tests in `ui/src/contact_tier_cache.rs`. The cross-peer e2e
+  // proving "bob retunes mid-run, alice mints at new tier, recipient
+  // accepts" was re-enabled in #223 alongside the contract-side fix
+  // (`Inbox::merge` now propagates `settings`; `verify_token_policy`
+  // uses `>=` not `==`). #180's AFT_CAP_RAISED row is closed via this
+  // test together with the unit-test coverage.
+  test("recipient tier change before first send; sender mints at new tier (#221, #180 AFT_CAP_RAISED row)", async ({
     browser,
   }) => {
     test.skip(

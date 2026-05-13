@@ -420,7 +420,21 @@ inbox.wasm or AFT contract wasms, so users' stored messages and AFT
 token ledgers stay accessible across releases. To deliberately rotate
 (e.g. for a contract bugfix that requires data migration), edit the
 =x.y.z pin in the relevant Cargo.toml and pair the change with the
-per-identity migration story (issue #199 Phase B — not yet shipped).
+per-identity migration story.
+
+**Inbox migration (#213/#223, shipped)**: on UI startup the
+`set_aliases` callback in `ui/src/api.rs` compares the embedded
+`INBOX_CODE_HASH` against the `inbox_wasm_hash` recorded on each
+identity in the identity-management delegate. On drift it dispatches
+a Get for the old inbox key (derived from the prior hash + identity
+vk), and the GetResponse arm decodes the old state, re-signs via
+`Inbox::new`, and PUTs it under the current inbox key. Toast surfaces
+the migration to the user. On first observation (`inbox_wasm_hash =
+None`) the UI stamps the current hash as a baseline so the next bump
+is detectable. The schema bump on the delegate is backwards-compatible
+(`#[serde(default)]` on `AliasInfo.inbox_wasm_hash`). AFT contract
+migration follows the same shape if and when AFT WASM rotates — not
+yet implemented; file a follow-up when needed.
 
 **Facade lockfile isolation (issue #198)**: the facade contract and its
 shared types crate live OUTSIDE the freenet-email workspace:

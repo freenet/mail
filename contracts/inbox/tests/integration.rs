@@ -194,32 +194,39 @@ fn update_rejects_token_with_invalid_slot() {
     );
 }
 
-/// #85: when `InboxSettings.minimum_tier` is set to a non-default tier,
-/// any incoming AddMessages that carries a token minted at a different
-/// tier must be rejected. The policy lives on settings (mutable by the
-/// owner via `ModifySettings`) rather than params (immutable), so the
-/// contract id stays stable across policy tweaks.
+/// #85 / #223: when `InboxSettings.minimum_tier` is set to a non-default
+/// tier, any incoming AddMessages that carries a token minted at a
+/// *weaker* tier (shorter period, sorts lower under `Tier: Ord`) must be
+/// rejected. The policy lives on settings (mutable by the owner via
+/// `ModifySettings`) rather than params (immutable), so the contract id
+/// stays stable across policy tweaks.
+///
+/// Post-#223 the contract enforces `assignment.tier >= settings.minimum_tier`
+/// (floor semantics matching sender-side `pick_spend_tier`), not strict
+/// equality, so a stronger-tier token would *not* be rejected here. See
+/// `update_accepts_stronger_tier_than_recipient_policy` for the positive
+/// case.
 #[test]
-fn update_rejects_token_with_wrong_tier_for_recipient_policy() {
+fn update_rejects_token_with_weaker_tier_than_recipient_policy() {
     let owner_sk = make_inbox_keypair();
     let owner_vk = inbox_verifying_key(&owner_sk);
     let (gen_sk, gen_vk_bytes) = make_token_generator_keypair();
     let params = make_params(&owner_vk);
-    // Recipient policy carried on settings: Hour1, not Day1.
+    // Recipient policy carried on settings: Hour1 (1-hour slot).
     let settings = make_settings_with_policy(Tier::Hour1, 365 * 24 * 3600);
 
-    let token_record_id = token_record_id_for(b"wrong-tier-record");
-    // Sender mints at Day1 (the legacy default), which now mismatches
-    // the recipient's settings policy and should be rejected.
+    let token_record_id = token_record_id_for(b"weak-tier-record");
+    // Sender mints at Min10 — shorter period than Hour1, so it sorts
+    // below the floor and must be rejected.
     let assignment = make_token_assignment(
         &gen_sk,
         gen_vk_bytes,
-        Tier::Day1,
+        Tier::Min10,
         fixed_valid_slot(),
-        assignment_hash_for(b"wrong-tier-msg"),
+        assignment_hash_for(b"weak-tier-msg"),
         token_record_id,
     );
-    let message = make_message(b"wrong-tier-payload".to_vec(), assignment.clone());
+    let message = make_message(b"weak-tier-payload".to_vec(), assignment.clone());
     let record = make_token_record(assignment);
 
     let initial_state = make_inbox_state(&owner_sk, vec![], Utc::now(), settings);
@@ -231,7 +238,7 @@ fn update_rejects_token_with_wrong_tier_for_recipient_policy() {
     let result = Inbox::update_state(params, initial_state, updates);
     assert!(
         result.is_err(),
-        "tier-mismatched token must be rejected by update_state; got {result:?}"
+        "tier below recipient floor must be rejected by update_state; got {result:?}"
     );
 }
 
@@ -1363,6 +1370,203 @@ fn modify_settings_accepts_verified_senders_at_cap() {
         result.is_ok(),
         "ModifySettings with verified_senders.len() == MAX_VERIFIED_SENDERS must be accepted; \
          got {result:?}"
+    );
+}
+
+// ─── #223 regression: merge, tier-floor semantics, last_update advance ──
+
+/// Bug 2 (`verify_token_policy` strict equality): under the old
+/// `assignment.tier != settings.minimum_tier` check, a token minted at a
+/// stronger tier (longer period) was rejected even though it satisfies
+/// the recipient's floor. Post-#223 the check is `<` (floor semantics
+/// matching sender-side `pick_spend_tier`), so stronger tiers land.
+#[test]
+fn update_accepts_stronger_tier_than_recipient_policy() {
+    let owner_sk = make_inbox_keypair();
+    let owner_vk = inbox_verifying_key(&owner_sk);
+    let (gen_sk, gen_vk_bytes) = make_token_generator_keypair();
+    let params = make_params(&owner_vk);
+    // Floor: Min10. Sender mints at Hour1 (longer slot, stronger
+    // commitment) → should be accepted.
+    let settings = make_settings_with_policy(Tier::Min10, 365 * 24 * 3600);
+    let token_record_id = token_record_id_for(b"strong-tier-record");
+    let assignment = make_token_assignment(
+        &gen_sk,
+        gen_vk_bytes,
+        Tier::Hour1,
+        fixed_valid_slot(),
+        assignment_hash_for(b"strong-tier-msg"),
+        token_record_id,
+    );
+    let message = make_message(b"strong-tier-payload".to_vec(), assignment.clone());
+    let record = make_token_record(assignment);
+
+    let initial_state = make_inbox_state(&owner_sk, vec![], Utc::now(), settings);
+    let updates = vec![
+        add_messages_delta(vec![message]),
+        related_state_update(token_record_id, record),
+    ];
+
+    let result = Inbox::update_state(params, initial_state, updates);
+    assert!(
+        result.is_ok(),
+        "stronger-tier token must be accepted under floor semantics; got {result:?}"
+    );
+    let modified = result.unwrap();
+    assert!(
+        modified.new_state.is_some(),
+        "expected a valid state modification, got {:?}",
+        modified.related
+    );
+}
+
+/// Bug 2 regression (the actual reason #223 was filed): with an existing
+/// message minted at Min10 in the inbox, the owner sends `ModifySettings`
+/// lowering `minimum_tier` to Min1. Pre-#223 the contract re-ran
+/// `verify_token_policy` over every stored message during `validate_state`
+/// and rejected with `PolicyTierMismatch { expected: Min1, got: Min10 }`,
+/// surfacing as "invalid outcome state" on the host. Post-fix the
+/// pre-existing message is `>= Min1` (Min10 sorts higher) and the
+/// ModifySettings update lands.
+#[test]
+fn modify_settings_to_lower_tier_keeps_existing_higher_tier_messages() {
+    let owner_sk = make_inbox_keypair();
+    let owner_vk = inbox_verifying_key(&owner_sk);
+    let (gen_sk, gen_vk_bytes) = make_token_generator_keypair();
+    let params = make_params(&owner_vk);
+
+    let initial_settings = make_settings_with_policy(Tier::Min10, 365 * 24 * 3600);
+    let token_record_id = token_record_id_for(b"lower-tier-pre-record");
+    let assignment = make_token_assignment(
+        &gen_sk,
+        gen_vk_bytes,
+        Tier::Min10,
+        fixed_valid_slot(),
+        assignment_hash_for(b"lower-tier-pre-msg"),
+        token_record_id,
+    );
+    let message = make_message(b"existing-msg".to_vec(), assignment.clone());
+    let record = make_token_record(assignment);
+
+    // Inbox starts with one Min10 message.
+    let state_with_msg =
+        make_inbox_state(&owner_sk, vec![message], Utc::now(), initial_settings);
+
+    // Owner retunes floor to Min1.
+    let new_settings = make_settings_with_policy(Tier::Min1, 365 * 24 * 3600);
+    let updates = vec![
+        modify_settings_delta(&owner_sk, new_settings),
+        related_state_update(token_record_id, record),
+    ];
+
+    let result = Inbox::update_state(params, state_with_msg, updates);
+    assert!(
+        result.is_ok(),
+        "ModifySettings lowering minimum_tier must not reject pre-existing higher-tier messages \
+         (#223 bug 2 regression); got {result:?}"
+    );
+    let modified = result.unwrap();
+    let new_state = modified.new_state.expect("valid state modification");
+    let decoded = Inbox::try_from(&new_state).expect("decode new state");
+    assert_eq!(
+        decoded.settings.minimum_tier,
+        Tier::Min1,
+        "new state must carry the lowered tier"
+    );
+    assert_eq!(
+        decoded.messages.len(),
+        1,
+        "existing message must survive the ModifySettings update"
+    );
+}
+
+/// Bug 1 (`Inbox::merge` drops settings): `ModifySettings` must advance
+/// `inbox.last_update` so the new settings win the last-write-wins
+/// comparison when a State broadcast carries them to another node.
+#[test]
+fn modify_settings_advances_last_update() {
+    let owner_sk = make_inbox_keypair();
+    let owner_vk = inbox_verifying_key(&owner_sk);
+    let params = make_params(&owner_vk);
+
+    let start = Utc::now();
+    let initial_state =
+        make_inbox_state(&owner_sk, vec![], start, InboxSettings::default());
+    let new_settings = make_settings_with_policy(Tier::Min1, 7 * 86_400);
+    let updates = vec![modify_settings_delta(&owner_sk, new_settings)];
+
+    let result = Inbox::update_state(params, initial_state, updates);
+    assert!(result.is_ok(), "ModifySettings must succeed; got {result:?}");
+    let new_state = result.unwrap().new_state.expect("valid state");
+    let decoded = Inbox::try_from(&new_state).expect("decode new state");
+    assert!(
+        decoded.last_update > start,
+        "ModifySettings must advance last_update so cross-node merge can \
+         resolve last-write-wins (#223 bug 1); got {} vs start {}",
+        decoded.last_update,
+        start
+    );
+}
+
+/// Bug 1: a full State broadcast carrying newer settings must overwrite
+/// the recipient's stale settings. Drives a `UpdateData::State` arm
+/// against an existing inbox state and asserts the new settings land.
+#[test]
+fn state_broadcast_with_newer_last_update_replaces_settings() {
+    use freenet_stdlib::prelude::UpdateData;
+
+    let owner_sk = make_inbox_keypair();
+    let owner_vk = inbox_verifying_key(&owner_sk);
+    let params = make_params(&owner_vk);
+
+    let earlier = Utc::now() - Duration::seconds(60);
+    let stale_settings = make_settings_with_policy(Tier::Min10, 365 * 24 * 3600);
+    let local_state = make_inbox_state(&owner_sk, vec![], earlier, stale_settings);
+
+    let later = earlier + Duration::seconds(30);
+    let fresh_settings = make_settings_with_policy(Tier::Min1, 7 * 86_400);
+    let incoming_state = make_inbox_state(&owner_sk, vec![], later, fresh_settings);
+
+    let updates = vec![UpdateData::State(incoming_state)];
+    let result = Inbox::update_state(params, local_state, updates);
+    assert!(result.is_ok(), "state merge must succeed; got {result:?}");
+    let merged = result.unwrap().new_state.expect("valid state");
+    let decoded = Inbox::try_from(&merged).expect("decode merged state");
+    assert_eq!(
+        decoded.settings.minimum_tier,
+        Tier::Min1,
+        "newer state's settings must replace local stale settings (#223 bug 1)"
+    );
+}
+
+/// Bug 1: an *older* State broadcast must NOT clobber locally-mutated
+/// settings. Defends against a delayed propagation re-applying a stale
+/// pre-ModifySettings snapshot.
+#[test]
+fn state_broadcast_with_older_last_update_keeps_local_settings() {
+    use freenet_stdlib::prelude::UpdateData;
+
+    let owner_sk = make_inbox_keypair();
+    let owner_vk = inbox_verifying_key(&owner_sk);
+    let params = make_params(&owner_vk);
+
+    let now = Utc::now();
+    let fresh_settings = make_settings_with_policy(Tier::Min1, 7 * 86_400);
+    let local_state = make_inbox_state(&owner_sk, vec![], now, fresh_settings);
+
+    let earlier = now - Duration::seconds(60);
+    let stale_settings = make_settings_with_policy(Tier::Min10, 365 * 24 * 3600);
+    let incoming_state = make_inbox_state(&owner_sk, vec![], earlier, stale_settings);
+
+    let updates = vec![UpdateData::State(incoming_state)];
+    let result = Inbox::update_state(params, local_state, updates);
+    assert!(result.is_ok(), "stale-state merge must succeed; got {result:?}");
+    let merged = result.unwrap().new_state.expect("valid state");
+    let decoded = Inbox::try_from(&merged).expect("decode merged state");
+    assert_eq!(
+        decoded.settings.minimum_tier,
+        Tier::Min1,
+        "stale state must not overwrite locally-mutated settings (#223 bug 1)"
     );
 }
 

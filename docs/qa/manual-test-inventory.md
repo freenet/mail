@@ -143,8 +143,10 @@ add/remove protocol.
 | Appearance: serif_subjects toggle | manual | Toggle, confirm subjects flip font |
 | Advanced: custom relay URL takes effect on reload | manual | Set custom_relay + URL, reload, WS connects to that URL |
 | Settings round-trip across reload | manual | Set value, reload, value persists |
-| AFT tier picker dispatches ModifySettings (#85) | manual | Settings → AFT, click a tier card, expect `UpdateInboxPolicy dispatched … tier=<Tier> (#85)` in console. End-to-end cross-peer cap-raise + send blocked on #223 (`Inbox::merge` drops settings; tier-policy strict equality). |
-| Sender resolves recipient tier from live `InboxSettings` (#221) | auto (unit) | `ui/src/contact_tier_cache.rs` — record/lookup/overwrite. Live e2e skipped pending #223. |
+| AFT tier picker dispatches ModifySettings (#85) | auto | iso: `recipient tier change before first send; sender mints at new tier (#221, #180 AFT_CAP_RAISED row)` (re-enabled in #223). |
+| Sender resolves recipient tier from live `InboxSettings` (#221) | auto (unit + iso) | `ui/src/contact_tier_cache.rs` record/lookup/overwrite + iso cross-peer round-trip. |
+| Inbox contract merge propagates settings; tier-policy uses `>=` (#223) | auto (host) | `contracts/inbox/tests/integration.rs` — 5 new tests covering merge LWW, stronger-tier acceptance, ModifySettings advances last_update, pre-existing higher-tier messages survive tier downgrade. |
+| Per-identity inbox migration on contract id rotation (#213) | manual | Bump `contracts/inbox/Cargo.toml` patch / change inbox code; rebuild; reload UI; expect `inbox migration: detected drift … (#213)` log + toast "Inbox … migrated …" + delegate's `inbox_wasm_hash` now equals new hash. Schema bump (`AliasInfo.inbox_wasm_hash`) is backwards-compatible via `#[serde(default)]`. |
 | AFT verified-sender bypass toggle dispatches ModifySettings (#157) | auto | iso: `verified-skip toggle dispatches ModifySettings + flips state (#157)` |
 | WIP: read receipts toggle (gated) | blocked | Issue #69 — feature not implemented |
 | WIP: pad_length toggle (gated) | blocked | No implementation; gated until designed |

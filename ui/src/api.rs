@@ -236,7 +236,7 @@ mod delegate_api {
 mod inbox_management {
     use std::sync::Arc;
 
-    use freenet_stdlib::prelude::*;
+    use freenet_stdlib::{client_api::ContractRequest, prelude::*};
     use ml_dsa::{MlDsa65, SigningKey as MlDsaSigningKey, signature::Keypair};
 
     use freenet_email_inbox::{InboxParams, InboxSettings};
@@ -248,6 +248,82 @@ mod inbox_management {
 
     thread_local! {
         pub(super) static CREATED_INBOX: RefCell<Vec<(Rc<str>, ContractKey)>> = const { RefCell::new(Vec::new()) };
+
+        /// #213 inbox migration: maps an OLD inbox `ContractKey` (derived
+        /// with a prior `INBOX_CODE_HASH`) to the identity that owns it.
+        /// On the corresponding `GetResponse`, the api.rs handler decodes
+        /// the old state and PUTs it under the identity's CURRENT inbox
+        /// key. Entries are removed once the migration completes (or
+        /// after a timeout — currently best-effort).
+        pub(super) static PENDING_MIGRATION: RefCell<HashMap<ContractKey, crate::app::Identity>> =
+            RefCell::new(HashMap::new());
+    }
+
+    /// PUT the migrated inbox state under the identity's CURRENT inbox
+    /// key. Called from the GetResponse arm when a `PENDING_MIGRATION`
+    /// entry resolves. Reuses `Inbox::new` to produce a freshly-signed
+    /// state — the signature is over a fixed `STATE_UPDATE` salt and
+    /// the identity key is unchanged, so the re-signed state validates
+    /// identically.
+    pub(super) async fn put_migrated_inbox(
+        client: &mut WebApiRequestClient,
+        identity: &crate::app::Identity,
+        parsed: freenet_email_inbox::Inbox,
+    ) -> Result<(), DynError> {
+        use ml_dsa::signature::Keypair;
+        let vk = Keypair::verifying_key(identity.ml_dsa_signing_key.as_ref());
+        let params: Parameters = InboxParams {
+            pub_key: crate::inbox::inbox_params_pub_key_bytes(&vk),
+        }
+        .try_into()?;
+        let rebuilt = freenet_email_inbox::Inbox::new(
+            identity.ml_dsa_signing_key.as_ref(),
+            parsed.settings,
+            parsed.messages,
+        );
+        let state = rebuilt.serialize()?;
+        let new_key = contract_api::create_contract(client, INBOX_CODE, state, &params).await?;
+        crate::log::info(format!(
+            "inbox migration: PUT succeeded new_key={new_key} identity=`{}` (#213)",
+            identity.alias()
+        ));
+        Ok(())
+    }
+
+    /// Dispatch a `Get` for `identity`'s inbox under the prior contract
+    /// code hash so the GetResponse arm in `node_comms` can decode the
+    /// old state and PUT it under the current inbox key. Best-effort:
+    /// the old contract may have been GC'd off the network; on Get
+    /// failure the caller stamps the current hash anyway so subsequent
+    /// reloads don't retry forever.
+    pub(super) async fn migrate_inbox(
+        client: &mut WebApiRequestClient,
+        identity: &crate::app::Identity,
+        prior_hash: &str,
+    ) -> Result<(), DynError> {
+        use ml_dsa::signature::Keypair;
+        let vk = Keypair::verifying_key(identity.ml_dsa_signing_key.as_ref());
+        let params: Parameters = InboxParams {
+            pub_key: crate::inbox::inbox_params_pub_key_bytes(&vk),
+        }
+        .try_into()?;
+        let old_key = ContractKey::from_params(prior_hash, params)
+            .map_err(|e| format!("derive old inbox key: {e}"))?;
+        PENDING_MIGRATION.with(|m| {
+            m.borrow_mut().insert(old_key, identity.clone());
+        });
+        let request = ContractRequest::Get {
+            key: old_key.into(),
+            return_contract_code: false,
+            subscribe: false,
+            blocking_subscribe: false,
+        };
+        client.send(request.into()).await?;
+        crate::log::info(format!(
+            "inbox migration: GET dispatched for old key {old_key} (identity=`{}`) (#213)",
+            identity.alias()
+        ));
+        Ok(())
     }
 
     pub(super) async fn create_contract(
@@ -656,6 +732,22 @@ mod identity_management {
         crate::log::debug!("deleting own identity {alias}");
         let msg = IdentityMsg::DeleteIdentity {
             alias: alias.to_string(),
+        };
+        send_identity_msg(client, &msg).await
+    }
+
+    /// Stamp the current `INBOX_CODE_HASH` on the identity-management
+    /// delegate so subsequent reloads can compare against it and detect
+    /// a deliberate contract bump (#213). Called from the migration
+    /// path after a successful PUT, and on first load to baseline the
+    /// hash (so the very first contract-bump release is detectable).
+    pub(super) async fn stamp_inbox_wasm_hash_api_call(
+        client: &mut WebApiRequestClient,
+        alias: &str,
+    ) -> Result<(), DynError> {
+        let msg = IdentityMsg::UpdateInboxWasmHash {
+            alias: alias.to_string(),
+            wasm_hash: crate::inbox::INBOX_CODE_HASH.to_string(),
         };
         send_identity_msg(client, &msg).await
     }
@@ -1562,6 +1654,54 @@ pub(crate) async fn node_comms(
                                         "GetResponse: contact inbox {key} \
                                         primed (#191) — drop"
                                     );
+                                } else if let Some(identity) = inbox_management::PENDING_MIGRATION
+                                    .with(|m| m.borrow_mut().remove(&key))
+                                {
+                                    // #213 inbox migration: this is a GetResponse
+                                    // for the identity's OLD inbox key (derived
+                                    // under the prior INBOX_CODE_HASH). Decode
+                                    // the state and re-PUT it under the current
+                                    // inbox key. The signature is over a fixed
+                                    // STATE_UPDATE salt and the identity key is
+                                    // unchanged, so we can reconstruct the
+                                    // serialized state by calling Inbox::new
+                                    // with the same settings + messages.
+                                    match serde_json::from_slice::<StoredInbox>(state.as_ref()) {
+                                        Ok(parsed) => {
+                                            if let Err(e) = inbox_management::put_migrated_inbox(
+                                                &mut client,
+                                                &identity,
+                                                parsed,
+                                            )
+                                            .await
+                                            {
+                                                crate::log::error(
+                                                    format!(
+                                                        "inbox migration: PUT failed for `{}`: {e} (#213)",
+                                                        identity.alias()
+                                                    ),
+                                                    None,
+                                                );
+                                            } else {
+                                                crate::toast::push_toast(
+                                                    format!(
+                                                        "Inbox `{}` migrated to the new contract id after webapp upgrade.",
+                                                        identity.alias()
+                                                    ),
+                                                    crate::toast::ToastLevel::Info,
+                                                );
+                                            }
+                                        }
+                                        Err(e) => {
+                                            crate::log::error(
+                                                format!(
+                                                    "inbox migration: deser old state for `{}` failed: {e} (#213)",
+                                                    identity.alias()
+                                                ),
+                                                None,
+                                            );
+                                        }
+                                    }
                                 } else {
                                     crate::log::error(
                                         format!("GetResponse for unknown contract key: {key}"),
@@ -1958,6 +2098,24 @@ pub(crate) async fn node_comms(
                                     msg.payload.as_slice(),
                                 ) {
                                     Ok(im) => {
+                                        // #213 migration: snapshot each
+                                        // identity's recorded
+                                        // `inbox_wasm_hash` before
+                                        // `set_aliases` consumes the
+                                        // IdentityManagement. The
+                                        // migration block below compares
+                                        // these against the embedded
+                                        // INBOX_CODE_HASH to detect a
+                                        // deliberate contract bump.
+                                        let recorded_inbox_hashes: std::collections::HashMap<
+                                            String,
+                                            Option<String>,
+                                        > = im
+                                            .get_info()
+                                            .map(|(alias, info)| {
+                                                (alias.clone(), info.inbox_wasm_hash.clone())
+                                            })
+                                            .collect();
                                         let new_ids = crate::app::Identity::set_aliases(im, user);
                                         // ALIASES is a thread_local Vec, not a
                                         // Dioxus signal — bump login_controller
@@ -2053,6 +2211,96 @@ pub(crate) async fn node_comms(
                                                     ),
                                                     None,
                                                 ),
+                                            }
+                                        }
+                                        // #213 inbox migration: detect a
+                                        // deliberate contract bump (the
+                                        // baked-in INBOX_CODE_HASH no
+                                        // longer matches the hash this
+                                        // identity's inbox was last
+                                        // observed under) and stamp the
+                                        // current hash on the delegate.
+                                        // A full GET-old → PUT-new
+                                        // migration is implemented in
+                                        // `inbox_management::migrate_inbox`;
+                                        // this dispatch is fire-and-
+                                        // forget per identity. First-time
+                                        // load (`None` recorded) just
+                                        // stamps the current hash as the
+                                        // baseline so the NEXT bump can
+                                        // detect drift.
+                                        for id in &new_ids {
+                                            let alias_str = id.alias().to_string();
+                                            let prior = recorded_inbox_hashes
+                                                .get(&alias_str)
+                                                .cloned()
+                                                .flatten();
+                                            match prior {
+                                                Some(prior_hash)
+                                                    if prior_hash
+                                                        == crate::inbox::INBOX_CODE_HASH =>
+                                                {
+                                                    // No drift; nothing to do.
+                                                }
+                                                Some(prior_hash) => {
+                                                    crate::log::info(format!(
+                                                        "inbox migration: detected drift for `{}` \
+                                                         prior_hash={} current_hash={} (#213)",
+                                                        alias_str,
+                                                        prior_hash,
+                                                        crate::inbox::INBOX_CODE_HASH
+                                                    ));
+                                                    if let Err(e) = inbox_management::migrate_inbox(
+                                                        &mut client,
+                                                        id,
+                                                        &prior_hash,
+                                                    )
+                                                    .await
+                                                    {
+                                                        crate::log::error(
+                                                            format!(
+                                                                "inbox migration: failed for `{}`: {e} (#213)",
+                                                                alias_str
+                                                            ),
+                                                            None,
+                                                        );
+                                                    }
+                                                    if let Err(e) = identity_management::stamp_inbox_wasm_hash_api_call(
+                                                        &mut client,
+                                                        &alias_str,
+                                                    )
+                                                    .await
+                                                    {
+                                                        crate::log::error(
+                                                            format!(
+                                                                "inbox migration: stamp failed for `{}`: {e} (#213)",
+                                                                alias_str
+                                                            ),
+                                                            None,
+                                                        );
+                                                    }
+                                                }
+                                                None => {
+                                                    // First observation —
+                                                    // baseline the current
+                                                    // hash so the next
+                                                    // contract bump can be
+                                                    // detected.
+                                                    if let Err(e) = identity_management::stamp_inbox_wasm_hash_api_call(
+                                                        &mut client,
+                                                        &alias_str,
+                                                    )
+                                                    .await
+                                                    {
+                                                        crate::log::error(
+                                                            format!(
+                                                                "inbox migration: baseline stamp failed for `{}`: {e} (#213)",
+                                                                alias_str
+                                                            ),
+                                                            None,
+                                                        );
+                                                    }
+                                                }
                                             }
                                         }
                                     }
