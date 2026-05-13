@@ -60,6 +60,7 @@ manual gap by adding a test, flip status to `auto` and link the test.
 | `verify_on_send` blocks unverified-contact send (toast) | manual | Disable verify on import, Send → expect "Recipient is not verified" toast, no Sent row |
 | Edit / delete contact | manual | Open Contacts, click row, edit label / description, save; delete and confirm gone |
 | Self-card in Contacts (own identity) | manual | Confirm own identity surfaces in Contacts with "you" indicator (or absent — verify intended behavior) |
+| Contact import + reload + UpdateNotification stays sane (#198/#204) | auto | iso: `contact import + reload + UpdateNotification stays sane (#204)` |
 
 ### Inbox / message read flow
 

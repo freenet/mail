@@ -64,6 +64,8 @@ const ALIAS_T2_ALICE = "alice2";
 const ALIAS_T2_BOB = "bob2";
 const ALIAS_T3_ALICE = "alice3";
 const ALIAS_T3_BOB = "bob3";
+const ALIAS_T4_ALICE = "alice4";
+const ALIAS_T4_BOB = "bob4";
 test.describe("Live node E2E", () => {
   test.skip(
     !process.env.FREENET_EMAIL_BASE_URL?.includes("/v1/contract/web/"),
@@ -648,6 +650,207 @@ test.describe("Live node E2E", () => {
       await bobCtx.tracing
         .stop({ path: "test-results/multi-round-bob-trace.zip" })
         .catch(() => {});
+      await aliceCtx.close().catch(() => {});
+      await bobCtx.close().catch(() => {});
+      stopGwPump();
+      stopPeerPump();
+    }
+  });
+
+  // #204 regression: contact-share + reload + UpdateNotification on a
+  // contact's primed inbox. Pre-#198 fix path:
+  //   1. alice imports bob via share-card (CreateContact-prime
+  //      subscribes alice's node to bob's inbox key)
+  //   2. alice reloads (rehydrate-prime path re-subscribes on boot)
+  //   3. bob's inbox emits an UpdateNotification (any UPDATE — here
+  //      alice → bob)
+  //   4. alice's api.rs UpdateNotification arm dispatches by contract
+  //      key. bob's inbox key isn't in alice's `inboxes` and isn't in
+  //      `token_rec_to_id`, so pre-#198 it hit `unreachable!` and the
+  //      whole webapp crashed.
+  //
+  // Asserts:
+  //   - `rehydrate primed contact inbox` log fires (subscription is
+  //     actually established post-reload — without this the test could
+  //     pass for the wrong reason)
+  //   - no WASM panic / `unreachable executed` in alice's console
+  //   - no `UpdateNotification for unknown contract key` error in
+  //     alice's console (the regression marker if the contact-key
+  //     guard breaks)
+  //   - bob still receives the message end-to-end (sanity)
+  test("contact import + reload + UpdateNotification stays sane (#204)", async ({
+    browser,
+  }) => {
+    test.skip(
+      !PEER_BASE_URL,
+      "cross-node test requires FREENET_EMAIL_BASE_URL to include the contract id",
+    );
+    const stopGwPump = startPermissionPump(ISO_GW_ORIGIN);
+    const stopPeerPump = startPermissionPump(ISO_PEER_ORIGIN);
+    const aliceCtx = await browser.newContext();
+    const bobCtx = await browser.newContext();
+    const alicePage = await aliceCtx.newPage();
+    const bobPage = await bobCtx.newPage();
+
+    // Surface alice's panics + the specific "unknown contract key"
+    // marker so a regression points at the right frame.
+    const aliceErrors: string[] = [];
+    // Track the rehydrate-prime log emitted from the webapp (`crate::log::info`
+    // lands in the browser console, not in the gateway log files).
+    let rehydratePrimed = false;
+    alicePage.on("console", (m) => {
+      const t = m.text();
+      if (
+        /WASM PANIC|RuntimeError: unreachable executed|UpdateNotification for unknown contract key|tried to get wrong contract key/.test(
+          t,
+        )
+      ) {
+        aliceErrors.push(`[${m.type()}] ${t}`);
+      }
+      // Loose match: the rehydrate path iterates every persisted
+      // contact and the test only needs to confirm the path fired
+      // post-reload (so subscriptions are re-armed). bob4 contact-row
+      // presence in the UI post-reload separately confirms bob4
+      // specifically made it through the delegate round-trip.
+      if (/rehydrate primed contact inbox .* for .* \(#191\)/.test(t)) {
+        rehydratePrimed = true;
+      }
+    });
+    alicePage.on("pageerror", (e) => {
+      aliceErrors.push(`[pageerror] ${e.message}`);
+    });
+
+    try {
+      await Promise.all([alicePage.goto(""), bobPage.goto(PEER_BASE_URL)]);
+      await Promise.all([
+        createIdentity(alicePage, ALIAS_T4_ALICE),
+        createIdentity(bobPage, ALIAS_T4_BOB),
+      ]);
+
+      // ── Bob shares his card ─────────────────────────────────────
+      const bobApp = bobPage.frameLocator("iframe#app");
+      await bobApp
+        .locator(`[data-testid="fm-id-row"][data-alias="${ALIAS_T4_BOB}"] [data-testid="fm-id-share"]`)
+        .click();
+      const bobShare = bobApp.locator('[data-testid="fm-share-modal"]');
+      await bobShare.waitFor({ timeout: 5_000 });
+      const bobCard = (await bobShare.getAttribute("data-share-text")) ?? "";
+      expect(bobCard, "bob share text contains contact:// payload").toMatch(
+        /verify: .+\ncontact:\/\//,
+      );
+      await bobShare.locator(".modal-x").click();
+
+      // ── Alice imports bob ───────────────────────────────────────
+      const aliceApp = alicePage.frameLocator("iframe#app");
+      await aliceApp.locator('[data-testid="fm-contact-import"]').click();
+      await aliceApp
+        .locator('[data-testid="fm-import-contact-modal"] textarea')
+        .fill(bobCard);
+      await aliceApp
+        .locator('input[placeholder="e.g. Alice (work)"]')
+        .fill(ALIAS_T4_BOB);
+      const verifyCheck = aliceApp.locator('[data-testid="fm-verify-check"]');
+      await verifyCheck.waitFor({ timeout: 15_000 });
+      await verifyCheck.click();
+
+      // Watch for the `primed contact inbox … for <alias> (#191)` log
+      // BEFORE the import-submit click, so the handler is armed when
+      // CreateContact emits it. (The rehydrate-variant happens only on
+      // reload; this is the initial-import variant.)
+      // Also surface bob4 contact-related logs to stdout so a regression
+      // points at the right webapp branch.
+      const primedRe = new RegExp(
+        `primed contact inbox .* for ${ALIAS_T4_BOB} \\(#191\\)`,
+      );
+      let importPrimed = false;
+      alicePage.on("console", (m) => {
+        const t = m.text();
+        if (primedRe.test(t)) importPrimed = true;
+        if (
+          /(create_contact|insert_contact|prime contact inbox|primed contact inbox|address book rejected|failed to store contact)/.test(
+            t,
+          )
+        ) {
+          console.log(`[console:alice4:${m.type()}] ${t}`);
+        }
+      });
+      await aliceApp.locator('[data-testid="fm-import-submit"]').click();
+
+      // Wait for the import to commit to the local node + identity-management
+      // delegate before reloading — otherwise the reload races the in-flight
+      // CreateContact and the rehydrated address book lacks bob, so the
+      // post-reload compose can't resolve bob's fingerprint.
+      // Two-stage check: the `primed contact inbox` log confirms the
+      // local-node Get-with-subscribe went out, then bob's contact-row
+      // surfacing in alice's UI confirms `insert_contact` ran. A 2s
+      // dwell after both is enough for the delegate ack to round-trip
+      // (the delegate write is fire-and-forget — no log marks it).
+      await expect
+        .poll(() => importPrimed, {
+          message: `expected initial \`primed contact inbox … for ${ALIAS_T4_BOB}\` log before reload`,
+          timeout: 20_000,
+        })
+        .toBe(true);
+      await expect(
+        aliceApp.locator(`[data-testid="contact-row"][data-alias="${ALIAS_T4_BOB}"]`),
+        `${ALIAS_T4_BOB} contact-row visible in alice's UI before reload`,
+      ).toBeVisible({ timeout: 10_000 });
+      await alicePage.waitForTimeout(2_000);
+
+      // ── Reload alice — rehydrate-prime path re-subscribes to bob's
+      // inbox key. Wait for the log marker so we're certain the
+      // subscription is established before bob's inbox updates.
+      await alicePage.reload();
+      await alicePage
+        .frameLocator("iframe#app")
+        .locator(".brand-name")
+        .first()
+        .waitFor({ timeout: 60_000 });
+      await expect
+        .poll(() => rehydratePrimed, {
+          message:
+            "expected `rehydrate primed contact inbox` console log within 30s of " +
+            "alice reload (otherwise the #204 path isn't actually exercised)",
+          timeout: 30_000,
+        })
+        .toBe(true);
+
+      // ── Drive an UPDATE on bob's inbox: alice opens her inbox and
+      // sends to bob. This puts traffic on the contract key alice is
+      // now subscribed to via rehydrate-prime. Pre-#198 fix: the
+      // resulting UpdateNotification arm panics with `unreachable`.
+      const aliceAppReloaded = alicePage.frameLocator("iframe#app");
+      await aliceAppReloaded
+        .locator(`[data-testid="fm-id-row"][data-alias="${ALIAS_T4_ALICE}"] [data-testid="fm-id-open"]`)
+        .first()
+        .click();
+      await composeAndSend(
+        aliceAppReloaded,
+        ALIAS_T4_BOB,
+        "ping after reload",
+        "this drives an UPDATE on bob's inbox, which alice is now subscribed to",
+      );
+
+      // Sanity: bob still receives end-to-end.
+      await bobApp
+        .locator(`[data-testid="fm-id-row"][data-alias="${ALIAS_T4_BOB}"] [data-testid="fm-id-open"]`)
+        .first()
+        .click();
+      await expect(
+        bobApp.getByText(/ping after reload/i),
+        "bob receives the post-reload message",
+      ).toBeVisible({ timeout: 60_000 });
+
+      // Give the UpdateNotification a moment to reach alice (the
+      // subscription is established, but the broadcast back to alice
+      // is async). 5s is generous on the iso harness.
+      await alicePage.waitForTimeout(5_000);
+
+      expect(
+        aliceErrors,
+        `alice must not panic / log unknown-contract-key on contact's inbox notification (#204):\n${aliceErrors.join("\n")}`,
+      ).toEqual([]);
+    } finally {
       await aliceCtx.close().catch(() => {});
       await bobCtx.close().catch(() => {});
       stopGwPump();
