@@ -149,19 +149,18 @@ cargo make test-inbox
 cargo make clippy
 echo "  ✓ cargo make test, test-inbox, clippy green"
 
-# Real-node E2E (opt-in via FREENET_RELEASE_E2E=1). Heavy: spins up
-# a 2-node iso Freenet network + dx build + headed chromium, runs
-# 5–10min. Off by default so a routine release isn't gated on the
-# iso harness, but recommended before tagging anything user-facing.
-# CI runs the same target on tag push (.github/workflows/e2e-real-node.yml),
-# so the post-push gate stays in place either way.
-if [ "${FREENET_RELEASE_E2E:-0}" = "1" ]; then
+# Real-node E2E (on by default; opt-out via FREENET_RELEASE_E2E=0).
+# Heavy: spins up a 2-node iso Freenet network + dx build + headed
+# chromium, runs 5–10min. On by default so the pre-tag smoke catches
+# regressions before they hit users; CI runs the same target on tag
+# push (.github/workflows/e2e-real-node.yml) as a second gate.
+if [ "${FREENET_RELEASE_E2E:-1}" = "1" ]; then
     echo ""
-    echo "═══ Real-node E2E (FREENET_RELEASE_E2E=1) ════════════════════"
+    echo "═══ Real-node E2E (pre-tag smoke) ═════════════════════════════"
     cargo make test-e2e-real-node
     echo "  ✓ test-e2e-real-node green"
 else
-    echo "  • skipped test-e2e-real-node (set FREENET_RELEASE_E2E=1 to run)"
+    echo "  • skipped test-e2e-real-node (FREENET_RELEASE_E2E=0)"
 fi
 
 # ─── Confirmation ──────────────────────────────────────────────────────────
