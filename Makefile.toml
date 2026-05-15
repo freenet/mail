@@ -424,6 +424,38 @@ fdev --port "$PORT" publish \
     --state "$STATE"
 '''
 
+[tasks.publish-facade]
+description = "Publish (PUT) the facade contract to the live Freenet network — ONE-TIME prod publish only"
+dependencies = ["build-facade", "sign-facade-state"]
+script_runner = "bash"
+script = '''
+set -euo pipefail
+ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
+WASM="$ROOT/published-contract/facade.wasm"
+PARAMS="$ROOT/published-contract/facade.parameters"
+STATE="$ROOT/target/facade/facade.state"
+if [ ! -f "$WASM" ] || [ ! -f "$PARAMS" ]; then
+    echo "error: facade wasm/parameters missing — run \`cargo make update-published-facade\` first" >&2
+    exit 1
+fi
+if [ ! -f "$STATE" ]; then
+    echo "error: $STATE missing — sign-facade-state dependency should have produced it" >&2
+    exit 1
+fi
+# IMPORTANT: this is a one-shot. The facade contract id MUST stay
+# byte-stable forever (it's the bookmarkable URL); re-PUTting it on a
+# network that already has the contract is wasteful but harmless.
+# Per-release pointer flips use `fdev execute update --as-state`
+# inside scripts/release.sh, NOT this task.
+echo "publishing facade contract $(cat "$ROOT/published-contract/facade-id.txt") to the live network"
+echo "  (no --port: targets whichever node owns 7509)"
+fdev publish \
+    --code "$WASM" \
+    --parameters "$PARAMS" \
+    contract \
+    --state "$STATE"
+'''
+
 [tasks.check-facade-byte-equal]
 description = "Verify the freshly built facade wasm matches the committed published-contract/facade.wasm"
 script_runner = "bash"

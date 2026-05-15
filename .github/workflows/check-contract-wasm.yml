@@ -140,3 +140,53 @@ jobs:
           path: contracts/facade/target/wasm32-unknown-unknown/release/freenet_email_facade.wasm
           if-no-files-found: warn
           retention-days: 7
+
+      # Issue #214 F1: facade.parameters IS the production verifying
+      # key (32 bytes ed25519). The committed facade contract id is
+      # `hash(facade.wasm, facade.parameters)`, so swapping the
+      # parameters silently rotates the stable bookmarkable URL —
+      # exactly the failure #200 was designed to prevent. Hard-code
+      # the production pubkey here as a tripwire: a PR that touches
+      # published-contract/facade.parameters MUST update this hex,
+      # which is a visible, reviewable change.
+      #
+      # Production pubkey is the ed25519 verifying key under
+      # ~/.config/freenet-email/web-container-keys.toml. Rotating the
+      # production key requires bumping this constant in the same PR.
+      - name: Verify facade.parameters matches production pubkey
+        run: |
+          EXPECTED="31dd371fedc842994c6e571a0868e5eece1367a7d8cc16c498a57c985526ae46"
+          ACTUAL=$(xxd -p -c 64 published-contract/facade.parameters | tr -d '\n')
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+              echo "::error::facade.parameters does not match the production verifying key."
+              echo "  expected: $EXPECTED"
+              echo "  actual:   $ACTUAL"
+              echo ""
+              echo "This means either:"
+              echo "  (a) the snapshot was signed with the test key by mistake, or"
+              echo "  (b) the production key was rotated — bump EXPECTED in"
+              echo "      .github/workflows/check-contract-wasm.yml in the same PR."
+              exit 1
+          fi
+          echo "✅ facade.parameters matches the committed production pubkey."
+
+      # Same tripwire for webapp.parameters. The web-container id
+      # rotates per release (intentional, see #198), but the signing
+      # key must still be the production key — never the committed
+      # test key from test-contract/web-container-keys.toml.
+      - name: Verify webapp.parameters matches production pubkey
+        run: |
+          EXPECTED="31dd371fedc842994c6e571a0868e5eece1367a7d8cc16c498a57c985526ae46"
+          ACTUAL=$(xxd -p -c 64 published-contract/webapp.parameters | tr -d '\n')
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+              echo "::error::webapp.parameters does not match the production verifying key."
+              echo "  expected: $EXPECTED"
+              echo "  actual:   $ACTUAL"
+              echo ""
+              echo "If this commit was meant to refresh the TEST snapshot"
+              echo "(\`cargo make update-published-contract\`), do not push"
+              echo "the test snapshot to main — only the production snapshot"
+              echo "(\`update-published-contract-prod\`) is committed."
+              exit 1
+          fi
+          echo "✅ webapp.parameters matches the committed production pubkey."

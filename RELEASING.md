@@ -319,13 +319,15 @@ git commit -m "chore(facade): commit production facade snapshot"
 # web-container id. After this, every subsequent release.sh run flips
 # its state via UPDATE.
 cargo make publish-facade-test    # for the local sandbox
-# OR for production:
-fdev publish \
-    --code published-contract/facade.wasm \
-    --parameters published-contract/facade.parameters \
-    contract --state target/facade/facade.state \
-    network
+# OR for production (one-shot, requires WEB_CONTAINER_KEY_FILE or
+# the default ~/.config/freenet-email/web-container-keys.toml):
+cargo make publish-facade
 ```
+
+`publish-facade` mirrors `publish-facade-test` but drops the
+`--port` override so fdev publishes to the live-network node. It is a
+one-time-per-environment operation — every subsequent release flips
+the facade pointer via UPDATE, not PUT.
 
 **Snapshot stability (#206)**: the committed
 `published-contract/facade.{wasm,parameters,id.txt}` snapshot is the
