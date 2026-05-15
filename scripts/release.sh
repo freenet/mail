@@ -187,10 +187,13 @@ cargo make publish-production
 
 # ─── Verify the commit-worthy diff ─────────────────────────────────────────
 
+SNAPSHOT_CHANGED=1
 if [ -z "$(git status --porcelain -- published-contract/)" ]; then
-    die "expected published-contract/ to change but git status shows no diff.
-Something went wrong in the build — the committed snapshot may already
-match the current build output (unusual for a first production publish)."
+    SNAPSHOT_CHANGED=0
+    echo "  ⚠️  published-contract/ unchanged — wasm bytes + parameters identical to last release."
+    echo "      Lockfile-isolated build (#198) kept wasm reproducible. Signature has a"
+    echo "      fresh timestamp and was re-published, but the snapshot files are bit-equal."
+    echo "      Will tag $TAG against current HEAD without an empty release commit."
 fi
 
 CONTRACT_ID=$(cat published-contract/contract-id.txt)
@@ -252,22 +255,25 @@ else
     echo ""
 fi
 
-echo "Diff in published-contract/:"
-git status --short -- published-contract/
-echo ""
+if [ "$SNAPSHOT_CHANGED" = "1" ]; then
+    echo "Diff in published-contract/:"
+    git status --short -- published-contract/
+    echo ""
+    confirm "Commit this snapshot and tag as $TAG?"
 
-confirm "Commit this snapshot and tag as $TAG?"
+    # ─── Commit ────────────────────────────────────────────────────────────────
 
-# ─── Commit ────────────────────────────────────────────────────────────────
-
-git add published-contract/
-git commit -m "chore(release): $TAG — production publish
+    git add published-contract/
+    git commit -m "chore(release): $TAG — production publish
 
 Contract ID: $CONTRACT_ID
 
 Signed with the uncommitted production key at
 ~/.config/freenet-email/web-container-keys.toml.
 "
+else
+    confirm "Tag current HEAD as $TAG (no snapshot commit)?"
+fi
 
 COMMIT=$(git rev-parse HEAD)
 
