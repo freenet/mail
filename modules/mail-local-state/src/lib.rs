@@ -148,10 +148,15 @@ pub struct KeptMessage {
     pub from: String,
     pub title: String,
     pub content: String,
-    /// Unix millis at the time `MarkRead` was issued; the contract message
-    /// timestamp is not currently surfaced through the UI's `Message` type
-    /// so we keep our own.
+    /// Unix millis at the time `MarkRead` was issued.
     pub kept_at: i64,
+    /// Sender's original send time captured at MarkRead, surfaced from
+    /// `DecryptedMessage.time`. The kept-row render path prefers this over
+    /// `kept_at` so a row whose live contract entry has been evicted keeps
+    /// showing the send time rather than mutating to the click time (#229).
+    /// `None` for entries written before this field existed.
+    #[serde(default)]
+    pub sent_at: Option<i64>,
 }
 
 /// Saved permission decision for a specific recipient.
@@ -857,6 +862,7 @@ mod boundary_tests {
                 title: "hi".into(),
                 content: "yo".into(),
                 kept_at: 42,
+                sent_at: None,
             },
         );
         let bytes = serde_json::to_vec(&state).unwrap();

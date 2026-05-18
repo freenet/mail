@@ -602,6 +602,7 @@ mod tests {
             title: title.into(),
             content: "body".into(),
             kept_at: 0,
+            sent_at: None,
         }
     }
 
@@ -816,6 +817,7 @@ mod tests {
                         title: format!("msg-{id}"),
                         content: "body".into(),
                         kept_at: SHARED_KEPT_AT,
+                        sent_at: None,
                     },
                 );
             }

@@ -1441,8 +1441,15 @@ fn MessageList() -> Element {
                 if crate::local_state::is_archived(&alias, mid) {
                     continue;
                 }
-                let time = chrono::DateTime::from_timestamp_millis(kept.kept_at)
-                    .unwrap_or_else(chrono::Utc::now);
+                // Prefer sender's send time over click time so a kept row
+                // doesn't mutate to the click time after eviction (#229).
+                // Legacy entries (pre-#229) lack sent_at and fall back to
+                // kept_at — wrong but indistinguishable from the old
+                // behaviour, and self-heals next time the row is read.
+                let time = chrono::DateTime::from_timestamp_millis(
+                    kept.sent_at.unwrap_or(kept.kept_at),
+                )
+                .unwrap_or_else(chrono::Utc::now);
                 emails.push(Message {
                     id: mid,
                     from: kept.from.into(),
@@ -2121,6 +2128,7 @@ fn OpenMessage(msg: Message) -> Element {
                 title: msg.title.to_string(),
                 content: msg.content.to_string(),
                 kept_at: chrono::Utc::now().timestamp_millis(),
+                sent_at: Some(msg.time.timestamp_millis()),
             };
             crate::local_state::local_mark_read(&alias, msg.id, kept.clone());
             #[cfg(feature = "use-node")]
