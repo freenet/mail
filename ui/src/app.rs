@@ -426,10 +426,7 @@ impl InboxView {
                     )
                     .await
                     {
-                        crate::log::error(
-                            format!("set_sent_delivery_state(Failed) failed: {e}"),
-                            None,
-                        );
+                        crate::log::local_state_failure("update delivery state", e);
                     }
                 }
             };
@@ -2146,7 +2143,7 @@ fn OpenMessage(msg: Message) -> Element {
                     )
                     .await
                     {
-                        crate::log::error(format!("mark_read failed: {e}"), None);
+                        crate::log::local_state_failure("mark message read", e);
                     }
                 });
             }
@@ -2298,10 +2295,7 @@ fn OpenMessage(msg: Message) -> Element {
                                     )
                                     .await
                                     {
-                                        crate::log::error(
-                                            format!("archive_message failed: {e}"),
-                                            None,
-                                        );
+                                        crate::log::local_state_failure("archive message", e);
                                     }
                                 });
                             }
@@ -2470,7 +2464,7 @@ fn ComposeSheet() -> Element {
                 if let Err(e) =
                     crate::local_state::save_draft(&mut client_clone, alias, id, draft).await
                 {
-                    crate::log::error(format!("save_draft failed: {e}"), None);
+                    crate::log::local_state_failure("save draft", e);
                 }
             });
         }
@@ -2513,7 +2507,7 @@ fn ComposeSheet() -> Element {
             spawn(async move {
                 if let Err(e) = crate::local_state::delete_draft(&mut client_clone, alias, id).await
                 {
-                    crate::log::error(format!("delete_draft failed: {e}"), None);
+                    crate::log::local_state_failure("delete draft", e);
                 }
             });
         }
@@ -2737,7 +2731,7 @@ fn ComposeSheet() -> Element {
                     )
                     .await
                     {
-                        crate::log::error(format!("save_sent failed: {e}"), None);
+                        crate::log::local_state_failure("save sent message", e);
                     }
                 });
             }

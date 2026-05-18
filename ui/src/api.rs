@@ -1898,10 +1898,7 @@ pub(crate) async fn node_comms(
                         )
                         .await
                         {
-                            crate::log::error(
-                                format!("set_sent_delivery_state(Delivered) failed: {e}"),
-                                None,
-                            );
+                            crate::log::local_state_failure("update delivery state", e);
                         }
                     });
                 }
