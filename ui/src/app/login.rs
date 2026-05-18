@@ -1915,20 +1915,19 @@ pub(super) fn ImportContactForm() -> Element {
         }
     };
 
-    // If the pasted blob includes the `verify: <six-words>` prefix the
-    // sharing flow emits (see share_text format at login.rs:1038), require
-    // the user to tick the verify checkbox before allowing Import. Falling
-    // through to a permanently-unverified contact silently breaks the
-    // verified-only acceptance flow (#228, settings.rs:1434).
+    // Surface (but don't block on) the verify checkbox when the pasted blob
+    // includes the `verify: <six-words>` prefix the sharing flow emits (see
+    // share_text format at login.rs:1038). Permanently-unverified contacts
+    // silently break the verified-only acceptance flow (settings.rs:1434),
+    // so the import modal calls it out; recovery still happens via the
+    // clickable badge in ContactsSection (#228).
     let has_verify_phrase = paste_text
         .read()
         .lines()
         .next()
         .map(|l| l.trim_start().starts_with("verify: "))
         .unwrap_or(false);
-    let can_import = fingerprint_words.read().is_some()
-        && !local_alias.read().is_empty()
-        && (!has_verify_phrase || *verified.read());
+    let can_import = fingerprint_words.read().is_some() && !local_alias.read().is_empty();
 
     let cancel = move |_| {
         import_contact_form.write().0 = false;
@@ -2025,7 +2024,7 @@ pub(super) fn ImportContactForm() -> Element {
                                 if has_verify_phrase && !*verified.read() {
                                     span { class: "verify-sub",
                                         style: "color:#991b1b;",
-                                        "Required: this contact card includes a verify phrase. Tick once you've matched the six words out-of-band."
+                                        "The sender included a verify phrase. Importing unverified is allowed, but verified-only inboxes will reject your messages until you tick this once you've matched the six words out-of-band."
                                     }
                                 }
                             }

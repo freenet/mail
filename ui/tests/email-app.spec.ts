@@ -815,10 +815,22 @@ test.describe("Import contact verify-check (#52)", () => {
       row.locator('[data-testid="contact-verify-badge"]'),
     ).toContainText("⚠");
 
-    // Row exposes a Verify button only while the badge is amber.
-    await row.locator('[data-testid="fm-contact-verify"]').click();
-
+    // The ⚠ badge itself is the primary CTA — clicking it opens the
+    // verify modal (#228). The adjacent Verify button still works as a
+    // fallback (covered below).
+    await row.locator('[data-testid="contact-verify-badge"]').click();
     const verifyModal = page.locator('[data-testid="fm-verify-contact-modal"]');
+    await expect(verifyModal).toBeVisible({ timeout: 5_000 });
+    // Close it so the rest of the test exercises the explicit Verify button.
+    await page.keyboard.press("Escape").catch(() => {});
+    await verifyModal
+      .locator(".modal-x")
+      .click()
+      .catch(() => {});
+    await expect(verifyModal).toBeHidden({ timeout: 5_000 });
+
+    // Row also exposes an explicit Verify button while the badge is amber.
+    await row.locator('[data-testid="fm-contact-verify"]').click();
     await expect(verifyModal).toBeVisible({ timeout: 5_000 });
 
     // Submit is disabled until the same six-word checkbox is ticked.
