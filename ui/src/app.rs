@@ -2704,10 +2704,14 @@ fn ComposeSheet() -> Element {
                     }
                 });
             }
+
+            // Only on success: drop the draft, navigate away, surface success
+            // toast. On failure the Err arm above already pushed an error toast
+            // and the draft must stay so the user can retry. (#230)
+            delete_draft_now(());
+            menu_selection.write().at_new_msg();
+            crate::toast::push_toast("Sent", crate::toast::ToastLevel::Success);
         }
-        delete_draft_now(());
-        menu_selection.write().at_new_msg();
-        crate::toast::push_toast("Sent", crate::toast::ToastLevel::Success);
     };
 
     rsx! {
