@@ -603,6 +603,8 @@ mod tests {
             content: "body".into(),
             kept_at: 0,
             sent_at: None,
+            sender_vk: Vec::new(),
+            signature_valid: false,
         }
     }
 
@@ -818,6 +820,8 @@ mod tests {
                         content: "body".into(),
                         kept_at: SHARED_KEPT_AT,
                         sent_at: None,
+                        sender_vk: Vec::new(),
+                        signature_valid: false,
                     },
                 );
             }

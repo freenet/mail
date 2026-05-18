@@ -863,6 +863,30 @@ fn kept_render_time(kept: &mail_local_state::KeptMessage) -> chrono::DateTime<ch
         .unwrap_or_else(chrono::Utc::now)
 }
 
+/// Reconstruct a `Message` from a kept-locally snapshot when the live
+/// contract row has been evicted. Propagates verification metadata
+/// (`sender_vk`, `signature_valid`) captured at MarkRead so verified
+/// senders keep their ✓ badge after eviction (#240). Legacy pre-#240
+/// snapshots default both to empty/false and demote to `Unverified` at
+/// render time — self-heals on the next MarkRead.
+fn kept_to_message(
+    mid: mail_local_state::MessageId,
+    kept: mail_local_state::KeptMessage,
+) -> Message {
+    let time = kept_render_time(&kept);
+    Message {
+        id: mid,
+        from: kept.from.into(),
+        title: kept.title.into(),
+        content: kept.content.into(),
+        read: true,
+        time,
+        sender_vk: kept.sender_vk,
+        signature_valid: kept.signature_valid,
+        assignment_hash: [0u8; 32],
+    }
+}
+
 impl From<MessageModel> for Message {
     fn from(value: MessageModel) -> Self {
         Message {
@@ -1466,18 +1490,7 @@ fn MessageList() -> Element {
                 if crate::local_state::is_archived(&alias, mid) {
                     continue;
                 }
-                let time = kept_render_time(&kept);
-                emails.push(Message {
-                    id: mid,
-                    from: kept.from.into(),
-                    title: kept.title.into(),
-                    content: kept.content.into(),
-                    read: true,
-                    time,
-                    sender_vk: Vec::new(),
-                    signature_valid: false,
-                    assignment_hash: [0u8; 32],
-                });
+                emails.push(kept_to_message(mid, kept));
             }
             crate::log::debug!("active id: {:?}; emails number: {}", id.alias, emails.len());
         }
@@ -2147,6 +2160,8 @@ fn OpenMessage(msg: Message) -> Element {
                 content: msg.content.to_string(),
                 kept_at: chrono::Utc::now().timestamp_millis(),
                 sent_at: Some(msg.time.timestamp_millis()),
+                sender_vk: msg.sender_vk.clone(),
+                signature_valid: msg.signature_valid,
             };
             crate::local_state::local_mark_read(&alias, msg.id, kept.clone());
             #[cfg(feature = "use-node")]
@@ -3122,6 +3137,7 @@ mod kept_render_time_tests {
             content: "yo".into(),
             kept_at: 10_000,      // "click time"
             sent_at: Some(1_000), // "send time"
+            ..Default::default()
         };
         let t = kept_render_time(&kept);
         assert_eq!(t.timestamp_millis(), 1_000, "must use sender's send time");
@@ -3137,6 +3153,7 @@ mod kept_render_time_tests {
             content: "yo".into(),
             kept_at: 5_000,
             sent_at: None,
+            ..Default::default()
         };
         let t = kept_render_time(&kept);
         assert_eq!(t.timestamp_millis(), 5_000);
@@ -3154,8 +3171,59 @@ mod kept_render_time_tests {
             content: "x".into(),
             kept_at: i64::MAX,
             sent_at: Some(i64::MAX),
+            ..Default::default()
         };
         let _ = kept_render_time(&kept);
+    }
+}
+
+#[cfg(test)]
+mod kept_to_message_tests {
+    use super::kept_to_message;
+    use crate::inbox::VerificationState;
+    use mail_local_state::KeptMessage;
+
+    /// Regression for #240: a verified-sender row that gets evicted
+    /// from the live contract must keep its `sender_vk` +
+    /// `signature_valid` so the badge stays ✓ instead of demoting to ⚠.
+    #[test]
+    fn propagates_verification_metadata() {
+        let kept = KeptMessage {
+            from: "bob".into(),
+            title: "hi".into(),
+            content: "yo".into(),
+            kept_at: 100,
+            sent_at: Some(50),
+            sender_vk: vec![9, 8, 7, 6, 5],
+            signature_valid: true,
+        };
+        let msg = kept_to_message(42, kept);
+        assert_eq!(&*msg.sender_vk, &[9, 8, 7, 6, 5]);
+        assert!(msg.signature_valid);
+        assert!(msg.read);
+    }
+
+    /// Legacy pre-#240 entries lack the verification fields entirely;
+    /// the helper must default `signature_valid` to false so the row
+    /// renders as `Unverified` (matches pre-#240 behaviour). It self-
+    /// heals on next MarkRead.
+    #[test]
+    fn legacy_entries_demote_to_unverified() {
+        let kept = KeptMessage {
+            from: "bob".into(),
+            title: "hi".into(),
+            content: "yo".into(),
+            kept_at: 100,
+            sent_at: Some(50),
+            ..Default::default()
+        };
+        let msg = kept_to_message(42, kept);
+        assert!(msg.sender_vk.is_empty());
+        assert!(!msg.signature_valid);
+        assert!(matches!(
+            msg.verification_state(),
+            VerificationState::Unverified
+        ));
     }
 }
 

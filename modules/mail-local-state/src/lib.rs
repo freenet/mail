@@ -157,6 +157,18 @@ pub struct KeptMessage {
     /// `None` for entries written before this field existed.
     #[serde(default)]
     pub sent_at: Option<i64>,
+    /// Sender's ML-DSA-65 verifying key bytes (FIPS 204 encoded), copied
+    /// from the live `Message.sender_vk` at MarkRead. Empty for legacy
+    /// pre-#240 entries — those still demote to `Unverified` on read
+    /// until the next MarkRead re-stamps the row.
+    #[serde(default)]
+    pub sender_vk: Vec<u8>,
+    /// Crypto verification result captured at MarkRead. Combined with the
+    /// address-book lookup at render time so a verified-known sender
+    /// keeps their ✓ badge after the live contract row is evicted (#240).
+    /// `false` for legacy pre-#240 entries.
+    #[serde(default)]
+    pub signature_valid: bool,
 }
 
 /// Saved permission decision for a specific recipient.
@@ -863,6 +875,8 @@ mod boundary_tests {
                 content: "yo".into(),
                 kept_at: 42,
                 sent_at: None,
+                sender_vk: Vec::new(),
+                signature_valid: false,
             },
         );
         let bytes = serde_json::to_vec(&state).unwrap();
@@ -894,11 +908,47 @@ mod boundary_tests {
             content: "yo".into(),
             kept_at: 100,
             sent_at: Some(50),
+            sender_vk: Vec::new(),
+            signature_valid: false,
         };
         let bytes = serde_json::to_vec(&k).unwrap();
         let back: KeptMessage = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(back.sent_at, Some(50));
         assert_eq!(back.kept_at, 100);
+    }
+
+    /// Regression for #240: pre-#240 `KeptMessage` payloads (no
+    /// `sender_vk` / `signature_valid` fields) must still deserialise
+    /// with the new fields defaulted. Legacy entries demote to
+    /// `Unverified` at render time — wrong, but matches the pre-#240
+    /// behaviour and self-heals on next MarkRead.
+    #[test]
+    fn kept_message_missing_verification_fields_defaults_empty() {
+        let json = br#"{"from":"bob","title":"hi","content":"yo","kept_at":42,"sent_at":7}"#;
+        let k: KeptMessage = serde_json::from_slice(json).expect("should deserialise");
+        assert!(k.sender_vk.is_empty());
+        assert!(!k.signature_valid);
+        assert_eq!(k.sent_at, Some(7));
+    }
+
+    /// New writes carry verification metadata; both fields must
+    /// round-trip across the delegate stash so a verified-sender row
+    /// keeps its ✓ badge after the live contract row is evicted (#240).
+    #[test]
+    fn kept_message_with_verification_round_trips() {
+        let k = KeptMessage {
+            from: "bob".into(),
+            title: "hi".into(),
+            content: "yo".into(),
+            kept_at: 100,
+            sent_at: Some(50),
+            sender_vk: vec![1, 2, 3, 4, 5],
+            signature_valid: true,
+        };
+        let bytes = serde_json::to_vec(&k).unwrap();
+        let back: KeptMessage = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(back.sender_vk, vec![1, 2, 3, 4, 5]);
+        assert!(back.signature_valid);
     }
 
     #[test]
