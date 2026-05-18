@@ -71,6 +71,24 @@ pub(crate) fn local_state_failure(op: &str, err: impl std::fmt::Display) {
     );
 }
 
+pub(crate) fn error(msg: impl AsRef<str>, action: Option<TryNodeAction>) {
+    let error = msg.as_ref();
+    if let Some(action) = action {
+        tracing::error!(%error, %action);
+        #[cfg(target_family = "wasm")]
+        {
+            let error = format!("error while `{action}`: {error}");
+            web_sys::console::error_1(&serde_wasm_bindgen::to_value(&error).unwrap());
+        }
+    } else {
+        tracing::error!(%error);
+        #[cfg(target_family = "wasm")]
+        {
+            web_sys::console::error_1(&serde_wasm_bindgen::to_value(&error).unwrap());
+        }
+    }
+}
+
 #[cfg(test)]
 mod local_state_failure_tests {
     use super::{local_state_failure_log_msg, local_state_failure_toast_msg};
@@ -124,23 +142,5 @@ mod local_state_failure_tests {
             ops.len(),
             "each op must produce a distinct toast"
         );
-    }
-}
-
-pub(crate) fn error(msg: impl AsRef<str>, action: Option<TryNodeAction>) {
-    let error = msg.as_ref();
-    if let Some(action) = action {
-        tracing::error!(%error, %action);
-        #[cfg(target_family = "wasm")]
-        {
-            let error = format!("error while `{action}`: {error}");
-            web_sys::console::error_1(&serde_wasm_bindgen::to_value(&error).unwrap());
-        }
-    } else {
-        tracing::error!(%error);
-        #[cfg(target_family = "wasm")]
-        {
-            web_sys::console::error_1(&serde_wasm_bindgen::to_value(&error).unwrap());
-        }
     }
 }
