@@ -812,6 +812,33 @@ fn sort_cmp_archive(
 
 // ────────────────────────────────────────────────────────────────────────────
 
+/// Post-send UI follow-up: what the compose handler must do after
+/// `inbox.send_message` returns. Captured as a tiny value type so the
+/// branching can be unit-tested without spinning up Dioxus runtime
+/// (#230).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ComposePostSend {
+    /// True only on success: delete the draft from the local stash AND
+    /// dispatch the delegate `DeleteDraft` write.
+    pub clear_draft: bool,
+    /// True only on success: close the compose sheet and return to the
+    /// inbox view.
+    pub navigate_away: bool,
+    /// True only on success: push the green "Sent" toast. The `Err` arm
+    /// of `send_message` pushes its own contextual error toast.
+    pub push_success_toast: bool,
+}
+
+/// All-or-nothing decision driven by `send_succeeded`. Encodes the
+/// invariant that compose-form-finalization is gated on send success.
+pub(crate) fn compose_post_send(send_succeeded: bool) -> ComposePostSend {
+    ComposePostSend {
+        clear_draft: send_succeeded,
+        navigate_away: send_succeeded,
+        push_success_toast: send_succeeded,
+    }
+}
+
 impl From<MessageModel> for Message {
     fn from(value: MessageModel) -> Self {
         Message {
@@ -2704,12 +2731,20 @@ fn ComposeSheet() -> Element {
                     }
                 });
             }
-
-            // Only on success: drop the draft, navigate away, surface success
-            // toast. On failure the Err arm above already pushed an error toast
-            // and the draft must stay so the user can retry. (#230)
+        }
+        // On success only: drop the draft, navigate away, surface success
+        // toast. On failure the Err arm above already pushed an error toast
+        // and the draft must stay so the user can retry. The branching
+        // lives in `compose_post_send` so the gating is unit-testable
+        // (#230).
+        let post = compose_post_send(send_succeeded);
+        if post.clear_draft {
             delete_draft_now(());
+        }
+        if post.navigate_away {
             menu_selection.write().at_new_msg();
+        }
+        if post.push_success_toast {
             crate::toast::push_toast("Sent", crate::toast::ToastLevel::Success);
         }
     };
@@ -2962,6 +2997,36 @@ fn ComposeSheet() -> Element {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod compose_post_send_tests {
+    use super::compose_post_send;
+
+    /// Regression for #230. Before the fix, `delete_draft_now`, navigation,
+    /// and the green "Sent" toast all ran unconditionally after the
+    /// `send_message` match arm, even when send failed. The bug deleted
+    /// the user's draft and covered the error toast with a success one.
+    /// All three flags must be `false` when `send_succeeded == false`.
+    #[test]
+    fn failure_does_nothing() {
+        let p = compose_post_send(false);
+        assert!(!p.clear_draft, "must keep the draft on failure");
+        assert!(!p.navigate_away, "must stay on compose on failure");
+        assert!(
+            !p.push_success_toast,
+            "must not push success toast on failure (Err arm already pushed error)"
+        );
+    }
+
+    /// Sanity: on success all three follow-ups fire.
+    #[test]
+    fn success_runs_all_follow_ups() {
+        let p = compose_post_send(true);
+        assert!(p.clear_draft);
+        assert!(p.navigate_away);
+        assert!(p.push_success_toast);
     }
 }
 
