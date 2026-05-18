@@ -3309,6 +3309,64 @@ mod inbox_sort_tests {
         assert_eq!(a_hashes, vec![0xCC, 0xBB, 0xAA]);
     }
 
+    /// Regression check for #234: a row that transitions from live →
+    /// kept_for (eviction on MarkRead) keeps the same position in the
+    /// rendered inbox list, because the time-primary key is preserved
+    /// (#229) and the assignment_hash tie-break only matters at
+    /// identical timestamps. Three messages with distinct send times;
+    /// the middle one evicts. The render order must be unchanged.
+    #[test]
+    fn eviction_preserves_position_for_distinct_timestamps() {
+        let live_a = make_msg(100, 3_000, 0xAA);
+        let mut live_b = make_msg(200, 2_000, 0xBB);
+        let live_c = make_msg(300, 1_000, 0xCC);
+
+        let mut before = [live_a.clone(), live_b.clone(), live_c.clone()];
+        before.sort_by(sort_cmp_inbox);
+        let positions_before: Vec<u64> = before.iter().map(|m| m.id).collect();
+
+        // Simulate eviction of B: kept_to_message zeroes assignment_hash
+        // but `sent_at` (via kept_render_time) preserves the original
+        // time, so primary-key ordering is intact.
+        live_b.assignment_hash = [0u8; 32];
+
+        let mut after = [live_a, live_b, live_c];
+        after.sort_by(sort_cmp_inbox);
+        let positions_after: Vec<u64> = after.iter().map(|m| m.id).collect();
+
+        assert_eq!(
+            positions_before, positions_after,
+            "eviction must not reorder rows with distinct timestamps"
+        );
+    }
+
+    /// Same idea but stresses the tie-break case: two rows with
+    /// identical timestamps where the second one evicts. With the
+    /// kept row's hash zeroed, the live row sorts ahead of it (hash
+    /// 0xAA > 0x00) — still deterministic, just predictably "live
+    /// before kept" when times collide. Asserts the order is stable
+    /// across renders, not which row wins (that's an implementation
+    /// detail of the hash zero).
+    #[test]
+    fn eviction_with_tied_timestamps_is_deterministic() {
+        let ts = 5_000;
+        let live = make_msg(100, ts, 0xAA);
+        let mut evicted = make_msg(200, ts, 0xBB);
+        evicted.assignment_hash = [0u8; 32];
+
+        let mut v1 = [live.clone(), evicted.clone()];
+        v1.sort_by(sort_cmp_inbox);
+        let mut v2 = [evicted.clone(), live.clone()];
+        v2.sort_by(sort_cmp_inbox);
+
+        let ids1: Vec<u64> = v1.iter().map(|m| m.id).collect();
+        let ids2: Vec<u64> = v2.iter().map(|m| m.id).collect();
+        assert_eq!(
+            ids1, ids2,
+            "tied-timestamp order must be insertion-invariant"
+        );
+    }
+
     /// Calling sort twice on the same vec must produce the same order —
     /// i.e. the sort is stable and deterministic across re-renders.
     #[test]
