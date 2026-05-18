@@ -872,6 +872,35 @@ mod boundary_tests {
         assert_eq!(back.aliases["alice"].kept["7"].content.as_str(), "yo");
     }
 
+    /// Pre-#229 `KeptMessage` payloads (no `sent_at` field) must keep loading
+    /// with `sent_at = None`. The UI render path falls back to `kept_at` in
+    /// that case — wrong but indistinguishable from the old behaviour.
+    #[test]
+    fn kept_message_missing_sent_at_defaults_none() {
+        let json = br#"{"from":"bob","title":"hi","content":"yo","kept_at":42}"#;
+        let k: KeptMessage = serde_json::from_slice(json).expect("should deserialise");
+        assert_eq!(k.sent_at, None);
+        assert_eq!(k.kept_at, 42);
+    }
+
+    /// New writes carry the sender's send time; it must round-trip across
+    /// the delegate stash so the kept-path render keeps showing the actual
+    /// send time after reload (#229).
+    #[test]
+    fn kept_message_with_sent_at_round_trips() {
+        let k = KeptMessage {
+            from: "bob".into(),
+            title: "hi".into(),
+            content: "yo".into(),
+            kept_at: 100,
+            sent_at: Some(50),
+        };
+        let bytes = serde_json::to_vec(&k).unwrap();
+        let back: KeptMessage = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(back.sent_at, Some(50));
+        assert_eq!(back.kept_at, 100);
+    }
+
     #[test]
     fn alias_state_missing_kept_defaults_empty() {
         let json = br#"{"drafts":{},"read":[1]}"#;

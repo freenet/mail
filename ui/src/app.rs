@@ -839,6 +839,16 @@ pub(crate) fn compose_post_send(send_succeeded: bool) -> ComposePostSend {
     }
 }
 
+/// Time column shown for a kept-locally row whose live contract entry has
+/// been evicted. Prefer the sender's send time (`sent_at`) over the
+/// MarkRead click time (`kept_at`). Legacy entries (pre-#229) lack
+/// `sent_at`; they fall back to `kept_at` — wrong but matches the
+/// pre-#229 behaviour and self-heals the next time the row is read.
+fn kept_render_time(kept: &mail_local_state::KeptMessage) -> chrono::DateTime<chrono::Utc> {
+    chrono::DateTime::from_timestamp_millis(kept.sent_at.unwrap_or(kept.kept_at))
+        .unwrap_or_else(chrono::Utc::now)
+}
+
 impl From<MessageModel> for Message {
     fn from(value: MessageModel) -> Self {
         Message {
@@ -1441,14 +1451,7 @@ fn MessageList() -> Element {
                 if crate::local_state::is_archived(&alias, mid) {
                     continue;
                 }
-                // Prefer sender's send time over click time so a kept row
-                // doesn't mutate to the click time after eviction (#229).
-                // Legacy entries (pre-#229) lack sent_at and fall back to
-                // kept_at — wrong but indistinguishable from the old
-                // behaviour, and self-heals next time the row is read.
-                let time =
-                    chrono::DateTime::from_timestamp_millis(kept.sent_at.unwrap_or(kept.kept_at))
-                        .unwrap_or_else(chrono::Utc::now);
+                let time = kept_render_time(&kept);
                 emails.push(Message {
                     id: mid,
                     from: kept.from.into(),
@@ -3087,6 +3090,59 @@ mod time_format_tests {
         let s = format_time_full(old);
         assert!(s.contains('·'), "got {s:?}");
         assert!(s.contains(':'), "got {s:?}");
+    }
+}
+
+#[cfg(test)]
+mod kept_render_time_tests {
+    use super::kept_render_time;
+    use mail_local_state::KeptMessage;
+
+    /// Regression for #229: the live row had time = sender's send time
+    /// (9:39). After eviction the kept-path row used to render with
+    /// click time (10:20). With the fix the row keeps the send time.
+    #[test]
+    fn prefers_sent_at_over_kept_at_when_present() {
+        let kept = KeptMessage {
+            from: "bob".into(),
+            title: "hi".into(),
+            content: "yo".into(),
+            kept_at: 10_000,      // "click time"
+            sent_at: Some(1_000), // "send time"
+        };
+        let t = kept_render_time(&kept);
+        assert_eq!(t.timestamp_millis(), 1_000, "must use sender's send time");
+    }
+
+    /// Legacy entries (pre-#229 stored snapshots) lack `sent_at` and
+    /// must still render with `kept_at` as a graceful fallback.
+    #[test]
+    fn falls_back_to_kept_at_for_legacy_entries() {
+        let kept = KeptMessage {
+            from: "bob".into(),
+            title: "hi".into(),
+            content: "yo".into(),
+            kept_at: 5_000,
+            sent_at: None,
+        };
+        let t = kept_render_time(&kept);
+        assert_eq!(t.timestamp_millis(), 5_000);
+    }
+
+    /// Out-of-range millis (e.g. corrupt or future-dated entries) must
+    /// not panic; helper falls back to `Utc::now()`. We just assert the
+    /// call returns without panicking — the actual value depends on
+    /// wall-clock.
+    #[test]
+    fn out_of_range_falls_back_to_now() {
+        let kept = KeptMessage {
+            from: "x".into(),
+            title: "x".into(),
+            content: "x".into(),
+            kept_at: i64::MAX,
+            sent_at: Some(i64::MAX),
+        };
+        let _ = kept_render_time(&kept);
     }
 }
 
