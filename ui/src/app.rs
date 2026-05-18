@@ -452,6 +452,7 @@ impl InboxView {
                     time: content.time,
                     sender_vk: Vec::new(),
                     signature_valid: false,
+                    assignment_hash: [0u8; 32],
                 };
                 MOCK_SENT_MESSAGES.with(|map| {
                     map.borrow_mut()
@@ -545,6 +546,7 @@ impl InboxView {
                     time: t(15),
                     sender_vk: Vec::new(),
                     signature_valid: false,
+                    assignment_hash: [0u8; 32],
                 },
                 Message {
                     id: 1,
@@ -555,6 +557,7 @@ impl InboxView {
                     time: t(60 * 26),
                     sender_vk: Vec::new(),
                     signature_valid: false,
+                    assignment_hash: [0u8; 32],
                 },
                 Message {
                     id: 2,
@@ -565,6 +568,7 @@ impl InboxView {
                     time: t(60 * 24 * 4),
                     sender_vk: Vec::new(),
                     signature_valid: false,
+                    assignment_hash: [0u8; 32],
                 },
             ]
         } else {
@@ -578,6 +582,7 @@ impl InboxView {
                     time: t(35),
                     sender_vk: Vec::new(),
                     signature_valid: false,
+                    assignment_hash: [0u8; 32],
                 },
                 Message {
                     id: 1,
@@ -588,6 +593,7 @@ impl InboxView {
                     time: t(60 * 50),
                     sender_vk: Vec::new(),
                     signature_valid: false,
+                    assignment_hash: [0u8; 32],
                 },
             ]
         };
@@ -736,6 +742,13 @@ struct Message {
     /// Pure-crypto signature check result. Combined with the address-
     /// book lookup at render time to produce a `VerificationState`.
     signature_valid: bool,
+    /// Deterministic per-message hash derived from content + token + sender
+    /// (`TokenAssignment.assignment_hash`). Used as the inbox-sort secondary
+    /// key so two nodes that hold the same set of messages render them in
+    /// the same order regardless of contract-vec position (#233). Zero for
+    /// kept-locally rows reconstructed from `KeptMessage` since the
+    /// assignment hash isn't persisted there yet.
+    assignment_hash: [u8; 32],
 }
 
 impl Message {
@@ -764,18 +777,22 @@ impl Message {
 // re-render (issue #137).  Use these at every sort site AND in unit tests so
 // the two cannot drift apart.
 
-/// Inbox: newest `Message` first; tie-break by `id` descending for stability.
+/// Inbox: newest `Message` first; tie-break by `assignment_hash` descending.
 ///
-/// **Important:** `Message.id` is the *enumerate index* from
-/// `InboxModel::from_state` (i.e. the position of the row in the contract's
-/// `StoredInbox.messages` vec at the time the model was built).  It is NOT a
-/// monotonic arrival id — a higher value does NOT mean the message arrived
-/// later.  The tie-break is purely for render-stability: it guarantees a
-/// consistent ordering across re-renders when two messages share the same
-/// sender-stamped timestamp, preventing the HashMap iteration-order flicker
-/// described in issue #137.
+/// **Why `assignment_hash` and not `id`:** `Message.id` is the *enumerate
+/// index* from `InboxModel::from_state` (the position of the row in the
+/// contract's `StoredInbox.messages` vec at build time). Vec order is
+/// non-deterministic across nodes — `Inbox::merge` appends in
+/// `other.messages` iteration order, so the same set of messages received
+/// via different paths can sit in different vec positions, giving two
+/// clients different `id`s for the same message (#233).
+/// `TokenAssignment.assignment_hash` is content-derived (token + content +
+/// sender) and stable across nodes by construction, so any two clients
+/// holding the same set render the same order.
 fn sort_cmp_inbox(a: &Message, b: &Message) -> std::cmp::Ordering {
-    b.time.cmp(&a.time).then(b.id.cmp(&a.id))
+    b.time
+        .cmp(&a.time)
+        .then(b.assignment_hash.cmp(&a.assignment_hash))
 }
 
 /// Drafts: newest first by `updated_at`; tie-break by UUID string descending
@@ -857,6 +874,7 @@ impl From<MessageModel> for Message {
             time: value.content.time,
             sender_vk: value.sender_vk,
             signature_valid: value.signature_valid,
+            assignment_hash: value.token_assignment.assignment_hash,
         }
     }
 }
@@ -1458,6 +1476,7 @@ fn MessageList() -> Element {
                     time,
                     sender_vk: Vec::new(),
                     signature_valid: false,
+                    assignment_hash: [0u8; 32],
                 });
             }
             crate::log::debug!("active id: {:?}; emails number: {}", id.alias, emails.len());
@@ -3146,7 +3165,9 @@ mod inbox_sort_tests {
     use chrono::{TimeZone, Utc};
     use std::borrow::Cow;
 
-    fn make_msg(id: u64, timestamp_secs: i64) -> Message {
+    fn make_msg(id: u64, timestamp_secs: i64, hash_byte: u8) -> Message {
+        let mut assignment_hash = [0u8; 32];
+        assignment_hash[0] = hash_byte;
         Message {
             id,
             from: Cow::Borrowed("test@test"),
@@ -3156,30 +3177,68 @@ mod inbox_sort_tests {
             time: Utc.timestamp_opt(timestamp_secs, 0).unwrap(),
             sender_vk: Vec::new(),
             signature_valid: false,
+            assignment_hash,
         }
     }
 
     /// Messages with distinct timestamps should be sorted newest-first.
     #[test]
     fn sort_by_time_desc() {
-        let mut v = [make_msg(1, 1_000), make_msg(2, 3_000), make_msg(3, 2_000)];
+        let mut v = [
+            make_msg(1, 1_000, 1),
+            make_msg(2, 3_000, 2),
+            make_msg(3, 2_000, 3),
+        ];
         v.sort_by(sort_cmp_inbox);
         let ids: Vec<u64> = v.iter().map(|m| m.id).collect();
         assert_eq!(ids, vec![2, 3, 1]);
     }
 
-    /// When timestamps tie, higher id should come first for render-stability
-    /// (issue #137).  Note: `id` is the enumerate index from `from_state`,
-    /// not a monotonic arrival counter — this tie-break is for stability
-    /// only, not chronological ordering.
+    /// When timestamps tie, higher `assignment_hash` comes first. This is the
+    /// content-derived per-message hash (`TokenAssignment.assignment_hash`),
+    /// stable across nodes by construction — see #233 for why the previous
+    /// id-based tie-break was non-deterministic across peers.
     #[test]
-    fn tie_break_by_id_desc() {
+    fn tie_break_by_assignment_hash_desc() {
         let ts = 5_000;
-        let mut v = [make_msg(10, ts), make_msg(30, ts), make_msg(20, ts)];
+        // Vary `id` (enumerate index — non-deterministic across nodes) AND
+        // `assignment_hash` independently to assert that the comparator only
+        // looks at the hash.
+        let mut v = [
+            make_msg(10, ts, 0x11),
+            make_msg(30, ts, 0x33),
+            make_msg(20, ts, 0x22),
+        ];
         v.sort_by(sort_cmp_inbox);
         let ids: Vec<u64> = v.iter().map(|m| m.id).collect();
-        // Regardless of input order, higher id must come first.
+        // Highest hash (0x33 → id 30) first, descending.
         assert_eq!(ids, vec![30, 20, 10]);
+    }
+
+    /// Two clients holding the same set of messages in different vec
+    /// positions (= different `id`s) must produce the same order after sort.
+    /// This is the cross-node consistency guarantee #233 is about.
+    #[test]
+    fn cross_node_order_matches_when_hashes_match() {
+        let ts = 5_000;
+        // Node A holds the messages in one order; node B in another. Same
+        // logical messages (same assignment_hash), different positions.
+        let mut node_a = [
+            make_msg(0, ts, 0xAA),
+            make_msg(1, ts, 0xBB),
+            make_msg(2, ts, 0xCC),
+        ];
+        let mut node_b = [
+            make_msg(0, ts, 0xCC),
+            make_msg(1, ts, 0xAA),
+            make_msg(2, ts, 0xBB),
+        ];
+        node_a.sort_by(sort_cmp_inbox);
+        node_b.sort_by(sort_cmp_inbox);
+        let a_hashes: Vec<u8> = node_a.iter().map(|m| m.assignment_hash[0]).collect();
+        let b_hashes: Vec<u8> = node_b.iter().map(|m| m.assignment_hash[0]).collect();
+        assert_eq!(a_hashes, b_hashes);
+        assert_eq!(a_hashes, vec![0xCC, 0xBB, 0xAA]);
     }
 
     /// Calling sort twice on the same vec must produce the same order —
@@ -3188,10 +3247,10 @@ mod inbox_sort_tests {
     fn sort_is_idempotent() {
         let ts = 7_000;
         let mut v = [
-            make_msg(5, ts),
-            make_msg(1, ts),
-            make_msg(3, ts),
-            make_msg(4, 8_000),
+            make_msg(5, ts, 5),
+            make_msg(1, ts, 1),
+            make_msg(3, ts, 3),
+            make_msg(4, 8_000, 4),
         ];
         v.sort_by(sort_cmp_inbox);
         let first: Vec<u64> = v.iter().map(|m| m.id).collect();
