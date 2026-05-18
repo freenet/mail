@@ -79,6 +79,33 @@ jobs:
         if: steps.cache-bins.outputs.cache-hit != 'true'
         run: cargo install --force fdev
 
+      # Issue #214 F1 tripwire — must run BEFORE the rebuild step below,
+      # which overwrites published-contract/webapp.parameters with a
+      # file signed by the committed test key. The committed-on-main
+      # parameters MUST be the production verifying key.
+      #
+      # The web-container contract id rotates per release (intentional,
+      # see #198), but the signing key must still be the production key
+      # — never the committed test key from
+      # test-contract/web-container-keys.toml. See issue #241 for the
+      # ordering bug this fixes.
+      - name: Verify webapp.parameters matches production pubkey
+        run: |
+          EXPECTED="31dd371fedc842994c6e571a0868e5eece1367a7d8cc16c498a57c985526ae46"
+          ACTUAL=$(xxd -p -c 64 published-contract/webapp.parameters | tr -d '\n')
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+              echo "::error::webapp.parameters does not match the production verifying key."
+              echo "  expected: $EXPECTED"
+              echo "  actual:   $ACTUAL"
+              echo ""
+              echo "If this commit was meant to refresh the TEST snapshot"
+              echo "(\`cargo make update-published-contract\`), do not push"
+              echo "the test snapshot to main — only the production snapshot"
+              echo "(\`update-published-contract-prod\`) is committed."
+              exit 1
+          fi
+          echo "✅ webapp.parameters matches the committed production pubkey."
+
       - name: Rebuild published contract from source
         run: cargo make update-published-contract
 
@@ -170,23 +197,3 @@ jobs:
           fi
           echo "✅ facade.parameters matches the committed production pubkey."
 
-      # Same tripwire for webapp.parameters. The web-container id
-      # rotates per release (intentional, see #198), but the signing
-      # key must still be the production key — never the committed
-      # test key from test-contract/web-container-keys.toml.
-      - name: Verify webapp.parameters matches production pubkey
-        run: |
-          EXPECTED="31dd371fedc842994c6e571a0868e5eece1367a7d8cc16c498a57c985526ae46"
-          ACTUAL=$(xxd -p -c 64 published-contract/webapp.parameters | tr -d '\n')
-          if [ "$ACTUAL" != "$EXPECTED" ]; then
-              echo "::error::webapp.parameters does not match the production verifying key."
-              echo "  expected: $EXPECTED"
-              echo "  actual:   $ACTUAL"
-              echo ""
-              echo "If this commit was meant to refresh the TEST snapshot"
-              echo "(\`cargo make update-published-contract\`), do not push"
-              echo "the test snapshot to main — only the production snapshot"
-              echo "(\`update-published-contract-prod\`) is committed."
-              exit 1
-          fi
-          echo "✅ webapp.parameters matches the committed production pubkey."
