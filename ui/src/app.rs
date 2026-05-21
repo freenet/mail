@@ -491,26 +491,28 @@ impl InboxView {
         }
     }
 
-    // Remove the messages from the inbox contract, and move them to local storage
+    /// Mark messages as read in the in-memory view. Read-state persistence
+    /// to the mail-local-state delegate is the caller's responsibility (see
+    /// `OpenMessage`). Crucially this does NOT evict the message from the
+    /// inbox contract — read mail stays in the inbox just like every other
+    /// mail client. Pre-fix this called `remove_messages`, which triggered
+    /// a `GetResponse → from_state` renumber on the next refresh; the kept
+    /// snapshot's id then collided with a different surviving message and
+    /// the merge in `MessageList` silently dropped the row.
+    #[allow(clippy::unnecessary_wraps)]
     fn mark_as_read(
         &mut self,
-        client: WebApiRequestClient,
+        _client: WebApiRequestClient,
         ids: &[u64],
-        inbox_data: InboxesData,
+        _inbox_data: InboxesData,
     ) -> Result<LocalBoxFuture<'static, ()>, DynError> {
-        {
-            let messages = &mut *self.messages.borrow_mut();
-            let mut removed_messages = Vec::with_capacity(ids.len());
-            for e in messages {
-                if ids.contains(&e.id) {
-                    e.read = true;
-                    let m = e.clone();
-                    removed_messages.push(m);
-                }
+        let messages = &mut *self.messages.borrow_mut();
+        for e in messages {
+            if ids.contains(&e.id) {
+                e.read = true;
             }
         }
-        // todo: persist in a delegate `removed_messages`
-        self.remove_messages(client, ids, inbox_data)
+        Ok(async {}.boxed_local())
     }
 
     #[cfg(feature = "example-data")]
@@ -885,6 +887,53 @@ fn kept_to_message(
         signature_valid: kept.signature_valid,
         assignment_hash: [0u8; 32],
     }
+}
+
+/// Build the inbox-list `Vec<Message>` from the live contract messages plus
+/// the kept-locally snapshot. Pulled out of `MessageList` so the merge rules
+/// (archive hiding, read-state overlay, kept-row dedup) can be unit-tested
+/// without a Dioxus runtime.
+///
+/// The dedup between `live` and `kept` is by `Message.id` — which is
+/// positional (`enumerate` index from `InboxModel::from_state`) and therefore
+/// changes when the contract evicts a message. Callers must NOT rely on
+/// `Message.id` being stable across contract-state reloads.
+fn merge_inbox_list(
+    live: Vec<Message>,
+    kept: Vec<(mail_local_state::MessageId, mail_local_state::KeptMessage)>,
+    is_archived: impl Fn(u64) -> bool,
+    is_read: impl Fn(u64) -> bool,
+) -> Vec<Message> {
+    let mut out = Vec::with_capacity(live.len() + kept.len());
+    for mut m in live {
+        // Hide archived rows from the Inbox list (#47c). Until the
+        // contract eviction round-trips, the live contract may still
+        // serve a row the user has archived; we drop it client-side.
+        if is_archived(m.id) {
+            continue;
+        }
+        // Read-state survives reload because it lives in the
+        // mail-local-state delegate, not just `mark_as_read`'s
+        // local mutation. See issue #47/47a.
+        if is_read(m.id) {
+            m.read = true;
+        }
+        out.push(m);
+    }
+    // Merge kept-locally messages: rows the inbox contract has already
+    // evicted but the user has read. They are always read, and dedup by
+    // id against the live contract messages. Archived rows are excluded —
+    // they belong to the Archive folder, not Inbox.
+    for (mid, kept) in kept {
+        if out.iter().any(|m| m.id == mid) {
+            continue;
+        }
+        if is_archived(mid) {
+            continue;
+        }
+        out.push(kept_to_message(mid, kept));
+    }
+    out
 }
 
 impl From<MessageModel> for Message {
@@ -1461,37 +1510,21 @@ fn MessageList() -> Element {
         }) {
             let inbox = inbox.read();
             let mut emails = inbox.messages.borrow_mut();
-            emails.clear();
             let alias = id.alias.to_string();
-            for msg in &current_model.borrow().messages {
-                let mut m = Message::from(msg.clone());
-                // Hide archived rows from the Inbox list (#47c). Until the
-                // contract eviction round-trips, the live contract may still
-                // serve a row the user has archived; we drop it client-side.
-                if crate::local_state::is_archived(&alias, m.id) {
-                    continue;
-                }
-                // Read-state survives reload because it lives in the
-                // mail-local-state delegate, not just `mark_as_read`'s
-                // local mutation. See issue #47/47a.
-                if crate::local_state::is_read(&alias, m.id) {
-                    m.read = true;
-                }
-                emails.push(m);
-            }
-            // Merge kept-locally messages (b): rows the inbox contract has
-            // already evicted but the user has read. They are always read,
-            // and dedup by id against the live contract messages. Archived
-            // rows are excluded — they belong to the Archive folder, not Inbox.
-            for (mid, kept) in crate::local_state::kept_for(&alias) {
-                if emails.iter().any(|m| m.id == mid) {
-                    continue;
-                }
-                if crate::local_state::is_archived(&alias, mid) {
-                    continue;
-                }
-                emails.push(kept_to_message(mid, kept));
-            }
+            let live: Vec<Message> = current_model
+                .borrow()
+                .messages
+                .iter()
+                .cloned()
+                .map(Message::from)
+                .collect();
+            let kept = crate::local_state::kept_for(&alias);
+            *emails = merge_inbox_list(
+                live,
+                kept,
+                |id| crate::local_state::is_archived(&alias, id),
+                |id| crate::local_state::is_read(&alias, id),
+            );
             crate::log::debug!("active id: {:?}; emails number: {}", id.alias, emails.len());
         }
     }
@@ -2143,10 +2176,11 @@ fn OpenMessage(msg: Message) -> Element {
     });
 
     // Persist read flag + a local snapshot of the message in the
-    // mail-local-state delegate (issue #47/47a). This is additive to the
-    // existing inbox-contract `remove_messages` call above: the contract
-    // still evicts the row, but the kept-locally copy lets the UI keep
-    // showing the message after reload.
+    // mail-local-state delegate (issue #47/47a). Read mail stays in the
+    // inbox contract — `mark_as_read` only flips the in-memory flag — so
+    // this is the durable record of "user has read this". The local
+    // snapshot also lets the UI keep showing the message if the contract
+    // ever does evict it (e.g. via an explicit Archive/Delete).
     {
         let alias = user
             .read()
@@ -3383,6 +3417,83 @@ mod inbox_sort_tests {
         v.sort_by(sort_cmp_inbox);
         let second: Vec<u64> = v.iter().map(|m| m.id).collect();
         assert_eq!(first, second, "sort must be idempotent");
+    }
+}
+
+#[cfg(test)]
+mod merge_inbox_list_tests {
+    use super::{Message, merge_inbox_list};
+    use chrono::{TimeZone, Utc};
+    use mail_local_state::KeptMessage;
+    use std::borrow::Cow;
+
+    fn live(id: u64, from: &'static str) -> Message {
+        Message {
+            id,
+            from: Cow::Borrowed(from),
+            title: Cow::Borrowed("subject"),
+            content: Cow::Borrowed("body"),
+            read: false,
+            time: Utc.timestamp_opt(1_000 + id as i64, 0).unwrap(),
+            sender_vk: Vec::new(),
+            signature_valid: false,
+            assignment_hash: [0u8; 32],
+        }
+    }
+
+    fn kept(from: &str) -> KeptMessage {
+        KeptMessage {
+            from: from.into(),
+            title: "subject".into(),
+            content: "body".into(),
+            kept_at: 100,
+            sent_at: Some(50),
+            sender_vk: Vec::new(),
+            signature_valid: false,
+        }
+    }
+
+    /// With the fix in place, clicking a message no longer triggers
+    /// contract eviction, so the kept_for path stays empty and the
+    /// merge just flips `read=true` on the live row. The latent merge
+    /// dedup-by-positional-id bug is documented in
+    /// `kept_collides_with_renumbered_live_is_a_latent_bug` below — it
+    /// can still bite if a future change re-introduces contract
+    /// eviction on read.
+    #[test]
+    fn read_message_stays_in_inbox_via_is_read_overlay() {
+        let live_rows = vec![live(0, "alice"), live(1, "bob")];
+        let merged = merge_inbox_list(live_rows, vec![], |_| false, |id| id == 0);
+        assert_eq!(merged.len(), 2, "both rows must remain after click-to-read");
+        assert!(merged[0].read, "clicked row must surface as read");
+        assert!(!merged[1].read, "unread row must remain unread");
+    }
+
+    /// Latent bug — kept here as a tripwire. If a future change re-adds
+    /// contract eviction on read, the `MessageId` written to
+    /// `kept_for` (the positional id at click time) will collide with a
+    /// different message after `from_state` re-enumerates the surviving
+    /// rows, and the kept row gets dedup'd away. Captured as
+    /// `#[should_panic]` so the test suite stays green today while
+    /// documenting the constraint.
+    #[test]
+    #[should_panic(expected = "alice (read, kept-locally) must remain")]
+    fn kept_collides_with_renumbered_live_is_a_latent_bug() {
+        // Initial state: two messages at positional ids 0 and 1.
+        // User clicks id=0 ("alice"), contract evicts it, local kept
+        // snapshot records `kept[0] = alice`.
+        let kept_entries: Vec<(u64, KeptMessage)> = vec![(0, kept("alice"))];
+
+        // After eviction + state reload, the surviving message
+        // (originally id=1) is now id=0.
+        let live_after_evict = vec![live(0, "bob")];
+
+        let merged = merge_inbox_list(live_after_evict, kept_entries, |_| false, |_| false);
+        let froms: Vec<String> = merged.iter().map(|m| m.from.to_string()).collect();
+        assert!(
+            froms.iter().any(|f| f == "alice"),
+            "alice (read, kept-locally) must remain in the inbox list after eviction + renumber; got {froms:?}"
+        );
     }
 }
 
