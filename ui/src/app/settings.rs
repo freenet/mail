@@ -1103,8 +1103,12 @@ fn ScrContacts() -> Element {
             return;
         };
         let card = address_book::ContactCard::from_identity(&active);
-        let fp = card.fingerprint().join("-");
-        let share_text = format!("verify: {}\n{}", fp, card.encode());
+        let fp = address_book::fingerprint_words(
+            &active.ml_dsa_vk_bytes(),
+            &active.ml_kem_ek_bytes(),
+        )
+        .join("-");
+        let share_text = format!("{}\nverify: {}", card.encode(), fp);
         share_pending.set(crate::app::login::SharePending {
             data: Some(crate::app::login::SharePendingData {
                 alias: active.alias.to_string(),

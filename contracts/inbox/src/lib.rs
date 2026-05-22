@@ -187,6 +187,17 @@ pub struct Inbox {
     pub messages: Vec<Message>,
     pub last_update: DateTime<Utc>,
     pub settings: InboxSettings,
+    /// ML-KEM-768 encapsulation key (FIPS 203 encoded, 1184 bytes). Fetched
+    /// by senders alongside the inbox state on import, so the recipient's
+    /// inbox contract id is the only thing the sender needs to know to
+    /// reach them. Bound to the owner via `inbox_signature` (the signed
+    /// payload includes these bytes), so a peer rebroadcasting State
+    /// cannot swap in their own ek. `#[serde(default)]` keeps the
+    /// previous wire shape decodable during migration; legacy states
+    /// re-PUTted under the new code hash by the UI's migration writer
+    /// will carry a populated value.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub owner_ek_bytes: Vec<u8>,
     inbox_signature: Signature,
 }
 
@@ -352,12 +363,14 @@ impl Inbox {
         key: &MlDsaSigningKey<MlDsa65>,
         settings: InboxSettings,
         messages: Vec<Message>,
+        owner_ek_bytes: Vec<u8>,
     ) -> Self {
-        let inbox_signature = Self::sign(key);
+        let inbox_signature = Self::sign(key, &owner_ek_bytes);
         Self {
             settings,
             messages,
             last_update: Utc::now(),
+            owner_ek_bytes,
             inbox_signature,
         }
     }
@@ -366,11 +379,17 @@ impl Inbox {
         serde_json::to_vec(self).map_err(|err| ContractError::Deser(format!("{err}")))
     }
 
-    /// Sign the fixed `STATE_UPDATE` salt with the inbox owner's ML-DSA-65
-    /// signing key. The resulting signature is stored in
-    /// `Inbox::inbox_signature` and verified on every state update.
-    pub fn sign(key: &MlDsaSigningKey<MlDsa65>) -> Signature {
-        let sig: ml_dsa::Signature<MlDsa65> = MlDsaSigner::sign(key, STATE_UPDATE);
+    /// Sign `STATE_UPDATE || owner_ek_bytes` with the inbox owner's
+    /// ML-DSA-65 signing key. Binding the ek to the signature means a
+    /// peer rebroadcasting `UpdateData::State` cannot substitute their
+    /// own encapsulation key — the contract host re-runs `verify` on
+    /// every merge and would reject the swap. The resulting signature
+    /// is stored in `Inbox::inbox_signature`.
+    pub fn sign(key: &MlDsaSigningKey<MlDsa65>, owner_ek_bytes: &[u8]) -> Signature {
+        let mut payload = Vec::with_capacity(STATE_UPDATE.len() + owner_ek_bytes.len());
+        payload.extend_from_slice(STATE_UPDATE);
+        payload.extend_from_slice(owner_ek_bytes);
+        let sig: ml_dsa::Signature<MlDsa65> = MlDsaSigner::sign(key, &payload);
         sig.encode().to_vec().into_boxed_slice()
     }
 
@@ -380,7 +399,10 @@ impl Inbox {
             .ok_or(VerificationError::WrongSignature)?;
         let sig = decode_ml_dsa_signature(&self.inbox_signature)
             .map_err(|_| VerificationError::WrongSignature)?;
-        MlDsaVerifier::verify(&verifying_key, STATE_UPDATE, &sig)
+        let mut payload = Vec::with_capacity(STATE_UPDATE.len() + self.owner_ek_bytes.len());
+        payload.extend_from_slice(STATE_UPDATE);
+        payload.extend_from_slice(&self.owner_ek_bytes);
+        MlDsaVerifier::verify(&verifying_key, &payload, &sig)
             .map_err(|_e| VerificationError::WrongSignature)?;
         Ok(())
     }
@@ -554,6 +576,11 @@ impl Inbox {
         // should reflect the latest authoritative copy.
         if other.last_update > self.last_update {
             self.settings = other.settings;
+            // ek + signature travel together — the signature binds the
+            // ek (sign payload is STATE_UPDATE || owner_ek_bytes), so
+            // overwriting one without the other would break verify on
+            // the next merge / update on this state.
+            self.owner_ek_bytes = other.owner_ek_bytes;
             self.inbox_signature = other.inbox_signature;
             self.last_update = other.last_update;
         }
@@ -570,6 +597,7 @@ impl Inbox {
             messages: delta,
             last_update: self.last_update,
             settings: self.settings,
+            owner_ek_bytes: self.owner_ek_bytes,
             inbox_signature: self.inbox_signature,
         }
     }
@@ -938,8 +966,9 @@ mod tests {
             .map_err(|e| format!("{e}"))
             .unwrap();
 
-        // Sign the fixed STATE_UPDATE salt — same payload the contract
-        // verifies on every state update.
+        // Sign STATE_UPDATE || owner_ek_bytes — same payload the contract
+        // verifies on every state update. Empty ek for this empty-inbox
+        // fixture; the verify path concatenates an empty slice and matches.
         let signature: ml_dsa::Signature<MlDsa65> = MlDsaSigner::sign(&signing_key, STATE_UPDATE);
         let signature_bytes = signature.encode().to_vec();
 

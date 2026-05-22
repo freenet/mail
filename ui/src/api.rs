@@ -232,6 +232,108 @@ mod delegate_api {
     }
 }
 
+/// Decode an import-fetch `GetResponse` into an
+/// `ImportFetchOutcome`. Pulls the recipient's ML-DSA vk from the
+/// contract's parameters and the ek + tier policy from the inbox state.
+#[cfg(feature = "use-node")]
+fn decode_import_fetch(
+    contract: &Option<freenet_stdlib::prelude::ContractContainer>,
+    state: &[u8],
+) -> contact_import::ImportFetchOutcome {
+    use freenet_email_inbox::{Inbox as InboxState, InboxParams};
+
+    let parsed: InboxState = match serde_json::from_slice(state) {
+        Ok(v) => v,
+        Err(e) => {
+            return contact_import::ImportFetchOutcome::Failed(format!(
+                "decode inbox state: {e}"
+            ));
+        }
+    };
+    let container = match contract.as_ref() {
+        Some(c) => c,
+        None => {
+            return contact_import::ImportFetchOutcome::Failed(
+                "GetResponse missing contract container (return_contract_code wasn't honored?)"
+                    .into(),
+            );
+        }
+    };
+    let params: InboxParams = match InboxParams::try_from(container.params()) {
+        Ok(p) => p,
+        Err(e) => {
+            return contact_import::ImportFetchOutcome::Failed(format!(
+                "decode InboxParams: {e}"
+            ));
+        }
+    };
+    if parsed.owner_ek_bytes.is_empty() {
+        return contact_import::ImportFetchOutcome::Failed(
+            "recipient inbox is missing ek (legacy state pre-#249)".into(),
+        );
+    }
+    contact_import::ImportFetchOutcome::Ok {
+        ml_dsa_vk_bytes: params.pub_key,
+        ml_kem_ek_bytes: parsed.owner_ek_bytes,
+        required_tier: parsed.settings.minimum_tier,
+        max_age_secs: parsed.settings.max_age_secs,
+    }
+}
+
+/// State for the address → pubkey fetch driven by the Import Contact
+/// modal. The modal pastes a bs58 inbox address, the api dispatcher
+/// issues a `Get` against that contract, and the `GetResponse` arm
+/// drops the deserialized `Inbox` here for the modal to read.
+///
+/// Lives outside `inbox_management` because the modal and the
+/// GetResponse handler both need to touch it, and `inbox_management`
+/// is `use-node` gated.
+pub(crate) mod contact_import {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    use freenet_stdlib::prelude::ContractInstanceId;
+
+    /// What the modal sees after a fetch completes.
+    #[derive(Clone, Debug)]
+    pub struct ImportFetched {
+        /// bs58 inbox address the modal asked for (also the map key).
+        pub inbox_address: String,
+        /// Result of the fetch.
+        pub outcome: ImportFetchOutcome,
+    }
+
+    #[derive(Clone, Debug)]
+    pub enum ImportFetchOutcome {
+        /// Inbox state arrived. Carries the raw vk + ek bytes ready for
+        /// `StoredContactKeys::from_inbox_state`-style construction.
+        Ok {
+            ml_dsa_vk_bytes: Vec<u8>,
+            ml_kem_ek_bytes: Vec<u8>,
+            required_tier: freenet_aft_interface::Tier,
+            max_age_secs: u64,
+        },
+        /// Fetch failed (network error, contract unknown, malformed state, etc.).
+        Failed(String),
+    }
+
+    thread_local! {
+        /// Latest fetch result keyed by the bs58 inbox address the modal
+        /// requested. The modal polls this in a `use_future` after
+        /// dispatching `NodeAction::FetchContactKeys`.
+        pub(crate) static RESULTS: RefCell<HashMap<String, ImportFetched>> =
+            RefCell::new(HashMap::new());
+
+        /// Inbox contract instance ids we've dispatched a Get for on
+        /// behalf of the modal. Used by the GetResponse arm to recognise
+        /// the response and route it here (vs the inbox-owner /
+        /// migration paths). Maps the instance id back to the bs58
+        /// address the modal used (the modal's lookup key in `RESULTS`).
+        pub(crate) static PENDING: RefCell<HashMap<ContractInstanceId, String>> =
+            RefCell::new(HashMap::new());
+    }
+}
+
 #[cfg(feature = "use-node")]
 mod inbox_management {
     use std::sync::Arc;
@@ -276,10 +378,20 @@ mod inbox_management {
             pub_key: crate::inbox::inbox_params_pub_key_bytes(&vk),
         }
         .try_into()?;
+        // Use the parsed state's `owner_ek_bytes` if non-empty (already
+        // populated by a prior migration); otherwise stamp the local
+        // identity's ek so the re-PUT under the new code hash carries
+        // it. This is the migration writer's responsibility (#199).
+        let owner_ek_bytes = if parsed.owner_ek_bytes.is_empty() {
+            identity.ml_kem_ek_bytes()
+        } else {
+            parsed.owner_ek_bytes
+        };
         let rebuilt = freenet_email_inbox::Inbox::new(
             identity.ml_dsa_signing_key.as_ref(),
             parsed.settings,
             parsed.messages,
+            owner_ek_bytes,
         );
         let state = rebuilt.serialize()?;
         let new_key = contract_api::create_contract(client, INBOX_CODE, state, &params).await?;
@@ -329,6 +441,7 @@ mod inbox_management {
     pub(super) async fn create_contract(
         client: &mut WebApiRequestClient,
         ml_dsa_key: Arc<MlDsaSigningKey<MlDsa65>>,
+        owner_ek_bytes: Vec<u8>,
         required_tier: freenet_aft_interface::Tier,
         max_age_secs: u64,
     ) -> Result<ContractKey, DynError> {
@@ -351,6 +464,7 @@ mod inbox_management {
                     ..InboxSettings::default()
                 },
                 Vec::new(),
+                owner_ek_bytes,
             );
             inbox.serialize()?
         };
@@ -1020,6 +1134,7 @@ pub(crate) async fn node_comms(
             }
             NodeAction::CreateContract {
                 ml_dsa_key,
+                ml_kem_ek_bytes,
                 contract_type,
                 alias,
                 required_tier,
@@ -1030,6 +1145,7 @@ pub(crate) async fn node_comms(
                     match inbox_management::create_contract(
                         &mut client,
                         ml_dsa_key,
+                        ml_kem_ek_bytes,
                         required_tier,
                         max_age_secs,
                     )
@@ -1048,6 +1164,9 @@ pub(crate) async fn node_comms(
                     }
                 }
                 ContractType::AFTContract => {
+                    // AFT record contract id is derived from the sender's
+                    // ML-DSA key alone; the ek belongs to the inbox.
+                    let _ = ml_kem_ek_bytes;
                     crate::log::debug!("creating AFT record contract for {alias}");
                     match token_record_management::create_contract(&mut client, ml_dsa_key).await {
                         Ok(key) => {
@@ -1330,6 +1449,56 @@ pub(crate) async fn node_comms(
                     }
                 }
             }
+            NodeAction::FetchContactKeys { inbox_address } => {
+                use std::str::FromStr;
+                let id_result =
+                    freenet_stdlib::prelude::ContractInstanceId::from_str(inbox_address.trim());
+                let inbox_id = match id_result {
+                    Ok(id) => id,
+                    Err(e) => {
+                        contact_import::RESULTS.with(|m| {
+                            m.borrow_mut().insert(
+                                inbox_address.clone(),
+                                contact_import::ImportFetched {
+                                    inbox_address: inbox_address.clone(),
+                                    outcome: contact_import::ImportFetchOutcome::Failed(format!(
+                                        "invalid inbox address: {e}"
+                                    )),
+                                },
+                            );
+                        });
+                        return;
+                    }
+                };
+                contact_import::PENDING.with(|m| {
+                    m.borrow_mut().insert(inbox_id, inbox_address.clone());
+                });
+                let req = freenet_stdlib::client_api::ContractRequest::Get {
+                    key: inbox_id,
+                    // Pulls `WasmContractV1.parameters` alongside state
+                    // so we can recover the owner's ML-DSA vk (the
+                    // ek lives on state). Single round trip.
+                    return_contract_code: true,
+                    subscribe: false,
+                    blocking_subscribe: false,
+                };
+                if let Err(e) = client.send(req.into()).await {
+                    contact_import::PENDING.with(|m| {
+                        m.borrow_mut().remove(&inbox_id);
+                    });
+                    contact_import::RESULTS.with(|m| {
+                        m.borrow_mut().insert(
+                            inbox_address.clone(),
+                            contact_import::ImportFetched {
+                                inbox_address,
+                                outcome: contact_import::ImportFetchOutcome::Failed(format!(
+                                    "send Get failed: {e}"
+                                )),
+                            },
+                        );
+                    });
+                }
+            }
             NodeAction::DeleteContact { alias } => {
                 if let Err(e) =
                     identity_management::delete_contact_api_call(&mut client, &alias).await
@@ -1534,7 +1703,10 @@ pub(crate) async fn node_comms(
         crate::log::debug!("got node response: {res}");
         match res {
             HostResponse::ContractResponse(ContractResponse::GetResponse {
-                key, state, ..
+                key,
+                contract,
+                state,
+                ..
             }) => {
                 crate::log::info(format!(
                     "GetResponse: key={key} state_size={}",
@@ -1615,6 +1787,26 @@ pub(crate) async fn node_comms(
                                 token_rec_to_id.insert(key, identity);
                             }
                             _ => {
+                                // Import-contact fetch (#249): if this
+                                // response is for a key the Import modal
+                                // is waiting on, decode state + params and
+                                // drop the result into `contact_import::RESULTS`
+                                // for the modal's polling loop to pick up.
+                                let import_addr = contact_import::PENDING
+                                    .with(|m| m.borrow_mut().remove(key.id()));
+                                if let Some(inbox_address) = import_addr {
+                                    let outcome = decode_import_fetch(&contract, state.as_ref());
+                                    contact_import::RESULTS.with(|m| {
+                                        m.borrow_mut().insert(
+                                            inbox_address.clone(),
+                                            contact_import::ImportFetched {
+                                                inbox_address,
+                                                outcome,
+                                            },
+                                        );
+                                    });
+                                    return;
+                                }
                                 // GetResponse for a contact's inbox: arrives
                                 // because the rehydrate-prime path (#191) and
                                 // CreateContact handler send Get-with-subscribe

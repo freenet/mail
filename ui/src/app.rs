@@ -53,6 +53,11 @@ pub(crate) enum NodeAction {
         /// ML-DSA-65 signing key used for both inbox ownership and AFT
         /// token signing (same key serves both subsystems post-Stage-4).
         ml_dsa_key: Arc<MlDsaSigningKey<MlDsa65>>,
+        /// ML-KEM-768 encapsulation key bytes for the inbox owner. Stamped
+        /// into the inbox state's `owner_ek_bytes` field so senders can
+        /// recover the recipient's encryption key by Get-ing the inbox.
+        /// Ignored for `ContractType::AFTContract`.
+        ml_kem_ek_bytes: Vec<u8>,
         /// Initial recipient anti-flood policy seeded into the inbox's
         /// `InboxSettings` at creation. Only consulted for
         /// `ContractType::InboxContract`; the AFT record contract id is
@@ -88,6 +93,15 @@ pub(crate) enum NodeAction {
     /// Store a new contact in the identity-management delegate.
     CreateContact {
         contact: address_book::Contact,
+    },
+    /// Fetch the inbox state for `inbox_address` (bs58 ContractInstanceId)
+    /// so the ImportContact modal can populate the contact's pubkeys +
+    /// fingerprint preview. On `GetResponse`, the api.rs handler routes
+    /// the parsed state back into `IMPORT_FETCH_RESULT` for the modal to
+    /// observe. See the import flow in `ui/src/app/login.rs`
+    /// (`ImportContactForm`).
+    FetchContactKeys {
+        inbox_address: String,
     },
     /// Remove a contact from the identity-management delegate.
     DeleteContact {
@@ -2543,15 +2557,18 @@ fn ComposeSheet() -> Element {
     let ab_gen_ctx = use_context::<AddressBookGen>();
     let recipient_lookup = use_memo(move || {
         let _ab = ab_gen_ctx.0.read();
-        address_book::lookup(&to.read())
+        let val = to.read();
+        address_book::lookup(&val).or_else(|| address_book::lookup_by_bs58(&val))
     });
 
     // Autocomplete suggestions: case-insensitive substring over all contacts.
-    // Empty when input is blank or exactly matches a known alias.
+    // Empty when input is blank or exactly matches a known alias / bs58 address.
     let ac_suggestions = use_memo(move || {
         let needle = to.read().clone();
-        // Exact match → no suggestions (user already resolved the contact).
-        if needle.is_empty() || address_book::lookup(&needle).is_some() {
+        if needle.is_empty()
+            || address_book::lookup(&needle).is_some()
+            || address_book::lookup_by_bs58(&needle).is_some()
+        {
             return vec![];
         }
         address_book::filter_contacts(&needle, 8)
@@ -2582,7 +2599,12 @@ fn ComposeSheet() -> Element {
     });
     let send_msg = move |_| {
         let to_val = to.read().clone();
-        let recipient = match address_book::lookup(&to_val) {
+        // Try local alias first; fall back to raw bs58 inbox address so
+        // a user can paste an address into the To field and reach a
+        // contact without re-typing the alias.
+        let recipient = match address_book::lookup(&to_val)
+            .or_else(|| address_book::lookup_by_bs58(&to_val))
+        {
             Some(r) => r,
             None => {
                 crate::log::error(
@@ -2591,7 +2613,7 @@ fn ComposeSheet() -> Element {
                 );
                 crate::toast::push_toast(
                     format!(
-                        "Recipient `{to_val}` is not in your address book. Import their contact card before sending."
+                        "Recipient `{to_val}` is not in your address book. Import their contact before sending."
                     ),
                     crate::toast::ToastLevel::Error,
                 );

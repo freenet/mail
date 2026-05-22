@@ -1034,8 +1034,12 @@ pub(super) fn Identities() -> Element {
                             "data-testid": testid::FM_ID_SHARE,
                             onclick: move |_| {
                                 let card = crate::app::address_book::ContactCard::from_identity(&share_id);
-                                let fp = card.fingerprint().join("-");
-                                let share_text = format!("verify: {}\n{}", fp, card.encode());
+                                let fp = crate::app::address_book::fingerprint_words(
+                                    &share_id.ml_dsa_vk_bytes(),
+                                    &share_id.ml_kem_ek_bytes(),
+                                )
+                                .join("-");
+                                let share_text = format!("{}\nverify: {}", card.encode(), fp);
                                 share_pending.set(SharePending {
                                     data: Some(SharePendingData {
                                         alias: share_id.alias.to_string(),
@@ -1229,9 +1233,14 @@ pub(super) fn CreateAliasForm() -> Element {
             return;
         };
         let alias: Rc<str> = alias_str.into();
+        let ek_bytes = {
+            use ml_kem::kem::KeyExport;
+            ml_kem.encapsulation_key().to_bytes().to_vec()
+        };
         actions.send(NodeAction::CreateContract {
             alias: alias.clone(),
             ml_dsa_key: ml_dsa.clone(),
+            ml_kem_ek_bytes: ek_bytes.clone(),
             contract_type: ContractType::InboxContract,
             required_tier: freenet_aft_interface::Tier::Min10,
             max_age_secs: freenet_email_inbox::DEFAULT_MAX_AGE_SECS,
@@ -1243,6 +1252,7 @@ pub(super) fn CreateAliasForm() -> Element {
         actions.send(NodeAction::CreateContract {
             alias: alias.clone(),
             ml_dsa_key: ml_dsa.clone(),
+            ml_kem_ek_bytes: ek_bytes,
             contract_type: ContractType::AFTContract,
             required_tier: freenet_aft_interface::Tier::Min10,
             max_age_secs: freenet_email_inbox::DEFAULT_MAX_AGE_SECS,
@@ -1729,9 +1739,14 @@ fn ImportForm() -> Element {
                             let desc_val = description.read().clone();
                             let ml_dsa = backup.keys.ml_dsa_signing_key();
                             let ml_kem = backup.keys.ml_kem_dk();
+                            let ek_bytes = {
+                                use ml_kem::kem::KeyExport;
+                                ml_kem.encapsulation_key().to_bytes().to_vec()
+                            };
                             actions.send(NodeAction::CreateContract {
                                 alias: alias.clone(),
                                 ml_dsa_key: ml_dsa.clone(),
+                                ml_kem_ek_bytes: ek_bytes.clone(),
                                 contract_type: ContractType::InboxContract,
                                 required_tier: freenet_aft_interface::Tier::Min10,
                                 max_age_secs: freenet_email_inbox::DEFAULT_MAX_AGE_SECS,
@@ -1743,6 +1758,7 @@ fn ImportForm() -> Element {
                             actions.send(NodeAction::CreateContract {
                                 alias: alias.clone(),
                                 ml_dsa_key: ml_dsa.clone(),
+                                ml_kem_ek_bytes: ek_bytes,
                                 contract_type: ContractType::AFTContract,
                                 required_tier: freenet_aft_interface::Tier::Min10,
                                 max_age_secs: freenet_email_inbox::DEFAULT_MAX_AGE_SECS,
@@ -1875,9 +1891,19 @@ pub(super) fn ShareContactModal() -> Element {
     }
 }
 
-/// Form to import a contact from a pasted ContactCard.
+/// Form to import a contact from a pasted bs58 inbox address.
+///
+/// The user pastes the address; we dispatch a `NodeAction::FetchContactKeys`
+/// which issues a `Get` on the recipient's inbox contract. The api.rs
+/// handler decodes the inbox state + params and drops the result into
+/// `contact_import::RESULTS`; the modal polls that thread-local in a
+/// `use_future` loop and renders the six-word fingerprint once the keys
+/// land. The user confirms the fingerprint out-of-band and ticks
+/// "verified" before persisting via `NodeAction::CreateContact`.
 #[allow(non_snake_case)]
 pub(super) fn ImportContactForm() -> Element {
+    use crate::api::contact_import::{ImportFetchOutcome, ImportFetched};
+
     let mut import_contact_form = use_context::<Signal<ImportContact>>();
     let actions = use_coroutine_handle::<NodeAction>();
 
@@ -1887,13 +1913,86 @@ pub(super) fn ImportContactForm() -> Element {
     let mut verified = use_signal(|| false);
     let mut error_msg = use_signal(String::new);
     let mut fingerprint_words: Signal<Option<[&'static str; 6]>> = use_signal(|| None);
+    let mut fetched_keys: Signal<Option<(Vec<u8>, Vec<u8>, freenet_aft_interface::Tier, u64)>> =
+        use_signal(|| None);
+    let mut fetching = use_signal(|| false);
+    let mut pending_address: Signal<Option<String>> = use_signal(|| None);
+    let mut verify_phrase: Signal<Option<String>> = use_signal(|| None);
+
+    // Poll the api.rs result table for the address we asked about. Runs
+    // while the modal is mounted; the fetch completes in well under a
+    // second on a healthy local node, so 150ms is fast enough without
+    // being a busy loop.
+    use_future(move || async move {
+        loop {
+            #[cfg(feature = "use-node")]
+            {
+                let addr = pending_address.read().clone();
+                if let Some(addr) = addr {
+                    let result: Option<ImportFetched> =
+                        crate::api::contact_import::RESULTS.with(|m| m.borrow_mut().remove(&addr));
+                    if let Some(ImportFetched { outcome, .. }) = result {
+                        match outcome {
+                            ImportFetchOutcome::Ok {
+                                ml_dsa_vk_bytes,
+                                ml_kem_ek_bytes,
+                                required_tier,
+                                max_age_secs,
+                            } => {
+                                let fp = crate::app::address_book::fingerprint_words(
+                                    &ml_dsa_vk_bytes,
+                                    &ml_kem_ek_bytes,
+                                );
+                                fingerprint_words.set(Some(fp));
+                                fetched_keys.set(Some((
+                                    ml_dsa_vk_bytes,
+                                    ml_kem_ek_bytes,
+                                    required_tier,
+                                    max_age_secs,
+                                )));
+                                error_msg.set(String::new());
+                            }
+                            ImportFetchOutcome::Failed(e) => {
+                                error_msg.set(format!("Could not fetch inbox: {e}"));
+                                fingerprint_words.set(None);
+                                fetched_keys.set(None);
+                            }
+                        }
+                        fetching.set(false);
+                        pending_address.set(None);
+                    }
+                }
+            }
+            gloo_timers::future::TimeoutFuture::new(150).await;
+        }
+    });
 
     let on_paste_change = move |evt: dioxus::prelude::Event<dioxus::html::FormData>| {
         let text = evt.value().clone();
         paste_text.set(text.clone());
         error_msg.set(String::new());
         fingerprint_words.set(None);
-        match crate::app::address_book::ContactCard::decode(&text) {
+        fetched_keys.set(None);
+
+        // Pull the verify phrase if the sender included one
+        // (`<addr>\nverify: <words>` from `ShareContactModal`).
+        let mut phrase = None;
+        let mut addr_line: Option<&str> = None;
+        for line in text.lines() {
+            let stripped = line.trim();
+            if let Some(rest) = stripped.strip_prefix("verify:") {
+                phrase = Some(rest.trim().to_string());
+            } else if addr_line.is_none() && !stripped.is_empty() {
+                addr_line = Some(stripped);
+            }
+        }
+        verify_phrase.set(phrase);
+        let Some(addr_input) = addr_line else {
+            pending_address.set(None);
+            return;
+        };
+
+        match crate::app::address_book::ContactCard::decode(addr_input) {
             Ok(card) => {
                 if local_alias.read().is_empty()
                     && let Some(ref s) = card.suggested_alias
@@ -1905,29 +2004,78 @@ pub(super) fn ImportContactForm() -> Element {
                 {
                     description.set(s.clone());
                 }
-                fingerprint_words.set(Some(card.fingerprint()));
+
+                // Offline mode (`no-sync`) has no api.rs handler to issue
+                // a real Get against the recipient inbox. To keep the
+                // import + send UX exercisable without a node (Playwright
+                // fixtures + manual offline testing), synthesize placeholder
+                // pubkeys deterministically from the bs58 address. Fingerprint
+                // is stable across runs for the same address; the bytes never
+                // hit the wire in this build since there's no node. Seeded
+                // example-data identities still resolve through
+                // `lookup_by_bs58` first so their real fingerprint shows.
+                #[cfg(not(feature = "use-node"))]
+                {
+                    use freenet_aft_interface::Tier;
+                    use freenet_stdlib::prelude::blake3;
+                    let (vk_bytes, ek_bytes) = if let Some(r) =
+                        crate::app::address_book::lookup_by_bs58(&card.inbox_address)
+                    {
+                        (r.ml_dsa_vk_bytes, r.ml_kem_ek_bytes)
+                    } else {
+                        let seed_in = card.inbox_address.as_bytes();
+                        let mut vk = vec![0u8; 1952];
+                        let mut ek = vec![0u8; 1184];
+                        for (i, chunk) in vk.chunks_mut(32).enumerate() {
+                            let mut h = blake3::Hasher::new();
+                            h.update(b"offline-vk");
+                            h.update(seed_in);
+                            h.update(&(i as u32).to_le_bytes());
+                            chunk.copy_from_slice(&h.finalize().as_bytes()[..chunk.len()]);
+                        }
+                        for (i, chunk) in ek.chunks_mut(32).enumerate() {
+                            let mut h = blake3::Hasher::new();
+                            h.update(b"offline-ek");
+                            h.update(seed_in);
+                            h.update(&(i as u32).to_le_bytes());
+                            chunk.copy_from_slice(&h.finalize().as_bytes()[..chunk.len()]);
+                        }
+                        (vk, ek)
+                    };
+                    let fp = crate::app::address_book::fingerprint_words(&vk_bytes, &ek_bytes);
+                    fingerprint_words.set(Some(fp));
+                    fetched_keys.set(Some((
+                        vk_bytes,
+                        ek_bytes,
+                        Tier::Min10,
+                        freenet_email_inbox::DEFAULT_MAX_AGE_SECS,
+                    )));
+                    return;
+                }
+
+                #[cfg(feature = "use-node")]
+                {
+                    fetching.set(true);
+                    pending_address.set(Some(card.inbox_address.clone()));
+                    actions.send(NodeAction::FetchContactKeys {
+                        inbox_address: card.inbox_address,
+                    });
+                }
             }
             Err(e) => {
                 if !text.trim().is_empty() {
-                    error_msg.set(format!("Could not parse contact card: {e}"));
+                    error_msg.set(format!("Could not parse inbox address: {e}"));
                 }
             }
         }
     };
 
-    // Surface (but don't block on) the verify checkbox when the pasted blob
-    // includes the `verify: <six-words>` prefix the sharing flow emits (see
-    // share_text format at login.rs:1038). Permanently-unverified contacts
-    // silently break the verified-only acceptance flow (settings.rs:1434),
-    // so the import modal calls it out; recovery still happens via the
-    // clickable badge in ContactsSection (#228).
-    let has_verify_phrase = paste_text
-        .read()
-        .lines()
-        .next()
-        .map(|l| l.trim_start().starts_with("verify: "))
-        .unwrap_or(false);
-    let can_import = fingerprint_words.read().is_some() && !local_alias.read().is_empty();
+    // Soft warning when the sender included a verify phrase but the user
+    // hasn't ticked the box. Verified-only inboxes (settings.rs:1434)
+    // will reject sends until the user ticks it once they've matched the
+    // six words out-of-band.
+    let has_verify_phrase = verify_phrase.read().is_some();
+    let can_import = fetched_keys.read().is_some() && !local_alias.read().is_empty();
 
     let cancel = move |_| {
         import_contact_form.write().0 = false;
@@ -1954,16 +2102,21 @@ pub(super) fn ImportContactForm() -> Element {
                 }
                 div { class: "modal-body",
                     p { class: "field-help", style: "margin: -4px 0 14px;",
-                        "Paste the contact:// token your contact gave you. The decoded fingerprint appears below — confirm it through a separate channel before you tick the verify box."
+                        "Paste your contact's inbox address. We fetch their pubkeys from the inbox contract and show the fingerprint — confirm it through a separate channel before you tick the verify box."
                     }
                     div { class: "field",
-                        label { class: "field-label", "Contact card" }
+                        label { class: "field-label", "Inbox address" }
                         textarea {
                             class: "textarea",
-                            placeholder: "contact://…",
+                            placeholder: "e.g. EqJ5YpEEV3XLqEvKWLQHFhGAac2qXzSUoE6k2zbdnXBr",
                             rows: "3",
                             value: "{paste_text}",
                             oninput: on_paste_change,
+                        }
+                    }
+                    if *fetching.read() {
+                        div { class: "field-help",
+                            "Fetching keys from the recipient's inbox…"
                         }
                     }
                     if let Some(ref words) = *fingerprint_words.read() {
@@ -2043,39 +2196,38 @@ pub(super) fn ImportContactForm() -> Element {
                         "data-testid": testid::FM_IMPORT_SUBMIT,
                         disabled: !can_import,
                         onclick: move |_| {
-                            let text = paste_text.read().clone();
                             let alias_str = local_alias.read().clone();
                             if alias_str.is_empty() { return; }
-                            match crate::app::address_book::ContactCard::decode(&text) {
-                                Ok(card) => {
-                                    if crate::app::address_book::is_own_fingerprint(
-                                        &card.ml_dsa_vk_bytes,
-                                        &card.ml_kem_ek_bytes,
-                                    ) {
-                                        error_msg.set("That card belongs to one of your own identities.".into());
-                                        return;
-                                    }
-                                    let stored = crate::app::address_book::StoredContactKeys::from_card(
-                                        &card,
-                                        *verified.read(),
-                                    );
-                                    let contact = stored.into_contact(
-                                        alias_str.clone().into(),
-                                        description.read().clone(),
-                                    );
-                                    actions.send(NodeAction::CreateContact { contact });
-                                    import_contact_form.write().0 = false;
-                                    paste_text.set(String::new());
-                                    local_alias.set(String::new());
-                                    description.set(String::new());
-                                    verified.set(false);
-                                    fingerprint_words.set(None);
-                                    error_msg.set(String::new());
-                                }
-                                Err(e) => {
-                                    error_msg.set(format!("Failed to parse: {e}"));
-                                }
+                            let Some((vk, ek, tier, max_age)) = fetched_keys.read().clone() else {
+                                error_msg.set("Still fetching keys — wait a moment.".into());
+                                return;
+                            };
+                            if crate::app::address_book::is_own_fingerprint(&vk, &ek) {
+                                error_msg.set("That address belongs to one of your own identities.".into());
+                                return;
                             }
+                            let stored = crate::app::address_book::StoredContactKeys {
+                                ml_dsa_vk_bytes: vk,
+                                ml_kem_ek_bytes: ek,
+                                suggested_alias: Some(alias_str.clone()),
+                                verified: *verified.read(),
+                                required_tier: tier,
+                                max_age_secs: max_age,
+                            };
+                            let contact = stored.into_contact(
+                                alias_str.into(),
+                                description.read().clone(),
+                            );
+                            actions.send(NodeAction::CreateContact { contact });
+                            import_contact_form.write().0 = false;
+                            paste_text.set(String::new());
+                            local_alias.set(String::new());
+                            description.set(String::new());
+                            verified.set(false);
+                            fingerprint_words.set(None);
+                            fetched_keys.set(None);
+                            verify_phrase.set(None);
+                            error_msg.set(String::new());
                         },
                         "Import"
                     }

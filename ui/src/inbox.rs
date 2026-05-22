@@ -823,6 +823,10 @@ impl InboxModel {
             self.settings.ml_dsa_signing_key.as_ref(),
             settings,
             messages,
+            // TODO: this path is dead-coded (see TODO above); fill ek
+            // properly when `to_state` is wired up. Empty ek would fail
+            // signature verify on the contract host today.
+            Vec::new(),
         );
         let serialized = serde_json::to_vec(&inbox)?;
         Ok(serialized.into())
