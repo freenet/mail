@@ -1904,6 +1904,12 @@ pub(super) fn ShareContactModal() -> Element {
 /// `use_future` loop and renders the six-word fingerprint once the keys
 /// land. The user confirms the fingerprint out-of-band and ticks
 /// "verified" before persisting via `NodeAction::CreateContact`.
+/// `(ml_dsa_vk_bytes, ml_kem_ek_bytes, required_tier, max_age_secs)`
+/// — the four fields recovered from the inbox contract on a successful
+/// `FetchContactKeys` round-trip, ready to flow into
+/// `StoredContactKeys` on confirm.
+type FetchedKeys = (Vec<u8>, Vec<u8>, freenet_aft_interface::Tier, u64);
+
 #[allow(non_snake_case)]
 pub(super) fn ImportContactForm() -> Element {
     use crate::api::contact_import::{ImportFetchOutcome, ImportFetched};
@@ -1917,8 +1923,7 @@ pub(super) fn ImportContactForm() -> Element {
     let mut verified = use_signal(|| false);
     let mut error_msg = use_signal(String::new);
     let mut fingerprint_words: Signal<Option<[&'static str; 6]>> = use_signal(|| None);
-    let mut fetched_keys: Signal<Option<(Vec<u8>, Vec<u8>, freenet_aft_interface::Tier, u64)>> =
-        use_signal(|| None);
+    let mut fetched_keys: Signal<Option<FetchedKeys>> = use_signal(|| None);
     let mut fetching = use_signal(|| false);
     let mut pending_address: Signal<Option<String>> = use_signal(|| None);
     let mut verify_phrase: Signal<Option<String>> = use_signal(|| None);

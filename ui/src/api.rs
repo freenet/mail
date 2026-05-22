@@ -290,12 +290,11 @@ pub(crate) mod contact_import {
 
     use freenet_stdlib::prelude::ContractInstanceId;
 
-    /// What the modal sees after a fetch completes.
+    /// What the modal sees after a fetch completes. The bs58 address
+    /// the modal asked for is the lookup key in `RESULTS`, so it's
+    /// not duplicated on the value.
     #[derive(Clone, Debug)]
     pub struct ImportFetched {
-        /// bs58 inbox address the modal asked for (also the map key).
-        pub inbox_address: String,
-        /// Result of the fetch.
         pub outcome: ImportFetchOutcome,
     }
 
@@ -1471,7 +1470,6 @@ pub(crate) async fn node_comms(
                             m.borrow_mut().insert(
                                 inbox_address.clone(),
                                 contact_import::ImportFetched {
-                                    inbox_address: inbox_address.clone(),
                                     outcome: contact_import::ImportFetchOutcome::Failed(format!(
                                         "invalid inbox address: {e}"
                                     )),
@@ -1501,7 +1499,6 @@ pub(crate) async fn node_comms(
                         m.borrow_mut().insert(
                             inbox_address.clone(),
                             contact_import::ImportFetched {
-                                inbox_address,
                                 outcome: contact_import::ImportFetchOutcome::Failed(format!(
                                     "send Get failed: {e}"
                                 )),
@@ -1809,11 +1806,8 @@ pub(crate) async fn node_comms(
                                     let outcome = decode_import_fetch(&contract, state.as_ref());
                                     contact_import::RESULTS.with(|m| {
                                         m.borrow_mut().insert(
-                                            inbox_address.clone(),
-                                            contact_import::ImportFetched {
-                                                inbox_address,
-                                                outcome,
-                                            },
+                                            inbox_address,
+                                            contact_import::ImportFetched { outcome },
                                         );
                                     });
                                     return;
