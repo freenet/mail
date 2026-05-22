@@ -2517,6 +2517,137 @@ pub(crate) async fn node_comms(
     }
 }
 
+/// Pure (host-testable) helpers used by the wasm-only `permission_pump`
+/// module. Kept outside the wasm cfg gate so unit tests cover them.
+/// `allow(dead_code)` because production callers live behind the wasm
+/// cfg gate; on host builds only the `#[cfg(test)]` submodule uses these.
+#[allow(dead_code)]
+pub(crate) mod permission_pump_policy {
+    /// Decode `ml-dsa-65:<hex>` from the gateway's permission message
+    /// `user` field into raw VK bytes.
+    ///
+    /// The AFT token-generator delegate truncates the assignee VK to a
+    /// short hex prefix and appends a literal `...` for modal display
+    /// (see `token-generator/src/lib.rs::user_input`). So the field is a
+    /// VK *prefix*, not the full key — and the trailing `...` chars must
+    /// not abort hex decoding.
+    pub fn vk_bytes_from_user_field(user: &str) -> Option<Vec<u8>> {
+        let rest = user.strip_prefix("ml-dsa-65:")?;
+        let hex: String = rest.chars().take_while(|c| c.is_ascii_hexdigit()).collect();
+        if hex.is_empty() || !hex.len().is_multiple_of(2) {
+            return None;
+        }
+        let mut out = Vec::with_capacity(hex.len() / 2);
+        let mut chars = hex.chars();
+        while let (Some(hi), Some(lo)) = (chars.next(), chars.next()) {
+            let hi = hi.to_digit(16)?;
+            let lo = lo.to_digit(16)?;
+            out.push((hi * 16 + lo) as u8);
+        }
+        Some(out)
+    }
+
+    /// Does `identity_vk` (the full ML-DSA-65 encoded verifying key of one
+    /// of the user's identities) match the prefix bytes parsed from the
+    /// delegate notification's `user` field?
+    ///
+    /// Empty prefix never matches — the delegate always emits at least
+    /// one byte, and matching empty would mean "any identity".
+    pub fn identity_matches_sender_prefix(identity_vk: &[u8], sender_vk_prefix: &[u8]) -> bool {
+        !sender_vk_prefix.is_empty() && identity_vk.starts_with(sender_vk_prefix)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// Delegate emits `ml-dsa-65:<16-byte-hex>...` for modal display.
+        /// Pre-fix decoder bailed on the `.` chars; fix stops at first
+        /// non-hex char and returns the decoded prefix.
+        #[test]
+        fn decodes_truncated_user_field_from_delegate() {
+            // Sample matches the modal screenshot:
+            //   "ml-dsa-65:e26ce50c9fd104ca0fa33f4924e3c7c4..."
+            let field = "ml-dsa-65:e26ce50c9fd104ca0fa33f4924e3c7c4...";
+            let decoded =
+                vk_bytes_from_user_field(field).expect("delegate-format user field should decode");
+            assert_eq!(
+                decoded,
+                vec![
+                    0xe2, 0x6c, 0xe5, 0x0c, 0x9f, 0xd1, 0x04, 0xca, 0x0f, 0xa3, 0x3f, 0x49, 0x24,
+                    0xe3, 0xc7, 0xc4,
+                ],
+            );
+        }
+
+        #[test]
+        fn rejects_missing_prefix() {
+            assert_eq!(vk_bytes_from_user_field("deadbeef"), None);
+        }
+
+        #[test]
+        fn rejects_odd_hex_length() {
+            assert_eq!(vk_bytes_from_user_field("ml-dsa-65:abc..."), None);
+        }
+
+        #[test]
+        fn rejects_empty_hex() {
+            assert_eq!(vk_bytes_from_user_field("ml-dsa-65:..."), None);
+        }
+
+        #[test]
+        fn decodes_full_hex_without_trailing_dots() {
+            assert_eq!(
+                vk_bytes_from_user_field("ml-dsa-65:deadbeef"),
+                Some(vec![0xde, 0xad, 0xbe, 0xef]),
+            );
+        }
+
+        /// Pre-fix `resolve_auto_response` compared the full identity VK
+        /// against the (truncated) sender bytes with `==`, which never
+        /// matched. New helper accepts a prefix match.
+        #[test]
+        fn identity_matches_when_prefix_is_truncated() {
+            let mut full = vec![0u8; 1952];
+            full[..16].copy_from_slice(&[
+                0xe2, 0x6c, 0xe5, 0x0c, 0x9f, 0xd1, 0x04, 0xca, 0x0f, 0xa3, 0x3f, 0x49, 0x24, 0xe3,
+                0xc7, 0xc4,
+            ]);
+            let prefix = &full[..16];
+            assert!(identity_matches_sender_prefix(&full, prefix));
+        }
+
+        #[test]
+        fn identity_does_not_match_different_prefix() {
+            let full = vec![0xaa; 1952];
+            let other_prefix = vec![0xbb; 16];
+            assert!(!identity_matches_sender_prefix(&full, &other_prefix));
+        }
+
+        #[test]
+        fn empty_prefix_never_matches() {
+            let full = vec![0xaa; 1952];
+            assert!(!identity_matches_sender_prefix(&full, &[]));
+        }
+
+        /// End-to-end of the pre-fix bug: pump parses delegate field →
+        /// gets short prefix → must still recognise it as the user's own
+        /// identity (so auto-accept fires).
+        #[test]
+        fn delegate_field_resolves_to_user_identity() {
+            let mut user_vk = vec![0u8; 1952];
+            user_vk[..16].copy_from_slice(&[
+                0xe2, 0x6c, 0xe5, 0x0c, 0x9f, 0xd1, 0x04, 0xca, 0x0f, 0xa3, 0x3f, 0x49, 0x24, 0xe3,
+                0xc7, 0xc4,
+            ]);
+
+            let field = "ml-dsa-65:e26ce50c9fd104ca0fa33f4924e3c7c4...";
+            let parsed = vk_bytes_from_user_field(field).expect("decode");
+            assert!(identity_matches_sender_prefix(&user_vk, &parsed));
+        }
+    }
+}
+
 /// Permission pump — polls the gateway `/permission/pending` endpoint and
 /// auto-responds when the active identity's AFT policy dictates.
 ///
@@ -2648,23 +2779,9 @@ pub(crate) mod permission_pump {
         Ok(())
     }
 
-    /// Decode `ml-dsa-65:<hex>` from the gateway's permission message `user`
-    /// field into raw VK bytes. Returns `None` for unexpected formats or
-    /// odd-length hex.
-    fn vk_bytes_from_user_field(user: &str) -> Option<Vec<u8>> {
-        let hex = user.strip_prefix("ml-dsa-65:")?;
-        if hex.len() % 2 != 0 {
-            return None;
-        }
-        let mut out = Vec::with_capacity(hex.len() / 2);
-        let mut chars = hex.chars();
-        while let (Some(hi), Some(lo)) = (chars.next(), chars.next()) {
-            let hi = hi.to_digit(16)?;
-            let lo = lo.to_digit(16)?;
-            out.push((hi * 16 + lo) as u8);
-        }
-        Some(out)
-    }
+    pub(crate) use super::permission_pump_policy::{
+        identity_matches_sender_prefix, vk_bytes_from_user_field,
+    };
 
     /// Decide whether to auto-respond to a pending permission prompt.
     ///
@@ -2676,7 +2793,10 @@ pub(crate) mod permission_pump {
     /// 2. `auto_accept_verified_contacts` AND the recipient is verified.
     /// 3. No rule → `None`.
     ///
-    /// `sender_vk_bytes`: raw ML-DSA-65 VK of the token sender.
+    /// `sender_vk_bytes`: ML-DSA-65 VK *prefix* of the token sender as
+    /// surfaced by the delegate notification (see
+    /// [`vk_bytes_from_user_field`]). Compared by prefix against the user's
+    /// full identity VKs.
     /// `pending_recipient_vk_bytes`: VK bytes of currently pending recipients.
     /// `user`: the `Signal<User>` to read identity settings from.
     pub(crate) fn resolve_auto_response(
@@ -2685,10 +2805,13 @@ pub(crate) mod permission_pump {
         user: dioxus::prelude::Signal<crate::app::User>,
     ) -> Option<u8> {
         // Identify which of the user's identities is doing the send.
+        // The delegate notification truncates the sender VK to a short
+        // hex prefix (see `vk_bytes_from_user_field`), so match by prefix
+        // rather than full equality.
         let active_alias = {
             let user_guard = user.read();
             user_guard.logged_id().and_then(|id| {
-                if id.ml_dsa_vk_bytes() == sender_vk_bytes {
+                if identity_matches_sender_prefix(&id.ml_dsa_vk_bytes(), sender_vk_bytes) {
                     Some(id.alias.to_string())
                 } else {
                     None
