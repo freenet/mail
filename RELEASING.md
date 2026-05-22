@@ -85,7 +85,29 @@ git status   # must be clean
 The release script refuses to run from any other branch or with
 uncommitted changes.
 
-### 4. GNU tar, fdev, dioxus-cli, cargo-make, gh
+### 4. Workspace version bumped to match the release tag
+
+`ui/src/lib.rs` bakes `env!("CARGO_PKG_VERSION")` into the wasm, and
+that string is what the sidebar shows. If `Cargo.toml`'s workspace
+`version` doesn't match the tag, the published webapp will display the
+old version forever (and the wasm bytes will be byte-equal to the
+previous release, so the release script reports "unchanged bytes" and
+nothing actually moves between tags — this is how v0.1.9 through
+v0.1.11 all shipped with `v0.1.8` baked in).
+
+Bump it BEFORE running `scripts/release.sh`:
+
+```bash
+# In Cargo.toml [workspace.package], set version = "<new>"
+cargo update --workspace      # refreshes Cargo.lock
+git commit -am "chore: bump workspace version to <new>"
+git push
+```
+
+`scripts/release.sh` now preflight-checks that the workspace version
+matches its argument and aborts otherwise.
+
+### 5. GNU tar, fdev, dioxus-cli, cargo-make, gh
 
 All preflight-checked by `scripts/release.sh`. On macOS:
 
