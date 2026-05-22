@@ -54,6 +54,69 @@ pub(crate) const INBOX_CODE_HASH: &str = include_str!("../../build/inbox_code_ha
 #[cfg(not(feature = "use-node"))]
 pub(crate) const INBOX_CODE_HASH: &str = "";
 
+/// Historical `INBOX_CODE_HASH` values, oldest → newest. Each entry is a
+/// hash the inbox contract WASM previously had under a prior release.
+/// Used by the migration path (#251 improvement 2) to handle multi-hop
+/// version gaps: if a user comes back online after two or more deliberate
+/// contract bumps, the recorded `inbox_wasm_hash` may be older than the
+/// most recent prior hash. The migration walks the slice starting at the
+/// recorded hash and dispatches GETs against every newer historical key
+/// until one resolves. Append-only: never reorder, never delete entries.
+/// The current `INBOX_CODE_HASH` must NOT appear in this list.
+pub(crate) const LEGACY_INBOX_CODE_HASHES: &[&str] = &[];
+
+/// Build the ordered list of candidate code hashes to GET for a
+/// migration starting from `prior_hash`. The returned vec always
+/// contains `prior_hash` first, then every entry in `legacy` that
+/// follows it (if `prior_hash` is present in `legacy`) — or every
+/// entry in `legacy` other than `prior_hash` (if `prior_hash` is NOT
+/// present, meaning the recorded hash predates the committed legacy
+/// list; we walk the whole list to maximise recovery odds).
+///
+/// Pure function — extracted from `migrate_inbox` so the chain-build
+/// logic can be unit-tested without a node round trip.
+pub(crate) fn build_migration_candidates(prior_hash: &str, legacy: &[&str]) -> Vec<String> {
+    let mut out: Vec<String> = vec![prior_hash.to_string()];
+    let start_idx = legacy
+        .iter()
+        .position(|h| *h == prior_hash)
+        .map_or(0, |i| i + 1);
+    for h in &legacy[start_idx..] {
+        if *h != prior_hash {
+            out.push((*h).to_string());
+        }
+    }
+    out
+}
+
+/// Decide which prior hash to migrate FROM on startup, given the
+/// recorded `inbox_wasm_hash` (`prior`), the persistent
+/// pending-migration marker (`pending`), and the embedded
+/// `current` hash.
+///
+/// Rules:
+/// - If `prior == current`: no drift; ignore any stale marker (caller
+///   is responsible for clearing it separately).
+/// - Else if `pending` is set: prefer the marker (it's the source of
+///   truth for in-flight retries — see #251 improvement 5).
+/// - Else if `prior` is set: standard single-hop drift.
+/// - Else: first observation; nothing to migrate.
+///
+/// Pure function — extracted so the precedence rules can be
+/// table-tested without a node.
+pub(crate) fn select_migrate_from(
+    prior: Option<&str>,
+    pending: Option<&str>,
+    current: &str,
+) -> Option<String> {
+    match (prior, pending) {
+        (Some(p), _) if p == current => None,
+        (_, Some(pending)) => Some(pending.to_string()),
+        (Some(p), None) => Some(p.to_string()),
+        (None, None) => None,
+    }
+}
+
 /// Encode the `InboxParams.pub_key` bytes for an inbox owned by this identity.
 ///
 /// After Stage 2 the inbox contract ID is derived from the ML-DSA-65 verifying
@@ -1009,6 +1072,97 @@ impl InboxModel {
         };
         client.send(request.into()).await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod migration_logic_tests {
+    use super::*;
+
+    #[test]
+    fn candidates_single_when_legacy_empty() {
+        let out = build_migration_candidates("h0", &[]);
+        assert_eq!(out, vec!["h0"]);
+    }
+
+    #[test]
+    fn candidates_skip_entries_at_or_before_prior() {
+        let legacy = ["h0", "h1", "h2"];
+        let out = build_migration_candidates("h1", &legacy);
+        assert_eq!(out, vec!["h1", "h2"]);
+    }
+
+    #[test]
+    fn candidates_walk_all_when_prior_absent() {
+        let legacy = ["h0", "h1"];
+        let out = build_migration_candidates("unknown", &legacy);
+        assert_eq!(out, vec!["unknown", "h0", "h1"]);
+    }
+
+    #[test]
+    fn candidates_no_duplicate_when_prior_at_end() {
+        let legacy = ["h0", "h1"];
+        let out = build_migration_candidates("h1", &legacy);
+        assert_eq!(out, vec!["h1"]);
+    }
+
+    #[test]
+    fn select_no_drift_when_prior_matches_current() {
+        assert_eq!(select_migrate_from(Some("cur"), None, "cur"), None);
+    }
+
+    #[test]
+    fn select_ignores_pending_when_prior_matches_current() {
+        // Stale marker case — drift logic returns None, caller clears
+        // the marker separately.
+        assert_eq!(select_migrate_from(Some("cur"), Some("stale"), "cur"), None);
+    }
+
+    #[test]
+    fn select_prefers_pending_over_prior() {
+        assert_eq!(
+            select_migrate_from(Some("old"), Some("older"), "cur"),
+            Some("older".to_string())
+        );
+    }
+
+    #[test]
+    fn select_falls_back_to_prior_when_no_pending() {
+        assert_eq!(
+            select_migrate_from(Some("old"), None, "cur"),
+            Some("old".to_string())
+        );
+    }
+
+    #[test]
+    fn select_uses_pending_when_prior_absent() {
+        // Indicates state corruption — prior was never stamped but a
+        // marker exists. Conservative behavior: retry the migration.
+        assert_eq!(
+            select_migrate_from(None, Some("older"), "cur"),
+            Some("older".to_string())
+        );
+    }
+
+    #[test]
+    fn select_none_on_first_observation() {
+        assert_eq!(select_migrate_from(None, None, "cur"), None);
+    }
+
+    /// The current `INBOX_CODE_HASH` must NOT appear in
+    /// `LEGACY_INBOX_CODE_HASHES`. Violating this invariant would make
+    /// `migrate_inbox` GET the current key as an "old" candidate and
+    /// re-PUT identical state. Only checked under `use-node` because
+    /// the constant is otherwise empty.
+    #[cfg(feature = "use-node")]
+    #[test]
+    fn current_hash_not_in_legacy() {
+        let current = INBOX_CODE_HASH;
+        assert!(
+            !LEGACY_INBOX_CODE_HASHES.contains(&current),
+            "INBOX_CODE_HASH ({current}) must not appear in LEGACY_INBOX_CODE_HASHES — \
+             append it only AFTER bumping to a new hash",
+        );
     }
 }
 

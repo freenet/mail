@@ -422,19 +422,42 @@ token ledgers stay accessible across releases. To deliberately rotate
 =x.y.z pin in the relevant Cargo.toml and pair the change with the
 per-identity migration story.
 
-**Inbox migration (#213/#223, shipped)**: on UI startup the
-`set_aliases` callback in `ui/src/api.rs` compares the embedded
-`INBOX_CODE_HASH` against the `inbox_wasm_hash` recorded on each
-identity in the identity-management delegate. On drift it dispatches
-a Get for the old inbox key (derived from the prior hash + identity
-vk), and the GetResponse arm decodes the old state, re-signs via
-`Inbox::new`, and PUTs it under the current inbox key. Toast surfaces
-the migration to the user. On first observation (`inbox_wasm_hash =
-None`) the UI stamps the current hash as a baseline so the next bump
-is detectable. The schema bump on the delegate is backwards-compatible
-(`#[serde(default)]` on `AliasInfo.inbox_wasm_hash`). AFT contract
-migration follows the same shape if and when AFT WASM rotates — not
-yet implemented; file a follow-up when needed.
+**Inbox migration (#213/#223, shipped; #251 hardening)**: on UI
+startup the `set_aliases` callback in `ui/src/api.rs` compares the
+embedded `INBOX_CODE_HASH` against the `inbox_wasm_hash` recorded on
+each identity in the identity-management delegate. On drift it
+dispatches GETs for the old inbox keys (chained over every plausible
+historical hash — see below), and the GetResponse arm decodes the
+old state, re-signs via `Inbox::new`, and PUTs it under the current
+inbox key. Toast surfaces the migration to the user. On first
+observation (`inbox_wasm_hash = None`) the UI stamps the current
+hash as a baseline so the next bump is detectable. The schema bump
+on the delegate is backwards-compatible (`#[serde(default)]` on
+`AliasInfo.inbox_wasm_hash`). AFT contract migration follows the
+same shape if and when AFT WASM rotates — not yet implemented; file
+a follow-up when needed.
+
+**Chained migration (#251 improvement 2)**: `LEGACY_INBOX_CODE_HASHES`
+in `ui/src/inbox.rs` is an append-only oldest→newest list of every
+prior `INBOX_CODE_HASH`. `build_migration_candidates` walks from the
+recorded hash forward and `migrate_inbox` dispatches a GET per
+candidate; the first GetResponse to resolve wins, suppressed by
+`MIGRATED_IDENTITIES` (keyed by ML-DSA verifying-key bytes, not the
+mutable alias). Append the previous hash to the slice as part of any
+deliberate inbox-contract bump so users skipping releases still
+recover. The current `INBOX_CODE_HASH` must never appear in the slice
+— enforced by the `current_hash_not_in_legacy` test.
+
+**Persistent migration retry (#251 improvement 5)**:
+`AliasInfo.pending_migration_from: Option<String>` is stamped on the
+identity-management delegate via `IdentityMsg::SetPendingMigrationFrom`
+BEFORE dispatching the migration GETs, and cleared (set to `None`)
+only when the PUT under the current inbox key succeeds. On startup
+`select_migrate_from` (in `ui/src/inbox.rs`) prefers a non-None
+pending marker over the recorded hash, so a session whose GET never
+resolved (node offline, contract expired) re-attempts on the next
+session. Stale markers (`prior == current` with a leftover pending
+value) are cleared in the no-drift branch.
 
 **Facade lockfile isolation (issue #198)**: the facade contract and its
 shared types crate live OUTSIDE the freenet-email workspace:
