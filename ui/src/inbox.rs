@@ -135,12 +135,27 @@ pub(crate) fn inbox_params_pub_key_bytes(ml_dsa_vk: &MlDsaVerifyingKey<MlDsa65>)
 pub(crate) fn inbox_key_for(
     ml_dsa_vk: &MlDsaVerifyingKey<MlDsa65>,
 ) -> Result<ContractKey, DynError> {
+    inbox_key_for_with_hash(ml_dsa_vk, INBOX_CODE_HASH)
+}
+
+/// Same as `inbox_key_for` but derives against an explicit code hash —
+/// used by the send path (#251 improvement 4) so the sender can address
+/// the recipient's inbox under the recipient's WASM hash rather than
+/// the sender's embedded `INBOX_CODE_HASH`. A non-upgraded recipient
+/// still receives messages from an upgraded sender.
+///
+/// Callers that hold a recipient's `Contact.inbox_wasm_hash` should
+/// pass it here. `None` callers can stay on `inbox_key_for`.
+pub(crate) fn inbox_key_for_with_hash(
+    ml_dsa_vk: &MlDsaVerifyingKey<MlDsa65>,
+    code_hash: &str,
+) -> Result<ContractKey, DynError> {
     let params = InboxParams {
         pub_key: inbox_params_pub_key_bytes(ml_dsa_vk),
     }
     .try_into()
     .map_err(|e| format!("{e}"))?;
-    ContractKey::from_params(INBOX_CODE_HASH, params).map_err(|e| format!("{e}").into())
+    ContractKey::from_params(code_hash, params).map_err(|e| format!("{e}").into())
 }
 
 /// Verify a detached ML-DSA-65 signature over `ciphertext` using the
@@ -516,6 +531,7 @@ pub(crate) struct DecryptedMessage {
 }
 
 impl DecryptedMessage {
+    #[allow(clippy::too_many_arguments)]
     pub async fn start_sending(
         self,
         client: &mut WebApiRequestClient,
@@ -523,6 +539,7 @@ impl DecryptedMessage {
         recipient_ml_dsa_vk: MlDsaVerifyingKey<MlDsa65>,
         recipient_required_tier: freenet_aft_interface::Tier,
         recipient_max_age_secs: u64,
+        recipient_inbox_wasm_hash: Option<&str>,
         from: &Identity,
     ) -> Result<(), DynError> {
         let (hash, _) = self.assignment_hash_and_signed_content()?;
@@ -532,11 +549,17 @@ impl DecryptedMessage {
             bs58::encode(hash).into_string()
         ));
         let inbox_pub_key_bytes = inbox_params_pub_key_bytes(&recipient_ml_dsa_vk);
+        // #251 improvement 4: address the recipient's inbox under the
+        // recipient's advertised WASM hash when known. Falls back to
+        // the sender's `INBOX_CODE_HASH` for own-identity sends and
+        // for contacts imported before the field shipped.
+        let code_hash = recipient_inbox_wasm_hash.unwrap_or(INBOX_CODE_HASH);
         let delegate_key = AftRecords::assign_token(
             client,
             inbox_pub_key_bytes.clone(),
             recipient_required_tier,
             recipient_max_age_secs,
+            recipient_inbox_wasm_hash,
             from,
             hash,
         )
@@ -546,8 +569,7 @@ impl DecryptedMessage {
         }
         .try_into()
         .map_err(|e| format!("{e}"))?;
-        let inbox_key =
-            ContractKey::from_params(INBOX_CODE_HASH, params).map_err(|e| format!("{e}"))?;
+        let inbox_key = ContractKey::from_params(code_hash, params).map_err(|e| format!("{e}"))?;
         crate::log::info(format!(
             "send.start_sending: token requested, awaiting AFT delegate response from=`{}` inbox_key={inbox_key} (release-visible diagnostic for #174)",
             from.alias()
@@ -1464,6 +1486,80 @@ mod tests {
             }
         } else {
             panic!("unexpected request type");
+        }
+    }
+
+    /// #251 improvement 4: `inbox_key_for_with_hash` against two
+    /// different code hashes must yield two different `ContractKey`s
+    /// for the same vk — the whole reason the helper exists. Also pin
+    /// that `inbox_key_for` is exactly the `INBOX_CODE_HASH` instance
+    /// of the helper, so the two stay in lockstep.
+    #[cfg(feature = "use-node")]
+    #[test]
+    fn inbox_key_for_with_hash_distinguishes_code_hashes() {
+        let sk = fresh_signing_key();
+        let vk = MlDsaKeypair::verifying_key(&sk);
+        let synthetic = bs58::encode([7u8; 32])
+            .with_alphabet(bs58::Alphabet::BITCOIN)
+            .into_string();
+        let current = inbox_key_for_with_hash(&vk, INBOX_CODE_HASH).expect("current key");
+        let other = inbox_key_for_with_hash(&vk, &synthetic).expect("other key");
+        assert_ne!(
+            current.id(),
+            other.id(),
+            "different code hashes must produce different contract instance ids — \
+             otherwise the send-time switch in #251 improvement 4 is a no-op",
+        );
+        let default = inbox_key_for(&vk).expect("default key");
+        assert_eq!(
+            current.id(),
+            default.id(),
+            "inbox_key_for must equal inbox_key_for_with_hash(.., INBOX_CODE_HASH)",
+        );
+    }
+
+    /// `bs58::encode(key.code_hash().as_ref())` must roundtrip through
+    /// the same bs58 BITCOIN alphabet that `ContractKey::from_params`
+    /// uses internally. `freenet_stdlib::CodeHash::encode` lowercases
+    /// its output, which would break this roundtrip — pin the chosen
+    /// alternative (#251 improvement 4).
+    #[test]
+    fn code_hash_bs58_roundtrips_byte_identical() {
+        let bytes: [u8; 32] = [
+            0x01, 0x02, 0x03, 0xAB, 0xCD, 0xEF, 0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80,
+            0x90, 0xA0, 0xB0, 0xC0, 0xD0, 0xE0, 0xF0, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+            0x88, 0x99, 0xAA, 0xBB,
+        ];
+        let encoded = bs58::encode(bytes)
+            .with_alphabet(bs58::Alphabet::BITCOIN)
+            .into_string();
+        // The encoding must contain mixed case — lowercasing it would
+        // change the decoded bytes (case-sensitive bs58 alphabet).
+        assert!(
+            encoded.chars().any(|c| c.is_ascii_uppercase())
+                && encoded.chars().any(|c| c.is_ascii_lowercase()),
+            "fixture chosen to exercise mixed-case bs58 output, got {encoded}",
+        );
+        let mut decoded = [0u8; 32];
+        bs58::decode(&encoded)
+            .with_alphabet(bs58::Alphabet::BITCOIN)
+            .onto(&mut decoded)
+            .expect("decode");
+        assert_eq!(decoded, bytes, "bs58 BITCOIN alphabet must roundtrip");
+
+        // Decode lowercased — must yield DIFFERENT bytes, demonstrating
+        // why we cannot use `CodeHash::encode` (which lowercases).
+        let lowered = encoded.to_lowercase();
+        let mut decoded_lower = [0u8; 32];
+        let lower_ok = bs58::decode(&lowered)
+            .with_alphabet(bs58::Alphabet::BITCOIN)
+            .onto(&mut decoded_lower)
+            .is_ok();
+        if lower_ok {
+            assert_ne!(
+                decoded_lower, bytes,
+                "lowercased bs58 must NOT roundtrip — proves the workaround is load-bearing",
+            );
         }
     }
 }

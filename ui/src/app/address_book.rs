@@ -153,6 +153,11 @@ pub struct Contact {
     pub max_age_secs: u64,
     /// True when the user explicitly confirmed the fingerprint with the sender.
     pub verified: bool,
+    /// bs58-encoded inbox contract WASM code hash for this contact's
+    /// inbox, captured at import time (#251 improvement 4). `None`
+    /// for contacts that pre-date this field. See
+    /// `StoredContactKeys.inbox_wasm_hash`.
+    pub inbox_wasm_hash: Option<String>,
 }
 
 impl Contact {
@@ -195,6 +200,11 @@ pub struct Recipient {
     /// True only for contacts whose fingerprint was confirmed by the user.
     pub verified: bool,
     pub is_own: bool,
+    /// Recipient's inbox WASM code hash (#251 improvement 4). `None`
+    /// means "fall back to the sender's embedded `INBOX_CODE_HASH`"
+    /// — preserves pre-#251 behaviour for own identities and for
+    /// contacts imported before this field shipped.
+    pub inbox_wasm_hash: Option<String>,
 }
 
 impl Recipient {
@@ -309,6 +319,7 @@ pub fn lookup(alias: &str) -> Option<Recipient> {
                     max_age_secs: id.max_age_secs,
                     verified: true,
                     is_own: true,
+                    inbox_wasm_hash: None,
                 }
             }
             Entry::Contact(c) => {
@@ -322,6 +333,7 @@ pub fn lookup(alias: &str) -> Option<Recipient> {
                     max_age_secs: c.max_age_secs,
                     verified: c.verified,
                     is_own: false,
+                    inbox_wasm_hash: c.inbox_wasm_hash.clone(),
                 }
             }
         })
@@ -334,7 +346,7 @@ pub fn lookup(alias: &str) -> Option<Recipient> {
 /// fingerprint. Unknown addresses return `None`; the UI surfaces "import
 /// as contact first".
 pub fn lookup_by_bs58(addr: &str) -> Option<Recipient> {
-    use crate::inbox::inbox_key_for;
+    use crate::inbox::{INBOX_CODE_HASH, inbox_key_for, inbox_key_for_with_hash};
     use std::str::FromStr;
     let trimmed = addr.trim();
     let target = freenet_stdlib::prelude::ContractInstanceId::from_str(trimmed).ok()?;
@@ -343,7 +355,13 @@ pub fn lookup_by_bs58(addr: &str) -> Option<Recipient> {
         ab.borrow().values().find_map(|entry| match entry {
             Entry::Contact(c) => {
                 let vk = vk_from_bytes(&c.ml_dsa_vk_bytes).ok()?;
-                let key = inbox_key_for(&vk).ok()?;
+                // #251 improvement 4: address-book lookup must derive the
+                // contact's inbox key under the contact's advertised
+                // hash, not the sender's `INBOX_CODE_HASH`. A
+                // cross-version contact's actual contract id differs
+                // from `inbox_key_for(vk)` once the sender upgrades.
+                let code_hash = c.inbox_wasm_hash.as_deref().unwrap_or(INBOX_CODE_HASH);
+                let key = inbox_key_for_with_hash(&vk, code_hash).ok()?;
                 if *key.id() == target {
                     let fingerprint = c.fingerprint();
                     Some(Recipient {
@@ -355,6 +373,7 @@ pub fn lookup_by_bs58(addr: &str) -> Option<Recipient> {
                         max_age_secs: c.max_age_secs,
                         verified: c.verified,
                         is_own: false,
+                        inbox_wasm_hash: c.inbox_wasm_hash.clone(),
                     })
                 } else {
                     None
@@ -376,6 +395,7 @@ pub fn lookup_by_bs58(addr: &str) -> Option<Recipient> {
                         max_age_secs: id.max_age_secs,
                         verified: true,
                         is_own: true,
+                        inbox_wasm_hash: None,
                     })
                 } else {
                     None
@@ -392,14 +412,24 @@ pub fn lookup_by_bs58(addr: &str) -> Option<Recipient> {
 /// can't render a contact's inbox (the messages are encrypted to the
 /// contact's ml_kem key, not ours) — the prime is fire-and-forget.
 pub fn is_contact_inbox_key(key: &freenet_stdlib::prelude::ContractKey) -> bool {
-    use crate::inbox::inbox_key_for;
+    use crate::inbox::{INBOX_CODE_HASH, inbox_key_for_with_hash};
     ADDRESS_BOOK.with(|ab| {
         ab.borrow().values().any(|e| match e {
+            // #251 improvement 4: derive each contact's inbox key under
+            // the contact's advertised WASM hash. A cross-version
+            // contact's actual `key.id()` is derived from THAT hash, not
+            // the sender's `INBOX_CODE_HASH`; falling back to the
+            // sender's hash here silently failed to match
+            // UpdateNotifications + GetResponses for cross-version
+            // contacts, breaking tier-cache priming + ack pairing.
             Entry::Contact(c) => match vk_from_bytes(&c.ml_dsa_vk_bytes) {
-                Ok(vk) => match inbox_key_for(&vk) {
-                    Ok(contact_key) => contact_key.id() == key.id(),
-                    Err(_) => false,
-                },
+                Ok(vk) => {
+                    let code_hash = c.inbox_wasm_hash.as_deref().unwrap_or(INBOX_CODE_HASH);
+                    match inbox_key_for_with_hash(&vk, code_hash) {
+                        Ok(contact_key) => contact_key.id() == key.id(),
+                        Err(_) => false,
+                    }
+                }
                 Err(_) => false,
             },
             Entry::Own(_) => false,
@@ -519,6 +549,16 @@ pub struct StoredContactKeys {
     pub required_tier: Tier,
     #[serde(default = "default_max_age_secs")]
     pub max_age_secs: u64,
+    /// bs58-encoded inbox contract WASM code hash for this contact's
+    /// inbox, captured from the GetResponse at import time
+    /// (#251 improvement 4). The sender uses this hash to derive the
+    /// recipient's inbox `ContractKey`, so a non-upgraded recipient
+    /// still receives messages from an upgraded sender. `None` for
+    /// contacts imported before this field shipped — send path falls
+    /// back to the sender's embedded `INBOX_CODE_HASH` (pre-#251
+    /// behaviour).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inbox_wasm_hash: Option<String>,
 }
 
 impl StoredContactKeys {
@@ -541,6 +581,7 @@ impl StoredContactKeys {
             verified,
             required_tier: state.settings.minimum_tier,
             max_age_secs: state.settings.max_age_secs,
+            inbox_wasm_hash: None,
         }
     }
 
@@ -553,6 +594,7 @@ impl StoredContactKeys {
             required_tier: self.required_tier,
             max_age_secs: self.max_age_secs,
             verified: self.verified,
+            inbox_wasm_hash: self.inbox_wasm_hash,
         }
     }
 }
@@ -685,6 +727,41 @@ mod tests {
         );
     }
 
+    /// Older delegate payloads omit `inbox_wasm_hash` entirely. They
+    /// must still decode and default to `None` so existing contacts
+    /// keep working after the #251 improvement 4 schema bump.
+    #[test]
+    fn stored_contact_keys_missing_inbox_wasm_hash_defaults_to_none() {
+        let json = br#"{
+            "ml_dsa_vk_bytes":[1,2,3],
+            "ml_kem_ek_bytes":[4,5,6],
+            "suggested_alias":null,
+            "verified":false
+        }"#;
+        let decoded: StoredContactKeys =
+            serde_json::from_slice(json).expect("legacy payload must decode");
+        assert_eq!(decoded.inbox_wasm_hash, None);
+    }
+
+    /// New payloads with `inbox_wasm_hash` round-trip cleanly so the
+    /// sender always sees the recipient's advertised hash after a
+    /// delegate reload.
+    #[test]
+    fn stored_contact_keys_with_inbox_wasm_hash_round_trips() {
+        let original = StoredContactKeys {
+            ml_dsa_vk_bytes: vec![1; 1952],
+            ml_kem_ek_bytes: vec![2; 1184],
+            suggested_alias: Some("alice".into()),
+            verified: true,
+            required_tier: Tier::Min10,
+            max_age_secs: DEFAULT_MAX_AGE_SECS,
+            inbox_wasm_hash: Some("EeAHzLBKgFG2dF7TdpeP3JLrHEqKnaznT7WVtnutaQXH".into()),
+        };
+        let bytes = serde_json::to_vec(&original).expect("serialise");
+        let decoded: StoredContactKeys = serde_json::from_slice(&bytes).expect("deserialise");
+        assert_eq!(decoded.inbox_wasm_hash, original.inbox_wasm_hash);
+    }
+
     fn make_contact(alias: &str, vk: u8, ek: u8) -> Contact {
         Contact {
             local_alias: alias.into(),
@@ -694,6 +771,7 @@ mod tests {
             required_tier: Tier::Day1,
             max_age_secs: DEFAULT_MAX_AGE_SECS,
             verified: false,
+            inbox_wasm_hash: None,
         }
     }
 
@@ -898,6 +976,7 @@ mod tests {
             required_tier: Tier::Day1,
             max_age_secs: DEFAULT_MAX_AGE_SECS,
             verified: false,
+            inbox_wasm_hash: None,
         };
         insert_contact(contact).unwrap();
 
@@ -925,6 +1004,7 @@ mod tests {
             required_tier: Tier::Day1,
             max_age_secs: DEFAULT_MAX_AGE_SECS,
             verified: false,
+            inbox_wasm_hash: None,
         })
         .unwrap();
 
@@ -959,6 +1039,7 @@ mod tests {
             required_tier: Tier::Day1,
             max_age_secs: DEFAULT_MAX_AGE_SECS,
             verified: true,
+            inbox_wasm_hash: None,
         })
         .unwrap();
 

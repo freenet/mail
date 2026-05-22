@@ -403,11 +403,15 @@ impl AftRecords {
     // recipient's inbox contract (ML-DSA-65 verifying key bytes, caller-computed).
     // `recipient_required_tier` / `recipient_max_age_secs`: recipient's
     // anti-flood policy from their `InboxParams` / `ContactCard` (#85).
+    // `recipient_inbox_wasm_hash`: recipient's inbox WASM code hash
+    // (#251 improvement 4). `None` falls back to the sender's embedded
+    // `INBOX_CODE_HASH` (preserves pre-#251 behaviour).
     pub async fn assign_token(
         client: &mut WebApiRequestClient,
         recipient_inbox_pub_key: Vec<u8>,
         recipient_required_tier: Tier,
         recipient_max_age_secs: u64,
+        recipient_inbox_wasm_hash: Option<&str>,
         generator_id: &Identity,
         assignment_hash: [u8; 32],
     ) -> Result<DelegateKey, DynError> {
@@ -441,8 +445,8 @@ impl AftRecords {
             pub_key: recipient_inbox_pub_key,
         }
         .try_into()?;
-        let inbox_key =
-            ContractKey::from_params(crate::inbox::INBOX_CODE_HASH, inbox_params.clone())?;
+        let inbox_code_hash = recipient_inbox_wasm_hash.unwrap_or(crate::inbox::INBOX_CODE_HASH);
+        let inbox_key = ContractKey::from_params(inbox_code_hash, inbox_params.clone())?;
         let delegate_params = DelegateParameters::new(seed_bytes);
 
         let record_params = TokenDelegateParameters::new(&sender_vk);
