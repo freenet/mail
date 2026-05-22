@@ -88,6 +88,33 @@ if git ls-remote --exit-code --tags origin "$TAG" >/dev/null 2>&1; then
     die "tag $TAG already exists on origin. Either bump the version or delete it remotely."
 fi
 
+# Workspace Cargo.toml version must match the requested release version.
+# `ui/src/lib.rs` bakes `env!("CARGO_PKG_VERSION")` into the wasm; if the
+# workspace version drifts behind the tag the published webapp shows the
+# old version in its sidebar and CI byte-equality reports "unchanged
+# bytes" because nothing actually moved between releases (this is how
+# v0.1.9/v0.1.10/v0.1.11 all shipped with v0.1.8 baked in).
+CARGO_VERSION=$(awk '
+    /^\[workspace\.package\]/ { in_section = 1; next }
+    /^\[/                     { in_section = 0 }
+    in_section && /^version *= *"/ {
+        match($0, /"[^"]+"/)
+        print substr($0, RSTART + 1, RLENGTH - 2)
+        exit
+    }
+' Cargo.toml)
+if [ -z "$CARGO_VERSION" ]; then
+    die "could not parse [workspace.package] version from Cargo.toml"
+fi
+if [ "$CARGO_VERSION" != "$VERSION" ]; then
+    die "Cargo.toml workspace version ($CARGO_VERSION) does not match release version ($VERSION).
+Bump it first:
+  sed -i.bak 's/^version = \"$CARGO_VERSION\"/version = \"$VERSION\"/' Cargo.toml && rm Cargo.toml.bak
+  cargo update --workspace
+  git commit -am 'chore: bump workspace version to $VERSION'"
+fi
+echo "  ✓ Cargo.toml workspace version = $VERSION"
+
 # Production key
 KEY_FILE="${WEB_CONTAINER_KEY_FILE:-$HOME/.config/freenet-email/web-container-keys.toml}"
 if [ ! -f "$KEY_FILE" ]; then
