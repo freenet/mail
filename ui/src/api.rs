@@ -369,6 +369,18 @@ mod inbox_management {
         /// after a timeout — currently best-effort).
         pub(super) static PENDING_MIGRATION: RefCell<HashMap<ContractKey, crate::app::Identity>> =
             RefCell::new(HashMap::new());
+
+        /// #251 improvement 2: tracks identities whose migration is
+        /// either already in-flight or completed this session, keyed by
+        /// ML-DSA verifying-key bytes (NOT alias — aliases mutate via
+        /// rename). Chained migration dispatches GETs against several
+        /// historical inbox keys for the same identity; the entry is
+        /// inserted BEFORE the PUT await so a second GetResponse
+        /// arriving during the await is suppressed (closes TOCTOU). On
+        /// PUT failure the entry is removed to allow retry on the next
+        /// candidate response.
+        pub(super) static MIGRATED_IDENTITIES: RefCell<std::collections::HashSet<Vec<u8>>> =
+            RefCell::new(std::collections::HashSet::new());
     }
 
     /// PUT the migrated inbox state under the identity's CURRENT inbox
@@ -425,26 +437,43 @@ mod inbox_management {
     ) -> Result<(), DynError> {
         use ml_dsa::signature::Keypair;
         let vk = Keypair::verifying_key(identity.ml_dsa_signing_key.as_ref());
-        let params: Parameters = InboxParams {
-            pub_key: crate::inbox::inbox_params_pub_key_bytes(&vk),
+        let pub_key = crate::inbox::inbox_params_pub_key_bytes(&vk);
+
+        // #251 improvement 2: chained migration. Build the candidate
+        // chain via `build_migration_candidates` — always starts with
+        // `prior_hash` itself, then every legacy entry that follows
+        // it (or every legacy entry, if `prior_hash` is not in the
+        // list — see the helper for the rationale). GET each in turn;
+        // the GetResponse arm in `node_comms` picks the first one
+        // that resolves and re-PUTs under the CURRENT key, suppressing
+        // duplicate responses via `MIGRATED_IDENTITIES`.
+        let candidates = crate::inbox::build_migration_candidates(
+            prior_hash,
+            crate::inbox::LEGACY_INBOX_CODE_HASHES,
+        );
+
+        for candidate in candidates {
+            let params: Parameters = InboxParams {
+                pub_key: pub_key.clone(),
+            }
+            .try_into()?;
+            let old_key = ContractKey::from_params(&candidate, params)
+                .map_err(|e| format!("derive old inbox key: {e}"))?;
+            PENDING_MIGRATION.with(|m| {
+                m.borrow_mut().insert(old_key, identity.clone());
+            });
+            let request = ContractRequest::Get {
+                key: old_key.into(),
+                return_contract_code: false,
+                subscribe: false,
+                blocking_subscribe: false,
+            };
+            client.send(request.into()).await?;
+            crate::log::info(format!(
+                "inbox migration: GET dispatched for old key {old_key} (identity=`{}`, hash={candidate}) (#213, #251)",
+                identity.alias()
+            ));
         }
-        .try_into()?;
-        let old_key = ContractKey::from_params(prior_hash, params)
-            .map_err(|e| format!("derive old inbox key: {e}"))?;
-        PENDING_MIGRATION.with(|m| {
-            m.borrow_mut().insert(old_key, identity.clone());
-        });
-        let request = ContractRequest::Get {
-            key: old_key.into(),
-            return_contract_code: false,
-            subscribe: false,
-            blocking_subscribe: false,
-        };
-        client.send(request.into()).await?;
-        crate::log::info(format!(
-            "inbox migration: GET dispatched for old key {old_key} (identity=`{}`) (#213)",
-            identity.alias()
-        ));
         Ok(())
     }
 
@@ -872,6 +901,34 @@ mod identity_management {
         let msg = IdentityMsg::UpdateInboxWasmHash {
             alias: alias.to_string(),
             wasm_hash: crate::inbox::INBOX_CODE_HASH.to_string(),
+        };
+        send_identity_msg(client, &msg).await
+    }
+
+    /// Mark an in-flight migration on the identity-management delegate
+    /// so the next session can re-attempt the GET if this one never
+    /// resolves (#251 improvement 5).
+    pub(super) async fn set_pending_migration_api_call(
+        client: &mut WebApiRequestClient,
+        alias: &str,
+        prior_hash: &str,
+    ) -> Result<(), DynError> {
+        let msg = IdentityMsg::SetPendingMigrationFrom {
+            alias: alias.to_string(),
+            prior_hash: Some(prior_hash.to_string()),
+        };
+        send_identity_msg(client, &msg).await
+    }
+
+    /// Clear the in-flight migration marker after a successful PUT
+    /// under the current inbox key (#251 improvement 5).
+    pub(super) async fn clear_pending_migration_api_call(
+        client: &mut WebApiRequestClient,
+        alias: &str,
+    ) -> Result<(), DynError> {
+        let msg = IdentityMsg::SetPendingMigrationFrom {
+            alias: alias.to_string(),
+            prior_hash: None,
         };
         send_identity_msg(client, &msg).await
     }
@@ -1864,40 +1921,104 @@ pub(crate) async fn node_comms(
                                     // unchanged, so we can reconstruct the
                                     // serialized state by calling Inbox::new
                                     // with the same settings + messages.
-                                    match serde_json::from_slice::<StoredInbox>(state.as_ref()) {
-                                        Ok(parsed) => {
-                                            if let Err(e) = inbox_management::put_migrated_inbox(
-                                                &mut client,
-                                                &identity,
-                                                parsed,
-                                            )
-                                            .await
-                                            {
+                                    //
+                                    // #251 improvement 2: chained migration may
+                                    // dispatch GETs against several historical
+                                    // keys. The first one to land wins; later
+                                    // responses for the same identity are
+                                    // ignored via MIGRATED_IDENTITIES (keyed
+                                    // by ML-DSA verifying-key bytes — alias
+                                    // mutates via rename). The insert happens
+                                    // BEFORE awaiting the PUT to close the
+                                    // TOCTOU window between guard check and
+                                    // PUT completion. On PUT failure we
+                                    // remove the entry so the next candidate
+                                    // response can retry.
+                                    let alias_str = identity.alias().to_string();
+                                    let vk_key = {
+                                        use ml_dsa::signature::Keypair;
+                                        let vk = Keypair::verifying_key(
+                                            identity.ml_dsa_signing_key.as_ref(),
+                                        );
+                                        crate::inbox::inbox_params_pub_key_bytes(&vk)
+                                    };
+                                    let claimed = inbox_management::MIGRATED_IDENTITIES.with(|s| {
+                                        let mut set = s.borrow_mut();
+                                        if set.contains(&vk_key) {
+                                            false
+                                        } else {
+                                            set.insert(vk_key.clone());
+                                            true
+                                        }
+                                    });
+                                    if !claimed {
+                                        crate::log::debug!(
+                                            "inbox migration: skipping duplicate GetResponse for {key} (identity=`{alias_str}`) — already claimed this session"
+                                        );
+                                    } else {
+                                        match serde_json::from_slice::<StoredInbox>(state.as_ref())
+                                        {
+                                            Ok(parsed) => {
+                                                if let Err(e) =
+                                                    inbox_management::put_migrated_inbox(
+                                                        &mut client,
+                                                        &identity,
+                                                        parsed,
+                                                    )
+                                                    .await
+                                                {
+                                                    crate::log::error(
+                                                        format!(
+                                                            "inbox migration: PUT failed for `{alias_str}`: {e} (#213)"
+                                                        ),
+                                                        None,
+                                                    );
+                                                    inbox_management::MIGRATED_IDENTITIES.with(
+                                                        |s| {
+                                                            s.borrow_mut().remove(&vk_key);
+                                                        },
+                                                    );
+                                                } else {
+                                                    // #251 improvement 5:
+                                                    // clear the persistent
+                                                    // pending-migration marker
+                                                    // now that the PUT
+                                                    // succeeded. Until this
+                                                    // clear lands, subsequent
+                                                    // session restarts would
+                                                    // re-attempt the GET.
+                                                    if let Err(e) = identity_management::clear_pending_migration_api_call(
+                                                        &mut client,
+                                                        &alias_str,
+                                                    )
+                                                    .await
+                                                    {
+                                                        crate::log::error(
+                                                            format!(
+                                                                "inbox migration: clear pending marker for `{alias_str}` failed: {e} (#251)"
+                                                            ),
+                                                            None,
+                                                        );
+                                                    }
+                                                    crate::toast::push_toast(
+                                                        format!(
+                                                            "Inbox `{alias_str}` migrated to the new contract id after webapp upgrade."
+                                                        ),
+                                                        crate::toast::ToastLevel::Info,
+                                                    );
+                                                }
+                                            }
+                                            Err(e) => {
                                                 crate::log::error(
                                                     format!(
-                                                        "inbox migration: PUT failed for `{}`: {e} (#213)",
-                                                        identity.alias()
+                                                        "inbox migration: deser old state for `{alias_str}` failed: {e} (#213)"
                                                     ),
                                                     None,
                                                 );
-                                            } else {
-                                                crate::toast::push_toast(
-                                                    format!(
-                                                        "Inbox `{}` migrated to the new contract id after webapp upgrade.",
-                                                        identity.alias()
-                                                    ),
-                                                    crate::toast::ToastLevel::Info,
-                                                );
+                                                inbox_management::MIGRATED_IDENTITIES.with(|s| {
+                                                    s.borrow_mut().remove(&vk_key);
+                                                });
                                             }
-                                        }
-                                        Err(e) => {
-                                            crate::log::error(
-                                                format!(
-                                                    "inbox migration: deser old state for `{}` failed: {e} (#213)",
-                                                    identity.alias()
-                                                ),
-                                                None,
-                                            );
                                         }
                                     }
                                 } else {
@@ -2317,6 +2438,22 @@ pub(crate) async fn node_comms(
                                                 (alias.clone(), info.inbox_wasm_hash.clone())
                                             })
                                             .collect();
+                                        // #251 improvement 5: snapshot
+                                        // the persistent pending-migration
+                                        // marker per identity. If set and
+                                        // the current INBOX_CODE_HASH
+                                        // still differs from the recorded
+                                        // hash, the previous session's
+                                        // GET never resolved — re-attempt.
+                                        let recorded_pending_migrations: std::collections::HashMap<
+                                            String,
+                                            Option<String>,
+                                        > = im
+                                            .get_info()
+                                            .map(|(alias, info)| {
+                                                (alias.clone(), info.pending_migration_from.clone())
+                                            })
+                                            .collect();
                                         let new_ids = crate::app::Identity::set_aliases(im, user);
                                         // ALIASES is a thread_local Vec, not a
                                         // Dioxus signal — bump login_controller
@@ -2436,21 +2573,52 @@ pub(crate) async fn node_comms(
                                                 .get(&alias_str)
                                                 .cloned()
                                                 .flatten();
-                                            match prior {
-                                                Some(prior_hash)
-                                                    if prior_hash
-                                                        == crate::inbox::INBOX_CODE_HASH =>
-                                                {
-                                                    // No drift; nothing to do.
-                                                }
+                                            let pending_marker = recorded_pending_migrations
+                                                .get(&alias_str)
+                                                .cloned()
+                                                .flatten();
+                                            // #251 improvement 5: drift
+                                            // selection (prior vs pending
+                                            // marker vs current) is a pure
+                                            // helper in `inbox.rs` so the
+                                            // precedence rules can be
+                                            // unit-tested.
+                                            let migrate_from = crate::inbox::select_migrate_from(
+                                                prior.as_deref(),
+                                                pending_marker.as_deref(),
+                                                crate::inbox::INBOX_CODE_HASH,
+                                            );
+                                            match migrate_from {
                                                 Some(prior_hash) => {
                                                     crate::log::info(format!(
                                                         "inbox migration: detected drift for `{}` \
-                                                         prior_hash={} current_hash={} (#213)",
+                                                         prior_hash={} current_hash={} pending={} (#213, #251)",
                                                         alias_str,
                                                         prior_hash,
-                                                        crate::inbox::INBOX_CODE_HASH
+                                                        crate::inbox::INBOX_CODE_HASH,
+                                                        pending_marker.is_some()
                                                     ));
+                                                    // Stamp the pending
+                                                    // marker BEFORE
+                                                    // dispatching the GET
+                                                    // so a crash mid-flow
+                                                    // still allows the
+                                                    // next session to
+                                                    // recover (#251).
+                                                    if let Err(e) = identity_management::set_pending_migration_api_call(
+                                                        &mut client,
+                                                        &alias_str,
+                                                        &prior_hash,
+                                                    )
+                                                    .await
+                                                    {
+                                                        crate::log::error(
+                                                            format!(
+                                                                "inbox migration: mark pending failed for `{alias_str}`: {e} (#251)"
+                                                            ),
+                                                            None,
+                                                        );
+                                                    }
                                                     if let Err(e) = inbox_management::migrate_inbox(
                                                         &mut client,
                                                         id,
@@ -2460,12 +2628,22 @@ pub(crate) async fn node_comms(
                                                     {
                                                         crate::log::error(
                                                             format!(
-                                                                "inbox migration: failed for `{}`: {e} (#213)",
-                                                                alias_str
+                                                                "inbox migration: failed for `{alias_str}`: {e} (#213)"
                                                             ),
                                                             None,
                                                         );
                                                     }
+                                                    // Stamp the current
+                                                    // hash so drift
+                                                    // doesn't keep firing
+                                                    // each session even
+                                                    // when the GET never
+                                                    // resolves. The
+                                                    // pending marker is
+                                                    // the source of truth
+                                                    // for retry — it's
+                                                    // cleared only on
+                                                    // successful PUT.
                                                     if let Err(e) = identity_management::stamp_inbox_wasm_hash_api_call(
                                                         &mut client,
                                                         &alias_str,
@@ -2474,29 +2652,47 @@ pub(crate) async fn node_comms(
                                                     {
                                                         crate::log::error(
                                                             format!(
-                                                                "inbox migration: stamp failed for `{}`: {e} (#213)",
-                                                                alias_str
+                                                                "inbox migration: stamp failed for `{alias_str}`: {e} (#213)"
                                                             ),
                                                             None,
                                                         );
                                                     }
                                                 }
                                                 None => {
-                                                    // First observation —
-                                                    // baseline the current
-                                                    // hash so the next
-                                                    // contract bump can be
-                                                    // detected.
-                                                    if let Err(e) = identity_management::stamp_inbox_wasm_hash_api_call(
-                                                        &mut client,
-                                                        &alias_str,
-                                                    )
-                                                    .await
+                                                    // No drift OR first
+                                                    // observation. Baseline
+                                                    // the current hash if
+                                                    // we haven't yet.
+                                                    if prior.is_none()
+                                                        && let Err(e) = identity_management::stamp_inbox_wasm_hash_api_call(
+                                                            &mut client,
+                                                            &alias_str,
+                                                        )
+                                                        .await
                                                     {
                                                         crate::log::error(
                                                             format!(
-                                                                "inbox migration: baseline stamp failed for `{}`: {e} (#213)",
-                                                                alias_str
+                                                                "inbox migration: baseline stamp failed for `{alias_str}`: {e} (#213)"
+                                                            ),
+                                                            None,
+                                                        );
+                                                    }
+                                                    // #251 improvement 5
+                                                    // cleanup: clear stale
+                                                    // pending marker if
+                                                    // prior == current
+                                                    // but a leftover
+                                                    // marker survived.
+                                                    if pending_marker.is_some()
+                                                        && let Err(e) = identity_management::clear_pending_migration_api_call(
+                                                            &mut client,
+                                                            &alias_str,
+                                                        )
+                                                        .await
+                                                    {
+                                                        crate::log::error(
+                                                            format!(
+                                                                "inbox migration: clear stale pending marker for `{alias_str}` failed: {e} (#251)"
                                                             ),
                                                             None,
                                                         );

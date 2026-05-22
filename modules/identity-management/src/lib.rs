@@ -98,6 +98,16 @@ pub struct AliasInfo {
     /// with old delegate states that lack the field via `#[serde(default)]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inbox_wasm_hash: Option<String>,
+    /// Hash this identity's inbox is being migrated FROM, if a migration
+    /// is currently in flight (#251 improvement 5). Set by the UI before
+    /// dispatching the GET against the old contract key; cleared after
+    /// the PUT under the new key succeeds. Persisting the in-flight
+    /// state lets the UI re-attempt the migration on the next session
+    /// if the GET never resolved (node offline, contract expired).
+    /// Backwards-compatible with older delegate states via
+    /// `#[serde(default)]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_migration_from: Option<String>,
 }
 
 #[derive(Deserialize, Serialize, Default, Debug)]
@@ -208,6 +218,7 @@ impl DelegateInterface for IdentityManagement {
                                 extra,
                                 kind: kind.unwrap_or_default(),
                                 inbox_wasm_hash: None,
+                                pending_migration_from: None,
                             },
                         );
                         let updated = serde_json::to_vec(&manager)
@@ -243,6 +254,34 @@ impl DelegateInterface for IdentityManagement {
                             let updated = serde_json::to_vec(&manager)
                                 .map_err(|e| DelegateError::Deser(format!("{e}")))?;
                             ctx.set_secret(&secret_key, &updated);
+                        }
+                        Ok(vec![])
+                    }
+                    IdentityMsg::SetPendingMigrationFrom { alias, prior_hash } => {
+                        // Per-field mutation for #251 improvement 5.
+                        // `Some(hash)` marks a migration in flight from
+                        // that hash; `None` clears the marker after a
+                        // successful PUT. No-op on missing alias for
+                        // the same reason as UpdateInboxWasmHash, but
+                        // logged because silent no-ops on persistent-
+                        // state messages have been a debugging cost
+                        // before.
+                        let mut manager = match ctx.get_secret(&secret_key) {
+                            Some(value) => IdentityManagement::try_from(value.as_slice())?,
+                            None => IdentityManagement::default(),
+                        };
+                        if let Some(info) = manager.identities.get_mut(alias.as_str()) {
+                            info.pending_migration_from = prior_hash;
+                            let updated = serde_json::to_vec(&manager)
+                                .map_err(|e| DelegateError::Deser(format!("{e}")))?;
+                            ctx.set_secret(&secret_key, &updated);
+                        } else {
+                            #[cfg(feature = "contract")]
+                            {
+                                freenet_stdlib::log::info(&format!(
+                                    "SetPendingMigrationFrom: alias `{alias}` missing; ignoring"
+                                ));
+                            }
                         }
                         Ok(vec![])
                     }
@@ -291,6 +330,17 @@ pub enum IdentityMsg {
     UpdateInboxWasmHash {
         alias: String,
         wasm_hash: String,
+    },
+    /// Set or clear the `pending_migration_from` marker on an identity
+    /// (#251 improvement 5). The UI stamps `Some(prior_hash)` before
+    /// dispatching the migration GET and `None` after the PUT under
+    /// the current key succeeds. On startup with a non-None marker
+    /// and `inbox_wasm_hash` still != `INBOX_CODE_HASH`, the UI
+    /// re-attempts the migration. Backwards-compatible: old senders
+    /// don't emit this variant.
+    SetPendingMigrationFrom {
+        alias: String,
+        prior_hash: Option<String>,
     },
     /// Request the current set of identities. Returns the serialized
     /// `IdentityManagement` as an `ApplicationMessage` response.
@@ -416,6 +466,36 @@ mod boundary_tests {
         }
     }
 
+    /// AliasInfo without `pending_migration_from` must deserialise to
+    /// `None` (#251 backwards-compat).
+    #[test]
+    fn alias_info_missing_pending_migration_defaults_to_none() {
+        let json = br#"{"key":[1],"extra":null,"kind":"identity","inbox_wasm_hash":"abc"}"#;
+        let info: AliasInfo = serde_json::from_slice(json).expect("should deserialise");
+        assert_eq!(info.pending_migration_from, None);
+    }
+
+    /// `IdentityMsg::SetPendingMigrationFrom` round-trips with both
+    /// `Some` and `None` payloads (#251).
+    #[test]
+    fn set_pending_migration_round_trips() {
+        for prior in [Some("oldhash".to_string()), None] {
+            let msg = IdentityMsg::SetPendingMigrationFrom {
+                alias: "alice".into(),
+                prior_hash: prior.clone(),
+            };
+            let bytes = serde_json::to_vec(&msg).expect("serialise");
+            let decoded: IdentityMsg = serde_json::from_slice(&bytes).expect("deserialise");
+            match decoded {
+                IdentityMsg::SetPendingMigrationFrom { alias, prior_hash } => {
+                    assert_eq!(alias, "alice");
+                    assert_eq!(prior_hash, prior);
+                }
+                other => panic!("expected SetPendingMigrationFrom, got {other:?}"),
+            }
+        }
+    }
+
     /// `IdentityMsg::CreateIdentity` without a `kind` field must deserialise
     /// successfully (backwards-compat for senders that pre-date the field).
     #[test]
@@ -440,6 +520,7 @@ mod boundary_tests {
                 extra: None,
                 kind: EntryKind::Identity,
                 inbox_wasm_hash: None,
+                pending_migration_from: None,
             },
         );
         mgr.identities.insert(
@@ -449,6 +530,7 @@ mod boundary_tests {
                 extra: Some("friend".into()),
                 kind: EntryKind::Contact,
                 inbox_wasm_hash: None,
+                pending_migration_from: None,
             },
         );
         let json = serde_json::to_vec(&mgr).unwrap();
