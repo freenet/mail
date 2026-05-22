@@ -452,6 +452,20 @@ from the identity's ML-DSA seed, not from the WASM, so it rotates
 only when the seed changes — i.e. never under a deliberate
 contract bump). The `current_aft_hash_not_in_legacy` test
 enforces the same append-only invariant as the inbox slice.
+`token_delegate_parameters_are_deterministic_per_vk` pins the
+load-bearing claim that `TokenDelegateParameters::new(&vk)` encodes
+byte-identically across calls.
+
+Deliberate AFT-record rotation recipe: edit a `=x.y.z` pin in
+`modules/antiflood-tokens/contracts/token-allocation-record/Cargo.toml`
+(or the contract source), `cargo make build-token-allocation-record`,
+append the prior `TOKEN_RECORD_CODE_HASH` to
+`LEGACY_TOKEN_RECORD_CODE_HASHES` in `ui/src/aft.rs`, ship. Schema
+of `TokenAllocationRecord` itself must stay compatible — appending
+to the legacy slice migrates state byte-for-byte; a JSON-schema
+change in the same release would silently fail `validate_state`
+per user and needs a dedicated re-shape pass in
+`put_migrated_aft_record`.
 
 **Chained migration (#251 improvement 2)**: `LEGACY_INBOX_CODE_HASHES`
 in `ui/src/inbox.rs` is an append-only oldest→newest list of every

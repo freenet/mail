@@ -582,6 +582,16 @@ mod token_record_management {
     /// to verify every assignment), which is unchanged across an AFT
     /// contract bump — so the old state re-validates under the new
     /// contract id.
+    ///
+    /// Unlike `inbox_management::put_migrated_inbox`, the migrated
+    /// state is NOT re-signed here. Inbox state carries an ML-DSA
+    /// signature over `(state, params)` that has to be regenerated
+    /// under the new params hash, so the inbox path calls
+    /// `Inbox::new` to re-sign. AFT records carry NO contract-id-
+    /// dependent signature: every `TokenAssignment` is signed by the
+    /// generator-delegate key over fields that do not include the
+    /// contract id, and `validate_state` only checks those per-
+    /// assignment signatures. A straight re-PUT is sufficient.
     pub(super) async fn put_migrated_aft_record(
         client: &mut WebApiRequestClient,
         identity: &crate::app::Identity,
