@@ -818,6 +818,21 @@ impl Inbox {
             match update {
                 UpdateData::State(state) => {
                     let full_inbox = Inbox::try_from(&state)?;
+                    // Verify the incoming State carries a signature
+                    // valid for its own `owner_ek_bytes` — without this
+                    // a peer could broadcast a `State` whose
+                    // `owner_ek_bytes` was tampered with (or stripped to
+                    // empty) and `merge` would overwrite the local copy
+                    // with the bad bytes. The signature payload is
+                    // `STATE_UPDATE || owner_ek_bytes` so verifying here
+                    // closes the ek-substitution / ek-downgrade window.
+                    // Note: `settings` and `last_update` are NOT in the
+                    // signed payload — re-signing on every
+                    // `ModifySettings` requires the owner's signing key,
+                    // which is not available in the WASM contract host.
+                    // Tracked separately for a sender-side resigning
+                    // redesign.
+                    full_inbox.verify(&params)?;
                     inbox.merge(full_inbox)?;
                 }
                 UpdateData::Delta(d) => match UpdateInbox::try_from(d)? {

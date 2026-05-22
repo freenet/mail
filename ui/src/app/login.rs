@@ -84,7 +84,7 @@ pub(crate) struct Identity {
     /// once at construction. Avoids re-deriving from `ml_kem_dk` on every read,
     /// which surfaced as a fingerprint mismatch (#100): two reads from the same
     /// logical identity could return different bytes after `Clone`, so the
-    /// share-modal six-word display and the contact:// token disagreed.
+    /// share-modal six-word display and the encoded contact token disagreed.
     ek_bytes: Vec<u8>,
     /// Cached encoded ML-DSA-65 verifying key bytes (1952 bytes), computed once
     /// at construction. Same rationale as `ek_bytes` — keeps the public-key
@@ -1809,19 +1809,23 @@ pub(super) fn ShareContactModal() -> Element {
         .unwrap_or_default();
     let mut copied = use_signal(|| false);
 
-    // Pull the verify line ("verify: w-w-w-w-w-w") off the front of the
-    // share text so we can render the six words in the trust-surface
-    // verify-words block. The remainder is the contact:// token.
+    // Pull the verify line ("verify: w-w-w-w-w-w") out of the share
+    // text — line order is bs58-address then `verify:` (see `on_share`
+    // serializer) but we scan all lines symmetrically with the Import
+    // parser at `ImportContactForm` so swapping the order in the future
+    // doesn't break either side. The remainder (non-`verify:` lines) is
+    // the bs58 address token shown in the modal.
     let (verify_words, contact_token): (Vec<String>, String) = {
         let mut words = Vec::new();
-        let mut token = share_text.clone();
-        if let Some((first, rest)) = share_text.split_once('\n')
-            && let Some(stripped) = first.strip_prefix("verify: ")
-        {
-            words = stripped.split('-').map(|s| s.to_string()).collect();
-            token = rest.to_string();
+        let mut token_lines: Vec<&str> = Vec::new();
+        for line in share_text.lines() {
+            if let Some(rest) = line.trim().strip_prefix("verify:") {
+                words = rest.trim().split('-').map(|s| s.to_string()).collect();
+            } else if !line.trim().is_empty() {
+                token_lines.push(line);
+            }
         }
-        (words, token)
+        (words, token_lines.join("\n"))
     };
     let close = move |_| {
         share_contact_form.write().0 = false;
@@ -2078,6 +2082,14 @@ pub(super) fn ImportContactForm() -> Element {
     let can_import = fetched_keys.read().is_some() && !local_alias.read().is_empty();
 
     let cancel = move |_| {
+        // Drop any pending Get + cached result so re-opening the modal
+        // for a different (or same) address starts clean. Without this
+        // the thread-local PENDING / RESULTS maps grow unbounded across
+        // a session.
+        #[cfg(feature = "use-node")]
+        if let Some(addr) = pending_address.read().clone() {
+            crate::api::contact_import::cancel(&addr);
+        }
         import_contact_form.write().0 = false;
         error_msg.set(String::new());
     };
@@ -2090,6 +2102,10 @@ pub(super) fn ImportContactForm() -> Element {
     rsx! {
         div { class: "veil",
             onclick: move |_| {
+                #[cfg(feature = "use-node")]
+                if let Some(addr) = pending_address.read().clone() {
+                    crate::api::contact_import::cancel(&addr);
+                }
                 import_contact_form.write().0 = false;
                 error_msg.set(String::new());
             },
@@ -2219,6 +2235,10 @@ pub(super) fn ImportContactForm() -> Element {
                                 description.read().clone(),
                             );
                             actions.send(NodeAction::CreateContact { contact });
+                            #[cfg(feature = "use-node")]
+                            if let Some(addr) = pending_address.read().clone() {
+                                crate::api::contact_import::cancel(&addr);
+                            }
                             import_contact_form.write().0 = false;
                             paste_text.set(String::new());
                             local_alias.set(String::new());
@@ -2227,6 +2247,7 @@ pub(super) fn ImportContactForm() -> Element {
                             fingerprint_words.set(None);
                             fetched_keys.set(None);
                             verify_phrase.set(None);
+                            pending_address.set(None);
                             error_msg.set(String::new());
                         },
                         "Import"

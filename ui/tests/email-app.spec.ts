@@ -1448,8 +1448,11 @@ test.describe("Regression #158: contact modals mount inside inbox", () => {
     const shareModal = page.locator('[data-testid="fm-share-modal"]');
     await expect(shareModal).toBeVisible({ timeout: 5_000 });
 
-    // Share modal should contain the contact:// token for the active identity.
-    await expect(shareModal.locator(".token-block")).toContainText("contact://");
+    // Share modal token block holds the bs58 inbox address (#249 — was
+    // `contact://<base64-json>` pre-PR; now ~44-char bs58 string).
+    await expect(shareModal.locator(".token-block")).toContainText(
+      /[1-9A-HJ-NP-Za-km-z]{43,44}/,
+    );
   });
 
   // Confirm the pre-login flows that triggered these modals from the

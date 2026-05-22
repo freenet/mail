@@ -53,7 +53,7 @@ manual gap by adding a test, flip status to `auto` and link the test.
 
 | Behavior | Status | Test / recipe |
 |---|---|---|
-| Share modal contains six-word fingerprint + contact:// token | auto | offline: `opens with six-word fingerprint, contact:// token, and copy button` |
+| Share modal contains six-word fingerprint + bs58 inbox address (#249) | auto | offline: `opens with six-word fingerprint, bs58 inbox address, and copy button` |
 | Import contact: alias → resolves in compose | auto | offline: `import contact card → appears in contacts section → compose accepts alias` |
 | Verify checkbox tick → badge flips to verified | auto | offline: `ticking the verify card flips the contact's badge to verified` |
 | Verify button promotes unverified contact in place (#87) | auto | offline: `Verify button promotes an unverified contact in place` |

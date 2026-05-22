@@ -13,8 +13,8 @@ mod common;
 use chrono::{Duration, Utc};
 use common::{
     add_messages_delta, assignment_hash_for, fixed_valid_slot, inbox_verifying_key,
-    make_inbox_keypair, make_inbox_state, make_inbox_value, make_message, make_message_no_token,
-    make_params, make_settings_with_bypass, make_settings_with_bypass_multi,
+    make_inbox_keypair, make_inbox_state, make_inbox_state_with_ek, make_inbox_value, make_message,
+    make_message_no_token, make_params, make_settings_with_bypass, make_settings_with_bypass_multi,
     make_settings_with_policy, make_token_assignment, make_token_generator_keypair,
     make_token_record, modify_settings_delta, related_state_update, token_record_id_for,
 };
@@ -85,6 +85,133 @@ fn validate_rejects_wrong_owner_signature() {
     assert!(
         result.is_err(),
         "a state signed by a non-owner key must not validate; got {result:?}"
+    );
+}
+
+#[test]
+fn validate_accepts_signed_inbox_with_nonempty_ek() {
+    // Positive control: a state with a non-empty `owner_ek_bytes` signed
+    // correctly under `STATE_UPDATE || owner_ek_bytes` must validate.
+    // Without this, the negative tests below could pass for the wrong
+    // reason (e.g. the helper always producing an invalid state).
+    let owner_sk = make_inbox_keypair();
+    let owner_vk = inbox_verifying_key(&owner_sk);
+    let params = make_params(&owner_vk);
+    let ek_bytes = vec![0x11_u8; 1184];
+    let state = make_inbox_state_with_ek(
+        &owner_sk,
+        vec![],
+        Utc::now(),
+        InboxSettings::default(),
+        &ek_bytes,
+    );
+    let result = Inbox::validate_state(params, state, RelatedContracts::new());
+    assert!(
+        matches!(result, Ok(ValidateResult::Valid)),
+        "signed state with non-empty owner_ek_bytes must validate; got {result:?}"
+    );
+}
+
+#[test]
+fn validate_rejects_swapped_ek() {
+    // #249 security: the signature payload is `STATE_UPDATE ||
+    // owner_ek_bytes`, so swapping `owner_ek_bytes` post-signing must
+    // be rejected. Attack: a peer rebroadcasting an observed State
+    // tampers with the ek to point at their own key. Without binding
+    // the ek to the signature, encrypted messages would be diverted.
+    let owner_sk = make_inbox_keypair();
+    let owner_vk = inbox_verifying_key(&owner_sk);
+    let params = make_params(&owner_vk);
+    let real_ek = vec![0x11_u8; 1184];
+    let state = make_inbox_state_with_ek(
+        &owner_sk,
+        vec![],
+        Utc::now(),
+        InboxSettings::default(),
+        &real_ek,
+    );
+    // Decode → flip ek → re-encode. The signature was over `real_ek`
+    // but the state now advertises `attacker_ek`.
+    let mut value: serde_json::Value = serde_json::from_slice(state.as_ref()).unwrap();
+    let attacker_ek = vec![0x22_u8; 1184];
+    value["owner_ek_bytes"] = serde_json::json!(attacker_ek);
+    let tampered = State::from(serde_json::to_vec(&value).unwrap());
+    let result = Inbox::validate_state(params, tampered, RelatedContracts::new());
+    assert!(
+        result.is_err() || matches!(result, Ok(ValidateResult::Invalid)),
+        "swapped owner_ek_bytes must be rejected; got {result:?}"
+    );
+}
+
+#[test]
+fn validate_rejects_empty_ek_when_signed_with_nonempty_ek() {
+    // Downgrade attack: the signature is over `STATE_UPDATE ||
+    // real_ek` but the state advertises `owner_ek_bytes = []`. Without
+    // the ek being in the signed payload, this would let a peer strip
+    // the ek (denying new contact-imports because
+    // `decode_import_fetch` rejects empty-ek states).
+    let owner_sk = make_inbox_keypair();
+    let owner_vk = inbox_verifying_key(&owner_sk);
+    let params = make_params(&owner_vk);
+    let real_ek = vec![0x33_u8; 1184];
+    let state = make_inbox_state_with_ek(
+        &owner_sk,
+        vec![],
+        Utc::now(),
+        InboxSettings::default(),
+        &real_ek,
+    );
+    let mut value: serde_json::Value = serde_json::from_slice(state.as_ref()).unwrap();
+    value["owner_ek_bytes"] = serde_json::json!(Vec::<u8>::new());
+    let tampered = State::from(serde_json::to_vec(&value).unwrap());
+    let result = Inbox::validate_state(params, tampered, RelatedContracts::new());
+    assert!(
+        result.is_err() || matches!(result, Ok(ValidateResult::Invalid)),
+        "stripped owner_ek_bytes must be rejected; got {result:?}"
+    );
+}
+
+#[test]
+fn update_state_arm_rejects_unsigned_incoming_state() {
+    // The `UpdateData::State` arm of `update_state` calls
+    // `full_inbox.verify(&params)?` BEFORE `merge`. Without that, a
+    // peer could broadcast a `State` whose `owner_ek_bytes` was
+    // tampered with and merge would adopt the bad bytes locally
+    // (overwriting `self.owner_ek_bytes` since the broadcasted
+    // `last_update` is newer). This test confirms the verify-before-
+    // merge guard rejects such an update.
+    use freenet_stdlib::prelude::UpdateData;
+
+    let owner_sk = make_inbox_keypair();
+    let owner_vk = inbox_verifying_key(&owner_sk);
+    let params = make_params(&owner_vk);
+    let real_ek = vec![0x44_u8; 1184];
+    let initial = make_inbox_state_with_ek(
+        &owner_sk,
+        vec![],
+        Utc::now() - Duration::seconds(60),
+        InboxSettings::default(),
+        &real_ek,
+    );
+    // Build an incoming `UpdateData::State` whose owner_ek_bytes was
+    // tampered (newer `last_update` so `merge`'s LWW comparison would
+    // adopt it, were the verify guard missing).
+    let attacker_ek = vec![0x55_u8; 1184];
+    let attacker_state = make_inbox_state_with_ek(
+        &owner_sk,
+        vec![],
+        Utc::now(),
+        InboxSettings::default(),
+        &real_ek, // legit ek → produces a valid signature
+    );
+    let mut value: serde_json::Value = serde_json::from_slice(attacker_state.as_ref()).unwrap();
+    value["owner_ek_bytes"] = serde_json::json!(attacker_ek);
+    let bad_state = State::from(serde_json::to_vec(&value).unwrap());
+    let result = Inbox::update_state(params, initial, vec![UpdateData::State(bad_state.into())]);
+    assert!(
+        result.is_err(),
+        "update_state must reject a State arm whose incoming signature \
+         doesn't match its (tampered) owner_ek_bytes; got {result:?}"
     );
 }
 

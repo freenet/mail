@@ -328,6 +328,21 @@ pub(crate) mod contact_import {
         pub(crate) static PENDING: RefCell<HashMap<ContractInstanceId, String>> =
             RefCell::new(HashMap::new());
     }
+
+    /// Drop any pending / completed entries for `addr` so closing the
+    /// modal (or pasting a fresh address into the same modal) doesn't
+    /// leak thread-local state across the session. Cheap to call on
+    /// every modal close — no-op if nothing is registered.
+    pub(crate) fn cancel(addr: &str) {
+        if let Ok(id) = addr.parse::<ContractInstanceId>() {
+            PENDING.with(|m| {
+                m.borrow_mut().remove(&id);
+            });
+        }
+        RESULTS.with(|m| {
+            m.borrow_mut().remove(addr);
+        });
+    }
 }
 
 #[cfg(feature = "use-node")]
