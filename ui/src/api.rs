@@ -2530,10 +2530,7 @@ pub(crate) mod permission_pump_policy {
     /// not abort hex decoding.
     pub fn vk_bytes_from_user_field(user: &str) -> Option<Vec<u8>> {
         let rest = user.strip_prefix("ml-dsa-65:")?;
-        let hex: String = rest
-            .chars()
-            .take_while(|c| c.is_ascii_hexdigit())
-            .collect();
+        let hex: String = rest.chars().take_while(|c| c.is_ascii_hexdigit()).collect();
         if hex.is_empty() || hex.len() % 2 != 0 {
             return None;
         }
@@ -2553,10 +2550,7 @@ pub(crate) mod permission_pump_policy {
     ///
     /// Empty prefix never matches — the delegate always emits at least
     /// one byte, and matching empty would mean "any identity".
-    pub fn identity_matches_sender_prefix(
-        identity_vk: &[u8],
-        sender_vk_prefix: &[u8],
-    ) -> bool {
+    pub fn identity_matches_sender_prefix(identity_vk: &[u8], sender_vk_prefix: &[u8]) -> bool {
         !sender_vk_prefix.is_empty() && identity_vk.starts_with(sender_vk_prefix)
     }
 
@@ -2572,13 +2566,13 @@ pub(crate) mod permission_pump_policy {
             // Sample matches the modal screenshot:
             //   "ml-dsa-65:e26ce50c9fd104ca0fa33f4924e3c7c4..."
             let field = "ml-dsa-65:e26ce50c9fd104ca0fa33f4924e3c7c4...";
-            let decoded = vk_bytes_from_user_field(field)
-                .expect("delegate-format user field should decode");
+            let decoded =
+                vk_bytes_from_user_field(field).expect("delegate-format user field should decode");
             assert_eq!(
                 decoded,
                 vec![
-                    0xe2, 0x6c, 0xe5, 0x0c, 0x9f, 0xd1, 0x04, 0xca,
-                    0x0f, 0xa3, 0x3f, 0x49, 0x24, 0xe3, 0xc7, 0xc4,
+                    0xe2, 0x6c, 0xe5, 0x0c, 0x9f, 0xd1, 0x04, 0xca, 0x0f, 0xa3, 0x3f, 0x49, 0x24,
+                    0xe3, 0xc7, 0xc4,
                 ],
             );
         }
@@ -2613,8 +2607,8 @@ pub(crate) mod permission_pump_policy {
         fn identity_matches_when_prefix_is_truncated() {
             let mut full = vec![0u8; 1952];
             full[..16].copy_from_slice(&[
-                0xe2, 0x6c, 0xe5, 0x0c, 0x9f, 0xd1, 0x04, 0xca,
-                0x0f, 0xa3, 0x3f, 0x49, 0x24, 0xe3, 0xc7, 0xc4,
+                0xe2, 0x6c, 0xe5, 0x0c, 0x9f, 0xd1, 0x04, 0xca, 0x0f, 0xa3, 0x3f, 0x49, 0x24, 0xe3,
+                0xc7, 0xc4,
             ]);
             let prefix = &full[..16];
             assert!(identity_matches_sender_prefix(&full, prefix));
@@ -2640,8 +2634,8 @@ pub(crate) mod permission_pump_policy {
         fn delegate_field_resolves_to_user_identity() {
             let mut user_vk = vec![0u8; 1952];
             user_vk[..16].copy_from_slice(&[
-                0xe2, 0x6c, 0xe5, 0x0c, 0x9f, 0xd1, 0x04, 0xca,
-                0x0f, 0xa3, 0x3f, 0x49, 0x24, 0xe3, 0xc7, 0xc4,
+                0xe2, 0x6c, 0xe5, 0x0c, 0x9f, 0xd1, 0x04, 0xca, 0x0f, 0xa3, 0x3f, 0x49, 0x24, 0xe3,
+                0xc7, 0xc4,
             ]);
 
             let field = "ml-dsa-65:e26ce50c9fd104ca0fa33f4924e3c7c4...";
