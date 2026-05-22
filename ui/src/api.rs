@@ -2519,6 +2519,9 @@ pub(crate) async fn node_comms(
 
 /// Pure (host-testable) helpers used by the wasm-only `permission_pump`
 /// module. Kept outside the wasm cfg gate so unit tests cover them.
+/// `allow(dead_code)` because production callers live behind the wasm
+/// cfg gate; on host builds only the `#[cfg(test)]` submodule uses these.
+#[allow(dead_code)]
 pub(crate) mod permission_pump_policy {
     /// Decode `ml-dsa-65:<hex>` from the gateway's permission message
     /// `user` field into raw VK bytes.
@@ -2531,7 +2534,7 @@ pub(crate) mod permission_pump_policy {
     pub fn vk_bytes_from_user_field(user: &str) -> Option<Vec<u8>> {
         let rest = user.strip_prefix("ml-dsa-65:")?;
         let hex: String = rest.chars().take_while(|c| c.is_ascii_hexdigit()).collect();
-        if hex.is_empty() || hex.len() % 2 != 0 {
+        if hex.is_empty() || !hex.len().is_multiple_of(2) {
             return None;
         }
         let mut out = Vec::with_capacity(hex.len() / 2);
