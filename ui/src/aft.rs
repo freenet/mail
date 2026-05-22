@@ -37,6 +37,15 @@ pub(crate) const TOKEN_GENERATOR_DELEGATE_CODE_HASH: &str = include_str!(
 #[cfg(not(feature = "use-node"))]
 pub(crate) const TOKEN_GENERATOR_DELEGATE_CODE_HASH: &str = "";
 
+/// Historical `TOKEN_RECORD_CODE_HASH` values, oldest → newest. Each
+/// entry is a hash the AFT token-allocation-record contract WASM
+/// previously had under a prior release. Same role as
+/// `crate::inbox::LEGACY_INBOX_CODE_HASHES` for the AFT side
+/// (#251 improvement 3). Append-only: never reorder, never delete
+/// entries. The current `TOKEN_RECORD_CODE_HASH` must NOT appear in
+/// this list — enforced by the `current_aft_hash_not_in_legacy` test.
+pub(crate) const LEGACY_TOKEN_RECORD_CODE_HASHES: &[&str] = &[];
+
 pub(crate) struct AftRecords {}
 
 type InboxContract = ContractKey;
@@ -705,6 +714,23 @@ mod tests {
 
     fn fake_token_record() -> ContractInstanceId {
         ContractInstanceId::new([7u8; 32])
+    }
+
+    /// The current `TOKEN_RECORD_CODE_HASH` must NOT appear in
+    /// `LEGACY_TOKEN_RECORD_CODE_HASHES` — the migration walker would
+    /// otherwise GET the current key as an "old" candidate and re-PUT
+    /// identical state. Only checked under `use-node` because the
+    /// constant is otherwise empty (#251 improvement 3).
+    #[cfg(feature = "use-node")]
+    #[test]
+    fn current_aft_hash_not_in_legacy() {
+        let current = TOKEN_RECORD_CODE_HASH;
+        assert!(
+            !LEGACY_TOKEN_RECORD_CODE_HASHES.contains(&current),
+            "TOKEN_RECORD_CODE_HASH ({current}) must not appear in \
+             LEGACY_TOKEN_RECORD_CODE_HASHES — append it only AFTER \
+             bumping to a new hash",
+        );
     }
 
     /// `build_recipient_criteria` must reflect the recipient's tier +

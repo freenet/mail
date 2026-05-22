@@ -523,7 +523,7 @@ mod token_record_management {
     use std::sync::Arc;
 
     use freenet_aft_interface::{TokenAllocationRecord, TokenDelegateParameters};
-    use freenet_stdlib::prelude::*;
+    use freenet_stdlib::{client_api::ContractRequest, prelude::*};
     use ml_dsa::{MlDsa65, SigningKey as MlDsaSigningKey, signature::Keypair};
 
     use super::*;
@@ -534,6 +534,22 @@ mod token_record_management {
 
     thread_local! {
         pub(super) static CREATED_AFT_RECORD: RefCell<Vec<(Rc<str>, ContractKey)>> = const { RefCell::new(Vec::new()) };
+
+        /// #251 improvement 3 AFT migration: maps an OLD AFT-record
+        /// `ContractKey` (derived with a prior `TOKEN_RECORD_CODE_HASH`)
+        /// to the identity that owns it. On the corresponding
+        /// `GetResponse`, the api.rs handler decodes the old state and
+        /// PUTs it under the identity's CURRENT AFT-record key. Mirrors
+        /// `inbox_management::PENDING_MIGRATION`.
+        pub(super) static PENDING_AFT_MIGRATION: RefCell<HashMap<ContractKey, crate::app::Identity>> =
+            RefCell::new(HashMap::new());
+
+        /// Tracks identities whose AFT migration is either in-flight or
+        /// completed this session, keyed by ML-DSA verifying-key bytes.
+        /// Parallel to `inbox_management::MIGRATED_IDENTITIES`; closes
+        /// the same TOCTOU window for the chained-candidate dispatch.
+        pub(super) static MIGRATED_AFT_IDENTITIES: RefCell<std::collections::HashSet<Vec<u8>>> =
+            RefCell::new(std::collections::HashSet::new());
     }
 
     pub(super) async fn create_contract(
@@ -556,6 +572,68 @@ mod token_record_management {
             pend.aft_rec = Some(contract_key);
         });
         Ok(contract_key)
+    }
+
+    /// PUT the migrated AFT token-allocation-record state under the
+    /// identity's CURRENT AFT-record key. Called from the GetResponse
+    /// arm when a `PENDING_AFT_MIGRATION` entry resolves. The record's
+    /// validity is tied to the identity's ML-DSA verifying key (the
+    /// `TokenDelegateParameters.generator_public_key` the contract uses
+    /// to verify every assignment), which is unchanged across an AFT
+    /// contract bump — so the old state re-validates under the new
+    /// contract id.
+    pub(super) async fn put_migrated_aft_record(
+        client: &mut WebApiRequestClient,
+        identity: &crate::app::Identity,
+        parsed: TokenAllocationRecord,
+    ) -> Result<(), DynError> {
+        let vk = Keypair::verifying_key(identity.ml_dsa_signing_key.as_ref());
+        let params: Parameters = TokenDelegateParameters::new(&vk).try_into()?;
+        let state = parsed.serialized()?;
+        let new_key =
+            contract_api::create_contract(client, TOKEN_RECORD_CODE, state, &params).await?;
+        crate::log::info(format!(
+            "AFT migration: PUT succeeded new_key={new_key} identity=`{}` (#251)",
+            identity.alias()
+        ));
+        Ok(())
+    }
+
+    /// Dispatch a `Get` for `identity`'s AFT record under each prior
+    /// `TOKEN_RECORD_CODE_HASH` so the GetResponse arm in `node_comms`
+    /// can decode the old state and PUT it under the current AFT-record
+    /// key. Mirrors `inbox_management::migrate_inbox`.
+    pub(super) async fn migrate_aft_record(
+        client: &mut WebApiRequestClient,
+        identity: &crate::app::Identity,
+        prior_hash: &str,
+    ) -> Result<(), DynError> {
+        let vk = Keypair::verifying_key(identity.ml_dsa_signing_key.as_ref());
+        let candidates = crate::inbox::build_migration_candidates(
+            prior_hash,
+            crate::aft::LEGACY_TOKEN_RECORD_CODE_HASHES,
+        );
+
+        for candidate in candidates {
+            let params: Parameters = TokenDelegateParameters::new(&vk).try_into()?;
+            let old_key = ContractKey::from_params(&candidate, params)
+                .map_err(|e| format!("derive old AFT-record key: {e}"))?;
+            PENDING_AFT_MIGRATION.with(|m| {
+                m.borrow_mut().insert(old_key, identity.clone());
+            });
+            let request = ContractRequest::Get {
+                key: old_key.into(),
+                return_contract_code: false,
+                subscribe: false,
+                blocking_subscribe: false,
+            };
+            client.send(request.into()).await?;
+            crate::log::info(format!(
+                "AFT migration: GET dispatched for old key {old_key} (identity=`{}`, hash={candidate}) (#251)",
+                identity.alias()
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -927,6 +1005,50 @@ mod identity_management {
         alias: &str,
     ) -> Result<(), DynError> {
         let msg = IdentityMsg::SetPendingMigrationFrom {
+            alias: alias.to_string(),
+            prior_hash: None,
+        };
+        send_identity_msg(client, &msg).await
+    }
+
+    /// Stamp the current `TOKEN_RECORD_CODE_HASH` on the
+    /// identity-management delegate so subsequent reloads can compare
+    /// against it and detect a deliberate AFT contract bump
+    /// (#251 improvement 3). Parallel to
+    /// `stamp_inbox_wasm_hash_api_call` for the AFT side.
+    pub(super) async fn stamp_aft_record_wasm_hash_api_call(
+        client: &mut WebApiRequestClient,
+        alias: &str,
+    ) -> Result<(), DynError> {
+        let msg = IdentityMsg::UpdateAftRecordWasmHash {
+            alias: alias.to_string(),
+            wasm_hash: crate::aft::TOKEN_RECORD_CODE_HASH.to_string(),
+        };
+        send_identity_msg(client, &msg).await
+    }
+
+    /// Mark an in-flight AFT migration so the next session can re-attempt
+    /// the GET if this one never resolves
+    /// (#251 improvement 3 + improvement 5).
+    pub(super) async fn set_pending_aft_migration_api_call(
+        client: &mut WebApiRequestClient,
+        alias: &str,
+        prior_hash: &str,
+    ) -> Result<(), DynError> {
+        let msg = IdentityMsg::SetPendingAftMigrationFrom {
+            alias: alias.to_string(),
+            prior_hash: Some(prior_hash.to_string()),
+        };
+        send_identity_msg(client, &msg).await
+    }
+
+    /// Clear the in-flight AFT migration marker after a successful PUT
+    /// under the current AFT record key (#251 improvement 3).
+    pub(super) async fn clear_pending_aft_migration_api_call(
+        client: &mut WebApiRequestClient,
+        alias: &str,
+    ) -> Result<(), DynError> {
+        let msg = IdentityMsg::SetPendingAftMigrationFrom {
             alias: alias.to_string(),
             prior_hash: None,
         };
@@ -2021,6 +2143,101 @@ pub(crate) async fn node_comms(
                                             }
                                         }
                                     }
+                                } else if let Some(identity) =
+                                    token_record_management::PENDING_AFT_MIGRATION
+                                        .with(|m| m.borrow_mut().remove(&key))
+                                {
+                                    // #251 improvement 3: GetResponse for
+                                    // an identity's OLD AFT-record key
+                                    // (derived under the prior
+                                    // TOKEN_RECORD_CODE_HASH). Decode the
+                                    // TokenAllocationRecord and re-PUT it
+                                    // under the current AFT-record key.
+                                    // Mirrors the inbox-migration arm
+                                    // above.
+                                    let alias_str = identity.alias().to_string();
+                                    let vk_key = {
+                                        use ml_dsa::signature::Keypair;
+                                        let vk = Keypair::verifying_key(
+                                            identity.ml_dsa_signing_key.as_ref(),
+                                        );
+                                        crate::inbox::inbox_params_pub_key_bytes(&vk)
+                                    };
+                                    let claimed = token_record_management::MIGRATED_AFT_IDENTITIES
+                                        .with(|s| {
+                                            let mut set = s.borrow_mut();
+                                            if set.contains(&vk_key) {
+                                                false
+                                            } else {
+                                                set.insert(vk_key.clone());
+                                                true
+                                            }
+                                        });
+                                    if !claimed {
+                                        crate::log::debug!(
+                                            "AFT migration: skipping duplicate GetResponse for {key} (identity=`{alias_str}`) — already claimed this session"
+                                        );
+                                    } else {
+                                        match serde_json::from_slice::<
+                                            freenet_aft_interface::TokenAllocationRecord,
+                                        >(
+                                            state.as_ref()
+                                        ) {
+                                            Ok(parsed) => {
+                                                if let Err(e) =
+                                                    token_record_management::put_migrated_aft_record(
+                                                        &mut client,
+                                                        &identity,
+                                                        parsed,
+                                                    )
+                                                    .await
+                                                {
+                                                    crate::log::error(
+                                                        format!(
+                                                            "AFT migration: PUT failed for `{alias_str}`: {e} (#251)"
+                                                        ),
+                                                        None,
+                                                    );
+                                                    token_record_management::MIGRATED_AFT_IDENTITIES
+                                                        .with(|s| {
+                                                            s.borrow_mut().remove(&vk_key);
+                                                        });
+                                                } else {
+                                                    if let Err(e) = identity_management::clear_pending_aft_migration_api_call(
+                                                        &mut client,
+                                                        &alias_str,
+                                                    )
+                                                    .await
+                                                    {
+                                                        crate::log::error(
+                                                            format!(
+                                                                "AFT migration: clear pending marker for `{alias_str}` failed: {e} (#251)"
+                                                            ),
+                                                            None,
+                                                        );
+                                                    }
+                                                    crate::toast::push_toast(
+                                                        format!(
+                                                            "AFT token ledger for `{alias_str}` migrated to the new contract id after webapp upgrade."
+                                                        ),
+                                                        crate::toast::ToastLevel::Info,
+                                                    );
+                                                }
+                                            }
+                                            Err(e) => {
+                                                crate::log::error(
+                                                    format!(
+                                                        "AFT migration: deser old state for `{alias_str}` failed: {e} (#251)"
+                                                    ),
+                                                    None,
+                                                );
+                                                token_record_management::MIGRATED_AFT_IDENTITIES
+                                                    .with(|s| {
+                                                        s.borrow_mut().remove(&vk_key);
+                                                    });
+                                            }
+                                        }
+                                    }
                                 } else {
                                     crate::log::error(
                                         format!("GetResponse for unknown contract key: {key}"),
@@ -2454,6 +2671,32 @@ pub(crate) async fn node_comms(
                                                 (alias.clone(), info.pending_migration_from.clone())
                                             })
                                             .collect();
+                                        // #251 improvement 3: same snapshots
+                                        // for the AFT-record side. Mirrored
+                                        // shape so the migration loop below
+                                        // can reuse `select_migrate_from`
+                                        // verbatim.
+                                        let recorded_aft_hashes: std::collections::HashMap<
+                                            String,
+                                            Option<String>,
+                                        > = im
+                                            .get_info()
+                                            .map(|(alias, info)| {
+                                                (alias.clone(), info.aft_record_wasm_hash.clone())
+                                            })
+                                            .collect();
+                                        let recorded_pending_aft_migrations: std::collections::HashMap<
+                                            String,
+                                            Option<String>,
+                                        > = im
+                                            .get_info()
+                                            .map(|(alias, info)| {
+                                                (
+                                                    alias.clone(),
+                                                    info.pending_aft_migration_from.clone(),
+                                                )
+                                            })
+                                            .collect();
                                         let new_ids = crate::app::Identity::set_aliases(im, user);
                                         // ALIASES is a thread_local Vec, not a
                                         // Dioxus signal — bump login_controller
@@ -2693,6 +2936,118 @@ pub(crate) async fn node_comms(
                                                         crate::log::error(
                                                             format!(
                                                                 "inbox migration: clear stale pending marker for `{alias_str}` failed: {e} (#251)"
+                                                            ),
+                                                            None,
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        // #251 improvement 3: AFT record
+                                        // migration. Same shape as the
+                                        // inbox loop above but against
+                                        // `TOKEN_RECORD_CODE_HASH` and
+                                        // the AFT-side AliasInfo fields.
+                                        // The two migrations run
+                                        // independently because the
+                                        // contracts rotate independently
+                                        // (separate `[dependencies]`
+                                        // blocks under
+                                        // contracts/inbox/ vs
+                                        // modules/antiflood-tokens/).
+                                        for id in &new_ids {
+                                            let alias_str = id.alias().to_string();
+                                            let prior = recorded_aft_hashes
+                                                .get(&alias_str)
+                                                .cloned()
+                                                .flatten();
+                                            let pending_marker = recorded_pending_aft_migrations
+                                                .get(&alias_str)
+                                                .cloned()
+                                                .flatten();
+                                            let migrate_from = crate::inbox::select_migrate_from(
+                                                prior.as_deref(),
+                                                pending_marker.as_deref(),
+                                                crate::aft::TOKEN_RECORD_CODE_HASH,
+                                            );
+                                            match migrate_from {
+                                                Some(prior_hash) => {
+                                                    crate::log::info(format!(
+                                                        "AFT migration: detected drift for `{}` \
+                                                         prior_hash={} current_hash={} pending={} (#251)",
+                                                        alias_str,
+                                                        prior_hash,
+                                                        crate::aft::TOKEN_RECORD_CODE_HASH,
+                                                        pending_marker.is_some()
+                                                    ));
+                                                    if let Err(e) = identity_management::set_pending_aft_migration_api_call(
+                                                        &mut client,
+                                                        &alias_str,
+                                                        &prior_hash,
+                                                    )
+                                                    .await
+                                                    {
+                                                        crate::log::error(
+                                                            format!(
+                                                                "AFT migration: mark pending failed for `{alias_str}`: {e} (#251)"
+                                                            ),
+                                                            None,
+                                                        );
+                                                    }
+                                                    if let Err(e) =
+                                                        token_record_management::migrate_aft_record(
+                                                            &mut client,
+                                                            id,
+                                                            &prior_hash,
+                                                        )
+                                                        .await
+                                                    {
+                                                        crate::log::error(
+                                                            format!(
+                                                                "AFT migration: failed for `{alias_str}`: {e} (#251)"
+                                                            ),
+                                                            None,
+                                                        );
+                                                    }
+                                                    if let Err(e) = identity_management::stamp_aft_record_wasm_hash_api_call(
+                                                        &mut client,
+                                                        &alias_str,
+                                                    )
+                                                    .await
+                                                    {
+                                                        crate::log::error(
+                                                            format!(
+                                                                "AFT migration: stamp failed for `{alias_str}`: {e} (#251)"
+                                                            ),
+                                                            None,
+                                                        );
+                                                    }
+                                                }
+                                                None => {
+                                                    if prior.is_none()
+                                                        && let Err(e) = identity_management::stamp_aft_record_wasm_hash_api_call(
+                                                            &mut client,
+                                                            &alias_str,
+                                                        )
+                                                        .await
+                                                    {
+                                                        crate::log::error(
+                                                            format!(
+                                                                "AFT migration: baseline stamp failed for `{alias_str}`: {e} (#251)"
+                                                            ),
+                                                            None,
+                                                        );
+                                                    }
+                                                    if pending_marker.is_some()
+                                                        && let Err(e) = identity_management::clear_pending_aft_migration_api_call(
+                                                            &mut client,
+                                                            &alias_str,
+                                                        )
+                                                        .await
+                                                    {
+                                                        crate::log::error(
+                                                            format!(
+                                                                "AFT migration: clear stale pending marker for `{alias_str}` failed: {e} (#251)"
                                                             ),
                                                             None,
                                                         );
