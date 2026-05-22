@@ -679,7 +679,9 @@ contract state.
 2. `cargo make publish-email-test` in another
 3. Open the published webapp URL in the browser
 4. Create identity A and identity B
-5. As B, click "Share address" and copy the contact card (`verify: …\ncontact://…`)
+5. As B, click "Share address" and copy the share text — bs58 inbox
+   address (~44 chars) on its own line, optionally followed by a
+   `verify: <six words>` fingerprint line for out-of-band verification (#249)
 6. As A, click "+ Import contact", paste B's card, set a local label, click Import
 7. A sends a message to B by typing the imported alias into the To field
    (the compose form should show a fingerprint badge once the alias resolves);

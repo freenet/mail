@@ -201,13 +201,30 @@ pub fn make_inbox_state(
     last_update: DateTime<Utc>,
     settings: InboxSettings,
 ) -> State<'static> {
-    let signature: ml_dsa::Signature<MlDsa65> = MlDsaSigner::sign(owner_sk, STATE_UPDATE);
+    make_inbox_state_with_ek(owner_sk, messages, last_update, settings, &[])
+}
+
+/// Variant that lets a caller stamp a non-empty `owner_ek_bytes` into the
+/// state. The signature is computed over `STATE_UPDATE || owner_ek_bytes`
+/// to match the contract's tightened verify (#249).
+pub fn make_inbox_state_with_ek(
+    owner_sk: &MlDsaSigningKey<MlDsa65>,
+    messages: Vec<Message>,
+    last_update: DateTime<Utc>,
+    settings: InboxSettings,
+    owner_ek_bytes: &[u8],
+) -> State<'static> {
+    let mut payload = Vec::with_capacity(STATE_UPDATE.len() + owner_ek_bytes.len());
+    payload.extend_from_slice(STATE_UPDATE);
+    payload.extend_from_slice(owner_ek_bytes);
+    let signature: ml_dsa::Signature<MlDsa65> = MlDsaSigner::sign(owner_sk, &payload);
     let signature_bytes: Vec<u8> = signature.encode().to_vec();
 
     let inbox_json: Value = json!({
         "messages": messages,
         "last_update": last_update,
         "settings": settings,
+        "owner_ek_bytes": owner_ek_bytes,
         "inbox_signature": signature_bytes,
     });
     let bytes = serde_json::to_vec(&inbox_json).expect("serialize inbox");
@@ -229,6 +246,7 @@ pub fn make_inbox_value(
         "messages": messages,
         "last_update": last_update,
         "settings": settings,
+        "owner_ek_bytes": Vec::<u8>::new(),
         "inbox_signature": signature_bytes,
     })
 }

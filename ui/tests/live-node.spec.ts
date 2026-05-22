@@ -292,8 +292,8 @@ test.describe("Live node E2E", () => {
       const shareModal = bobApp.locator('[data-testid="fm-share-modal"]');
       await shareModal.waitFor({ timeout: 5_000 });
       const bobCard = (await shareModal.getAttribute("data-share-text")) ?? "";
-      expect(bobCard, "bob share text contains contact:// payload").toMatch(
-        /verify: .+\ncontact:\/\//,
+      expect(bobCard, "bob share text contains bs58 inbox address").toMatch(
+        /^[1-9A-HJ-NP-Za-km-z]{43,44}\nverify: /,
       );
       await shareModal.locator(".modal-x").click();
 
@@ -312,9 +312,10 @@ test.describe("Live node E2E", () => {
       // unverified import silently rejects the send (toast: "Recipient
       // is not verified") and bob never receives — root cause of the
       // harness-only failure tracked in #105. Checkbox renders only
-      // after `fingerprint_words` resolves from the card.
+      // after the import-time Get on bob's inbox returns vk + ek (#249).
+      // Allow 30s for the GetResponse on the iso harness.
       const verifyCheck = aliceApp.locator('[data-testid="fm-verify-check"]');
-      await verifyCheck.waitFor({ timeout: 15_000 });
+      await verifyCheck.waitFor({ timeout: 30_000 });
       await verifyCheck.click();
       await aliceApp.locator('[data-testid="fm-import-submit"]').click();
 
@@ -519,7 +520,7 @@ test.describe("Live node E2E", () => {
       // verify_on_send defaults true; tick checkbox so import is verified
       // (#105 root cause: silent send rejection on unverified contact).
       const aliceVerify = aliceApp.locator('[data-testid="fm-verify-check"]');
-      await aliceVerify.waitFor({ timeout: 15_000 });
+      await aliceVerify.waitFor({ timeout: 30_000 });
       await aliceVerify.click();
       await aliceApp.locator('[data-testid="fm-import-submit"]').click();
 
@@ -724,8 +725,8 @@ test.describe("Live node E2E", () => {
       const bobShare = bobApp.locator('[data-testid="fm-share-modal"]');
       await bobShare.waitFor({ timeout: 5_000 });
       const bobCard = (await bobShare.getAttribute("data-share-text")) ?? "";
-      expect(bobCard, "bob share text contains contact:// payload").toMatch(
-        /verify: .+\ncontact:\/\//,
+      expect(bobCard, "bob share text contains bs58 inbox address").toMatch(
+        /^[1-9A-HJ-NP-Za-km-z]{43,44}\nverify: /,
       );
       await bobShare.locator(".modal-x").click();
 
@@ -739,7 +740,9 @@ test.describe("Live node E2E", () => {
         .locator('input[placeholder="e.g. Alice (work)"]')
         .fill(ALIAS_T4_BOB);
       const verifyCheck = aliceApp.locator('[data-testid="fm-verify-check"]');
-      await verifyCheck.waitFor({ timeout: 15_000 });
+      // Post-#249 the verify-check renders after the import-time Get on
+      // the recipient inbox completes. 30s for iso-harness latency.
+      await verifyCheck.waitFor({ timeout: 30_000 });
       await verifyCheck.click();
 
       // Watch for the `primed contact inbox … for <alias> (#191)` log
@@ -891,7 +894,7 @@ test.describe("Live node E2E", () => {
       await createIdentity(page, ALIAS_T5_ALICE);
 
       // Generate bob's share card by spinning a second browser context
-      // long enough to read his contact:// payload. The actual cross-
+      // long enough to read his bs58 inbox address. The actual cross-
       // node send + receive isn't exercised here; we just need bob's
       // VK in alice's verified-senders set.
       const bobCtx = await page.context().browser()!.newContext();
@@ -906,7 +909,7 @@ test.describe("Live node E2E", () => {
         const bobShare = bobApp.locator('[data-testid="fm-share-modal"]');
         await bobShare.waitFor({ timeout: 5_000 });
         const bobCard = (await bobShare.getAttribute("data-share-text")) ?? "";
-        expect(bobCard).toMatch(/verify: .+\ncontact:\/\//);
+        expect(bobCard).toMatch(/^[1-9A-HJ-NP-Za-km-z]{43,44}\nverify: /);
 
         // Alice imports bob (verified).
         await app.locator('[data-testid="fm-contact-import"]').click();
@@ -917,7 +920,9 @@ test.describe("Live node E2E", () => {
           .locator('input[placeholder="e.g. Alice (work)"]')
           .fill(ALIAS_T5_BOB);
         const verifyCheck = app.locator('[data-testid="fm-verify-check"]');
-        await verifyCheck.waitFor({ timeout: 15_000 });
+        // Post-#249 the verify-check renders after the import-time Get
+        // on bob's inbox returns.
+        await verifyCheck.waitFor({ timeout: 30_000 });
         await verifyCheck.click();
         await app.locator('[data-testid="fm-import-submit"]').click();
         await expect(
@@ -1058,7 +1063,7 @@ test.describe("Live node E2E", () => {
       await bobShare.waitFor({ timeout: 5_000 });
       const bobCard = (await bobShare.getAttribute("data-share-text")) ?? "";
       await bobShare.locator(".modal-x").click();
-      expect(bobCard).toMatch(/verify: .+\ncontact:\/\//);
+      expect(bobCard).toMatch(/^[1-9A-HJ-NP-Za-km-z]{43,44}\nverify: /);
 
       // Alice imports bob (verified so verify_on_send doesn't block).
       await aliceApp.locator('[data-testid="fm-contact-import"]').click();
@@ -1069,7 +1074,7 @@ test.describe("Live node E2E", () => {
         .locator('input[placeholder="e.g. Alice (work)"]')
         .fill(ALIAS_T6_BOB);
       const aliceVerify = aliceApp.locator('[data-testid="fm-verify-check"]');
-      await aliceVerify.waitFor({ timeout: 15_000 });
+      await aliceVerify.waitFor({ timeout: 30_000 });
       await aliceVerify.click();
       await aliceApp.locator('[data-testid="fm-import-submit"]').click();
 

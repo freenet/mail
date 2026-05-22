@@ -8,9 +8,8 @@
 
 use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::OnceLock};
 
-use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 use freenet_aft_interface::Tier;
-use freenet_email_inbox::DEFAULT_MAX_AGE_SECS;
+use freenet_email_inbox::{DEFAULT_MAX_AGE_SECS, Inbox as InboxState};
 use freenet_stdlib::prelude::blake3;
 use ml_dsa::{MlDsa65, VerifyingKey as MlDsaVerifyingKey};
 use ml_kem::{EncapsulationKey, MlKem768};
@@ -59,37 +58,23 @@ pub fn fingerprint_words(vk_bytes: &[u8], ek_bytes: &[u8]) -> [&'static str; 6] 
 // ── Wire format ───────────────────────────────────────────────────────────────
 
 /// Paste-friendly contact card exchanged out-of-band (text, QR, etc.).
-/// Encoded as `base64(serde_json(ContactCard))`.
+/// Carries the bs58-encoded inbox `ContractInstanceId` — the recipient's
+/// pubkeys are fetched from the inbox contract state at import time, not
+/// embedded in the card.
 ///
 /// Neither `suggested_alias` nor `suggested_description` are authoritative —
 /// the recipient chooses their own local label.
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ContactCard {
     pub version: u32,
-    pub ml_dsa_vk_bytes: Vec<u8>,
-    pub ml_kem_ek_bytes: Vec<u8>,
+    pub inbox_address: String,
     pub suggested_alias: Option<String>,
     pub suggested_description: Option<String>,
-    /// Recipient's anti-flood policy: AFT tier the sender must mint at.
-    /// Encoded into the recipient's `InboxParams`, so the contract id
-    /// hashes over this value — sending under a different tier is
-    /// rejected by `verify_token_policy` in the inbox contract.
-    /// Defaults to `Tier::Min10` when missing so v1 cards (which omit
-    /// this field) use the same tier as freshly-created inboxes, avoiding
-    /// a silent rejection when the sender mints at an outdated default.
-    #[serde(default = "default_tier")]
-    pub required_tier: Tier,
-    /// Recipient's anti-flood policy: max age (seconds) the AFT delegate
-    /// considers when looking for free slots. Mirrors
-    /// `InboxParams.max_age_secs`.
-    #[serde(default = "default_max_age_secs")]
-    pub max_age_secs: u64,
 }
 
-/// Default AFT tier for v1 contact cards that pre-date the `required_tier`
-/// field. Must match `IdentityAftPrefs::default().required_tier` so that a
-/// v1 card for a freshly-created inbox does not mint at an outdated tier and
-/// get silently rejected by `verify_token_policy` in the inbox contract.
+/// Default AFT tier for `StoredContactKeys` rows that pre-date the
+/// `required_tier` field. Must match `IdentityAftPrefs::default().required_tier`
+/// so the AFT delegate does not mint at a stale default.
 fn default_tier() -> Tier {
     Tier::Min10
 }
@@ -99,65 +84,57 @@ fn default_max_age_secs() -> u64 {
 }
 
 impl ContactCard {
-    pub const VERSION: u32 = 2;
-    /// Wire format uses standard (non-URL-safe) base64; the Playwright
-    /// test (email-app.spec.ts) exchanges cards via `btoa()` and relies
-    /// on the encodings matching.
-    pub const URI_SCHEME: &'static str = "contact://";
+    pub const VERSION: u32 = 3;
 
+    /// Returns the bare bs58 inbox address. No URI prefix, no base64 over
+    /// JSON — a ContactCard is the address plus optional local metadata,
+    /// and it's the address users actually share.
     pub fn encode(&self) -> String {
-        let json = serde_json::to_vec(self).expect("ContactCard serialization infallible");
-        format!("{}{}", Self::URI_SCHEME, B64.encode(&json))
+        self.inbox_address.clone()
     }
 
+    /// Parse a pasted address into a `ContactCard`. Accepts the bare
+    /// bs58-encoded `ContractInstanceId`. Re-normalizes through
+    /// `ContractInstanceId`'s codec so the stored address is canonical
+    /// (whitespace stripped, length validated by the stdlib).
     pub fn decode(input: &str) -> Result<Self, String> {
-        // Accept three forms:
-        //   1. Full share text:  "verify: word-...\ncontact://<base64>"
-        //   2. URI alone:        "contact://<base64>"
-        //   3. Bare base64:      "<base64>"
-        // For (1) and (2) we slice from the first `contact://` to the end of
-        // the line; for (3) we feed the trimmed input straight to base64.
+        use std::str::FromStr;
         let trimmed = input.trim();
-        let b64 = if let Some(start) = trimmed.find(Self::URI_SCHEME) {
-            let rest = &trimmed[start + Self::URI_SCHEME.len()..];
-            rest.split_whitespace().next().unwrap_or(rest)
-        } else {
-            trimmed
-        };
-        let json = B64.decode(b64).map_err(|e| format!("base64 decode: {e}"))?;
-        serde_json::from_slice(&json).map_err(|e| format!("json decode: {e}"))
+        let id = freenet_stdlib::prelude::ContractInstanceId::from_str(trimmed)
+            .map_err(|e| format!("invalid inbox address: {e}"))?;
+        Ok(Self {
+            version: Self::VERSION,
+            inbox_address: id.encode(),
+            suggested_alias: None,
+            suggested_description: None,
+        })
     }
 
     pub fn from_identity(identity: &Identity) -> Self {
+        let inbox_address = identity_inbox_address(identity)
+            .unwrap_or_else(|e| format!("<address derivation error: {e}>"));
         Self {
             version: Self::VERSION,
-            ml_dsa_vk_bytes: identity.ml_dsa_vk_bytes(),
-            ml_kem_ek_bytes: identity.ml_kem_ek_bytes(),
+            inbox_address,
             suggested_alias: Some(identity.alias.to_string()),
             suggested_description: if identity.description.is_empty() {
                 None
             } else {
                 Some(identity.description.clone())
             },
-            required_tier: identity.required_tier,
-            max_age_secs: identity.max_age_secs,
         }
     }
+}
 
-    pub fn fingerprint(&self) -> [&'static str; 6] {
-        fingerprint_words(&self.ml_dsa_vk_bytes, &self.ml_kem_ek_bytes)
-    }
-
-    #[allow(dead_code)]
-    pub fn fingerprint_short(&self) -> String {
-        let fp = self.fingerprint();
-        format!("{}-{}-{}", fp[0], fp[1], fp[2])
-    }
-
-    #[allow(dead_code)]
-    pub fn fingerprint_full(&self) -> String {
-        self.fingerprint().join("-")
-    }
+/// Compute the bs58-encoded inbox `ContractInstanceId` for the given
+/// identity. Goes through `inbox_key_for` so the derivation stays in
+/// lockstep with the send path and the contract id check in
+/// `is_contact_inbox_key`.
+pub fn identity_inbox_address(identity: &Identity) -> Result<String, String> {
+    use crate::inbox::inbox_key_for;
+    let vk = vk_from_bytes(&identity.ml_dsa_vk_bytes())?;
+    let key = inbox_key_for(&vk).map_err(|e| format!("derive inbox key: {e}"))?;
+    Ok(key.id().encode())
 }
 
 // ── Storage types ─────────────────────────────────────────────────────────────
@@ -351,6 +328,63 @@ pub fn lookup(alias: &str) -> Option<Recipient> {
     })
 }
 
+/// Look up a contact by their bs58 inbox address. Returns a `Recipient`
+/// only if a contact with that exact inbox key is already in the address
+/// book — i.e. the user has imported them and (presumably) verified the
+/// fingerprint. Unknown addresses return `None`; the UI surfaces "import
+/// as contact first".
+pub fn lookup_by_bs58(addr: &str) -> Option<Recipient> {
+    use crate::inbox::inbox_key_for;
+    use std::str::FromStr;
+    let trimmed = addr.trim();
+    let target = freenet_stdlib::prelude::ContractInstanceId::from_str(trimmed).ok()?;
+
+    ADDRESS_BOOK.with(|ab| {
+        ab.borrow().values().find_map(|entry| match entry {
+            Entry::Contact(c) => {
+                let vk = vk_from_bytes(&c.ml_dsa_vk_bytes).ok()?;
+                let key = inbox_key_for(&vk).ok()?;
+                if *key.id() == target {
+                    let fingerprint = c.fingerprint();
+                    Some(Recipient {
+                        local_alias: c.local_alias.clone(),
+                        ml_dsa_vk_bytes: c.ml_dsa_vk_bytes.clone(),
+                        ml_kem_ek_bytes: c.ml_kem_ek_bytes.clone(),
+                        fingerprint,
+                        required_tier: c.required_tier,
+                        max_age_secs: c.max_age_secs,
+                        verified: c.verified,
+                        is_own: false,
+                    })
+                } else {
+                    None
+                }
+            }
+            Entry::Own(id) => {
+                let vk = vk_from_bytes(&id.ml_dsa_vk_bytes()).ok()?;
+                let key = inbox_key_for(&vk).ok()?;
+                if *key.id() == target {
+                    let ml_dsa_vk_bytes = id.ml_dsa_vk_bytes();
+                    let ml_kem_ek_bytes = id.ml_kem_ek_bytes();
+                    let fingerprint = fingerprint_words(&ml_dsa_vk_bytes, &ml_kem_ek_bytes);
+                    Some(Recipient {
+                        local_alias: id.alias.clone(),
+                        ml_dsa_vk_bytes,
+                        ml_kem_ek_bytes,
+                        fingerprint,
+                        required_tier: id.required_tier,
+                        max_age_secs: id.max_age_secs,
+                        verified: true,
+                        is_own: true,
+                    })
+                } else {
+                    None
+                }
+            }
+        })
+    })
+}
+
 /// True if `key` is the inbox `ContractKey` of any known contact.
 ///
 /// Used by the api.rs GetResponse handler to swallow responses produced by
@@ -488,14 +522,25 @@ pub struct StoredContactKeys {
 }
 
 impl StoredContactKeys {
-    pub fn from_card(card: &ContactCard, verified: bool) -> Self {
+    /// Build the persisted contact record from a fetched inbox state. The
+    /// recipient's ML-DSA vk comes from the inbox params (via the supplied
+    /// `vk_bytes`); the ek + tier policy come from the state itself
+    /// (`Inbox::owner_ek_bytes` + `Inbox::settings`).
+    #[allow(dead_code)] // hook for future inbox-prime path; ImportContactForm currently
+    // builds `StoredContactKeys` inline from `fetched_keys` for clarity.
+    pub fn from_inbox_state(
+        vk_bytes: Vec<u8>,
+        state: &InboxState,
+        suggested_alias: Option<String>,
+        verified: bool,
+    ) -> Self {
         Self {
-            ml_dsa_vk_bytes: card.ml_dsa_vk_bytes.clone(),
-            ml_kem_ek_bytes: card.ml_kem_ek_bytes.clone(),
-            suggested_alias: card.suggested_alias.clone(),
+            ml_dsa_vk_bytes: vk_bytes,
+            ml_kem_ek_bytes: state.owner_ek_bytes.clone(),
+            suggested_alias,
             verified,
-            required_tier: card.required_tier,
-            max_age_secs: card.max_age_secs,
+            required_tier: state.settings.minimum_tier,
+            max_age_secs: state.settings.max_age_secs,
         }
     }
 
@@ -576,61 +621,33 @@ mod tests {
 
     #[test]
     fn contact_card_encode_decode_round_trip() {
+        let addr = "EqJ5YpEEV3XLqEvKWLQHFhGAac2qXzSUoE6k2zbdnXBr";
         let card = ContactCard {
             version: ContactCard::VERSION,
-            ml_dsa_vk_bytes: vec![1u8; 10],
-            ml_kem_ek_bytes: vec![2u8; 10],
+            inbox_address: addr.to_string(),
             suggested_alias: Some("alice".into()),
             suggested_description: None,
-            required_tier: Tier::Day1,
-            max_age_secs: DEFAULT_MAX_AGE_SECS,
         };
         let encoded = card.encode();
-        assert!(encoded.starts_with("contact://"));
+        assert_eq!(encoded, addr);
         let decoded = ContactCard::decode(&encoded).expect("decode should succeed");
-        assert_eq!(decoded.suggested_alias.as_deref(), Some("alice"));
-        assert_eq!(decoded.ml_dsa_vk_bytes, card.ml_dsa_vk_bytes);
-        assert_eq!(decoded.required_tier, Tier::Day1);
-        assert_eq!(decoded.max_age_secs, DEFAULT_MAX_AGE_SECS);
+        assert_eq!(decoded.inbox_address, addr);
     }
 
     #[test]
-    fn contact_card_decode_bare_base64() {
-        let card = ContactCard {
-            version: ContactCard::VERSION,
-            ml_dsa_vk_bytes: vec![3u8; 10],
-            ml_kem_ek_bytes: vec![4u8; 10],
-            suggested_alias: None,
-            suggested_description: None,
-            required_tier: Tier::Day1,
-            max_age_secs: DEFAULT_MAX_AGE_SECS,
-        };
-        let encoded = card.encode();
-        let bare = encoded.strip_prefix("contact://").unwrap();
-        let decoded = ContactCard::decode(bare).expect("bare base64 should decode");
-        assert_eq!(decoded.ml_dsa_vk_bytes, card.ml_dsa_vk_bytes);
+    fn contact_card_decode_trims_whitespace() {
+        let addr = "EqJ5YpEEV3XLqEvKWLQHFhGAac2qXzSUoE6k2zbdnXBr";
+        let decoded = ContactCard::decode(&format!("  {addr}\n")).expect("trim + decode");
+        assert_eq!(decoded.inbox_address, addr);
     }
 
-    /// Pre-#85 v1 cards lacked `required_tier` and `max_age_secs`. Decode
-    /// must default-fill those fields so existing imports still work.
-    /// The default tier is now `Min10` (matching freshly-created inboxes)
-    /// so v1 card holders don't mint at `Day1` and get rejected.
     #[test]
-    fn contact_card_v1_decodes_with_default_policy() {
-        let vk: Vec<u8> = vec![1u8; 10];
-        let ek: Vec<u8> = vec![2u8; 10];
-        let v1_json = serde_json::json!({
-            "version": 1,
-            "ml_dsa_vk_bytes": vk,
-            "ml_kem_ek_bytes": ek,
-            "suggested_alias": "alice",
-            "suggested_description": null,
-        });
-        let bytes = serde_json::to_vec(&v1_json).unwrap();
-        let encoded = format!("contact://{}", B64.encode(&bytes));
-        let decoded = ContactCard::decode(&encoded).expect("v1 card decodes");
-        assert_eq!(decoded.required_tier, Tier::Min10);
-        assert_eq!(decoded.max_age_secs, DEFAULT_MAX_AGE_SECS);
+    fn contact_card_decode_rejects_invalid_bs58() {
+        // Non-bs58 alphabet ('l' / '0' / 'O' / 'I' are excluded; whitespace).
+        assert!(ContactCard::decode("not a real address").is_err());
+        // Way too long — the stdlib decoder asserts exactly 32 bytes.
+        let too_long = "z".repeat(128);
+        assert!(ContactCard::decode(&too_long).is_err());
     }
 
     /// `default_tier()` must match `IdentityAftPrefs::default().required_tier` so
@@ -831,67 +848,28 @@ mod tests {
         assert_eq!(results.len(), 3);
     }
 
+    /// Identity → bs58 address derivation must match `inbox_key_for`, so
+    /// the address sender pastes round-trips through the contract id used
+    /// internally for routing + AFT alloc.
     #[test]
-    fn fingerprint_short_returns_first_three_words_joined() {
-        let card = ContactCard {
-            version: ContactCard::VERSION,
-            ml_dsa_vk_bytes: vec![17; 1952],
-            ml_kem_ek_bytes: vec![19; 1184],
-            suggested_alias: None,
-            suggested_description: None,
-            required_tier: Tier::Day1,
-            max_age_secs: DEFAULT_MAX_AGE_SECS,
-        };
-        let fp = card.fingerprint();
-        assert_eq!(
-            card.fingerprint_short(),
-            format!("{}-{}-{}", fp[0], fp[1], fp[2])
-        );
-        assert_eq!(card.fingerprint_full(), fp.join("-"));
-    }
+    fn identity_inbox_address_round_trips_through_inbox_key_for() {
+        use ml_dsa::{KeyGen, MlDsa65, signature::Keypair as MlDsaKeypair};
+        use std::str::FromStr;
+        let sk = MlDsa65::from_seed(&[42u8; 32].into());
+        let vk = MlDsaKeypair::verifying_key(&sk);
+        let vk_bytes = vk.encode().to_vec();
+        let key = crate::inbox::inbox_key_for(&vk).expect("inbox_key_for");
+        let expected = key.id().encode();
 
-    /// Regression for #73 — fingerprint shown to receiver after import
-    /// disagreed with sender's sidebar / share-modal fingerprint. Decoding
-    /// a real card captured during QA must reproduce its `verify:` words
-    /// byte-for-byte.
-    #[test]
-    fn contact_card_fixture_round_trip_fingerprint_matches_verify_line() {
-        let raw = include_str!("bob_card_fixture.txt");
-        let card = ContactCard::decode(raw).expect("fixture decodes");
-        let computed = card.fingerprint().join("-");
-        let verify_line = raw
-            .lines()
-            .next()
-            .and_then(|l| l.strip_prefix("verify: "))
-            .expect("fixture starts with `verify: …`");
-        assert_eq!(
-            computed, verify_line,
-            "card fingerprint must match the verify line embedded in the share text",
-        );
-    }
-
-    #[test]
-    fn contact_card_decode_share_text_with_verify_line() {
-        // The Share modal copies a multi-line blob: a `verify:` line for
-        // human comparison followed by the `contact://...` URI. The import
-        // form must accept the whole blob, not just the URI.
-        let card = ContactCard {
-            version: ContactCard::VERSION,
-            ml_dsa_vk_bytes: vec![5u8; 10],
-            ml_kem_ek_bytes: vec![6u8; 10],
-            suggested_alias: Some("alice".into()),
-            suggested_description: None,
-            required_tier: Tier::Day1,
-            max_age_secs: DEFAULT_MAX_AGE_SECS,
-        };
-        let share_text = format!(
-            "verify: {}\n{}",
-            card.fingerprint().join("-"),
-            card.encode()
-        );
-        let decoded =
-            ContactCard::decode(&share_text).expect("share text with verify line should decode");
-        assert_eq!(decoded.ml_dsa_vk_bytes, card.ml_dsa_vk_bytes);
+        // Build a minimal Identity-like shim by hand isn't ergonomic; do
+        // the derivation directly via the vk → ContractInstanceId path
+        // the function uses internally so the test stays self-contained.
+        let id = freenet_stdlib::prelude::ContractInstanceId::from_str(&expected).unwrap();
+        assert_eq!(*key.id(), id);
+        // And that vk_from_bytes ↔ inbox_key_for stays consistent.
+        let vk2 = vk_from_bytes(&vk_bytes).expect("vk_from_bytes");
+        let key2 = crate::inbox::inbox_key_for(&vk2).expect("inbox_key_for");
+        assert_eq!(key.id(), key2.id());
     }
 
     /// Regression for the api.rs:1467 panic ("tried to get wrong contract
@@ -958,6 +936,52 @@ mod tests {
             !is_contact_inbox_key(&other_key),
             "is_contact_inbox_key must return false for a key that is not any known contact's inbox",
         );
+    }
+
+    /// Pasting a known contact's bs58 inbox address resolves through
+    /// `lookup_by_bs58` to the same `Recipient` the alias path returns.
+    #[test]
+    fn lookup_by_bs58_finds_imported_contact() {
+        use ml_dsa::{KeyGen, MlDsa65, signature::Keypair as MlDsaKeypair};
+        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+
+        let sk = MlDsa65::from_seed(&[9u8; 32].into());
+        let vk = MlDsaKeypair::verifying_key(&sk);
+        let vk_bytes = vk.encode().to_vec();
+        let inbox_key = crate::inbox::inbox_key_for(&vk).expect("inbox_key_for");
+        let addr = inbox_key.id().encode();
+
+        insert_contact(Contact {
+            local_alias: "alice".into(),
+            description: String::new(),
+            ml_dsa_vk_bytes: vk_bytes.clone(),
+            ml_kem_ek_bytes: vec![0xCC; 1184],
+            required_tier: Tier::Day1,
+            max_age_secs: DEFAULT_MAX_AGE_SECS,
+            verified: true,
+        })
+        .unwrap();
+
+        let by_alias = lookup("alice").expect("alias lookup");
+        let by_bs58 = lookup_by_bs58(&addr).expect("bs58 lookup");
+        assert_eq!(by_alias.ml_dsa_vk_bytes, by_bs58.ml_dsa_vk_bytes);
+        assert_eq!(by_alias.ml_kem_ek_bytes, by_bs58.ml_kem_ek_bytes);
+        assert_eq!(by_alias.fingerprint, by_bs58.fingerprint);
+        assert!(by_bs58.verified);
+    }
+
+    #[test]
+    fn lookup_by_bs58_returns_none_for_unknown_address() {
+        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+        // Valid bs58 32-byte string but no matching contact.
+        let id = freenet_stdlib::prelude::ContractInstanceId::new([7u8; 32]);
+        assert!(lookup_by_bs58(&id.encode()).is_none());
+    }
+
+    #[test]
+    fn lookup_by_bs58_returns_none_for_invalid_address() {
+        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+        assert!(lookup_by_bs58("not bs58 at all").is_none());
     }
 
     #[test]

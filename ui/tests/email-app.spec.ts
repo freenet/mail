@@ -405,24 +405,13 @@ test.describe("Address book: import contact and display", () => {
     await page.goto("/");
     await waitForApp(page);
 
-    // ── Step 1: build a fake ContactCard via browser evaluate ─────────────
-    const contactCard = await page.evaluate(() => {
-      const mlDsaVk = new Array(1952)
-        .fill(0)
-        .map((_, i) => (i * 7 + 13) & 0xff);
-      const mlKemEk = new Array(1184)
-        .fill(0)
-        .map((_, i) => (i * 5 + 17) & 0xff);
-      const card = {
-        version: 1,
-        ml_dsa_vk_bytes: mlDsaVk,
-        ml_kem_ek_bytes: mlKemEk,
-        suggested_alias: "charlie",
-        suggested_description: "Test contact",
-      };
-      const json = JSON.stringify(card);
-      return `verify: foo-bar-baz-qux-quux-corge\ncontact://${btoa(json)}`;
-    });
+    // ── Step 1: build a fake bs58 inbox address ────────────────────────────
+    // Post-#249 the wire format is the bare bs58 ContractInstanceId
+    // (32-byte hash, 43-44 chars in bs58). The offline (no-sync) build
+    // synthesizes deterministic placeholder pubkeys from this address so
+    // the fingerprint is stable across runs and the import flow
+    // exercises end-to-end without a node.
+    const contactCard = "EqJ5YpEEV3XLqEvKWLQHFhGAac2qXzSUoE6k2zbdnXBr";
 
     // ── Step 2: open the import-contact dialog ────────────────────────────
     await page.locator('[data-testid="fm-contact-import"]').click();
@@ -436,10 +425,9 @@ test.describe("Address book: import contact and display", () => {
     const fingerprintPanel = page.locator('[data-testid="fm-import-fp"]');
     await expect(fingerprintPanel).toBeVisible({ timeout: 5_000 });
 
-    // Alias should be pre-filled with the suggested_alias from the card.
+    // bs58 addresses don't carry a suggested alias — the user always
+    // chooses their own local label.
     const labelInput = page.locator('input[placeholder="e.g. Alice (work)"]');
-    await expect(labelInput).toHaveValue("charlie");
-
     await labelInput.fill("charlie-test");
 
     // The verify-words block lays each word out in a `.verify-word .w`
@@ -682,7 +670,7 @@ test.describe("Create-alias reveal stage (#52)", () => {
 });
 
 test.describe("Share modal (#52)", () => {
-  test("opens with six-word fingerprint, contact:// token, and copy button", async ({
+  test("opens with six-word fingerprint, bs58 inbox address, and copy button", async ({
     page,
   }) => {
     await page.goto("/");
@@ -699,11 +687,10 @@ test.describe("Share modal (#52)", () => {
     const words = await modal.locator(".verify-word .w").allTextContents();
     expect(words).toHaveLength(6);
 
-    // Token block contains the contact:// scheme prefix; the full share
-    // text rides on `data-share-text` for live-node consumers.
-    await expect(modal.locator(".token-block")).toContainText("contact://");
+    // Token block carries the bs58 inbox address (43-44 chars); the
+    // full share text (address + verify line) rides on `data-share-text`.
     const shareText = await modal.getAttribute("data-share-text");
-    expect(shareText).toMatch(/^verify: .+\ncontact:\/\//);
+    expect(shareText).toMatch(/^[1-9A-HJ-NP-Za-km-z]{43,44}\nverify: /);
 
     // Copy button + close. mobile-chrome stacks columns and pre-login
     // background rows (id-rows, contact-rows, brand) intercept pointer
@@ -725,24 +712,7 @@ test.describe("Import contact verify-check (#52)", () => {
     // Same fake card the offline import test uses, but we tick the
     // verify-check before submitting and assert the row gets the
     // trust-green badge instead of the warn-amber one.
-    const contactCard = await page.evaluate(() => {
-      const mlDsaVk = new Array(1952)
-        .fill(0)
-        .map((_, i) => (i * 11 + 19) & 0xff);
-      const mlKemEk = new Array(1184)
-        .fill(0)
-        .map((_, i) => (i * 13 + 23) & 0xff);
-      const card = {
-        version: 1,
-        ml_dsa_vk_bytes: mlDsaVk,
-        ml_kem_ek_bytes: mlKemEk,
-        suggested_alias: "delta",
-        suggested_description: "Verified test",
-      };
-      return `verify: foo-bar-baz-qux-quux-corge\ncontact://${btoa(
-        JSON.stringify(card),
-      )}`;
-    });
+    const contactCard = "AmcVD92D3UjMxgC5JfqgFm78qmKCBmw2qBSDocsfYBJa";
 
     await page.locator('[data-testid="fm-contact-import"]').click();
     const importModal = page.locator('[data-testid="fm-import-contact-modal"]');
@@ -779,24 +749,7 @@ test.describe("Import contact verify-check (#52)", () => {
     await page.goto("/");
     await waitForApp(page);
 
-    const contactCard = await page.evaluate(() => {
-      const mlDsaVk = new Array(1952)
-        .fill(0)
-        .map((_, i) => (i * 17 + 31) & 0xff);
-      const mlKemEk = new Array(1184)
-        .fill(0)
-        .map((_, i) => (i * 19 + 37) & 0xff);
-      const card = {
-        version: 1,
-        ml_dsa_vk_bytes: mlDsaVk,
-        ml_kem_ek_bytes: mlKemEk,
-        suggested_alias: "echo",
-        suggested_description: "Verify-after-import test",
-      };
-      return `verify: foo-bar-baz-qux-quux-corge\ncontact://${btoa(
-        JSON.stringify(card),
-      )}`;
-    });
+    const contactCard = "5kKKaNuU8RXkbZH1J1pzkRRJiGqYJqFFR5rsTBHpAk2y";
 
     // Import without ticking the verify checkbox.
     await page.locator('[data-testid="fm-contact-import"]').click();
@@ -1377,45 +1330,19 @@ test.describe("Sent delivery state (#58)", () => {
   });
 });
 
-// ── Recipient anti-flood policy on ContactCard (#85) ──────────────────────────
+// ── bs58 inbox address as the wire format (#249) ──────────────────────────────
 //
-// Issue #85 makes the AFT tier + max_age recipient-configurable by hashing
-// them into `InboxParams`. The wire format change percolates to ContactCard
-// (v2 adds `required_tier` + `max_age_secs`). The decoder must:
-//   1. Accept v2 cards and round-trip the explicit policy fields.
-//   2. Accept legacy v1 cards (no policy fields) and default-fill them so
-//      pre-#85 imports keep working.
-// Both are exercised through the public Import Contact UI, which is the
-// path real users hit.
+// Post-#249 ContactCard collapses to the bare bs58 ContractInstanceId. The
+// recipient's anti-flood policy is no longer on the card — it lives on the
+// inbox state itself (`Inbox::settings.minimum_tier` + `max_age_secs`), so
+// the sender reads it back at import time via the inbox-state Get.
 
-test.describe("ContactCard #85 — recipient anti-flood policy", () => {
-  test("v2 contact card with explicit Hour1 policy imports successfully", async ({
-    page,
-  }) => {
+test.describe("ContactCard #249 — bs58 wire format", () => {
+  test("bs58 inbox address imports successfully", async ({ page }) => {
     await page.goto("/");
     await waitForApp(page);
 
-    const contactCard = await page.evaluate(() => {
-      const mlDsaVk = new Array(1952)
-        .fill(0)
-        .map((_, i) => (i * 11 + 3) & 0xff);
-      const mlKemEk = new Array(1184)
-        .fill(0)
-        .map((_, i) => (i * 13 + 5) & 0xff);
-      const card = {
-        version: 2,
-        ml_dsa_vk_bytes: mlDsaVk,
-        ml_kem_ek_bytes: mlKemEk,
-        suggested_alias: "hour1-contact",
-        suggested_description: "Heavy-traffic recipient",
-        // #85 fields: recipient demands Hour1 minted tokens with a
-        // 30-day max_age, instead of the legacy Day1/365d defaults.
-        required_tier: "Hour1",
-        max_age_secs: 30 * 24 * 3600,
-      };
-      const json = JSON.stringify(card);
-      return `verify: foo-bar-baz-qux-quux-corge\ncontact://${btoa(json)}`;
-    });
+    const contactCard = "9Z2RVTGgN3KX31fL6gp17hAjQXfRkx1cAcPwgkLh8WSY";
 
     await page.locator('[data-testid="fm-contact-import"]').click();
     const importModal = page.locator('[data-testid="fm-import-contact-modal"]');
@@ -1426,89 +1353,30 @@ test.describe("ContactCard #85 — recipient anti-flood policy", () => {
     const fingerprintPanel = page.locator('[data-testid="fm-import-fp"]');
     await expect(fingerprintPanel).toBeVisible({ timeout: 5_000 });
 
+    await page
+      .locator('input[placeholder="e.g. Alice (work)"]')
+      .fill("bs58-contact");
     await page.locator('[data-testid="fm-import-submit"]').click();
 
     const contactRow = page.locator(
-      '[data-testid="contact-row"][data-alias="hour1-contact"]',
+      '[data-testid="contact-row"][data-alias="bs58-contact"]',
     );
     await expect(contactRow).toBeVisible({ timeout: 5_000 });
   });
 
-  test("v1 contact card without policy fields imports with defaults", async ({
+  test("invalid bs58 input is rejected with no fingerprint panel", async ({
     page,
   }) => {
     await page.goto("/");
     await waitForApp(page);
 
-    // Legacy v1 wire shape — no `required_tier` / `max_age_secs`.
-    // The Rust decoder's serde defaults (Day1 + DEFAULT_MAX_AGE_SECS)
-    // must kick in so pre-#85 cards keep round-tripping.
-    const contactCard = await page.evaluate(() => {
-      const mlDsaVk = new Array(1952)
-        .fill(0)
-        .map((_, i) => (i * 17 + 23) & 0xff);
-      const mlKemEk = new Array(1184)
-        .fill(0)
-        .map((_, i) => (i * 19 + 29) & 0xff);
-      const card = {
-        version: 1,
-        ml_dsa_vk_bytes: mlDsaVk,
-        ml_kem_ek_bytes: mlKemEk,
-        suggested_alias: "legacy-contact",
-        suggested_description: "Pre-#85 v1 card",
-      };
-      const json = JSON.stringify(card);
-      return `verify: aaa-bbb-ccc-ddd-eee-fff\ncontact://${btoa(json)}`;
-    });
-
     await page.locator('[data-testid="fm-contact-import"]').click();
     const importModal = page.locator('[data-testid="fm-import-contact-modal"]');
     await importModal.waitFor({ timeout: 5_000 });
+    // 0/O/I/l are excluded from the bs58 alphabet; whitespace too.
+    await importModal.locator("textarea").fill("not a real address");
 
-    await importModal.locator("textarea").fill(contactCard);
-
-    // If the decoder rejected the missing fields the fingerprint panel
-    // would never appear and the submit button stays disabled.
-    const fingerprintPanel = page.locator('[data-testid="fm-import-fp"]');
-    await expect(fingerprintPanel).toBeVisible({ timeout: 5_000 });
-
-    await page.locator('[data-testid="fm-import-submit"]').click();
-
-    const contactRow = page.locator(
-      '[data-testid="contact-row"][data-alias="legacy-contact"]',
-    );
-    await expect(contactRow).toBeVisible({ timeout: 5_000 });
-  });
-
-  test("malformed policy in v2 card is rejected", async ({ page }) => {
-    await page.goto("/");
-    await waitForApp(page);
-
-    // `required_tier` is an enum — a stray string like "Bogus" must
-    // fail JSON deser, so the import dialog should refuse the card
-    // (no fingerprint panel renders).
-    const badCard = await page.evaluate(() => {
-      const mlDsaVk = new Array(1952).fill(0).map((_, i) => i & 0xff);
-      const mlKemEk = new Array(1184).fill(0).map((_, i) => i & 0xff);
-      const card = {
-        version: 2,
-        ml_dsa_vk_bytes: mlDsaVk,
-        ml_kem_ek_bytes: mlKemEk,
-        suggested_alias: "bogus",
-        suggested_description: null,
-        required_tier: "Bogus",
-        max_age_secs: 86400,
-      };
-      const json = JSON.stringify(card);
-      return `contact://${btoa(json)}`;
-    });
-
-    await page.locator('[data-testid="fm-contact-import"]').click();
-    const importModal = page.locator('[data-testid="fm-import-contact-modal"]');
-    await importModal.waitFor({ timeout: 5_000 });
-    await importModal.locator("textarea").fill(badCard);
-
-    // Fingerprint panel must NOT render (decoder rejected the card).
+    // Fingerprint panel must NOT render (decoder rejected the address).
     await expect(page.locator('[data-testid="fm-import-fp"]')).toHaveCount(0);
   });
 });
@@ -1580,8 +1448,11 @@ test.describe("Regression #158: contact modals mount inside inbox", () => {
     const shareModal = page.locator('[data-testid="fm-share-modal"]');
     await expect(shareModal).toBeVisible({ timeout: 5_000 });
 
-    // Share modal should contain the contact:// token for the active identity.
-    await expect(shareModal.locator(".token-block")).toContainText("contact://");
+    // Share modal token block holds the bs58 inbox address (#249 — was
+    // `contact://<base64-json>` pre-PR; now ~44-char bs58 string).
+    await expect(shareModal.locator(".token-block")).toContainText(
+      /[1-9A-HJ-NP-Za-km-z]{43,44}/,
+    );
   });
 
   // Confirm the pre-login flows that triggered these modals from the
