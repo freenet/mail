@@ -369,6 +369,7 @@ impl InboxView {
         recipient_ml_dsa_vk: ml_dsa::VerifyingKey<MlDsa65>,
         recipient_required_tier: freenet_aft_interface::Tier,
         recipient_max_age_secs: u64,
+        recipient_inbox_wasm_hash: Option<String>,
         title: &str,
         content: &str,
         // Optional `(sender_alias, sent_id, inbox_key)` so the future can
@@ -400,6 +401,7 @@ impl InboxView {
                 return Ok(futs);
             };
             let ack_meta_async = ack_meta.clone();
+            let recipient_hash_async = recipient_inbox_wasm_hash.clone();
             let f = async move {
                 let res = content_clone
                     .start_sending(
@@ -408,6 +410,7 @@ impl InboxView {
                         recipient_ml_dsa_vk,
                         recipient_required_tier,
                         recipient_max_age_secs,
+                        recipient_hash_async.as_deref(),
                         &id,
                     )
                     .await;
@@ -449,6 +452,8 @@ impl InboxView {
         // ack_meta is unused on the offline path; explicitly ignored.
         #[cfg(not(feature = "use-node"))]
         let _ = ack_meta;
+        #[cfg(not(feature = "use-node"))]
+        let _ = recipient_inbox_wasm_hash;
         #[cfg(all(feature = "example-data", not(feature = "use-node")))]
         {
             // In offline mode, deliver the message to an in-memory mailbox
@@ -704,6 +709,7 @@ impl User {
             required_tier: freenet_aft_interface::Tier::Min10,
             max_age_secs: freenet_email_inbox::DEFAULT_MAX_AGE_SECS,
             verified: true,
+            inbox_wasm_hash: None,
         });
         User {
             logged: false,
@@ -2677,9 +2683,17 @@ fn ComposeSheet() -> Element {
 
         // Derive the recipient's inbox key BEFORE moving `recipient_vk` into
         // `send_message` so we can pair the eventual UpdateResponse back to
-        // the Sent row's `SentId`.
+        // the Sent row's `SentId`. #251 improvement 4: derive against the
+        // recipient's advertised WASM hash when known so the ack pairing
+        // matches the actual contract id the runtime will route to.
         #[cfg(feature = "use-node")]
-        let inbox_key_for_ack = crate::inbox::inbox_key_for(&recipient_vk);
+        let inbox_key_for_ack = crate::inbox::inbox_key_for_with_hash(
+            &recipient_vk,
+            recipient
+                .inbox_wasm_hash
+                .as_deref()
+                .unwrap_or(crate::inbox::INBOX_CODE_HASH),
+        );
 
         // #221: prefer the live `InboxSettings` cached from the contact's
         // inbox state over the values frozen in the contact card. Cards
@@ -2738,6 +2752,7 @@ fn ComposeSheet() -> Element {
             recipient_vk,
             recipient_required_tier,
             recipient_max_age_secs,
+            recipient.inbox_wasm_hash.clone(),
             &title_val,
             &content_val,
             ack_meta,

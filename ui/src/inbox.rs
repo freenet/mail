@@ -135,12 +135,27 @@ pub(crate) fn inbox_params_pub_key_bytes(ml_dsa_vk: &MlDsaVerifyingKey<MlDsa65>)
 pub(crate) fn inbox_key_for(
     ml_dsa_vk: &MlDsaVerifyingKey<MlDsa65>,
 ) -> Result<ContractKey, DynError> {
+    inbox_key_for_with_hash(ml_dsa_vk, INBOX_CODE_HASH)
+}
+
+/// Same as `inbox_key_for` but derives against an explicit code hash —
+/// used by the send path (#251 improvement 4) so the sender can address
+/// the recipient's inbox under the recipient's WASM hash rather than
+/// the sender's embedded `INBOX_CODE_HASH`. A non-upgraded recipient
+/// still receives messages from an upgraded sender.
+///
+/// Callers that hold a recipient's `Contact.inbox_wasm_hash` should
+/// pass it here. `None` callers can stay on `inbox_key_for`.
+pub(crate) fn inbox_key_for_with_hash(
+    ml_dsa_vk: &MlDsaVerifyingKey<MlDsa65>,
+    code_hash: &str,
+) -> Result<ContractKey, DynError> {
     let params = InboxParams {
         pub_key: inbox_params_pub_key_bytes(ml_dsa_vk),
     }
     .try_into()
     .map_err(|e| format!("{e}"))?;
-    ContractKey::from_params(INBOX_CODE_HASH, params).map_err(|e| format!("{e}").into())
+    ContractKey::from_params(code_hash, params).map_err(|e| format!("{e}").into())
 }
 
 /// Verify a detached ML-DSA-65 signature over `ciphertext` using the
@@ -516,6 +531,7 @@ pub(crate) struct DecryptedMessage {
 }
 
 impl DecryptedMessage {
+    #[allow(clippy::too_many_arguments)]
     pub async fn start_sending(
         self,
         client: &mut WebApiRequestClient,
@@ -523,6 +539,7 @@ impl DecryptedMessage {
         recipient_ml_dsa_vk: MlDsaVerifyingKey<MlDsa65>,
         recipient_required_tier: freenet_aft_interface::Tier,
         recipient_max_age_secs: u64,
+        recipient_inbox_wasm_hash: Option<&str>,
         from: &Identity,
     ) -> Result<(), DynError> {
         let (hash, _) = self.assignment_hash_and_signed_content()?;
@@ -532,11 +549,17 @@ impl DecryptedMessage {
             bs58::encode(hash).into_string()
         ));
         let inbox_pub_key_bytes = inbox_params_pub_key_bytes(&recipient_ml_dsa_vk);
+        // #251 improvement 4: address the recipient's inbox under the
+        // recipient's advertised WASM hash when known. Falls back to
+        // the sender's `INBOX_CODE_HASH` for own-identity sends and
+        // for contacts imported before the field shipped.
+        let code_hash = recipient_inbox_wasm_hash.unwrap_or(INBOX_CODE_HASH);
         let delegate_key = AftRecords::assign_token(
             client,
             inbox_pub_key_bytes.clone(),
             recipient_required_tier,
             recipient_max_age_secs,
+            recipient_inbox_wasm_hash,
             from,
             hash,
         )
@@ -546,8 +569,7 @@ impl DecryptedMessage {
         }
         .try_into()
         .map_err(|e| format!("{e}"))?;
-        let inbox_key =
-            ContractKey::from_params(INBOX_CODE_HASH, params).map_err(|e| format!("{e}"))?;
+        let inbox_key = ContractKey::from_params(code_hash, params).map_err(|e| format!("{e}"))?;
         crate::log::info(format!(
             "send.start_sending: token requested, awaiting AFT delegate response from=`{}` inbox_key={inbox_key} (release-visible diagnostic for #174)",
             from.alias()

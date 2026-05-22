@@ -1908,7 +1908,19 @@ pub(super) fn ShareContactModal() -> Element {
 /// — the four fields recovered from the inbox contract on a successful
 /// `FetchContactKeys` round-trip, ready to flow into
 /// `StoredContactKeys` on confirm.
-type FetchedKeys = (Vec<u8>, Vec<u8>, freenet_aft_interface::Tier, u64);
+///
+/// Fields: `(ml_dsa_vk, ml_kem_ek, required_tier, max_age_secs,
+/// inbox_wasm_hash)`. The last entry is `None` for offline-mode
+/// fixtures (no node round-trip to capture the recipient's actual
+/// inbox WASM hash) and the send path falls back to the sender's
+/// embedded `INBOX_CODE_HASH` — same behaviour as pre-#251.
+type FetchedKeys = (
+    Vec<u8>,
+    Vec<u8>,
+    freenet_aft_interface::Tier,
+    u64,
+    Option<String>,
+);
 
 #[allow(non_snake_case)]
 pub(super) fn ImportContactForm() -> Element {
@@ -1947,6 +1959,7 @@ pub(super) fn ImportContactForm() -> Element {
                                 ml_kem_ek_bytes,
                                 required_tier,
                                 max_age_secs,
+                                inbox_wasm_hash,
                             } => {
                                 let fp = crate::app::address_book::fingerprint_words(
                                     &ml_dsa_vk_bytes,
@@ -1958,6 +1971,7 @@ pub(super) fn ImportContactForm() -> Element {
                                     ml_kem_ek_bytes,
                                     required_tier,
                                     max_age_secs,
+                                    Some(inbox_wasm_hash),
                                 )));
                                 error_msg.set(String::new());
                             }
@@ -2058,8 +2072,8 @@ pub(super) fn ImportContactForm() -> Element {
                         ek_bytes,
                         Tier::Min10,
                         freenet_email_inbox::DEFAULT_MAX_AGE_SECS,
+                        None,
                     )));
-                    return;
                 }
 
                 #[cfg(feature = "use-node")]
@@ -2219,7 +2233,9 @@ pub(super) fn ImportContactForm() -> Element {
                         onclick: move |_| {
                             let alias_str = local_alias.read().clone();
                             if alias_str.is_empty() { return; }
-                            let Some((vk, ek, tier, max_age)) = fetched_keys.read().clone() else {
+                            let Some((vk, ek, tier, max_age, inbox_wasm_hash)) =
+                                fetched_keys.read().clone()
+                            else {
                                 error_msg.set("Still fetching keys — wait a moment.".into());
                                 return;
                             };
@@ -2234,6 +2250,7 @@ pub(super) fn ImportContactForm() -> Element {
                                 verified: *verified.read(),
                                 required_tier: tier,
                                 max_age_secs: max_age,
+                                inbox_wasm_hash,
                             };
                             let contact = stored.into_contact(
                                 alias_str.into(),

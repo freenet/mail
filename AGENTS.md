@@ -448,6 +448,25 @@ deliberate inbox-contract bump so users skipping releases still
 recover. The current `INBOX_CODE_HASH` must never appear in the slice
 — enforced by the `current_hash_not_in_legacy` test.
 
+**Sender-side recipient hash (#251 improvement 4)**: the inbox WASM
+hash a recipient was running at import time is captured on the
+contact (`StoredContactKeys.inbox_wasm_hash`,
+`Contact.inbox_wasm_hash`) from the import-fetch `GetResponse`'s
+`key.code_hash()`. The send path
+(`inbox.rs::start_sending`, `aft.rs::assign_token`,
+`inbox.rs::inbox_key_for_with_hash`) addresses the recipient's
+inbox under THAT hash, falling back to the sender's embedded
+`INBOX_CODE_HASH` when the field is absent (own-identity sends,
+contacts imported before this shipped). This decouples sender and
+recipient upgrade schedules — an upgraded sender can still deliver
+to a non-upgraded recipient. Stored as a bs58 string (encoded via
+plain `bs58::encode`, NOT `CodeHash::encode` whose `to_lowercase`
+breaks the roundtrip with `ContractKey::from_params`). Migration
+to a fresher hash on the recipient's side is out of scope — the
+hash sticks until the user re-imports the contact card; the
+in-protocol upgrade pointer (#251 improvement 1) is the longer-
+term fix for that.
+
 **Persistent migration retry (#251 improvement 5)**:
 `AliasInfo.pending_migration_from: Option<String>` is stamped on the
 identity-management delegate via `IdentityMsg::SetPendingMigrationFrom`
