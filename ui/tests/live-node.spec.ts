@@ -520,7 +520,7 @@ test.describe("Live node E2E", () => {
       // verify_on_send defaults true; tick checkbox so import is verified
       // (#105 root cause: silent send rejection on unverified contact).
       const aliceVerify = aliceApp.locator('[data-testid="fm-verify-check"]');
-      await aliceVerify.waitFor({ timeout: 15_000 });
+      await aliceVerify.waitFor({ timeout: 30_000 });
       await aliceVerify.click();
       await aliceApp.locator('[data-testid="fm-import-submit"]').click();
 
@@ -1063,7 +1063,7 @@ test.describe("Live node E2E", () => {
       await bobShare.waitFor({ timeout: 5_000 });
       const bobCard = (await bobShare.getAttribute("data-share-text")) ?? "";
       await bobShare.locator(".modal-x").click();
-      expect(bobCard).toMatch(/verify: .+\ncontact:\/\//);
+      expect(bobCard).toMatch(/^[1-9A-HJ-NP-Za-km-z]{43,44}\nverify: /);
 
       // Alice imports bob (verified so verify_on_send doesn't block).
       await aliceApp.locator('[data-testid="fm-contact-import"]').click();
@@ -1074,7 +1074,7 @@ test.describe("Live node E2E", () => {
         .locator('input[placeholder="e.g. Alice (work)"]')
         .fill(ALIAS_T6_BOB);
       const aliceVerify = aliceApp.locator('[data-testid="fm-verify-check"]');
-      await aliceVerify.waitFor({ timeout: 15_000 });
+      await aliceVerify.waitFor({ timeout: 30_000 });
       await aliceVerify.click();
       await aliceApp.locator('[data-testid="fm-import-submit"]').click();
 

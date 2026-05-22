@@ -245,9 +245,7 @@ fn decode_import_fetch(
     let parsed: InboxState = match serde_json::from_slice(state) {
         Ok(v) => v,
         Err(e) => {
-            return contact_import::ImportFetchOutcome::Failed(format!(
-                "decode inbox state: {e}"
-            ));
+            return contact_import::ImportFetchOutcome::Failed(format!("decode inbox state: {e}"));
         }
     };
     let container = match contract.as_ref() {
@@ -262,9 +260,7 @@ fn decode_import_fetch(
     let params: InboxParams = match InboxParams::try_from(container.params()) {
         Ok(p) => p,
         Err(e) => {
-            return contact_import::ImportFetchOutcome::Failed(format!(
-                "decode InboxParams: {e}"
-            ));
+            return contact_import::ImportFetchOutcome::Failed(format!("decode InboxParams: {e}"));
         }
     };
     if parsed.owner_ek_bytes.is_empty() {
