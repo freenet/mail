@@ -433,9 +433,39 @@ inbox key. Toast surfaces the migration to the user. On first
 observation (`inbox_wasm_hash = None`) the UI stamps the current
 hash as a baseline so the next bump is detectable. The schema bump
 on the delegate is backwards-compatible (`#[serde(default)]` on
-`AliasInfo.inbox_wasm_hash`). AFT contract migration follows the
-same shape if and when AFT WASM rotates — not yet implemented; file
-a follow-up when needed.
+`AliasInfo.inbox_wasm_hash`).
+
+**AFT contract migration (#251 improvement 3)**: same shape applied
+to the AFT token-allocation-record contract. `AliasInfo` carries
+`aft_record_wasm_hash` + `pending_aft_migration_from`;
+`LEGACY_TOKEN_RECORD_CODE_HASHES` in `ui/src/aft.rs` is the
+append-only oldest→newest list (parallel to
+`LEGACY_INBOX_CODE_HASHES`). On startup, after the inbox loop, the
+UI runs the same drift / chained-migration / persistent-retry loop
+against `TOKEN_RECORD_CODE_HASH`, dispatching GETs for each prior
+AFT-record key and re-PUTing the decoded `TokenAllocationRecord`
+under the current key. Re-validation works because the contract's
+`TokenDelegateParameters.generator_public_key` is the identity's
+ML-DSA verifying key, which is unchanged across an AFT contract
+bump. The token-generator delegate is not migrated (its key derives
+from the identity's ML-DSA seed, not from the WASM, so it rotates
+only when the seed changes — i.e. never under a deliberate
+contract bump). The `current_aft_hash_not_in_legacy` test
+enforces the same append-only invariant as the inbox slice.
+`token_delegate_parameters_are_deterministic_per_vk` pins the
+load-bearing claim that `TokenDelegateParameters::new(&vk)` encodes
+byte-identically across calls.
+
+Deliberate AFT-record rotation recipe: edit a `=x.y.z` pin in
+`modules/antiflood-tokens/contracts/token-allocation-record/Cargo.toml`
+(or the contract source), `cargo make build-token-allocation-record`,
+append the prior `TOKEN_RECORD_CODE_HASH` to
+`LEGACY_TOKEN_RECORD_CODE_HASHES` in `ui/src/aft.rs`, ship. Schema
+of `TokenAllocationRecord` itself must stay compatible — appending
+to the legacy slice migrates state byte-for-byte; a JSON-schema
+change in the same release would silently fail `validate_state`
+per user and needs a dedicated re-shape pass in
+`put_migrated_aft_record`.
 
 **Chained migration (#251 improvement 2)**: `LEGACY_INBOX_CODE_HASHES`
 in `ui/src/inbox.rs` is an append-only oldest→newest list of every

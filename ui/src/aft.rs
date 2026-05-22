@@ -37,6 +37,27 @@ pub(crate) const TOKEN_GENERATOR_DELEGATE_CODE_HASH: &str = include_str!(
 #[cfg(not(feature = "use-node"))]
 pub(crate) const TOKEN_GENERATOR_DELEGATE_CODE_HASH: &str = "";
 
+/// Historical `TOKEN_RECORD_CODE_HASH` values, oldest → newest. Each
+/// entry is a hash the AFT token-allocation-record contract WASM
+/// previously had under a prior release. Same role as
+/// `crate::inbox::LEGACY_INBOX_CODE_HASHES` for the AFT side
+/// (#251 improvement 3). Append-only: never reorder, never delete
+/// entries. The current `TOKEN_RECORD_CODE_HASH` must NOT appear in
+/// this list — enforced by the `current_aft_hash_not_in_legacy` test.
+///
+/// PRECONDITION — schema-compatible bumps only. The migration walks
+/// each prior hash, GETs the old `TokenAllocationRecord` state, and
+/// re-PUTs the SAME JSON under the current key. If a future AFT
+/// contract bump also changes the `TokenAllocationRecord` JSON
+/// schema (e.g. renames `tokens_by_tier`, adds a required field
+/// without `#[serde(default)]`, or changes any field's encoding),
+/// the old state will deserialise cleanly but fail the new
+/// contract's `validate_state` — silently per-user, with only a log
+/// line. A schema-changing bump requires its own migration pass
+/// (re-shape the state during `put_migrated_aft_record`), not just
+/// an entry here.
+pub(crate) const LEGACY_TOKEN_RECORD_CODE_HASHES: &[&str] = &[];
+
 pub(crate) struct AftRecords {}
 
 type InboxContract = ContractKey;
@@ -705,6 +726,50 @@ mod tests {
 
     fn fake_token_record() -> ContractInstanceId {
         ContractInstanceId::new([7u8; 32])
+    }
+
+    /// The current `TOKEN_RECORD_CODE_HASH` must NOT appear in
+    /// `LEGACY_TOKEN_RECORD_CODE_HASHES` — the migration walker would
+    /// otherwise GET the current key as an "old" candidate and re-PUT
+    /// identical state. Only checked under `use-node` because the
+    /// constant is otherwise empty (#251 improvement 3).
+    #[cfg(feature = "use-node")]
+    #[test]
+    fn current_aft_hash_not_in_legacy() {
+        let current = TOKEN_RECORD_CODE_HASH;
+        assert!(
+            !LEGACY_TOKEN_RECORD_CODE_HASHES.contains(&current),
+            "TOKEN_RECORD_CODE_HASH ({current}) must not appear in \
+             LEGACY_TOKEN_RECORD_CODE_HASHES — append it only AFTER \
+             bumping to a new hash",
+        );
+    }
+
+    /// `TokenDelegateParameters::new(&vk)` must produce byte-identical
+    /// `Parameters` for a fixed verifying key. The AFT migration path
+    /// (#251 improvement 3) re-derives `Parameters` at PUT time from
+    /// the identity's VK and relies on every other peer doing the same
+    /// — non-determinism here would rotate the contract id mid-flight
+    /// and orphan the migrated state. This is the load-bearing claim
+    /// documented in AGENTS.md ("`generator_public_key` is unchanged
+    /// across an AFT contract bump").
+    #[test]
+    fn token_delegate_parameters_are_deterministic_per_vk() {
+        use ml_dsa::{KeyGen, MlDsa65, signature::Keypair as MlDsaKeypair};
+        let sk = MlDsa65::from_seed(&[42u8; 32].into());
+        let vk = MlDsaKeypair::verifying_key(&sk);
+        let p1: Parameters = TokenDelegateParameters::new(&vk)
+            .try_into()
+            .expect("first encode");
+        let p2: Parameters = TokenDelegateParameters::new(&vk)
+            .try_into()
+            .expect("second encode");
+        assert_eq!(
+            p1.as_ref(),
+            p2.as_ref(),
+            "TokenDelegateParameters must encode deterministically for a fixed VK — \
+             AFT migration assumes byte-identical params across PUTs (#251)",
+        );
     }
 
     /// `build_recipient_criteria` must reflect the recipient's tier +
