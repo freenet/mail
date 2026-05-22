@@ -467,6 +467,17 @@ hash sticks until the user re-imports the contact card; the
 in-protocol upgrade pointer (#251 improvement 1) is the longer-
 term fix for that.
 
+Every helper that derives a contact's on-chain inbox key from its
+ML-DSA VK MUST go through `inbox_key_for_with_hash` with the
+contact's `inbox_wasm_hash` (fallback to `INBOX_CODE_HASH`) — using
+`inbox_key_for` (sender's hash) silently breaks contact recognition
+for cross-version contacts. Currently:
+`ui/src/app/address_book.rs::is_contact_inbox_key`,
+`::lookup_by_bs58`, and the rehydrate + CreateContact prime GETs in
+`ui/src/api.rs` (~1442 and ~2540). `inbox_key_for` is still correct
+for OWN-identity derivations (own inbox is at the sender's embedded
+hash by construction).
+
 **Persistent migration retry (#251 improvement 5)**:
 `AliasInfo.pending_migration_from: Option<String>` is stamped on the
 identity-management delegate via `IdentityMsg::SetPendingMigrationFrom`

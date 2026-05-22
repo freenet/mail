@@ -346,7 +346,7 @@ pub fn lookup(alias: &str) -> Option<Recipient> {
 /// fingerprint. Unknown addresses return `None`; the UI surfaces "import
 /// as contact first".
 pub fn lookup_by_bs58(addr: &str) -> Option<Recipient> {
-    use crate::inbox::inbox_key_for;
+    use crate::inbox::{INBOX_CODE_HASH, inbox_key_for, inbox_key_for_with_hash};
     use std::str::FromStr;
     let trimmed = addr.trim();
     let target = freenet_stdlib::prelude::ContractInstanceId::from_str(trimmed).ok()?;
@@ -355,7 +355,13 @@ pub fn lookup_by_bs58(addr: &str) -> Option<Recipient> {
         ab.borrow().values().find_map(|entry| match entry {
             Entry::Contact(c) => {
                 let vk = vk_from_bytes(&c.ml_dsa_vk_bytes).ok()?;
-                let key = inbox_key_for(&vk).ok()?;
+                // #251 improvement 4: address-book lookup must derive the
+                // contact's inbox key under the contact's advertised
+                // hash, not the sender's `INBOX_CODE_HASH`. A
+                // cross-version contact's actual contract id differs
+                // from `inbox_key_for(vk)` once the sender upgrades.
+                let code_hash = c.inbox_wasm_hash.as_deref().unwrap_or(INBOX_CODE_HASH);
+                let key = inbox_key_for_with_hash(&vk, code_hash).ok()?;
                 if *key.id() == target {
                     let fingerprint = c.fingerprint();
                     Some(Recipient {
@@ -406,14 +412,24 @@ pub fn lookup_by_bs58(addr: &str) -> Option<Recipient> {
 /// can't render a contact's inbox (the messages are encrypted to the
 /// contact's ml_kem key, not ours) — the prime is fire-and-forget.
 pub fn is_contact_inbox_key(key: &freenet_stdlib::prelude::ContractKey) -> bool {
-    use crate::inbox::inbox_key_for;
+    use crate::inbox::{INBOX_CODE_HASH, inbox_key_for_with_hash};
     ADDRESS_BOOK.with(|ab| {
         ab.borrow().values().any(|e| match e {
+            // #251 improvement 4: derive each contact's inbox key under
+            // the contact's advertised WASM hash. A cross-version
+            // contact's actual `key.id()` is derived from THAT hash, not
+            // the sender's `INBOX_CODE_HASH`; falling back to the
+            // sender's hash here silently failed to match
+            // UpdateNotifications + GetResponses for cross-version
+            // contacts, breaking tier-cache priming + ack pairing.
             Entry::Contact(c) => match vk_from_bytes(&c.ml_dsa_vk_bytes) {
-                Ok(vk) => match inbox_key_for(&vk) {
-                    Ok(contact_key) => contact_key.id() == key.id(),
-                    Err(_) => false,
-                },
+                Ok(vk) => {
+                    let code_hash = c.inbox_wasm_hash.as_deref().unwrap_or(INBOX_CODE_HASH);
+                    match inbox_key_for_with_hash(&vk, code_hash) {
+                        Ok(contact_key) => contact_key.id() == key.id(),
+                        Err(_) => false,
+                    }
+                }
                 Err(_) => false,
             },
             Entry::Own(_) => false,
