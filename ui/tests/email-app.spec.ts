@@ -149,6 +149,58 @@ test.describe("Inbox view", () => {
   });
 });
 
+test.describe("Quarantine folder", () => {
+  // Helper: open Settings → Inbox and flip the quarantine toggle.
+  async function toggleQuarantine(page: Page) {
+    await page.locator('[data-testid="fm-settings-btn"]').click();
+    await page
+      .locator('[data-testid="fm-settings-shell"]')
+      .waitFor({ timeout: 5_000 });
+    await page.locator('[data-testid="fm-settings-nav-item"][data-screen="inbox"]').click();
+    // The quarantine row owns the only "unknown keys" label on this screen.
+    const row = page
+      .locator(".fm-row-set", { hasText: "Hold messages with unknown keys" });
+    await row.locator('[role="switch"]').click();
+    // Back out to the mailbox.
+    await page.locator('[data-testid="fm-settings-back"]').click();
+    await page.locator('[data-testid="fm-app"]').waitFor({ timeout: 5_000 });
+  }
+
+  test("hidden until enabled, then diverts unknown senders with a badge", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await waitForApp(page);
+    await selectIdentity(page, "address1");
+
+    // Off by default: no Quarantine folder in the sidebar, and the example
+    // (unknown-sender) messages all live in the Inbox.
+    await expect(
+      page.locator('[data-testid="fm-folder-quarantine"]'),
+    ).toHaveCount(0);
+    await expect(page.getByText("Lunch tomorrow?")).toBeVisible();
+
+    await toggleQuarantine(page);
+
+    // Quarantine folder now appears with a count badge (2 unread of the 3
+    // seeded example messages — "Your weekly digest" is pre-read).
+    const quarantineBtn = page.locator('[data-testid="fm-folder-quarantine"]');
+    await expect(quarantineBtn).toBeVisible();
+    await expect(quarantineBtn.locator(".count")).toHaveText("2");
+
+    // Inbox is now empty — every example sender is unknown.
+    await page.locator('[data-testid="fm-folder-inbox"]').click();
+    await expect(page.getByText("Lunch tomorrow?")).toHaveCount(0);
+
+    // The diverted rows render in Quarantine with an `unverified` badge.
+    await quarantineBtn.click();
+    const cards = page.locator('[data-testid="fm-quarantine-card"]');
+    await expect(cards).toHaveCount(3);
+    await expect(page.getByText("Lunch tomorrow?")).toBeVisible();
+    await expect(cards.first().locator(".badge")).toContainText("unverified");
+  });
+});
+
 test.describe("Compose and logout", () => {
   test("compose sheet renders and log out returns to identity list", async ({
     page,

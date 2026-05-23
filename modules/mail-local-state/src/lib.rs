@@ -395,17 +395,18 @@ impl Default for AppearanceSettings {
 
 /// Inbox-folder settings (global). Govern UI grouping / quarantine behavior.
 ///
-/// Both fields default to `false`. `quarantine_unknown=true` would silently
-/// hide every unsigned/legacy inbound message until the user verifies the
-/// sender, which is hostile for first-run UX; users who want strict
-/// quarantine flip the toggle in Settings > Inbox.
+/// Both fields default to `false`. `quarantine_unknown=true` diverts every
+/// message from a sender not in the verified address book into a dedicated
+/// Quarantine folder (with its own sidebar entry + count badge) instead of
+/// the inbox. Defaulting it off keeps first-run UX friendly; users who want
+/// strict quarantine flip the toggle in Settings > Inbox.
 #[derive(Deserialize, Serialize, PartialEq, Eq, Debug, Clone, Default)]
 pub struct InboxSettings {
     /// Show drafts inline in the inbox list rather than only in the
     /// Drafts folder.
     pub drafts_in_inbox: bool,
-    /// Move messages from senders not in the address book into a
-    /// quarantine folder instead of the inbox.
+    /// Move messages from senders not in the verified address book into a
+    /// dedicated Quarantine folder instead of the inbox.
     pub quarantine_unknown: bool,
 }
 

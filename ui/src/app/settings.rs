@@ -576,7 +576,7 @@ fn ScrPrivacy() -> Element {
                 }
                 SettingRow {
                     label: "Hide unsigned messages",
-                    help: "Move messages with no ML-DSA signature directly to a quarantine folder.",
+                    help: "Drop messages with no valid ML-DSA signature from the list entirely. For unknown-but-signed senders, use Quarantine in Inbox settings instead.",
                     control: rsx! { Toggle { on: hide_unsigned, ontoggle: on_hide_unsigned } },
                 }
             }

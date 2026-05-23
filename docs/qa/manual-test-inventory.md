@@ -72,7 +72,7 @@ manual gap by adding a test, flip status to `auto` and link the test.
 | Detail header full timestamp | auto | offline: `detail header shows full timestamp` |
 | Detail verified badge (verif-known / verif-unknown / unverified) | auto | offline: `detail header shows verified badge for incoming message` |
 | Search filter | manual | Send 3 messages with distinct subjects, type substring in sidebar Search, only matching rows visible |
-| Quarantine unknown sender (privacy pref) | manual | Toggle in Settings → Privacy, send from unknown, confirm row hidden / quarantined |
+| Quarantine unknown sender | manual | Toggle in Settings → Inbox, send from unknown sender, confirm a Quarantine folder appears with a count badge and the row lands there (not Inbox); verified senders stay in Inbox |
 | Hide unsigned (privacy pref) | manual | Toggle, deliver pre-#51 message, confirm hidden |
 
 ### Compose / send
@@ -136,7 +136,7 @@ add/remove protocol.
 | Identity privacy: verify_on_send toggle | manual | Settings → Privacy, toggle, send to unverified contact, confirm send proceeds vs blocks |
 | Identity privacy: hide_unsigned toggle | manual | Toggle, observe Inbox |
 | Inbox: drafts_in_inbox toggle | manual | Settings → Inbox, toggle, observe Drafts surface in Inbox folder |
-| Inbox: quarantine_unknown toggle | manual | Toggle, observe Inbox filters unknown senders |
+| Inbox: quarantine_unknown toggle | manual | Settings → Inbox, toggle on → Quarantine folder + badge appear in sidebar, unknown-sender rows move there; toggle off → folder disappears, rows return to Inbox |
 | Auto-sign + signature persists | manual | Set, send, reload, send again, confirm sig still appended |
 | Appearance: theme switch (data-theme attr) | manual | Settings → Appearance, change theme, confirm `.fm-app[data-theme]` reflects |
 | Appearance: density (data-density attr) | manual | Change density, confirm `.fm-app[data-density]` reflects + row heights change |
