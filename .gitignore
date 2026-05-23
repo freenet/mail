@@ -18,3 +18,5 @@ ui/tests/playwright-report/
 /.run-node/
 # Claude Code scheduled-task runtime lock (per-worktree).
 /.claude/scheduled_tasks.lock
+# Claude Code worktrees parent dir (each subdir is a separate git worktree).
+/.claude/worktrees/
