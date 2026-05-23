@@ -10,6 +10,7 @@
   "fmDraftCard": "fm-draft-card",
   "fmSentCard": "fm-sent-card",
   "fmArchiveCard": "fm-archive-card",
+  "fmQuarantineCard": "fm-quarantine-card",
   "fmDetailTime": "fm-detail-time",
   "fmDetailFingerprint": "fm-detail-fingerprint",
   "fmDetailVerif": "fm-detail-verif",

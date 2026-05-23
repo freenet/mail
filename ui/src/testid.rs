@@ -30,6 +30,7 @@ pub(crate) const FM_MSG_TIME: &str = "fm-msg-time";
 pub(crate) const FM_DRAFT_CARD: &str = "fm-draft-card";
 pub(crate) const FM_SENT_CARD: &str = "fm-sent-card";
 pub(crate) const FM_ARCHIVE_CARD: &str = "fm-archive-card";
+pub(crate) const FM_QUARANTINE_CARD: &str = "fm-quarantine-card";
 
 // Detail header
 pub(crate) const FM_DETAIL_TIME: &str = "fm-detail-time";
@@ -144,6 +145,7 @@ mod tests {
             ("fmDraftCard", super::FM_DRAFT_CARD),
             ("fmSentCard", super::FM_SENT_CARD),
             ("fmArchiveCard", super::FM_ARCHIVE_CARD),
+            ("fmQuarantineCard", super::FM_QUARANTINE_CARD),
             ("fmDetailTime", super::FM_DETAIL_TIME),
             ("fmDetailFingerprint", super::FM_DETAIL_FINGERPRINT),
             ("fmDetailVerif", super::FM_DETAIL_VERIF),

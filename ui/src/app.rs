@@ -1043,6 +1043,7 @@ mod menu {
     pub(super) enum Folder {
         #[default]
         Inbox,
+        Quarantine,
         Sent,
         Drafts,
         Archive,
@@ -1052,6 +1053,7 @@ mod menu {
         pub fn label(self) -> &'static str {
             match self {
                 Folder::Inbox => "Inbox",
+                Folder::Quarantine => "Quarantine",
                 Folder::Sent => "Sent",
                 Folder::Drafts => "Drafts",
                 Folder::Archive => "Archive",
@@ -1061,6 +1063,7 @@ mod menu {
         pub fn icon(self) -> &'static str {
             match self {
                 Folder::Inbox => "▤",
+                Folder::Quarantine => "⚠",
                 Folder::Sent => "↗",
                 Folder::Drafts => "✎",
                 Folder::Archive => "▦",
@@ -1250,9 +1253,38 @@ thread_local! {
     static DELAYED_ACTIONS: RefCell<Vec<LocalBoxFuture<'static, ()>>> = RefCell::new(Vec::new());
 }
 
+/// True when `m`'s sender is in the address book AND verified. Drives the
+/// Inbox/Quarantine split: when `quarantine_unknown` is on, only senders for
+/// which this returns true stay in the Inbox; everyone else (including
+/// signature-less rows) lands in Quarantine. Empty sender-vk never counts as
+/// known.
+fn is_sender_verified(m: &Message) -> bool {
+    if m.sender_vk.is_empty() {
+        return false;
+    }
+    matches!(
+        address_book::contact_by_vk(&m.sender_vk),
+        Some(c) if c.verified
+    )
+}
+
 fn folder_count(emails: &[Message], folder: menu::Folder, alias: &str) -> usize {
+    // Only split Inbox/Quarantine counts when the user opted in; otherwise the
+    // Quarantine folder is hidden and every row is an Inbox row.
+    let quarantine_on = crate::local_state::global_settings()
+        .inbox
+        .quarantine_unknown;
     match folder {
-        menu::Folder::Inbox => emails.iter().filter(|m| !m.read).count(),
+        menu::Folder::Inbox => emails
+            .iter()
+            .filter(|m| !m.read)
+            .filter(|m| !quarantine_on || is_sender_verified(m))
+            .count(),
+        menu::Folder::Quarantine => emails
+            .iter()
+            .filter(|m| !m.read)
+            .filter(|m| quarantine_on && !is_sender_verified(m))
+            .count(),
         menu::Folder::Drafts => crate::local_state::drafts_for(alias).len(),
         menu::Folder::Sent => crate::local_state::sent_for(alias).len(),
         menu::Folder::Archive => crate::local_state::archived_for(alias).len(),
@@ -1430,7 +1462,27 @@ fn Sidebar() -> Element {
             div { class: "sect-label", "Folders" }
             div { class: "nav",
                 {
-                    [menu::Folder::Inbox, menu::Folder::Sent, menu::Folder::Drafts, menu::Folder::Archive]
+                    // Quarantine only appears once the user opts in via
+                    // Settings > Inbox; until then there's no quarantine concept
+                    // so an empty folder would just confuse.
+                    let quarantine_on = crate::local_state::global_settings().inbox.quarantine_unknown;
+                    let folders: Vec<menu::Folder> = if quarantine_on {
+                        vec![
+                            menu::Folder::Inbox,
+                            menu::Folder::Quarantine,
+                            menu::Folder::Sent,
+                            menu::Folder::Drafts,
+                            menu::Folder::Archive,
+                        ]
+                    } else {
+                        vec![
+                            menu::Folder::Inbox,
+                            menu::Folder::Sent,
+                            menu::Folder::Drafts,
+                            menu::Folder::Archive,
+                        ]
+                    };
+                    folders
                         .into_iter()
                         .map(|f| {
                             let cls = if f == active { "nav-item active" } else { "nav-item" };
@@ -1576,7 +1628,11 @@ fn MessageList() -> Element {
         .unwrap_or_default();
     let inbox_settings = crate::local_state::global_settings().inbox;
     let privacy_prefs = crate::local_state::identity_settings_for(&active_alias).privacy;
-    let visible: Vec<Message> = if matches!(folder, menu::Folder::Inbox) {
+    // Inbox and Quarantine share every filter except the verified-sender
+    // split, so build the common candidate set once and partition by
+    // `is_sender_verified` only when the user opted into quarantine.
+    let visible: Vec<Message> = if matches!(folder, menu::Folder::Inbox | menu::Folder::Quarantine)
+    {
         let mut v: Vec<Message> = emails
             .iter()
             // Hide archived/deleted rows. In offline mode the populate loop
@@ -1595,21 +1651,19 @@ fn MessageList() -> Element {
                 }
                 m.signature_valid && !m.sender_vk.is_empty()
             })
-            // GlobalSettings.inbox.quarantine_unknown: when set, hide rows
-            // from senders not in the verified address book. Until a
-            // dedicated Quarantine folder ships, "hide" is the safe
-            // interpretation — visible drops, count drops, no surface.
+            // GlobalSettings.inbox.quarantine_unknown split: when off, every
+            // surviving row is an Inbox row (Quarantine folder is hidden).
+            // When on, verified senders stay in Inbox and everyone else is
+            // diverted to Quarantine.
             .filter(|m| {
                 if !inbox_settings.quarantine_unknown {
-                    return true;
+                    return matches!(folder, menu::Folder::Inbox);
                 }
-                if m.sender_vk.is_empty() {
-                    return false;
+                if matches!(folder, menu::Folder::Quarantine) {
+                    !is_sender_verified(m)
+                } else {
+                    is_sender_verified(m)
                 }
-                matches!(
-                    address_book::contact_by_vk(&m.sender_vk),
-                    Some(c) if c.verified
-                )
             })
             .cloned()
             .collect();
@@ -1840,7 +1894,13 @@ fn MessageList() -> Element {
                         }
                     }
                     {
-                        visible.into_iter().map(|email| {
+                        let in_quarantine = matches!(folder, menu::Folder::Quarantine);
+                        let card_testid = if in_quarantine {
+                            testid::FM_QUARANTINE_CARD
+                        } else {
+                            testid::FM_MSG_CARD
+                        };
+                        visible.into_iter().map(move |email| {
                             let id = email.id;
                             let mut classes = String::from("msg-card");
                             if !email.read { classes.push_str(" unread"); }
@@ -1853,11 +1913,14 @@ fn MessageList() -> Element {
                                 article {
                                     class: "{classes}",
                                     id: "email-inbox-accessor-{id}",
-                                    "data-testid": testid::FM_MSG_CARD,
+                                    "data-testid": "{card_testid}",
                                     "data-msg-id": "{id}",
                                     onclick: move |_| { menu_selection.write().open_email(id); },
                                     div { class: "msg-row1",
                                         span { class: "msg-sender", "{from}" }
+                                        if in_quarantine {
+                                            span { class: "badge badge-failed", "unverified" }
+                                        }
                                         span {
                                             class: "msg-time",
                                             "data-testid": testid::FM_MSG_TIME,
@@ -1890,15 +1953,22 @@ fn DetailPanel() -> Element {
     let selected = selected_id.and_then(|id| emails.iter().find(|m| m.id == id).cloned());
     let _local_gen = crate::local_state::GENERATION();
 
-    if matches!(folder, menu::Folder::Inbox) {
+    // Quarantine rows are ordinary inbox Messages keyed by id, so they open
+    // through the same OpenMessage path as the Inbox.
+    if matches!(folder, menu::Folder::Inbox | menu::Folder::Quarantine) {
         if let Some(msg) = selected {
             rsx! { OpenMessage { msg } }
         } else {
+            let hint = if matches!(folder, menu::Folder::Quarantine) {
+                "Select a quarantined message"
+            } else {
+                "Select a message"
+            };
             rsx! {
                 section { class: "detail-col",
                     div { class: "empty",
                         div { class: "empty-glyph", "✉" }
-                        div { class: "empty-hint", "Select a message" }
+                        div { class: "empty-hint", "{hint}" }
                     }
                 }
             }
@@ -3295,6 +3365,43 @@ mod kept_to_message_tests {
             msg.verification_state(),
             VerificationState::Unverified
         ));
+    }
+}
+
+#[cfg(test)]
+mod quarantine_tests {
+    use super::{Message, is_sender_verified};
+    use chrono::Utc;
+    use std::borrow::Cow;
+
+    fn msg_with_vk(vk: Vec<u8>) -> Message {
+        Message {
+            id: 0,
+            from: Cow::Borrowed("someone"),
+            title: Cow::Borrowed("hi"),
+            content: Cow::Borrowed("body"),
+            read: false,
+            time: Utc::now(),
+            sender_vk: vk,
+            signature_valid: true,
+            assignment_hash: [0u8; 32],
+        }
+    }
+
+    /// An empty sender-vk (legacy / unsigned) is never a known sender, so it
+    /// is diverted to Quarantine when the toggle is on. This is the case the
+    /// offline example messages exercise — they all carry an empty vk.
+    #[test]
+    fn empty_vk_is_unverified() {
+        assert!(!is_sender_verified(&msg_with_vk(Vec::new())));
+    }
+
+    /// A vk that isn't in the (empty, in this test) address book is unknown,
+    /// so even a cryptographically-valid signature lands in Quarantine until
+    /// the user verifies the contact.
+    #[test]
+    fn unknown_vk_is_unverified() {
+        assert!(!is_sender_verified(&msg_with_vk(vec![1, 2, 3, 4])));
     }
 }
 
