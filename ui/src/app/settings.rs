@@ -1087,7 +1087,6 @@ fn ScrContacts() -> Element {
     let ab_gen = use_context::<crate::app::AddressBookGen>();
     let mut search = use_signal(String::new);
 
-    let mut menu_selection = use_context::<Signal<menu::MenuSelection>>();
     let mut import_contact_form = use_context::<Signal<crate::app::login::ImportContact>>();
     let mut share_contact_form = use_context::<Signal<crate::app::login::ShareContact>>();
     let mut share_pending = use_context::<Signal<crate::app::login::SharePending>>();
@@ -1095,7 +1094,9 @@ fn ScrContacts() -> Element {
     let actions = use_coroutine_handle::<crate::app::NodeAction>();
 
     let on_import = move |_| {
-        menu_selection.write().close_settings();
+        // Leave Settings open underneath — the modal renders inside
+        // div.fm-app (app.rs) and is now styled in that scope, so it
+        // overlays the Contacts panel instead of dropping to the inbox.
         import_contact_form.write().0 = true;
     };
     let on_share = move |_| {
@@ -1113,7 +1114,6 @@ fn ScrContacts() -> Element {
                 share_text,
             }),
         });
-        menu_selection.write().close_settings();
         share_contact_form.write().0 = true;
     };
 

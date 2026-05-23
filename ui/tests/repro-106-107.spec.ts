@@ -99,10 +99,10 @@ async function importContact(app: FrameLocator, card: string, label: string) {
     .locator('input[placeholder="e.g. Alice (work)"]')
     .fill(label);
   // Tick the "I verified these six words" checkbox so the imported
-  // contact is marked verified — `verify_on_send` defaults to true so
-  // an unverified import would silently drop the send (the compose
-  // veil stays up and no toast surfaces). The checkbox only renders
-  // once `fingerprint_words` resolves from the card; wait for it.
+  // contact is marked verified. `verify_on_send` defaults to false, but
+  // we verify here anyway so the flow is robust regardless of the
+  // privacy default. The checkbox only renders once `fingerprint_words`
+  // resolves from the card; wait for it.
   const verifyCheck = app.locator('[data-testid="fm-verify-check"]');
   await verifyCheck.waitFor({ timeout: 15_000 });
   await verifyCheck.click();
