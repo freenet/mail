@@ -57,7 +57,7 @@ manual gap by adding a test, flip status to `auto` and link the test.
 | Import contact: alias → resolves in compose | auto | offline: `import contact card → appears in contacts section → compose accepts alias` |
 | Verify checkbox tick → badge flips to verified | auto | offline: `ticking the verify card flips the contact's badge to verified` |
 | Verify button promotes unverified contact in place (#87) | auto | offline: `Verify button promotes an unverified contact in place` |
-| `verify_on_send` blocks unverified-contact send (toast) | manual | Disable verify on import, Send → expect "Recipient is not verified" toast, no Sent row |
+| `verify_on_send` blocks unverified-contact send (toast) | manual | Enable "Require known key to send" (off by default), import a contact without ticking verify, Send → expect "Recipient is not verified" toast, no Sent row |
 | Edit / delete contact | manual | Open Contacts, click row, edit label / description, save; delete and confirm gone |
 | Self-card in Contacts (own identity) | manual | Confirm own identity surfaces in Contacts with "you" indicator (or absent — verify intended behavior) |
 | Contact import + reload + UpdateNotification stays sane (#198/#204) | auto | iso: `contact import + reload + UpdateNotification stays sane (#204)` |

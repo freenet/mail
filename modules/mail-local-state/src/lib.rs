@@ -271,7 +271,7 @@ pub struct IdentityPrivacyPrefs {
 impl Default for IdentityPrivacyPrefs {
     fn default() -> Self {
         Self {
-            verify_on_send: true,
+            verify_on_send: false,
             hide_unsigned: false,
             pad_length: true,
             read_receipts: false,
@@ -1026,7 +1026,7 @@ mod boundary_tests {
         assert_eq!(s.settings.aft.required_tier, "Min10");
         assert!(s.settings.aft.allow_known);
         assert!(!s.settings.aft.allow_anon);
-        assert!(s.settings.privacy.verify_on_send);
+        assert!(!s.settings.privacy.verify_on_send);
         assert!(s.settings.auto_sign);
     }
 

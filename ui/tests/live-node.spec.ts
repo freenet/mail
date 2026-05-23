@@ -308,12 +308,12 @@ test.describe("Live node E2E", () => {
         .locator('input[placeholder="e.g. Alice (work)"]')
         .fill(ALIAS_T2_BOB);
       // Tick the "I verified these six words" checkbox so the contact
-      // is stored verified. `verify_on_send` defaults to true, so an
-      // unverified import silently rejects the send (toast: "Recipient
-      // is not verified") and bob never receives — root cause of the
-      // harness-only failure tracked in #105. Checkbox renders only
-      // after the import-time Get on bob's inbox returns vk + ek (#249).
-      // Allow 30s for the GetResponse on the iso harness.
+      // is stored verified. `verify_on_send` defaults to false, but we
+      // verify here so the send path is exercised independent of the
+      // privacy default — and so verified-only recipients still accept.
+      // Checkbox renders only after the import-time Get on bob's inbox
+      // returns vk + ek (#249). Allow 30s for the GetResponse on the
+      // iso harness.
       const verifyCheck = aliceApp.locator('[data-testid="fm-verify-check"]');
       await verifyCheck.waitFor({ timeout: 30_000 });
       await verifyCheck.click();
@@ -517,8 +517,8 @@ test.describe("Live node E2E", () => {
       await aliceApp
         .locator('input[placeholder="e.g. Alice (work)"]')
         .fill(ALIAS_T3_BOB);
-      // verify_on_send defaults true; tick checkbox so import is verified
-      // (#105 root cause: silent send rejection on unverified contact).
+      // verify_on_send defaults false; tick checkbox anyway so import is
+      // verified and the send path works regardless of the privacy default.
       const aliceVerify = aliceApp.locator('[data-testid="fm-verify-check"]');
       await aliceVerify.waitFor({ timeout: 30_000 });
       await aliceVerify.click();
