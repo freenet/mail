@@ -15,7 +15,7 @@
 
     .sheet {
       width: 510px; max-width: calc(100vw - 44px); max-height: calc(100vh - 100px);
-      background: #fff; border-radius: 12px;
+      background: var(--bg-card); border-radius: 12px;
       box-shadow: var(--sh-lg);
       display: flex; flex-direction: column;
       overflow: hidden;
@@ -152,7 +152,7 @@
     .sheet-foot {
       display: flex; align-items: center; justify-content: space-between; gap: 10px;
       padding: 13px 18px; border-top: 1px solid var(--line2);
-      background: rgba(241, 245, 249, 0.4);
+      background: var(--c1);
     }
     .foot-meta {
       display: flex; align-items: center; gap: 7px;

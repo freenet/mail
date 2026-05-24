@@ -44,13 +44,13 @@
       from { opacity: 0; transform: translateY(5px); }
       to   { opacity: 1; transform: none; }
     }
-    .msg-card:hover { background: rgba(255, 255, 255, 0.6); }
+    .msg-card:hover { background: var(--hover); }
     .msg-card.unread::before {
       content: ""; position: absolute; left: 6px; top: 14px; bottom: 14px;
       width: 2px; border-radius: 2px; background: var(--unread);
     }
     .msg-card.selected {
-      background: #fff;
+      background: var(--bg-card);
       box-shadow: var(--sh-sm), inset 3px 0 0 var(--accent);
     }
     .msg-card.selected.unread::before { display: none; }

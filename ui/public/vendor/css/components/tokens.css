@@ -39,6 +39,9 @@
       /* Card / popover surface (sheet, dropdown, modal backgrounds). */
       --bg-card: #ffffff;
 
+      /* Hover film over a surface — light theme: white wash; dark: light wash. */
+      --hover: rgba(255, 255, 255, 0.6);
+
       --unread: #d97706;
 
       position: fixed;
@@ -91,6 +94,10 @@
     --line2: rgba(148, 163, 184, 0.10);
     --unread: #fbbf24;
     --bg-card: #111a2e;
+    --hover: rgba(148, 163, 184, 0.12);
+    --amber-bg: rgba(217, 119, 6, 0.12);
+    --amber-border: rgba(251, 191, 36, 0.3);
+    --amber-ink: #fbbf24;
   }
 
   @media (prefers-color-scheme: dark) {
@@ -113,6 +120,10 @@
       --line2: rgba(148, 163, 184, 0.10);
       --unread: #fbbf24;
       --bg-card: #111a2e;
+      --hover: rgba(148, 163, 184, 0.12);
+      --amber-bg: rgba(217, 119, 6, 0.12);
+      --amber-border: rgba(251, 191, 36, 0.3);
+      --amber-ink: #fbbf24;
     }
   }
 
