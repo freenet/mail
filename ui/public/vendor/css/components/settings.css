@@ -31,7 +31,7 @@
     /* Sidebar */
     .fm-set-side {
       border-right: 1px solid var(--line);
-      background: rgba(241, 245, 249, 0.4);
+      background: var(--c1);
       display: flex; flex-direction: column;
       padding: 18px 12px 14px;
       gap: 14px;
@@ -46,7 +46,7 @@
       background: transparent; border: 0;
       transition: background 0.15s ease, color 0.15s ease;
     }
-    .fm-set-back:hover { background: rgba(255, 255, 255, 0.6); color: var(--ink1); }
+    .fm-set-back:hover { background: var(--hover); color: var(--ink1); }
     .fm-set-back .arrow { font-family: "Geist Mono", monospace; font-size: 12px; }
 
     .fm-set-title {
@@ -57,7 +57,7 @@
 
     .fm-set-ident {
       margin: 0 4px; padding: 12px 12px 11px;
-      background: #fff; border: 1px solid var(--line2);
+      background: var(--bg-card); border: 1px solid var(--line2);
       border-radius: 11px; box-shadow: var(--sh-sm);
       display: flex; align-items: center; gap: 11px;
       cursor: default;
@@ -102,9 +102,9 @@
     }
     .fm-set-nav-item .meta.warn { color: var(--unread); }
     .fm-set-nav-item .meta.trust { color: var(--trust); }
-    .fm-set-nav-item:hover { background: rgba(255, 255, 255, 0.55); color: var(--ink0); }
+    .fm-set-nav-item:hover { background: var(--hover); color: var(--ink0); }
     .fm-set-nav-item.is-active {
-      background: #fff; color: var(--ink0); font-weight: 500;
+      background: var(--bg-card); color: var(--ink0); font-weight: 500;
       box-shadow: var(--sh-sm), inset 2px 0 0 var(--accent);
     }
     .fm-set-nav-item.is-active .glyph { color: var(--accent); }
@@ -116,7 +116,7 @@
       display: flex; align-items: center; gap: 12px;
       padding: 0 28px;
       border-bottom: 1px solid var(--line2);
-      background: rgba(248, 250, 252, 0.7);
+      background: var(--c1);
       backdrop-filter: blur(6px);
       -webkit-backdrop-filter: blur(6px);
       position: sticky; top: 0; z-index: 5;
@@ -144,7 +144,7 @@
 
     /* Card */
     .fm-card {
-      background: #fff; border: 1px solid var(--line2);
+      background: var(--bg-card); border: 1px solid var(--line2);
       border-radius: 12px; box-shadow: var(--sh-sm);
       overflow: hidden;
       margin-bottom: 18px;
@@ -201,7 +201,7 @@
     /* Select */
     .fm-select {
       height: 30px; padding: 0 28px 0 11px;
-      background: #fff; border: 1px solid var(--c3);
+      background: var(--bg-card); border: 1px solid var(--c3);
       border-radius: 7px;
       font-family: "DM Sans", system-ui, sans-serif; font-size: 12.5px; color: var(--ink1);
       appearance: none;
@@ -215,7 +215,7 @@
     /* Inputs */
     .fm-input {
       height: 30px; padding: 0 11px;
-      background: #fff; border: 1px solid var(--c3);
+      background: var(--bg-card); border: 1px solid var(--c3);
       border-radius: 7px;
       font-family: "DM Sans", system-ui, sans-serif; font-size: 12.5px; color: var(--ink1);
       letter-spacing: -0.005em;
@@ -226,7 +226,7 @@
     .fm-input.full { width: 100%; }
     .fm-textarea {
       width: 100%; min-height: 80px; padding: 9px 11px;
-      background: #fff; border: 1px solid var(--c3);
+      background: var(--bg-card); border: 1px solid var(--c3);
       border-radius: 7px; resize: vertical;
       font-family: "DM Sans", system-ui, sans-serif; font-size: 13px; color: var(--ink1);
       line-height: 1.55; letter-spacing: -0.005em;
@@ -244,15 +244,15 @@
     .fm-btn-primary:hover { background: var(--ink1); }
     .fm-btn-secondary {
       height: 30px; padding: 0 12px; border-radius: 7px;
-      background: #fff; color: var(--ink1);
+      background: var(--bg-card); color: var(--ink1);
       border: 1px solid var(--c3);
       font-size: 12px; font-weight: 500; letter-spacing: -0.005em;
       transition: background 0.15s ease, border-color 0.15s ease;
     }
-    .fm-btn-secondary:hover { background: rgba(255, 255, 255, 0.6); border-color: var(--ink4); }
+    .fm-btn-secondary:hover { background: var(--hover); border-color: var(--ink4); }
     .fm-btn-danger {
       height: 30px; padding: 0 12px; border-radius: 7px;
-      background: #fff; color: #b91c1c;
+      background: var(--bg-card); color: #b91c1c;
       border: 1px solid rgba(185, 28, 28, 0.25);
       font-size: 12px; font-weight: 500; letter-spacing: -0.005em;
       transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
@@ -269,7 +269,7 @@
       border: 1px solid var(--line);
       border-radius: 11px;
       padding: 16px 18px;
-      background: linear-gradient(180deg, #fff 0%, rgba(248, 250, 252, 0.6) 100%);
+      background: linear-gradient(180deg, var(--bg-card) 0%, var(--c1) 100%);
     }
     .fm-key-card-head {
       display: flex; align-items: center; justify-content: space-between;
@@ -330,7 +330,7 @@
       border: 1px solid var(--line);
       border-radius: 11px;
       padding: 12px 12px 10px;
-      background: #fff;
+      background: var(--bg-card);
       display: flex; flex-direction: column; gap: 4px;
       transition: border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
     }
@@ -338,7 +338,7 @@
     .fm-tier.is-active {
       border-color: var(--accent);
       box-shadow: var(--sh-sm), inset 0 -2px 0 var(--accent);
-      background: linear-gradient(180deg, #fff 0%, rgba(239, 246, 255, 0.5) 100%);
+      background: linear-gradient(180deg, var(--bg-card) 0%, rgba(239, 246, 255, 0.5) 100%);
     }
     .fm-tier-name {
       font-family: "Geist Mono", monospace; font-size: 10.5px;
@@ -420,9 +420,9 @@
       font-size: 12.5px; line-height: 1.55;
     }
     .fm-banner.amber {
-      background: rgba(254, 243, 199, 0.5);
-      border-color: rgba(217, 119, 6, 0.25);
-      color: #a6731f;
+      background: var(--amber-bg, rgba(254, 243, 199, 0.5));
+      border-color: var(--amber-border, rgba(217, 119, 6, 0.25));
+      color: var(--amber-ink, #a6731f);
     }
     .fm-banner-glyph {
       font-family: "Fraunces", serif; font-style: italic;
@@ -442,7 +442,7 @@
       cursor: default;
       transition: background 0.15s ease;
     }
-    .fm-contact-row:hover { background: rgba(241, 245, 249, 0.6); }
+    .fm-contact-row:hover { background: var(--hover); }
     .fm-contact-av {
       width: 28px; height: 28px; border-radius: 50%;
       background: var(--accent-bg); border: 1px solid var(--accent-mid);
@@ -482,7 +482,7 @@
     }
     .fm-modal {
       width: 460px; max-width: calc(100% - 40px);
-      background: #fff; border-radius: 14px;
+      background: var(--bg-card); border-radius: 14px;
       box-shadow: var(--sh-lg);
       overflow: hidden;
       animation: fm-modal-in 0.22s cubic-bezier(0.34, 1.28, 0.64, 1) both;
@@ -517,7 +517,7 @@
     }
     .fm-modal-foot {
       display: flex; align-items: center; justify-content: space-between;
-      padding: 14px 22px; background: rgba(241, 245, 249, 0.4);
+      padding: 14px 22px; background: var(--c1);
       border-top: 1px solid var(--line2);
     }
     .fm-modal-foot .help {
@@ -539,7 +539,7 @@
     .fm-id-popover {
       position: absolute;
       top: calc(100% + 4px); left: 12px; right: 12px;
-      background: #fff; border-radius: 11px;
+      background: var(--bg-card); border-radius: 11px;
       box-shadow: 0 4px 16px rgba(0, 40, 100, 0.08);
       border: 1px solid var(--line2);
       padding: 6px;
@@ -551,7 +551,7 @@
       padding: 9px 10px; border-radius: 7px; cursor: default;
       transition: background 0.15s ease;
     }
-    .fm-id-pop-row:hover { background: rgba(241, 245, 249, 0.7); }
+    .fm-id-pop-row:hover { background: var(--hover); }
     .fm-id-pop-row.is-active { background: rgba(239, 246, 255, 0.7); }
     .fm-id-pop-row.add { color: var(--accent); font-size: 12.5px; }
 
@@ -576,7 +576,7 @@
     .fm-sub-row {
       padding: 12px 20px;
       display: flex; align-items: center; gap: 12px;
-      background: rgba(248, 250, 252, 0.5);
+      background: var(--c1);
       border-top: 1px solid var(--line2);
     }
     .fm-sub-row .label {
@@ -594,13 +594,13 @@
       font-size: 16px;
       transition: background 0.15s ease, color 0.15s ease;
     }
-    .fm-icon-btn:hover { background: rgba(241, 245, 249, 0.7); color: var(--ink1); }
+    .fm-icon-btn:hover { background: var(--hover); color: var(--ink1); }
     .fm-set-icon { position: relative; }
     .fm-set-icon.has-dot::after {
       content: ''; position: absolute; top: 5px; right: 5px;
       width: 6px; height: 6px; border-radius: 50%;
       background: var(--unread);
-      box-shadow: 0 0 0 2px rgba(241, 245, 249, 0.85);
+      box-shadow: 0 0 0 2px var(--c1);
     }
 
     /* Login-style contact modals (.veil / .modal) rendered inside
@@ -621,7 +621,7 @@
     }
     .modal {
       width: 520px; max-width: 100%; max-height: calc(100vh - 64px);
-      background: #fff; border-radius: 14px; box-shadow: var(--sh-lg);
+      background: var(--bg-card); border-radius: 14px; box-shadow: var(--sh-lg);
       display: flex; flex-direction: column; overflow: hidden;
       animation: fm-modalIn .25s cubic-bezier(0.34, 1.28, 0.64, 1) both;
     }
@@ -647,7 +647,7 @@
     .modal-foot {
       display: flex; align-items: center; justify-content: flex-end; gap: 8px;
       padding: 14px 24px; border-top: 1px solid var(--line2);
-      background: rgba(241, 245, 249, 0.4);
+      background: var(--c1);
     }
 
     /* Contact-modal form fields. Mirrors the .field/.input/.textarea +
@@ -668,7 +668,7 @@
     .field-help { font-size: 11.5px; color: var(--ink3); font-style: italic; line-height: 1.5; }
     .input,
     .textarea {
-      width: 100%; background: #fff;
+      width: 100%; background: var(--bg-card);
       border: 1px solid var(--line); border-radius: 8px;
       padding: 11px 14px; font-size: 13.5px; color: var(--ink1);
       letter-spacing: -0.005em;
@@ -724,7 +724,7 @@
 
     .verify-check {
       display: flex; gap: 14px; align-items: flex-start;
-      background: #fff; border: 1.5px solid var(--line); border-radius: 10px;
+      background: var(--bg-card); border: 1.5px solid var(--line); border-radius: 10px;
       padding: 16px 18px; cursor: default;
       transition: border-color .15s ease, background .15s ease;
       margin: 14px 0 6px;
@@ -737,7 +737,7 @@
     .verify-check input { appearance: none; display: none; }
     .verify-box {
       width: 22px; height: 22px; border-radius: 6px;
-      border: 1.5px solid var(--c3); background: #fff; flex: 0 0 22px;
+      border: 1.5px solid var(--c3); background: var(--bg-card); flex: 0 0 22px;
       display: flex; align-items: center; justify-content: center;
       transition: background .15s ease, border-color .15s ease;
       margin-top: 1px;
@@ -761,6 +761,5 @@
       font-size: 12px; color: var(--ink2); line-height: 1.55;
       margin-top: 12px;
     }
-
   }
 }

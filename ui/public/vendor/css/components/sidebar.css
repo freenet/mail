@@ -43,14 +43,14 @@
       position: relative;
       transition: background .1s ease, color .1s ease;
     }
-    .nav-item:hover { background: rgba(255, 255, 255, 0.5); }
+    .nav-item:hover { background: var(--hover); }
     .nav-item .icon {
       font-family: "Geist Mono", monospace; font-size: 11px; color: var(--ink3); width: 14px; text-align: center;
     }
     .nav-item .label { flex: 1; font-weight: 400; }
     .nav-item .count { font-family: "Geist Mono", monospace; font-size: 9.5px; color: var(--ink4); }
     .nav-item.active {
-      background: #fff; color: var(--ink0);
+      background: var(--bg-card); color: var(--ink0);
       box-shadow: var(--sh-sm), inset 2px 0 0 var(--accent);
       font-weight: 500;
     }
