@@ -39,6 +39,29 @@ thread_local! {
     /// Key: (alias, msg_id_string).
     static PENDING_KEPT: RefCell<HashMap<(String, String), KeptMessage>> =
         RefCell::new(HashMap::new());
+
+    /// Optimistic `local_save_sent` writes that haven't round-tripped through
+    /// the delegate. A stale `GetAll` echo landing before the `SaveSent` write
+    /// persists would wipe the Sent stash and the message re-derives as a
+    /// Draft (#265 — "Sent → Draft after reload"). Re-merged into the snapshot
+    /// on every echo until the echo itself contains the entry.
+    /// Key: (alias, sent_id).
+    static OPTIMISTIC_SENT: RefCell<HashMap<(String, String), SentMessage>> =
+        RefCell::new(HashMap::new());
+
+    /// Optimistic `local_archive_message` writes not yet round-tripped. Without
+    /// this, a stale echo bounces the archived message back to the Inbox
+    /// (#265). Re-merged until the echo includes the archived entry.
+    /// Key: (alias, msg_id_string).
+    static OPTIMISTIC_ARCHIVED: RefCell<HashMap<(String, String), ArchivedMessage>> =
+        RefCell::new(HashMap::new());
+
+    /// Message ids the UI has optimistically deleted. A stale `GetAll` echo
+    /// predating the `DeleteMessage` write would otherwise resurrect the
+    /// message (#265 — "deleted messages return"). Re-applied to the snapshot's
+    /// `deleted` list (and the kept/archived entries re-removed) until the echo
+    /// itself records the deletion. Key: (alias, msg_id).
+    static DELETED_MESSAGES: RefCell<HashSet<(String, MessageId)>> = RefCell::new(HashSet::new());
 }
 
 /// Bumped on every snapshot mutation. Components read this signal so Dioxus
@@ -92,6 +115,57 @@ pub(crate) fn replace_snapshot(new: LocalState) {
             {
                 entry.read.push(parsed);
             }
+            true
+        });
+    });
+    OPTIMISTIC_SENT.with(|pending| {
+        let mut pending = pending.borrow_mut();
+        pending.retain(|(alias, sent_id), msg| {
+            let entry = new.aliases_mut().entry(alias.clone()).or_default();
+            if entry.sent.contains_key(sent_id) {
+                // Delegate echo includes the Sent entry — `SaveSent`
+                // round-tripped, drop the optimistic stash.
+                return false;
+            }
+            // Stale echo — re-merge so the Sent folder keeps the row.
+            entry.sent.insert(sent_id.clone(), msg.clone());
+            true
+        });
+    });
+    OPTIMISTIC_ARCHIVED.with(|pending| {
+        let mut pending = pending.borrow_mut();
+        pending.retain(|(alias, msg_id), archived| {
+            let entry = new.aliases_mut().entry(alias.clone()).or_default();
+            if entry.archived.contains_key(msg_id) {
+                return false;
+            }
+            entry.archived.insert(msg_id.clone(), archived.clone());
+            // Archiving implies read + drops any kept fallback (delegate
+            // semantics) — re-apply so a stale echo doesn't surface the row
+            // in both Inbox and Archive.
+            entry.kept.remove(msg_id);
+            if let Ok(parsed) = msg_id.parse::<MessageId>()
+                && !entry.read.contains(&parsed)
+            {
+                entry.read.push(parsed);
+            }
+            true
+        });
+    });
+    DELETED_MESSAGES.with(|tombs| {
+        let mut tombs = tombs.borrow_mut();
+        tombs.retain(|(alias, msg_id)| {
+            let entry = new.aliases_mut().entry(alias.clone()).or_default();
+            if entry.deleted.contains(msg_id) {
+                // Echo records the deletion — `DeleteMessage` round-tripped.
+                return false;
+            }
+            // Stale echo — re-apply the deletion so the message stays gone.
+            let id_str = msg_id.to_string();
+            entry.kept.remove(&id_str);
+            entry.archived.remove(&id_str);
+            entry.read.retain(|id| id != msg_id);
+            entry.deleted.push(*msg_id);
             true
         });
     });
@@ -411,7 +485,13 @@ pub(crate) fn local_save_sent(alias: &str, id: &str, sent: SentMessage) {
             .entry(alias.to_string())
             .or_default()
             .sent
-            .insert(id.to_string(), sent);
+            .insert(id.to_string(), sent.clone());
+    });
+    // Protect the optimistic Sent entry until `SaveSent` round-trips, so a
+    // stale `GetAll` echo doesn't wipe it (#265).
+    OPTIMISTIC_SENT.with(|p| {
+        p.borrow_mut()
+            .insert((alias.to_string(), id.to_string()), sent);
     });
     bump();
 }
@@ -423,6 +503,11 @@ pub(crate) fn local_delete_sent(alias: &str, id: &str) {
         if let Some(entry) = state.aliases_mut().get_mut(alias) {
             entry.sent.remove(id);
         }
+    });
+    // Drop any optimistic-sent protection for this id so a later stale echo
+    // doesn't resurrect a sent row the user just deleted (#265).
+    OPTIMISTIC_SENT.with(|p| {
+        p.borrow_mut().remove(&(alias.to_string(), id.to_string()));
     });
     bump();
 }
@@ -449,7 +534,7 @@ pub(crate) fn local_archive_message(alias: &str, msg_id: MessageId, archived: Ar
         if !entry.read.contains(&msg_id) {
             entry.read.push(msg_id);
         }
-        entry.archived.insert(msg_id.to_string(), archived);
+        entry.archived.insert(msg_id.to_string(), archived.clone());
     });
     // Archive supersedes a pending kept tombstone — drop it so a stale
     // echo doesn't re-insert the kept entry under the archived row.
@@ -457,6 +542,11 @@ pub(crate) fn local_archive_message(alias: &str, msg_id: MessageId, archived: Ar
         pending
             .borrow_mut()
             .remove(&(alias.to_string(), msg_id.to_string()));
+    });
+    // Protect the optimistic archive until `ArchiveMessage` round-trips (#265).
+    OPTIMISTIC_ARCHIVED.with(|p| {
+        p.borrow_mut()
+            .insert((alias.to_string(), msg_id.to_string()), archived);
     });
     bump();
 }
@@ -468,6 +558,12 @@ pub(crate) fn local_unarchive_message(alias: &str, msg_id: MessageId) {
         if let Some(entry) = state.aliases_mut().get_mut(alias) {
             entry.archived.remove(&msg_id.to_string());
         }
+    });
+    // Drop optimistic-archive protection so a stale echo doesn't re-archive
+    // a message the user just unarchived (#265).
+    OPTIMISTIC_ARCHIVED.with(|p| {
+        p.borrow_mut()
+            .remove(&(alias.to_string(), msg_id.to_string()));
     });
     bump();
 }
@@ -488,6 +584,20 @@ pub(crate) fn local_delete_message(alias: &str, msg_id: MessageId) {
         pending
             .borrow_mut()
             .remove(&(alias.to_string(), msg_id.to_string()));
+    });
+    // A deleted message also can't be a protected sent/archived row.
+    OPTIMISTIC_SENT.with(|p| {
+        p.borrow_mut()
+            .remove(&(alias.to_string(), msg_id.to_string()));
+    });
+    OPTIMISTIC_ARCHIVED.with(|p| {
+        p.borrow_mut()
+            .remove(&(alias.to_string(), msg_id.to_string()));
+    });
+    // Protect the deletion until `DeleteMessage` round-trips, so a stale echo
+    // doesn't resurrect the message (#265).
+    DELETED_MESSAGES.with(|t| {
+        t.borrow_mut().insert((alias.to_string(), msg_id));
     });
     bump();
 }
@@ -684,6 +794,9 @@ mod tests {
 
     fn fresh_pending() {
         PENDING_KEPT.with(|p| p.borrow_mut().clear());
+        OPTIMISTIC_SENT.with(|p| p.borrow_mut().clear());
+        OPTIMISTIC_ARCHIVED.with(|p| p.borrow_mut().clear());
+        DELETED_MESSAGES.with(|p| p.borrow_mut().clear());
     }
 
     /// The race in #113: delegate echo arrives BEFORE `local_mark_read`
@@ -790,6 +903,167 @@ mod tests {
         assert!(
             kept_for("alice").is_empty(),
             "deleted message must not be re-merged as kept on stale echo",
+        );
+    }
+
+    fn sent(to: &str, subject: &str) -> SentMessage {
+        SentMessage {
+            to: to.into(),
+            subject: subject.into(),
+            body: "body".into(),
+            ..Default::default()
+        }
+    }
+
+    /// Repro for #265 — "Sent → Draft after reload". The UI optimistically
+    /// stashes a sent message via `local_save_sent`, but the `SaveSent`
+    /// delegate write hasn't round-tripped yet. A stale `GetAll` echo (issued
+    /// before the write, e.g. on startup) lands and `replace_snapshot`
+    /// wholesale-overwrites SNAPSHOT — wiping the optimistic Sent entry.
+    /// The message then re-derives as a Draft. Unlike drafts (#107) and kept
+    /// (#113), there is no tombstone protecting the Sent stash.
+    #[test]
+    fn replace_snapshot_does_not_clobber_optimistic_sent() {
+        fresh_snapshot();
+        fresh_pending();
+        local_save_sent("alice", "sent-1", sent("bob", "hello"));
+
+        // Stale delegate echo predating the SaveSent write — alice exists but
+        // her sent stash is empty.
+        let mut echoed = LocalState::default();
+        echoed.aliases_mut().entry("alice".to_string()).or_default();
+        replace_snapshot(echoed);
+
+        let entries = sent_for("alice");
+        assert_eq!(
+            entries.len(),
+            1,
+            "optimistic Sent entry must survive a stale echo (#265)",
+        );
+        assert_eq!(entries[0].0, "sent-1");
+    }
+
+    /// Repro for #265 — "deleted/discarded messages return after reload".
+    /// `local_delete_message` pushes the id into the `deleted` tombstone list
+    /// in SNAPSHOT, but a stale `GetAll` echo overwrites SNAPSHOT before the
+    /// `DeleteMessage` delegate write round-trips, dropping the deletion.
+    /// The message reappears in the Inbox.
+    #[test]
+    fn replace_snapshot_does_not_clobber_optimistic_delete() {
+        fresh_snapshot();
+        fresh_pending();
+        // Message lives in the snapshot (e.g. previously read → kept), then
+        // the user deletes it.
+        local_mark_read("alice", 21, kept("bob", "to delete"));
+        local_delete_message("alice", 21);
+        assert!(is_deleted("alice", 21), "delete recorded optimistically");
+
+        // Stale echo predating the DeleteMessage write — still shows the
+        // message as kept, no deletion recorded.
+        let mut echoed = LocalState::default();
+        let entry = echoed.aliases_mut().entry("alice".to_string()).or_default();
+        entry.read.push(21);
+        entry.kept.insert("21".to_string(), kept("bob", "to delete"));
+        replace_snapshot(echoed);
+
+        assert!(
+            is_deleted("alice", 21),
+            "deletion must survive a stale echo — message must not return (#265)",
+        );
+        assert!(
+            kept_for("alice").is_empty(),
+            "deleted message must not be re-surfaced as kept on stale echo (#265)",
+        );
+    }
+
+    /// Repro for #265 — archived messages bouncing back to Inbox. Same shape:
+    /// optimistic `local_archive_message`, stale echo lacking the archive
+    /// overwrites SNAPSHOT, archive lost.
+    #[test]
+    fn replace_snapshot_does_not_clobber_optimistic_archive() {
+        fresh_snapshot();
+        fresh_pending();
+        local_archive_message(
+            "alice",
+            33,
+            ArchivedMessage {
+                from: "bob".into(),
+                title: "to archive".into(),
+                content: "body".into(),
+                archived_at: 1,
+            },
+        );
+        assert!(is_archived("alice", 33), "archive recorded optimistically");
+
+        let mut echoed = LocalState::default();
+        echoed.aliases_mut().entry("alice".to_string()).or_default();
+        replace_snapshot(echoed);
+
+        assert!(
+            is_archived("alice", 33),
+            "archive must survive a stale echo (#265)",
+        );
+    }
+
+    /// Lifecycle: once the delegate echoes a snapshot that includes the Sent
+    /// entry, the `OPTIMISTIC_SENT` protection drops. A later echo that lacks
+    /// it (e.g. the user deleted the sent row) must NOT resurrect it.
+    #[test]
+    fn optimistic_sent_drops_after_delegate_echo_includes_entry() {
+        fresh_snapshot();
+        fresh_pending();
+        local_save_sent("alice", "s-1", sent("bob", "hi"));
+
+        // Authoritative echo — delegate has the sent entry.
+        let mut echoed = LocalState::default();
+        echoed
+            .aliases_mut()
+            .entry("alice".to_string())
+            .or_default()
+            .sent
+            .insert("s-1".to_string(), sent("bob", "hi"));
+        replace_snapshot(echoed);
+
+        // A later echo without the entry must not bring it back.
+        let mut later = LocalState::default();
+        later.aliases_mut().entry("alice".to_string()).or_default();
+        replace_snapshot(later);
+
+        assert!(
+            sent_for("alice").is_empty(),
+            "sent protection must drop once delegate confirms the entry (#265)",
+        );
+    }
+
+    /// Lifecycle: deletion tombstone drops once the delegate echoes the
+    /// deletion, so it doesn't pin a message as deleted forever.
+    #[test]
+    fn deleted_message_tombstone_drops_after_delegate_confirms() {
+        fresh_snapshot();
+        fresh_pending();
+        local_mark_read("alice", 41, kept("bob", "x"));
+        local_delete_message("alice", 41);
+
+        // Authoritative echo — delegate records the deletion.
+        let mut echoed = LocalState::default();
+        echoed
+            .aliases_mut()
+            .entry("alice".to_string())
+            .or_default()
+            .deleted
+            .push(41);
+        replace_snapshot(echoed);
+
+        // Tombstone should be gone now — confirm by checking it isn't
+        // re-applied to a fresh echo that has neither the message nor the
+        // deletion (simulating the message legitimately gone from the node).
+        let mut later = LocalState::default();
+        later.aliases_mut().entry("alice".to_string()).or_default();
+        replace_snapshot(later);
+
+        assert!(
+            !is_deleted("alice", 41),
+            "deletion tombstone must drop once delegate confirms it (#265)",
         );
     }
 
