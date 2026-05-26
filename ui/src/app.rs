@@ -1268,21 +1268,45 @@ fn is_sender_verified(m: &Message) -> bool {
     )
 }
 
+/// Predicate matching the Inbox/Quarantine render filter in `MessageList`
+/// (#268). The sidebar badge MUST count only rows that would actually appear
+/// in the folder's list — otherwise the badge over-counts deleted/archived
+/// rows the list hides, so the number never matches the contents. Keep this in
+/// sync with the `visible` filter chain in `MessageList`.
+fn is_inbox_row_visible(m: &Message, alias: &str, hide_unsigned: bool) -> bool {
+    if crate::local_state::is_archived(alias, m.id) || crate::local_state::is_deleted(alias, m.id) {
+        return false;
+    }
+    if hide_unsigned && (!m.signature_valid || m.sender_vk.is_empty()) {
+        return false;
+    }
+    true
+}
+
 fn folder_count(emails: &[Message], folder: menu::Folder, alias: &str) -> usize {
     // Only split Inbox/Quarantine counts when the user opted in; otherwise the
     // Quarantine folder is hidden and every row is an Inbox row.
     let quarantine_on = crate::local_state::global_settings()
         .inbox
         .quarantine_unknown;
+    let hide_unsigned = crate::local_state::identity_settings_for(alias)
+        .privacy
+        .hide_unsigned;
     match folder {
+        // Inbox/Quarantine badge = unread count, but only over rows that
+        // survive the same archived/deleted/hide_unsigned exclusions the
+        // list applies (#268). Search is intentionally NOT applied — the
+        // badge reflects the folder, not the current search box.
         menu::Folder::Inbox => emails
             .iter()
             .filter(|m| !m.read)
+            .filter(|m| is_inbox_row_visible(m, alias, hide_unsigned))
             .filter(|m| !quarantine_on || is_sender_verified(m))
             .count(),
         menu::Folder::Quarantine => emails
             .iter()
             .filter(|m| !m.read)
+            .filter(|m| is_inbox_row_visible(m, alias, hide_unsigned))
             .filter(|m| quarantine_on && !is_sender_verified(m))
             .count(),
         menu::Folder::Drafts => crate::local_state::drafts_for(alias).len(),
@@ -3206,6 +3230,77 @@ mod compose_post_send_tests {
         assert!(p.clear_draft);
         assert!(p.navigate_away);
         assert!(p.push_success_toast);
+    }
+}
+
+#[cfg(test)]
+mod folder_count_tests {
+    use super::*;
+
+    fn msg(id: u64, read: bool) -> Message {
+        Message {
+            id,
+            from: "bob".into(),
+            title: "t".into(),
+            content: "c".into(),
+            read,
+            time: chrono::Utc::now(),
+            sender_vk: Vec::new(),
+            signature_valid: false,
+            assignment_hash: [0u8; 32],
+        }
+    }
+
+    /// Reset the shared local-state snapshot so deleted/archived sets don't
+    /// leak between tests on the same thread.
+    fn reset_state() {
+        crate::local_state::replace_snapshot(::mail_local_state::LocalState::default());
+    }
+
+    /// Repro for #268: the Inbox badge counted unread rows that the list
+    /// hides because they're deleted. Badge then exceeds the visible row
+    /// count — "folder counts don't match what's in them". After the fix the
+    /// badge excludes deleted rows, matching the list.
+    #[test]
+    fn inbox_badge_excludes_deleted_unread() {
+        reset_state();
+        let emails = vec![msg(1, false), msg(2, false), msg(3, true)];
+        // Two unread (1, 2), one read (3). Badge should be 2.
+        assert_eq!(folder_count(&emails, menu::Folder::Inbox, "alice"), 2);
+
+        // User deletes the unread message 2. It vanishes from the list, so
+        // the badge must drop to 1 — not stay at 2.
+        crate::local_state::local_delete_message("alice", 2);
+        assert_eq!(
+            folder_count(&emails, menu::Folder::Inbox, "alice"),
+            1,
+            "deleted unread row must not be counted (#268)",
+        );
+    }
+
+    /// Same defect for archived rows: archiving an unread message removes it
+    /// from the Inbox list, so the badge must not keep counting it.
+    #[test]
+    fn inbox_badge_excludes_archived_unread() {
+        reset_state();
+        let emails = vec![msg(10, false), msg(11, false)];
+        assert_eq!(folder_count(&emails, menu::Folder::Inbox, "alice"), 2);
+
+        crate::local_state::local_archive_message(
+            "alice",
+            11,
+            ::mail_local_state::ArchivedMessage {
+                from: "bob".into(),
+                title: "t".into(),
+                content: "c".into(),
+                archived_at: 0,
+            },
+        );
+        assert_eq!(
+            folder_count(&emails, menu::Folder::Inbox, "alice"),
+            1,
+            "archived unread row must not be counted (#268)",
+        );
     }
 }
 

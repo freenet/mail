@@ -17,7 +17,7 @@
     .toast {
       background: var(--ink0); color: #f8fafc;
       padding: 10px 14px; border-radius: 8px;
-      font-size: 12.5px; letter-spacing: -0.005em;
+      font-size: 13.5px; letter-spacing: -0.005em;
       box-shadow: var(--sh-lg);
       display: flex; align-items: center; gap: 9px;
       width: 100%;
@@ -39,7 +39,7 @@
     .toast .toast-dismiss {
       background: none; border: none; color: inherit;
       cursor: pointer; opacity: .65; padding: 0 2px;
-      font-size: 13px; line-height: 1; flex: 0 0 auto;
+      font-size: 14px; line-height: 1; flex: 0 0 auto;
     }
     .toast .toast-dismiss:hover { opacity: 1; }
 

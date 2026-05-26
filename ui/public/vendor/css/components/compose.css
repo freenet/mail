@@ -35,7 +35,7 @@
     }
     .sheet-x {
       appearance: none; border: 0; background: transparent;
-      width: 26px; height: 26px; border-radius: 6px; color: var(--ink3); font-size: 14px;
+      width: 26px; height: 26px; border-radius: 6px; color: var(--ink3); font-size: 15px;
     }
     .sheet-x:hover { background: var(--c1); color: var(--ink0); }
 
@@ -45,13 +45,13 @@
       border-bottom: 1px solid var(--line2);
     }
     .field-lbl {
-      font-family: "Geist Mono", monospace; font-size: 8.5px;
+      font-family: "Geist Mono", monospace; font-size: 10px;
       text-transform: uppercase; letter-spacing: 0.12em; color: var(--ink4);
       flex: 0 0 30px;
     }
     .field-input {
       flex: 1; border: 0; background: transparent;
-      font-size: 13px; color: var(--ink1);
+      font-size: 14px; color: var(--ink1);
     }
     .field-input::placeholder { color: var(--ink4); }
 
@@ -59,12 +59,12 @@
       padding: 0 18px 11px;
       border-bottom: 1px solid var(--line2);
       display: flex; align-items: center; gap: 8px;
-      font-family: "Geist Mono", monospace; font-size: 9px;
+      font-family: "Geist Mono", monospace; font-size: 10.5px;
       margin-top: -1px;
     }
     .badge {
       display: inline-flex; align-items: center; gap: 5px;
-      font-family: "Geist Mono", monospace; font-size: 8px;
+      font-family: "Geist Mono", monospace; font-size: 9.5px;
       padding: 3px 7px; border-radius: 5px; letter-spacing: 0.04em;
       text-transform: uppercase;
     }
@@ -81,7 +81,7 @@
     .sheet-recipient-hint {
       padding: 6px 18px 10px;
       border-bottom: 1px solid var(--line2);
-      font-size: 11px; color: var(--unread);
+      font-size: 12px; color: var(--unread);
       margin-top: -1px;
     }
 
@@ -106,7 +106,7 @@
       display: flex; align-items: center; gap: 8px;
       padding: 8px 14px;
       cursor: pointer;
-      font-size: 13px; color: var(--ink1);
+      font-size: 14px; color: var(--ink1);
       border-bottom: 1px solid var(--line2);
     }
     .compose-ac-item:last-child { border-bottom: 0; }
@@ -123,7 +123,7 @@
     }
     .compose-ac-trust {
       font-family: "Geist Mono", monospace;
-      font-size: 8px;
+      font-size: 9.5px;
       padding: 2px 6px; border-radius: 4px;
       text-transform: uppercase; letter-spacing: 0.04em;
       flex-shrink: 0;
@@ -138,14 +138,14 @@
     }
     .compose-ac-fp {
       font-family: "Geist Mono", monospace;
-      font-size: 9px; color: var(--ink3);
+      font-size: 10.5px; color: var(--ink3);
       flex-shrink: 0;
     }
 
     .sheet-body { padding: 14px 18px; }
     .sheet-textarea {
       width: 100%; min-height: 180px; border: 0; background: transparent; resize: none;
-      font-size: 13.5px; color: var(--ink1); line-height: 1.72;
+      font-size: 14.5px; color: var(--ink1); line-height: 1.72;
     }
     .sheet-textarea::placeholder { color: var(--ink4); font-style: italic; }
 
@@ -156,7 +156,7 @@
     }
     .foot-meta {
       display: flex; align-items: center; gap: 7px;
-      font-family: "Geist Mono", monospace; font-size: 9px; color: var(--ink3);
+      font-family: "Geist Mono", monospace; font-size: 10.5px; color: var(--ink3);
     }
     .foot-actions { display: flex; align-items: center; gap: 8px; }
 
