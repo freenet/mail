@@ -1067,6 +1067,63 @@ mod tests {
         );
     }
 
+    fn draft(to: &str, subject: &str) -> Draft {
+        Draft {
+            to: to.into(),
+            subject: subject.into(),
+            body: "body".into(),
+            updated_at: 0,
+        }
+    }
+
+    /// End-to-end of the exact beta-tester flow (#265): compose a draft, send
+    /// it (which saves a Sent row and deletes the draft), then a reload fires a
+    /// stale `GetAll` echo that predates both writes. After the reload the Sent
+    /// row must survive and the draft must stay gone — i.e. the message does
+    /// NOT "move back to Draft".
+    #[test]
+    fn compose_send_then_reload_keeps_sent_and_drops_draft() {
+        fresh_snapshot();
+        fresh_pending();
+
+        // 1. Compose: autosave stashes a draft.
+        local_save_draft("alice", "draft-1", draft("bob", "hello"));
+        assert_eq!(drafts_for("alice").len(), 1, "draft saved while composing");
+
+        // 2. Send succeeds: a Sent row is stashed and the draft deleted (the
+        //    real compose-send path runs both, app.rs ~2898 + delete_draft_now).
+        local_save_sent("alice", "sent-1", sent("bob", "hello"));
+        local_delete_draft("alice", "draft-1");
+        assert_eq!(sent_for("alice").len(), 1, "sent row stashed on send");
+        assert_eq!(drafts_for("alice").is_empty(), true, "draft cleared on send");
+
+        // 3. Reload: a stale delegate `GetAll` echo lands that predates the
+        //    SaveSent + DeleteDraft writes — it still shows the old draft and
+        //    no sent row. Before the #265 fix this clobbered the Sent stash and
+        //    (combined with a failed draft-delete) surfaced the message as a
+        //    Draft again.
+        let mut stale = LocalState::default();
+        stale
+            .aliases_mut()
+            .entry("alice".to_string())
+            .or_default()
+            .drafts
+            .insert("draft-1".to_string(), draft("bob", "hello"));
+        replace_snapshot(stale);
+
+        // Post-reload invariants:
+        assert_eq!(
+            sent_for("alice").len(),
+            1,
+            "Sent row must survive the reload — message stays in Sent (#265)",
+        );
+        assert_eq!(sent_for("alice")[0].0, "sent-1");
+        assert!(
+            drafts_for("alice").is_empty(),
+            "deleted draft must not resurrect — message must NOT move back to Draft (#265)",
+        );
+    }
+
     /// Regression for #137 / #141: `kept` is a `HashMap`, so iteration order
     /// is non-deterministic. After sorting the `kept_for` output with the same
     /// `(kept_at, id)` comparator used in the inbox rebuild, the result must
