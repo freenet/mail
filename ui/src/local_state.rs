@@ -963,7 +963,9 @@ mod tests {
         let mut echoed = LocalState::default();
         let entry = echoed.aliases_mut().entry("alice".to_string()).or_default();
         entry.read.push(21);
-        entry.kept.insert("21".to_string(), kept("bob", "to delete"));
+        entry
+            .kept
+            .insert("21".to_string(), kept("bob", "to delete"));
         replace_snapshot(echoed);
 
         assert!(
@@ -1095,7 +1097,11 @@ mod tests {
         local_save_sent("alice", "sent-1", sent("bob", "hello"));
         local_delete_draft("alice", "draft-1");
         assert_eq!(sent_for("alice").len(), 1, "sent row stashed on send");
-        assert_eq!(drafts_for("alice").is_empty(), true, "draft cleared on send");
+        assert_eq!(
+            drafts_for("alice").is_empty(),
+            true,
+            "draft cleared on send"
+        );
 
         // 3. Reload: a stale delegate `GetAll` echo lands that predates the
         //    SaveSent + DeleteDraft writes — it still shows the old draft and

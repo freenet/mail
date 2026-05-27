@@ -619,7 +619,10 @@ impl DecryptedMessage {
     /// UPDATE. Previously this `.expect()`-panicked, aborting the wasm module
     /// and freezing the entire UI (#267); an undecryptable message in shared
     /// state must be skipped, never fatal.
-    fn from_stored(dk: &DecapsulationKey<MlKem768>, msg_content: Vec<u8>) -> Option<DecryptedMessage> {
+    fn from_stored(
+        dk: &DecapsulationKey<MlKem768>,
+        msg_content: Vec<u8>,
+    ) -> Option<DecryptedMessage> {
         let plaintext = match ml_kem_decrypt(dk, msg_content) {
             Ok(p) => p,
             Err(e) => {
@@ -994,8 +997,7 @@ impl InboxModel {
                     // common in a multi-node mesh) must be skipped, not fatal
                     // (#267). Previously panicked here and froze the UI on the
                     // UPDATE that followed a second send.
-                    let Some(content) =
-                        DecryptedMessage::from_stored(ml_kem_dk, m.content.clone())
+                    let Some(content) = DecryptedMessage::from_stored(ml_kem_dk, m.content.clone())
                     else {
                         continue;
                     };
@@ -1427,7 +1429,11 @@ mod tests {
 
         let model = InboxModel::from_state(ml_dsa_key, recipient_dk, state, key)
             .expect("from_state must not fail on a foreign message (#267)");
-        assert_eq!(model.messages.len(), 1, "foreign message skipped, ours kept");
+        assert_eq!(
+            model.messages.len(),
+            1,
+            "foreign message skipped, ours kept"
+        );
         assert_eq!(model.messages[0].content.title, "ours");
     }
 
