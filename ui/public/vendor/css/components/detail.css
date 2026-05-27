@@ -33,15 +33,15 @@
       flex: 0 0 36px;
     }
     .from-text { flex: 1; display: flex; flex-direction: column; gap: 1px; min-width: 0; }
-    .from-name { font-size: 13.5px; font-weight: 500; letter-spacing: -0.01em; color: var(--ink0); }
-    .from-addr { font-family: "Geist Mono", monospace; font-size: 10px; color: var(--ink3); }
-    .from-time { font-family: "Geist Mono", monospace; font-size: 10px; color: var(--ink3); flex: 0 0 auto; }
+    .from-name { font-size: 14.5px; font-weight: 500; letter-spacing: -0.01em; color: var(--ink0); }
+    .from-addr { font-family: "Geist Mono", monospace; font-size: 11.5px; color: var(--ink3); }
+    .from-time { font-family: "Geist Mono", monospace; font-size: 11.5px; color: var(--ink3); flex: 0 0 auto; }
 
     /* Per-message signature-verification badge (#51). Three states map
        to three colour roles: known/verified (trust green), signed-but-
        unknown (caution amber), unsigned/forged (warning red). */
     .verif-badge {
-      font-family: "Geist Mono", monospace; font-size: 9px;
+      font-family: "Geist Mono", monospace; font-size: 10.5px;
       letter-spacing: 0.04em; text-transform: uppercase;
       padding: 2px 7px; border-radius: 999px;
       border: 1px solid currentColor; flex: 0 0 auto;
@@ -58,7 +58,7 @@
     .btn {
       appearance: none; border: 0;
       border-radius: 7px; padding: 6px 15px;
-      font-size: 12.5px; font-weight: 500; letter-spacing: -0.005em;
+      font-size: 13.5px; font-weight: 500; letter-spacing: -0.005em;
       transition: background .12s ease, color .12s ease, border-color .12s ease;
       cursor: default;
     }
@@ -76,7 +76,7 @@
     .detail-scroll::-webkit-scrollbar-thumb { background: rgba(100, 116, 139, 0.18); border-radius: 4px; }
     .detail-body {
       max-width: 680px;
-      font-size: 14.5px; line-height: 1.82; color: var(--ink1);
+      font-size: 15px; line-height: 1.82; color: var(--ink1);
       letter-spacing: -0.005em;
       text-wrap: pretty;
     }
@@ -92,7 +92,7 @@
       font-family: "Fraunces", serif; font-style: italic; font-weight: 300;
       font-size: 120px; line-height: 1; color: var(--ink4); opacity: 0.5; letter-spacing: -0.04em;
     }
-    .empty-hint { font-family: "Geist Mono", monospace; font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; }
+    .empty-hint { font-family: "Geist Mono", monospace; font-size: 11.5px; letter-spacing: 0.1em; text-transform: uppercase; }
 
   }
 }

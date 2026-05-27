@@ -612,9 +612,31 @@ impl DecryptedMessage {
         })
     }
 
-    fn from_stored(dk: &DecapsulationKey<MlKem768>, msg_content: Vec<u8>) -> DecryptedMessage {
-        let plaintext = ml_kem_decrypt(dk, msg_content).expect("failed to decrypt message content");
-        serde_json::from_slice(&plaintext).expect("failed to deserialise decrypted message")
+    /// Decrypt a stored message for this identity. Returns `None` when the
+    /// ciphertext can't be decrypted or the plaintext doesn't deserialise —
+    /// e.g. a message in shared inbox state that was encrypted for a different
+    /// identity, or a malformed/foreign entry that arrived via a cross-node
+    /// UPDATE. Previously this `.expect()`-panicked, aborting the wasm module
+    /// and freezing the entire UI (#267); an undecryptable message in shared
+    /// state must be skipped, never fatal.
+    fn from_stored(
+        dk: &DecapsulationKey<MlKem768>,
+        msg_content: Vec<u8>,
+    ) -> Option<DecryptedMessage> {
+        let plaintext = match ml_kem_decrypt(dk, msg_content) {
+            Ok(p) => p,
+            Err(e) => {
+                crate::log::debug!("skip undecryptable inbox message: {e}");
+                return None;
+            }
+        };
+        match serde_json::from_slice(&plaintext) {
+            Ok(msg) => Some(msg),
+            Err(e) => {
+                crate::log::debug!("skip inbox message with bad plaintext: {e}");
+                None
+            }
+        }
     }
 
     fn assignment_hash_and_signed_content(&self) -> Result<([u8; 32], Vec<u8>), DynError> {
@@ -927,11 +949,15 @@ impl InboxModel {
             .messages
             .iter()
             .enumerate()
-            .map(|(id, msg)| {
-                let content = DecryptedMessage::from_stored(&ml_kem_dk, msg.content.clone());
+            .filter_map(|(id, msg)| {
+                // Skip messages this identity can't decrypt rather than
+                // aborting the whole inbox decode (#267). `id` stays the
+                // enumerate index so ids remain stable for the messages we
+                // do keep.
+                let content = DecryptedMessage::from_stored(&ml_kem_dk, msg.content.clone())?;
                 let signature_valid =
                     verify_message_signature(&msg.content, &msg.sender_vk, &msg.signature);
-                Ok(MessageModel {
+                Some(MessageModel {
                     id: id as u64,
                     content,
                     token_assignment: msg.token_assignment.clone(),
@@ -939,7 +965,7 @@ impl InboxModel {
                     signature_valid,
                 })
             })
-            .collect::<Result<Vec<_>, DynError>>()?;
+            .collect::<Vec<_>>();
         Ok(Self {
             settings: InternalSettings::from_stored(
                 state.settings,
@@ -967,7 +993,14 @@ impl InboxModel {
                     {
                         continue;
                     }
-                    let content = DecryptedMessage::from_stored(ml_kem_dk, m.content.clone());
+                    // An undecryptable AddMessages entry (foreign / malformed,
+                    // common in a multi-node mesh) must be skipped, not fatal
+                    // (#267). Previously panicked here and froze the UI on the
+                    // UPDATE that followed a second send.
+                    let Some(content) = DecryptedMessage::from_stored(ml_kem_dk, m.content.clone())
+                    else {
+                        continue;
+                    };
                     let signature_valid =
                         verify_message_signature(&m.content, &m.sender_vk, &m.signature);
                     self.add_received_message(
@@ -1298,6 +1331,110 @@ mod tests {
     fn verify_rejects_garbage_lengths() {
         // Wrong-length VK and signature bytes both bail out cleanly.
         assert!(!verify_message_signature(b"x", &[0u8; 5], &[0u8; 5]));
+    }
+
+    fn fresh_kem_dk() -> DecapsulationKey<MlKem768> {
+        DecapsulationKey::<MlKem768>::from_seed({
+            use rand::RngCore;
+            let mut seed = [0u8; 64];
+            rand::thread_rng().fill_bytes(&mut seed);
+            seed.into()
+        })
+    }
+
+    /// Repro for #267: a stored message that this identity can't decrypt must
+    /// return `None`, NOT panic. Before the fix, `from_stored` `.expect()`ed
+    /// on the decrypt failure, aborting the wasm module and freezing the UI
+    /// when an undecryptable (foreign / malformed) message surfaced in shared
+    /// inbox state — e.g. on the UPDATE that followed a second send.
+    #[test]
+    fn from_stored_returns_none_on_undecryptable_content() {
+        let dk = fresh_kem_dk();
+        // Garbage that isn't even valid framing.
+        assert!(DecryptedMessage::from_stored(&dk, vec![0u8; 16]).is_none());
+        // Well-sized but undecryptable random bytes (wrong KEM ciphertext).
+        assert!(DecryptedMessage::from_stored(&dk, vec![7u8; 1200]).is_none());
+    }
+
+    /// Repro for #267: a message correctly encrypted for a DIFFERENT identity
+    /// (the realistic multi-node case) decrypts to `None` rather than
+    /// panicking. The recipient's `from_stored` must skip it.
+    #[test]
+    fn from_stored_skips_message_encrypted_for_other_identity() {
+        let alice_dk = fresh_kem_dk();
+        let bob_dk = fresh_kem_dk();
+
+        // Encrypt a real DecryptedMessage for alice.
+        let msg = DecryptedMessage {
+            title: "for alice".into(),
+            content: "secret".into(),
+            from: "carol".into(),
+            to: vec![],
+            cc: vec![],
+            time: Utc::now(),
+        };
+        let plaintext = serde_json::to_vec(&msg).unwrap();
+        let ciphertext = ml_kem_encrypt(alice_dk.encapsulation_key(), &plaintext).unwrap();
+
+        // Alice decrypts fine.
+        assert!(DecryptedMessage::from_stored(&alice_dk, ciphertext.clone()).is_some());
+        // Bob can't — must be skipped, not fatal.
+        assert!(DecryptedMessage::from_stored(&bob_dk, ciphertext).is_none());
+    }
+
+    /// Repro for #267 at the `from_state` level: an inbox whose stored
+    /// messages include an entry encrypted for another identity must decode
+    /// to a model that simply omits the undecryptable message, never panic.
+    #[test]
+    fn from_state_skips_undecryptable_messages() {
+        let ml_dsa_key = Arc::new(fresh_signing_key());
+        let recipient_dk = fresh_kem_dk();
+        let foreign_dk = fresh_kem_dk();
+
+        let mk_stored = |dk: &DecapsulationKey<MlKem768>, title: &str| {
+            let msg = DecryptedMessage {
+                title: title.into(),
+                content: "body".into(),
+                from: "carol".into(),
+                to: vec![],
+                cc: vec![],
+                time: Utc::now(),
+            };
+            let pt = serde_json::to_vec(&msg).unwrap();
+            StoredMessage {
+                content: ml_kem_encrypt(dk.encapsulation_key(), &pt).unwrap(),
+                token_assignment: crate::test_util::test_assignment(),
+                sender_vk: Vec::new(),
+                signature: Vec::new(),
+            }
+        };
+
+        // One decryptable (ours) + one foreign.
+        let vk = MlDsaKeypair::verifying_key(ml_dsa_key.as_ref());
+        let params = InboxParams::from_verifying_key(&vk);
+        let state = StoredInbox::new(
+            ml_dsa_key.as_ref(),
+            StoredSettings::default(),
+            vec![
+                mk_stored(&recipient_dk, "ours"),
+                mk_stored(&foreign_dk, "foreign"),
+            ],
+            // owner_ek_bytes is irrelevant here: from_state doesn't verify.
+            Vec::new(),
+        );
+        let key = ContractKey::from_params_and_code(
+            TryInto::<freenet_stdlib::prelude::Parameters>::try_into(params).unwrap(),
+            ContractCode::from([].as_slice()),
+        );
+
+        let model = InboxModel::from_state(ml_dsa_key, recipient_dk, state, key)
+            .expect("from_state must not fail on a foreign message (#267)");
+        assert_eq!(
+            model.messages.len(),
+            1,
+            "foreign message skipped, ours kept"
+        );
+        assert_eq!(model.messages[0].content.title, "ours");
     }
 
     // ─── #150 UI-side bypass helpers ──────────────────────────────────────
