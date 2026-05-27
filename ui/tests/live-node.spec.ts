@@ -1117,7 +1117,9 @@ test.describe("Live node E2E", () => {
         }
         if (
           label === "alice" &&
-          /contact tier cache: recorded .+ tier=Min1 .+ \(#221\)/.test(t)
+          /contact tier cache: recorded .+ tier=Min1 .+ \(#221(?:\/#273)?\)/.test(
+            t,
+          )
         ) {
           cacheRecordedMin1 = true;
         }
