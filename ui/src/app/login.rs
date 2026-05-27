@@ -32,7 +32,7 @@ fn Topbar() -> Element {
     rsx! {
         header { class: "topbar",
             div { class: "brand",
-                span { class: "brand-glyph", "f" }
+                {crate::app::brand_logo()}
                 div { class: "brand-text",
                     span { class: "brand-name", "{app_name}" }
                     span { class: "brand-tag", "Private · Decentralized" }

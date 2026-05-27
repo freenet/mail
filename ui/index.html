@@ -4,6 +4,9 @@
     <!-- <title> is set at runtime by `document::Title` in ui/src/app.rs
          using the `APP_NAME` constant in ui/src/lib.rs. -->
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- Vendored locally (not hot-linked to freenet.org); the gateway CSP
+         only allows same-origin. See ui/public/freenet_logo.svg. -->
+    <link rel="icon" type="image/svg+xml" href="freenet_logo.svg" />
     <!-- CUSTOM HEAD -->
     <!-- Vendored locally because the Freenet gateway sandbox CSP only
          allows same-origin (`default-src http://127.0.0.1:7509`), so
