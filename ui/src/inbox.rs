@@ -190,9 +190,8 @@ pub(crate) fn verify_message_signature(
 /// message carries no recipient-side hash, and the import fetch resolves
 /// the real keys regardless.
 pub(crate) fn inbox_address_bs58_from_vk_bytes(sender_vk: &[u8]) -> Result<String, DynError> {
-    let encoded_vk: EncodedVerifyingKey<MlDsa65> = sender_vk
-        .try_into()
-        .map_err(|_| "sender VK wrong length")?;
+    let encoded_vk: EncodedVerifyingKey<MlDsa65> =
+        sender_vk.try_into().map_err(|_| "sender VK wrong length")?;
     let vk = MlDsaVerifyingKey::<MlDsa65>::decode(&encoded_vk);
     let key = inbox_key_for(&vk)?;
     Ok(key.id().encode())
