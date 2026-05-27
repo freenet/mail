@@ -1374,7 +1374,7 @@ mod tests {
             time: Utc::now(),
         };
         let plaintext = serde_json::to_vec(&msg).unwrap();
-        let ciphertext = ml_kem_encrypt(&alice_dk.encapsulation_key(), &plaintext).unwrap();
+        let ciphertext = ml_kem_encrypt(alice_dk.encapsulation_key(), &plaintext).unwrap();
 
         // Alice decrypts fine.
         assert!(DecryptedMessage::from_stored(&alice_dk, ciphertext.clone()).is_some());
@@ -1402,7 +1402,7 @@ mod tests {
             };
             let pt = serde_json::to_vec(&msg).unwrap();
             StoredMessage {
-                content: ml_kem_encrypt(&dk.encapsulation_key(), &pt).unwrap(),
+                content: ml_kem_encrypt(dk.encapsulation_key(), &pt).unwrap(),
                 token_assignment: crate::test_util::test_assignment(),
                 sender_vk: Vec::new(),
                 signature: Vec::new(),
@@ -1423,7 +1423,7 @@ mod tests {
             Vec::new(),
         );
         let key = ContractKey::from_params_and_code(
-            &params.try_into().unwrap(),
+            TryInto::<freenet_stdlib::prelude::Parameters>::try_into(params).unwrap(),
             ContractCode::from([].as_slice()),
         );
 
