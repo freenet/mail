@@ -1097,11 +1097,7 @@ mod tests {
         local_save_sent("alice", "sent-1", sent("bob", "hello"));
         local_delete_draft("alice", "draft-1");
         assert_eq!(sent_for("alice").len(), 1, "sent row stashed on send");
-        assert_eq!(
-            drafts_for("alice").is_empty(),
-            true,
-            "draft cleared on send"
-        );
+        assert!(drafts_for("alice").is_empty(), "draft cleared on send");
 
         // 3. Reload: a stale delegate `GetAll` echo lands that predates the
         //    SaveSent + DeleteDraft writes — it still shows the old draft and
