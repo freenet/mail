@@ -180,6 +180,23 @@ pub(crate) fn verify_message_signature(
     MlDsaVerifier::verify(&vk, ciphertext, &sig).is_ok()
 }
 
+/// Derive the bs58 inbox-contract address for a sender from their raw
+/// ML-DSA-65 verifying-key bytes (as carried on a received message's
+/// `sender_vk`). Used by the #272 "Add to address book" flow to seed the
+/// import modal — the address is enough to trigger the live
+/// `FetchContactKeys` Get that pulls the rest of the contact's keys.
+///
+/// Derives against the sender's embedded `INBOX_CODE_HASH`; a received
+/// message carries no recipient-side hash, and the import fetch resolves
+/// the real keys regardless.
+pub(crate) fn inbox_address_bs58_from_vk_bytes(sender_vk: &[u8]) -> Result<String, DynError> {
+    let encoded_vk: EncodedVerifyingKey<MlDsa65> =
+        sender_vk.try_into().map_err(|_| "sender VK wrong length")?;
+    let vk = MlDsaVerifyingKey::<MlDsa65>::decode(&encoded_vk);
+    let key = inbox_key_for(&vk)?;
+    Ok(key.id().encode())
+}
+
 thread_local! {
     static PENDING_INBOXES_UPDATE: RefCell<HashMap<InboxContract, Vec<PendingOutgoing>>> = RefCell::new(HashMap::new());
     static INBOX_TO_ID: RefCell<HashMap<InboxContract, Identity>> =
@@ -554,9 +571,37 @@ impl DecryptedMessage {
         // the sender's `INBOX_CODE_HASH` for own-identity sends and
         // for contacts imported before the field shipped.
         let code_hash = recipient_inbox_wasm_hash.unwrap_or(INBOX_CODE_HASH);
+        let params: freenet_stdlib::prelude::Parameters = InboxParams {
+            pub_key: inbox_pub_key_bytes.clone(),
+        }
+        .try_into()
+        .map_err(|e| format!("{e}"))?;
+        let inbox_key = ContractKey::from_params(code_hash, params).map_err(|e| format!("{e}"))?;
+
+        // #273: verified-sender bypass. When the recipient has the bypass
+        // enabled on-chain AND has whitelisted our ML-DSA VK in
+        // `verified_senders`, we may deliver this message without minting
+        // an AFT token. We only take this path when we have *observed* the
+        // recipient's live `InboxSettings` (cache hit) — a miss falls
+        // through to the normal token mint so a stale/absent observation
+        // can never silently drop the message at the recipient's contract.
+        let sender_vk = from.ml_dsa_vk_bytes();
+        let can_skip_token = crate::contact_tier_cache::lookup(&inbox_key)
+            .is_some_and(|p| p.allows_token_skip_for(&sender_vk));
+        if can_skip_token {
+            crate::log::info(format!(
+                "send.start_sending: verified-sender bypass active, skipping AFT token \
+                 from=`{}` inbox_key={inbox_key} (#273)",
+                from.alias()
+            ));
+            return self
+                .finish_sending_bypass(client, inbox_key, hash, from)
+                .await;
+        }
+
         let delegate_key = AftRecords::assign_token(
             client,
-            inbox_pub_key_bytes.clone(),
+            inbox_pub_key_bytes,
             recipient_required_tier,
             recipient_max_age_secs,
             recipient_inbox_wasm_hash,
@@ -564,12 +609,6 @@ impl DecryptedMessage {
             hash,
         )
         .await?;
-        let params = InboxParams {
-            pub_key: inbox_pub_key_bytes,
-        }
-        .try_into()
-        .map_err(|e| format!("{e}"))?;
-        let inbox_key = ContractKey::from_params(code_hash, params).map_err(|e| format!("{e}"))?;
         crate::log::info(format!(
             "send.start_sending: token requested, awaiting AFT delegate response from=`{}` inbox_key={inbox_key} (release-visible diagnostic for #174)",
             from.alias()
@@ -586,6 +625,47 @@ impl DecryptedMessage {
                 });
         });
         let _ = recipient_ek; // ek is used inside to_stored via pending queue
+        Ok(())
+    }
+
+    /// #273 verified-sender bypass send path. Used when `start_sending`
+    /// determined (from the recipient's observed `InboxSettings`) that
+    /// this sender may deliver without an AFT token. Builds a placeholder
+    /// `TokenAssignment` — the recipient's inbox contract skips all
+    /// token-assignment validation for verified senders
+    /// (`add_message`/`verify_token_policy` short-circuit on the
+    /// `verified_senders` allow-list, see `contracts/inbox/src/lib.rs`),
+    /// so only the `assignment_hash` is load-bearing: it must equal the
+    /// real message hash because the inbox keys + dedupes messages by it.
+    ///
+    /// The delta is sent as a bare `UpdateData::Delta` — there is no AFT
+    /// allocation record to bundle as `RelatedStateAndDelta`, and the
+    /// contract never fetches one for a bypassed message.
+    async fn finish_sending_bypass(
+        self,
+        client: &mut WebApiRequestClient,
+        inbox_key: ContractKey,
+        hash: TokenAssignmentHash,
+        from: &Identity,
+    ) -> Result<(), DynError> {
+        let placeholder = TokenAssignment {
+            tier: Tier::Min1,
+            time_slot: Utc::now(),
+            generator: Vec::new(),
+            signature: Vec::new(),
+            assignment_hash: hash,
+            token_record: *inbox_key.id(),
+        };
+        let stored = self.to_stored(placeholder, from)?;
+        let delta = UpdateInbox::AddMessages {
+            messages: vec![stored],
+        };
+        let delta_bytes = serde_json::to_vec(&delta)?;
+        let request = ContractRequest::Update {
+            key: inbox_key,
+            data: UpdateData::Delta(delta_bytes.into()),
+        };
+        client.send(request.into()).await?;
         Ok(())
     }
 

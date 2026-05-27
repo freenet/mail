@@ -1097,7 +1097,7 @@ fn ScrContacts() -> Element {
         // Leave Settings open underneath — the modal renders inside
         // div.fm-app (app.rs) and is now styled in that scope, so it
         // overlays the Contacts panel instead of dropping to the inbox.
-        import_contact_form.write().0 = true;
+        *import_contact_form.write() = crate::app::login::ImportContact::opened();
     };
     let on_share = move |_| {
         let Some(active) = user.read().logged_id().cloned() else {

@@ -13,7 +13,7 @@
 //!
 //! Cache is in-memory only: a reload re-primes via `set_aliases` →
 //! Get-with-subscribe for every contact.
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::{LazyLock, RwLock};
 
 use chrono::{DateTime, Utc};
@@ -21,14 +21,31 @@ use freenet_aft_interface::Tier;
 use freenet_email_inbox::InboxSettings;
 use freenet_stdlib::prelude::ContractKey;
 
-/// Minimum policy fields the sender needs from the recipient's live
-/// `InboxSettings`. Skips `verified_senders` / `allow_verified_skip_token`
-/// — those affect the bypass path which goes through the contract's own
-/// state read, not the sender.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Policy fields the sender needs from the recipient's live
+/// `InboxSettings`. Besides the tier/max-age the sender mints against,
+/// this now mirrors the verified-sender bypass state (#273): when the
+/// recipient has `allow_verified_skip_token` on and the sender's ML-DSA
+/// VK is in `verified_senders`, the sender skips minting an AFT token
+/// entirely. The sender can only safely skip when it has *observed* the
+/// recipient's live settings — a cache miss falls back to minting a
+/// token, so a stale/absent observation never silently drops a message.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecipientPolicy {
     pub minimum_tier: Tier,
     pub max_age_secs: u64,
+    pub allow_verified_skip_token: bool,
+    pub verified_senders: BTreeSet<Vec<u8>>,
+}
+
+impl RecipientPolicy {
+    /// Whether a sender holding `sender_vk` may skip the AFT token for
+    /// this recipient: the recipient must have the bypass enabled and
+    /// have whitelisted this exact VK on-chain.
+    pub fn allows_token_skip_for(&self, sender_vk: &[u8]) -> bool {
+        self.allow_verified_skip_token
+            && !sender_vk.is_empty()
+            && self.verified_senders.contains(sender_vk)
+    }
 }
 
 /// Internal cache entry: `RecipientPolicy` plus the `last_update`
@@ -36,7 +53,7 @@ pub struct RecipientPolicy {
 /// (`record_with_last_update` ignores incoming snapshots whose
 /// `last_update` is older than what we already have, mirroring the
 /// contract-level last-write-wins in `Inbox::merge`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct CacheEntry {
     policy: RecipientPolicy,
     last_update: DateTime<Utc>,
@@ -62,24 +79,33 @@ pub fn record_with_last_update(
         policy: RecipientPolicy {
             minimum_tier: settings.minimum_tier,
             max_age_secs: settings.max_age_secs,
+            allow_verified_skip_token: settings.allow_verified_skip_token,
+            verified_senders: settings.verified_senders.clone(),
         },
         last_update,
     };
     let mut guard = CACHE.write().expect("contact tier cache poisoned");
-    let existing = guard.get(&key).copied();
+    let existing = guard.get(&key).cloned();
     match existing {
-        Some(prev) if prev.last_update > entry.last_update => {
+        Some(ref prev) if prev.last_update > entry.last_update => {
             // Stale; ignore.
             return;
         }
         _ => {}
     }
     let prev_policy = existing.map(|e| e.policy);
+    let changed = prev_policy.as_ref() != Some(&entry.policy);
+    let (tier, max_age, bypass, n_verified) = (
+        entry.policy.minimum_tier,
+        entry.policy.max_age_secs,
+        entry.policy.allow_verified_skip_token,
+        entry.policy.verified_senders.len(),
+    );
     guard.insert(key, entry);
-    if prev_policy != Some(entry.policy) {
+    if changed {
         crate::log::info(format!(
-            "contact tier cache: recorded {key} tier={:?} max_age_secs={} (#221)",
-            entry.policy.minimum_tier, entry.policy.max_age_secs
+            "contact tier cache: recorded {key} tier={tier:?} max_age_secs={max_age} \
+             allow_verified_skip_token={bypass} verified_senders={n_verified} (#221/#273)"
         ));
     }
 }
@@ -100,7 +126,7 @@ pub fn lookup(key: &ContractKey) -> Option<RecipientPolicy> {
         .read()
         .expect("contact tier cache poisoned")
         .get(key)
-        .map(|e| e.policy)
+        .map(|e| e.policy.clone())
 }
 
 #[cfg(test)]
@@ -130,6 +156,42 @@ mod tests {
             verified_senders: BTreeSet::new(),
             private: Vec::new(),
         }
+    }
+
+    fn settings_bypass(verified: &[&[u8]]) -> InboxSettings {
+        InboxSettings {
+            minimum_tier: Tier::Min1,
+            max_age_secs: DEFAULT_MAX_AGE_SECS,
+            allow_verified_skip_token: true,
+            verified_senders: verified.iter().map(|v| v.to_vec()).collect(),
+            private: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn bypass_fields_round_trip_and_gate_skip() {
+        let key = dummy_key(4);
+        record(key, &settings_bypass(&[b"vk-alice"]));
+        let p = lookup(&key).expect("cache hit");
+        assert!(p.allow_verified_skip_token);
+        // Whitelisted VK may skip.
+        assert!(p.allows_token_skip_for(b"vk-alice"));
+        // Non-whitelisted VK may not.
+        assert!(!p.allows_token_skip_for(b"vk-bob"));
+        // Empty VK never skips (matches the contract's `!sender_vk.is_empty()`).
+        assert!(!p.allows_token_skip_for(b""));
+    }
+
+    #[test]
+    fn bypass_off_never_skips_even_if_whitelisted() {
+        let key = dummy_key(5);
+        // minimum_tier path with bypass OFF but a populated set should
+        // still refuse to skip — `allow_verified_skip_token` is the master.
+        let mut s = settings_bypass(&[b"vk-alice"]);
+        s.allow_verified_skip_token = false;
+        record(key, &s);
+        let p = lookup(&key).expect("cache hit");
+        assert!(!p.allows_token_skip_for(b"vk-alice"));
     }
 
     // NOTE: these tests share a process-global `CACHE` (LazyLock). Each

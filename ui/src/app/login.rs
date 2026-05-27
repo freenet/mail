@@ -770,7 +770,31 @@ pub(crate) struct SharePendingData {
     pub(crate) share_text: String,
 }
 
-pub(crate) struct ImportContact(pub(crate) bool);
+/// Controls the Import-contact modal. `open` toggles visibility;
+/// `prefill` carries an inbox address (bs58) to seed the paste field
+/// when the modal is opened from a known sender — e.g. "Add to address
+/// book" on a received message (#272). `None` prefill = manual paste.
+#[derive(Clone, Default)]
+pub(crate) struct ImportContact {
+    pub(crate) open: bool,
+    pub(crate) prefill: Option<String>,
+}
+
+impl ImportContact {
+    pub(crate) fn opened() -> Self {
+        Self {
+            open: true,
+            prefill: None,
+        }
+    }
+
+    pub(crate) fn opened_with(address: String) -> Self {
+        Self {
+            open: true,
+            prefill: Some(address),
+        }
+    }
+}
 
 /// Carries the `Contact` whose verified flag the user is about to flip.
 /// `None` while the modal is closed; populated by the row-level Verify
@@ -835,7 +859,7 @@ pub(super) fn IdentifiersList() -> Element {
             if share_contact.read().0 {
                 ShareContactModal {}
             }
-            if import_contact.read().0 {
+            if import_contact.read().open {
                 ImportContactForm {}
             }
         }
@@ -1990,8 +2014,11 @@ pub(super) fn ImportContactForm() -> Element {
         }
     });
 
-    let on_paste_change = move |evt: dioxus::prelude::Event<dioxus::html::FormData>| {
-        let text = evt.value().clone();
+    // Parse a pasted (or prefilled) inbox-address blob and kick off the
+    // key fetch. Factored out of the textarea handler so the #272
+    // "Add to address book" prefill path can reuse the exact same parse +
+    // fetch logic without synthesising a DOM event.
+    let mut apply_address = move |text: String| {
         paste_text.set(text.clone());
         error_msg.set(String::new());
         fingerprint_words.set(None);
@@ -2093,6 +2120,19 @@ pub(super) fn ImportContactForm() -> Element {
         }
     };
 
+    // #272: when the modal is opened from "Add to address book" on a
+    // received message, the sender's inbox address is handed over via
+    // `ImportContact.prefill`. Seed the paste field and trigger the key
+    // fetch exactly once, then clear the prefill so a later manual edit
+    // (or a re-render) doesn't clobber the user's typing.
+    use_effect(move || {
+        let prefill = import_contact_form.read().prefill.clone();
+        if let Some(addr) = prefill {
+            apply_address(addr);
+            import_contact_form.write().prefill = None;
+        }
+    });
+
     // Soft warning when the sender included a verify phrase but the user
     // hasn't ticked the box. Verified-only inboxes (settings.rs:1434)
     // will reject sends until the user ticks it once they've matched the
@@ -2109,7 +2149,7 @@ pub(super) fn ImportContactForm() -> Element {
         if let Some(addr) = pending_address.read().clone() {
             crate::api::contact_import::cancel(&addr);
         }
-        import_contact_form.write().0 = false;
+        *import_contact_form.write() = ImportContact::default();
         error_msg.set(String::new());
     };
     let verify_check_class = if *verified.read() {
@@ -2125,7 +2165,7 @@ pub(super) fn ImportContactForm() -> Element {
                 if let Some(addr) = pending_address.read().clone() {
                     crate::api::contact_import::cancel(&addr);
                 }
-                import_contact_form.write().0 = false;
+                *import_contact_form.write() = ImportContact::default();
                 error_msg.set(String::new());
             },
             div { class: "modal",
@@ -2146,7 +2186,9 @@ pub(super) fn ImportContactForm() -> Element {
                             placeholder: "e.g. EqJ5YpEEV3XLqEvKWLQHFhGAac2qXzSUoE6k2zbdnXBr",
                             rows: "3",
                             value: "{paste_text}",
-                            oninput: on_paste_change,
+                            oninput: move |evt: dioxus::prelude::Event<dioxus::html::FormData>| {
+                                apply_address(evt.value());
+                            },
                         }
                     }
                     if *fetching.read() {
@@ -2261,7 +2303,7 @@ pub(super) fn ImportContactForm() -> Element {
                             if let Some(addr) = pending_address.read().clone() {
                                 crate::api::contact_import::cancel(&addr);
                             }
-                            import_contact_form.write().0 = false;
+                            *import_contact_form.write() = ImportContact::default();
                             paste_text.set(String::new());
                             local_alias.set(String::new());
                             description.set(String::new());
@@ -2400,7 +2442,7 @@ fn ContactsSection() -> Element {
             button {
                 class: "btn btn-secondary",
                 "data-testid": testid::FM_CONTACT_IMPORT,
-                onclick: move |_| { import_contact_form.write().0 = true; },
+                onclick: move |_| { *import_contact_form.write() = ImportContact::opened(); },
                 "+ Import contact"
             }
         }

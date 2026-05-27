@@ -175,7 +175,7 @@ pub(crate) fn app() -> Element {
     // These context providers are still here so both subtrees share the
     // same signal instances.
     use_context_provider(|| Signal::new(login::ImportBackup(false)));
-    use_context_provider(|| Signal::new(login::ImportContact(false)));
+    use_context_provider(|| Signal::new(login::ImportContact::default()));
     use_context_provider(|| Signal::new(login::ShareContact(false)));
     use_context_provider(|| Signal::new(login::SharePending::default()));
 
@@ -1383,7 +1383,7 @@ fn UserInbox() -> Element {
             if share_contact.read().0 {
                 login::ShareContactModal {}
             }
-            if import_contact.read().0 {
+            if import_contact.read().open {
                 login::ImportContactForm {}
             }
         }
@@ -2279,6 +2279,7 @@ fn OpenMessage(msg: Message) -> Element {
     let mut inbox = use_context::<Signal<InboxView>>();
     let inbox_data = use_context::<InboxesData>();
     let user = use_context::<Signal<User>>();
+    let mut import_contact = use_context::<Signal<crate::app::login::ImportContact>>();
     let email_id = [msg.id];
 
     let result = inbox
@@ -2373,6 +2374,7 @@ fn OpenMessage(msg: Message) -> Element {
         verification,
         crate::inbox::VerificationState::VerifiedUnknown
     );
+    let add_to_ab_vk = msg.sender_vk.clone();
 
     let archive_client = client.clone();
     let archive_inbox_data = inbox_data;
@@ -2426,15 +2428,24 @@ fn OpenMessage(msg: Message) -> Element {
                         class: "btn btn-secondary",
                         "data-testid": testid::FM_ADD_TO_AB,
                         onclick: move |_| {
-                            // Stub: opens the existing address-book import
-                            // modal. Pre-filling it with this sender's VK
-                            // is a follow-up — the affordance is wired now
-                            // so the verified-unknown flow has a path
-                            // (#51).
-                            crate::toast::push_toast(
-                                "Open the address book to add this sender",
-                                crate::toast::ToastLevel::Info,
-                            );
+                            // #272: derive the sender's bs58 inbox address
+                            // from the message's `sender_vk` and open the
+                            // import modal pre-seeded with it. The modal's
+                            // effect runs the same parse + `FetchContactKeys`
+                            // it would for a manual paste, so the contact's
+                            // ML-KEM ek + tier policy are pulled live.
+                            match crate::inbox::inbox_address_bs58_from_vk_bytes(&add_to_ab_vk) {
+                                Ok(addr) => {
+                                    *import_contact.write() =
+                                        crate::app::login::ImportContact::opened_with(addr);
+                                }
+                                Err(e) => {
+                                    crate::toast::push_toast(
+                                        format!("Could not derive sender address: {e}"),
+                                        crate::toast::ToastLevel::Error,
+                                    );
+                                }
+                            }
                         },
                         "Add to address book"
                     }
