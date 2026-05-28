@@ -980,7 +980,8 @@ test.describe("Sent folder (#47b)", () => {
     await expect(sheet.locator('input[placeholder="subject"]')).toHaveValue(
       "Re: original",
     );
-    await expect(sheet.locator("textarea.sheet-textarea")).toHaveValue("");
+    // #274B: reply now quotes the original body (each line prefixed with "> ").
+    await expect(sheet.locator("textarea.sheet-textarea")).toHaveValue("> hello");
   });
 
   test("Forward prefills blank recipient + Fwd: subject + quoted body", async ({

@@ -371,6 +371,18 @@ pub enum Density {
     Compact,
 }
 
+/// UI font-size preference. Scales every text element uniformly via
+/// CSS `zoom` on the app root (#275).
+#[derive(Deserialize, Serialize, PartialEq, Eq, Debug, Clone, Copy, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum FontSize {
+    Small,
+    #[default]
+    Default,
+    Large,
+    Larger,
+}
+
 /// Appearance settings (global, not per-identity).
 #[derive(Deserialize, Serialize, PartialEq, Eq, Debug, Clone)]
 pub struct AppearanceSettings {
@@ -381,6 +393,8 @@ pub struct AppearanceSettings {
     /// Render subject lines in the serif display face.
     #[serde(default = "default_true")]
     pub serif_subjects: bool,
+    #[serde(default)]
+    pub font_size: FontSize,
 }
 
 impl Default for AppearanceSettings {
@@ -389,6 +403,7 @@ impl Default for AppearanceSettings {
             theme: Theme::default(),
             density: Density::default(),
             serif_subjects: true,
+            font_size: FontSize::default(),
         }
     }
 }
@@ -1140,6 +1155,7 @@ mod boundary_tests {
                 theme: Theme::Dark,
                 density: Density::Compact,
                 serif_subjects: false,
+                font_size: FontSize::Large,
             },
             inbox: InboxSettings {
                 drafts_in_inbox: true,

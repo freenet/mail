@@ -86,7 +86,7 @@ manual gap by adding a test, flip status to `auto` and link the test.
 | Multi-recipient (To: alice, bob, charlie) | manual | Compose, type comma-separated aliases, confirm 3 fingerprint badges, send, confirm 3 inboxes receive |
 | Auto-sign appends signature once (idempotent on resend) | manual | Settings → Auto-sign on, set signature, send, inspect Sent body for sig; Resend, confirm not duplicated |
 | Forward prefills blank recipient + Fwd: subject + quoted body | auto | offline: `Forward prefills blank recipient + Fwd: subject + quoted body` |
-| Reply prefills recipient + Re: subject | auto | offline: `Reply prefills recipient + Re: subject` |
+| Reply prefills recipient + Re: subject + quoted body (#274B) | auto | offline: `Reply prefills recipient + Re: subject` (asserts quoted body since #274B). |
 | Resend prefills identical recipient/subject/body | auto | offline: `Resend prefills identical recipient/subject/body` |
 | Reply from Archive folder | manual | Archive a message, open it from Archive, click Reply, confirm prefill |
 | Empty body / no recipient → submit blocked or warns | manual | Compose, leave fields blank, click Send, observe behavior |
@@ -141,6 +141,7 @@ add/remove protocol.
 | Appearance: theme switch (data-theme attr) | manual | Settings → Appearance, change theme, confirm `.fm-app[data-theme]` reflects |
 | Appearance: density (data-density attr) | manual | Change density, confirm `.fm-app[data-density]` reflects + row heights change |
 | Appearance: serif_subjects toggle | manual | Toggle, confirm subjects flip font |
+| Appearance: font-size scaling (#275) | manual | Settings → Appearance, change Font size (small / default / large / larger). Confirm `.fm-app[data-font-size]` attr matches; entire UI scales uniformly via CSS `zoom`. Reload → choice persists. |
 | Advanced: custom relay URL takes effect on reload | manual | Set custom_relay + URL, reload, WS connects to that URL |
 | Settings round-trip across reload | manual | Set value, reload, value persists |
 | AFT tier picker dispatches ModifySettings (#85) | auto | iso: `recipient tier change before first send; sender mints at new tier (#221, #180 AFT_CAP_RAISED row)` (re-enabled in #223). |

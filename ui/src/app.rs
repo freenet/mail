@@ -1153,18 +1153,6 @@ mod menu {
             }
         }
 
-        pub fn open_compose_with(&mut self, to: String, subject: String) {
-            self.new_msg = true;
-            self.email = None;
-            self.sent_id = None;
-            self.compose_prefill = Some(ComposePrefill {
-                to,
-                subject,
-                body: String::new(),
-                draft_id: None,
-            });
-        }
-
         pub fn open_draft(&mut self, prefill: ComposePrefill) {
             self.new_msg = true;
             self.email = None;
@@ -1347,6 +1335,12 @@ fn UserInbox() -> Element {
         ::mail_local_state::Density::Comfortable => "comfortable",
         ::mail_local_state::Density::Compact => "compact",
     };
+    let font_size_attr = match appearance.font_size {
+        ::mail_local_state::FontSize::Small => "small",
+        ::mail_local_state::FontSize::Default => "default",
+        ::mail_local_state::FontSize::Large => "large",
+        ::mail_local_state::FontSize::Larger => "larger",
+    };
     let serif_class = if appearance.serif_subjects {
         " serif-subjects"
     } else {
@@ -1363,6 +1357,7 @@ fn UserInbox() -> Element {
             "data-testid": testid::FM_APP,
             "data-theme": theme_attr,
             "data-density": density_attr,
+            "data-font-size": font_size_attr,
             Topbar {}
             div { class: "main",
                 Sidebar {}
@@ -2105,6 +2100,7 @@ fn OpenArchivedMessage(msg_id: u64, msg: mail_local_state::ArchivedMessage) -> E
     let content = msg.content.clone();
     let reply_to = from.clone();
     let reply_subj = format!("Re: {title}");
+    let reply_body = quote_body(&content);
     let time_full = chrono::DateTime::from_timestamp_millis(msg.archived_at)
         .map(format_time_full)
         .unwrap_or_default();
@@ -2138,7 +2134,12 @@ fn OpenArchivedMessage(msg_id: u64, msg: mail_local_state::ArchivedMessage) -> E
                     class: "btn btn-primary",
                     "data-testid": testid::FM_ARCHIVE_REPLY,
                     onclick: move |_| {
-                        menu_selection.write().open_compose_with(reply_to.to_string(), reply_subj.clone());
+                        menu_selection.write().open_draft(menu::ComposePrefill {
+                            to: reply_to.to_string(),
+                            subject: reply_subj.clone(),
+                            body: reply_body.clone(),
+                            draft_id: None,
+                        });
                     },
                     "Reply"
                 }
@@ -2211,11 +2212,11 @@ fn OpenSentMessage(msg: mail_local_state::SentMessage) -> Element {
         mail_local_state::DeliveryState::Failed => "failed",
     };
 
-    // Reply: same recipient, "Re: <subject>".
+    // Reply: same recipient, "Re: <subject>", original quoted.
     let reply_prefill = menu::ComposePrefill {
         to: to.clone(),
         subject: format!("Re: {subject}"),
-        body: String::new(),
+        body: quote_body(&body),
         draft_id: None,
     };
     // Forward: blank recipient, "Fwd: <subject>", body quoted.
@@ -2368,6 +2369,7 @@ fn OpenMessage(msg: Message) -> Element {
     let id = msg.id;
     let reply_to = from.clone();
     let reply_subj = format!("Re: {}", title);
+    let reply_body = quote_body(&content);
     let time_full = format_time_full(msg.time);
     // Subscribe to address-book mutations so the verification badge
     // updates immediately when the user imports the sender's contact
@@ -2482,7 +2484,12 @@ fn OpenMessage(msg: Message) -> Element {
                     class: "btn btn-primary",
                     "data-testid": testid::FM_REPLY,
                     onclick: move |_| {
-                        menu_selection.write().open_compose_with(reply_to.to_string(), reply_subj.clone());
+                        menu_selection.write().open_draft(menu::ComposePrefill {
+                            to: reply_to.to_string(),
+                            subject: reply_subj.clone(),
+                            body: reply_body.clone(),
+                            draft_id: None,
+                        });
                     },
                     "Reply"
                 }
