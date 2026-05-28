@@ -586,7 +586,9 @@ impl DecryptedMessage {
         // through to the normal token mint so a stale/absent observation
         // can never silently drop the message at the recipient's contract.
         let sender_vk = from.ml_dsa_vk_bytes();
-        let can_skip_token = crate::contact_tier_cache::lookup(&inbox_key)
+        let cached_policy = crate::contact_tier_cache::lookup(&inbox_key);
+        let can_skip_token = cached_policy
+            .as_ref()
             .is_some_and(|p| p.allows_token_skip_for(&sender_vk));
         if can_skip_token {
             crate::log::info(format!(
@@ -597,6 +599,37 @@ impl DecryptedMessage {
             return self
                 .finish_sending_bypass(client, inbox_key, hash, from)
                 .await;
+        }
+        // #266: when bypass doesn't fire, surface WHICH gate failed so a
+        // tester wondering "I turned the toggle on, why am I still seeing
+        // pop-ups?" can diagnose without source-diving. Three possible
+        // gates: (a) cache miss (sender's `contact_tier_cache` never
+        // observed the recipient's live `InboxSettings`), (b) recipient's
+        // `allow_verified_skip_token` is false on-chain, (c) recipient
+        // has not whitelisted the sender's ML-DSA VK in
+        // `verified_senders`. Logged at info() so it shows up in release
+        // builds.
+        match cached_policy.as_ref() {
+            None => crate::log::info(format!(
+                "send.start_sending: AFT bypass NOT applied for inbox_key={inbox_key} — \
+                 contact_tier_cache miss (recipient inbox settings never observed; \
+                 sender's client has not done a Get on the recipient inbox yet). (#266)"
+            )),
+            Some(p) if !p.allow_verified_skip_token => crate::log::info(format!(
+                "send.start_sending: AFT bypass NOT applied for inbox_key={inbox_key} — \
+                 recipient's `allow_verified_skip_token` is OFF on-chain. The recipient \
+                 must enable “Accept verified senders without tokens” in their Settings → \
+                 Anti-Flood (AFT). (#266)"
+            )),
+            Some(p) if !p.verified_senders.contains(&sender_vk) => crate::log::info(format!(
+                "send.start_sending: AFT bypass NOT applied for inbox_key={inbox_key} — \
+                 sender's ML-DSA VK (len={}) is not in recipient's `verified_senders` set \
+                 (size={}). The recipient must mark this sender's contact as verified, \
+                 which republishes the set. (#266)",
+                sender_vk.len(),
+                p.verified_senders.len(),
+            )),
+            Some(_) => {}
         }
 
         let delegate_key = AftRecords::assign_token(

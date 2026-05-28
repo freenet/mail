@@ -923,7 +923,7 @@ fn ScrAft() -> Element {
     rsx! {
         div { class: "fm-set-inner",
             p { class: "fm-set-lede",
-                "Anti-Flood Tokens rate-limit the network without a server. Recipients require senders to hold a token of at least the recipient's chosen tier. Pick the floor your inbox accepts."
+                "Anti-Flood Tokens rate-limit the network without a server. Recipients require senders to hold a token of at least the recipient's chosen tier. Settings on this screen are a mix: some control how YOUR client sends mail (sender-side), others publish policy that other senders see and obey when sending to YOUR inbox (recipient-side). Each card below labels which side it affects."
             }
             Card {
                 title: "Your tokens",
@@ -1044,11 +1044,11 @@ fn ScrAft() -> Element {
                 }
             }
             Card {
-                title: "Permission modal behaviour",
-                sub: "When sending mail, the Freenet gateway shows a permission prompt for each AFT token spend. These settings control when that prompt is skipped automatically.",
+                title: "When sending: skip permission pop-ups",
+                sub: "These settings affect THIS client's send path. They tell your client when to auto-confirm the Freenet gateway's AFT permission prompt instead of asking you. They do NOT change whether a token is minted — only whether you are prompted.",
                 SettingRow {
-                    label: "Auto-accept token spending for verified contacts",
-                    help: "When on, sends to contacts you have verified (fingerprint confirmed) skip the permission modal entirely.",
+                    label: "Auto-confirm prompt for verified contacts",
+                    help: "When on, sending to a contact you have verified (fingerprint confirmed in Settings → Contacts) auto-confirms the AFT permission prompt — no pop-up. The token is still minted normally; you just aren't asked. Independent of the recipient's policy below.",
                     control: rsx! {
                         Toggle {
                             on: auto_accept_verified,
@@ -1164,11 +1164,11 @@ fn ScrAft() -> Element {
                 }
             }
             Card {
-                title: "Verified-sender bypass",
-                sub: "Trade the spam shield for convenience with trusted contacts. Use with care: a compromised verified contact can send unlimited messages to your inbox.",
+                title: "Your inbox policy: let verified senders skip tokens",
+                sub: "This is a RECIPIENT-side policy. It tells the network that your inbox will accept messages from senders you have verified WITHOUT requiring an AFT token. When on, your client publishes the list of contacts you have marked verified to your inbox contract; their clients (if they have observed your inbox settings) will skip minting a token when sending to you. Trade the spam shield for convenience with trusted contacts. Use with care: a compromised verified contact can send unlimited messages to your inbox.",
                 SettingRow {
-                    label: "Don't require tokens from verified senders",
-                    help: "When on, messages from contacts you've verified (fingerprint confirmed) skip the AFT token check. Verified contacts are managed in Settings → Contacts.",
+                    label: "Accept verified senders without tokens",
+                    help: "Recipient-side. Toggling this here does NOT affect whether tokens are minted when you send mail to others — that depends on the recipient's policy, which their client publishes the same way. To stop pop-ups when YOU send, see the “When sending” card above.",
                     control: rsx! {
                         div {
                             "data-testid": crate::testid::FM_AFT_VERIFIED_SKIP_TOGGLE,
