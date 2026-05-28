@@ -601,6 +601,33 @@ impl AftRecords {
         Ok(())
     }
 
+    /// Snapshot of the locally-cached `TokenAllocationRecord` for
+    /// `identity`, summarised as `(tier, used_count)` pairs sorted from
+    /// cheapest (shortest-period) tier to most expensive. Returns an
+    /// empty vec if the identity has no record cached yet (fresh
+    /// install, or RECORDS not yet seeded by `set_identity_contract`).
+    ///
+    /// "Used" is the count of `TokenAssignment`s the record currently
+    /// holds at that tier — i.e. tokens already spent inside the
+    /// recipient's `max_age` window. It is NOT a balance: the generator
+    /// delegate mints fresh slots as old ones roll out of the window.
+    /// The number is most useful as a "how much have I been sending"
+    /// indicator and a debugging surface for the rationing UI (#271).
+    pub fn used_counts_by_tier(identity: &Identity) -> Vec<(Tier, usize)> {
+        RECORDS.with(|recs| {
+            let recs = recs.borrow();
+            let Some(record) = recs.get(identity) else {
+                return Vec::new();
+            };
+            let mut by_tier: Vec<(Tier, usize)> = record
+                .into_iter()
+                .map(|(tier, assignments)| (*tier, assignments.len()))
+                .collect();
+            by_tier.sort_by_key(|(t, _)| *t);
+            by_tier
+        })
+    }
+
     pub async fn get_state(
         client: &mut WebApiRequestClient,
         key: AftRecord,
