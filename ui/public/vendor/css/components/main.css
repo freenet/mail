@@ -8,3 +8,11 @@
 
   }
 }
+
+/* Font-size scaling (#275). `zoom` scales every descendant uniformly
+   including the absolute-px font-size declarations across components.
+   Supported in Chromium, Safari, and Firefox 126+. */
+.fm-app[data-font-size="small"]   { zoom: 0.88; }
+.fm-app[data-font-size="default"] { zoom: 1; }
+.fm-app[data-font-size="large"]   { zoom: 1.15; }
+.fm-app[data-font-size="larger"]  { zoom: 1.30; }

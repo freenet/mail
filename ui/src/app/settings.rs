@@ -16,7 +16,7 @@ use dioxus::prelude::*;
 #[cfg(any(all(target_family = "wasm", feature = "use-node"), test))]
 use mail_local_state::IdentityAftPrefs;
 use mail_local_state::{
-    Density, GlobalSettings, IdentityPrivacyPrefs, IdentitySettings, InboxSettings,
+    Density, FontSize, GlobalSettings, IdentityPrivacyPrefs, IdentitySettings, InboxSettings,
     PermissionDecision, Theme,
 };
 
@@ -1373,6 +1373,12 @@ fn ScrAppearance() -> Element {
         Density::Comfortable => "comfortable",
         Density::Compact => "compact",
     };
+    let font_size_value = match g.appearance.font_size {
+        FontSize::Small => "small",
+        FontSize::Default => "default",
+        FontSize::Large => "large",
+        FontSize::Larger => "larger",
+    };
 
     let g_theme = g.clone();
     let on_theme = move |ev: Event<FormData>| {
@@ -1397,6 +1403,17 @@ fn ScrAppearance() -> Element {
     let on_serif = move |_| {
         let mut next = g_serif.clone();
         next.appearance.serif_subjects = !next.appearance.serif_subjects;
+        local_state::persist_global_settings(next);
+    };
+    let g_font_size = g.clone();
+    let on_font_size = move |ev: Event<FormData>| {
+        let mut next = g_font_size.clone();
+        next.appearance.font_size = match ev.value().as_str() {
+            "small" => FontSize::Small,
+            "large" => FontSize::Large,
+            "larger" => FontSize::Larger,
+            _ => FontSize::Default,
+        };
         local_state::persist_global_settings(next);
     };
     rsx! {
@@ -1427,6 +1444,21 @@ fn ScrAppearance() -> Element {
                             onchange: on_density,
                             option { value: "compact", "compact" }
                             option { value: "comfortable", "comfortable" }
+                        }
+                    },
+                }
+                SettingRow {
+                    label: "Font size",
+                    help: "Scales every text element uniformly. Use Large/Larger for high-DPI screens or low vision.",
+                    control: rsx! {
+                        select {
+                            class: "fm-select",
+                            value: "{font_size_value}",
+                            onchange: on_font_size,
+                            option { value: "small", "small" }
+                            option { value: "default", "default" }
+                            option { value: "large", "large" }
+                            option { value: "larger", "larger" }
                         }
                     },
                 }
