@@ -610,6 +610,26 @@ fn parse_tier(s: &str) -> Option<freenet_aft_interface::Tier> {
     })
 }
 
+/// Capacity values larger than this collapse to "ample" in the AFT
+/// usage panel. A `Min1` tier at the default 365d window has 525,600
+/// theoretical slots — surfacing the integer is more noise than
+/// signal. The cutoff is chosen so the longer-period tiers (Hour1 and
+/// up at 365d, all tiers at <1d windows) still render their numeric
+/// capacity, since those are the ones a user can plausibly exhaust.
+const CAPACITY_AMPLE_THRESHOLD: u64 = 10_000;
+
+/// Every `Tier` variant in cheapest → most-expensive order. Mirrors
+/// `TIER_ROWS` but holds the enum values (not display strings) so the
+/// AFT usage panel can compute capacity per tier from
+/// `Tier::tier_duration`.
+const ALL_TIERS: &[freenet_aft_interface::Tier] = {
+    use freenet_aft_interface::Tier::*;
+    &[
+        Min1, Min5, Min10, Min30, Hour1, Hour3, Hour6, Hour12, Day1, Day7, Day15, Day30, Day90,
+        Day180, Day365,
+    ]
+};
+
 /// Pretty name for a `Tier` enum value matching the labels in
 /// `TIER_ROWS` (`"Day1"`, `"Hour1"`, etc.). `Tier`'s `Display` impl is
 /// strum-`lowercase` (`"day1"`); we want title-cased identifiers in
@@ -868,21 +888,37 @@ fn ScrAft() -> Element {
         });
     };
 
-    // #271: Surface how many AFT tokens the active identity has already
-    // spent (one per sent message), grouped by tier. Read at render time
-    // from the `RECORDS` thread-local — no reactive subscription, so the
-    // numbers refresh on next Settings open. That's intentionally simple:
-    // a Dioxus signal for the AFT cache is a bigger change and the count
-    // is a slow-moving figure in practice.
-    let token_usage: Vec<(&'static str, usize)> = identity_for_alias(&alias_key)
-        .map(|id| {
-            crate::aft::AftRecords::used_counts_by_tier(&id)
-                .into_iter()
-                .map(|(t, n)| (tier_display_name(t), n))
-                .collect()
+    // #271: Surface AFT slot usage + remaining slots per tier for the
+    // active identity. Read at render time from the `RECORDS`
+    // thread-local — no reactive subscription, so values refresh on
+    // next Settings open.
+    //
+    // Capacity per tier is computed against the sender's OWN max_age
+    // (`capacity = max_age_secs / tier_period_secs`). A recipient
+    // running a shorter `max_age` will see fewer free slots — the copy
+    // calls that out explicitly. Tiers with capacity above
+    // CAPACITY_AMPLE_THRESHOLD render the rate as "ample" instead of a
+    // huge integer (a Min1 tier at 365d has 525k slots — surfacing the
+    // number is more noise than signal).
+    let max_age_secs: u64 = max_age_days.saturating_mul(86_400);
+    let used_by_tier: std::collections::HashMap<freenet_aft_interface::Tier, usize> =
+        identity_for_alias(&alias_key)
+            .map(|id| {
+                crate::aft::AftRecords::used_counts_by_tier(&id)
+                    .into_iter()
+                    .collect()
+            })
+            .unwrap_or_default();
+    let tier_rows: Vec<(&'static str, usize, u64)> = ALL_TIERS
+        .iter()
+        .map(|tier| {
+            let period_secs = tier.tier_duration().as_secs().max(1);
+            let capacity = max_age_secs / period_secs;
+            let used = used_by_tier.get(tier).copied().unwrap_or(0);
+            (tier_display_name(*tier), used, capacity)
         })
-        .unwrap_or_default();
-    let total_tokens_spent: usize = token_usage.iter().map(|(_, n)| *n).sum();
+        .collect();
+    let total_tokens_spent: usize = used_by_tier.values().copied().sum();
 
     rsx! {
         div { class: "fm-set-inner",
@@ -891,7 +927,7 @@ fn ScrAft() -> Element {
             }
             Card {
                 title: "Your tokens",
-                sub: "Each sent message burns one AFT slot at one tier. Slots roll out of the window as they age past your “Token max age” setting, so a high count is normal and self-clearing — it is not a remaining balance.",
+                sub: "Each sent message burns one AFT slot at one tier. Slots roll out as they age past the recipient's max-age window, so the “free” counts below are computed against your own max-age — a recipient running a shorter window will see fewer slots than shown.",
                 div { style: "padding: 4px 16px 12px;",
                     div { style: "font-size: 13px; color: var(--ink2); margin-bottom: 8px;",
                         "Total slots in use for "
@@ -899,26 +935,39 @@ fn ScrAft() -> Element {
                         ": "
                         b { "{total_tokens_spent}" }
                     }
-                    if token_usage.is_empty() {
-                        div { style: "font-size: 12px; color: var(--ink3);",
-                            "No AFT activity yet for this identity. The first send mints a slot."
-                        }
-                    } else {
-                        div { class: "fm-tier-grid",
-                            for (tier_name, used) in token_usage.iter() {
-                                {
-                                    let tier_name = *tier_name;
-                                    let used = *used;
-                                    rsx! {
-                                        div {
-                                            key: "{tier_name}",
-                                            class: "fm-tier",
-                                            style: "display: flex; flex-direction: column; gap: 4px; border: 1px solid var(--line); border-radius: 11px; padding: 12px 12px 10px; background: #fff;",
-                                            "data-testid": "fm-aft-usage-tier",
-                                            "data-tier": "{tier_name}",
-                                            div { class: "fm-tier-name", "{tier_name}" }
-                                            div { class: "fm-tier-rate", "{used} slot(s) in use" }
-                                        }
+                    div { class: "fm-tier-grid",
+                        for (tier_name, used, capacity) in tier_rows.iter() {
+                            {
+                                let tier_name = *tier_name;
+                                let used = *used;
+                                let capacity = *capacity;
+                                let free = capacity.saturating_sub(used as u64);
+                                let rate_text = if capacity > CAPACITY_AMPLE_THRESHOLD {
+                                    if used == 0 {
+                                        "ample free".to_string()
+                                    } else {
+                                        format!("{used} used · ample free")
+                                    }
+                                } else {
+                                    format!("{used} used · {free} free")
+                                };
+                                let is_exhausted = capacity > 0 && free == 0;
+                                let extra_style = if is_exhausted {
+                                    "border-color: var(--red, #ef4444);"
+                                } else {
+                                    ""
+                                };
+                                rsx! {
+                                    div {
+                                        key: "{tier_name}",
+                                        class: "fm-tier",
+                                        style: "display: flex; flex-direction: column; gap: 4px; border: 1px solid var(--line); border-radius: 11px; padding: 12px 12px 10px; background: #fff; {extra_style}",
+                                        "data-testid": "fm-aft-usage-tier",
+                                        "data-tier": "{tier_name}",
+                                        "data-used": "{used}",
+                                        "data-capacity": "{capacity}",
+                                        div { class: "fm-tier-name", "{tier_name}" }
+                                        div { class: "fm-tier-rate", "{rate_text}" }
                                     }
                                 }
                             }
