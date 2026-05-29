@@ -104,8 +104,17 @@ pub enum UpdateInbox {
         ids: Vec<TokenAssignmentHash>,
     },
     ModifySettings {
-        signature: Signature,
+        /// Owner ML-DSA-65 signature over the FULL authority payload
+        /// (`sign_payload(owner_ek_bytes, settings, last_update)`), not
+        /// just `serialized(settings)`. The host pins `last_update` from
+        /// this message and stores `inbox_signature` so the resulting
+        /// state re-verifies under the widened payload (#253).
+        inbox_signature: Signature,
         settings: InboxSettings,
+        /// Owner-supplied LWW timestamp the signature commits to. The host
+        /// assigns it verbatim (no host-side `+1µs` bump) so the stored
+        /// `last_update` matches what was signed.
+        last_update: DateTime<Utc>,
     },
 }
 
@@ -357,6 +366,40 @@ fn verify_token_policy(
     Ok(())
 }
 
+/// Canonical bytes the inbox owner signs to authorize a state: the
+/// `STATE_UPDATE` salt, the ML-KEM encapsulation key, the anti-flood
+/// `settings`, and the LWW `last_update`. Binding all four means a peer
+/// cannot rebroadcast a State with a legit `(owner_ek_bytes,
+/// inbox_signature)` pair but attacker-chosen `settings` / bumped
+/// `last_update` — `verify` recomputes this payload and rejects the
+/// mismatch (#253).
+///
+/// `settings` is encoded via `serde_json::to_vec`, which is deterministic
+/// for `InboxSettings` (stable struct field order; `verified_senders` is a
+/// `BTreeSet` → sorted) — the same encoding `can_update_settings` already
+/// signed. `last_update` is its microsecond unix timestamp, big-endian, so
+/// the µs LWW granularity the host previously bumped is preserved in the
+/// signed payload.
+pub fn sign_payload(
+    owner_ek_bytes: &[u8],
+    settings: &InboxSettings,
+    last_update: DateTime<Utc>,
+) -> Vec<u8> {
+    // Serializing a well-formed `InboxSettings` cannot fail: no map keys,
+    // no floats — only enums, ints, bool, and byte-vec sets.
+    let settings_bytes =
+        serde_json::to_vec(settings).expect("InboxSettings is always serializable");
+    let ts = last_update.timestamp_micros().to_be_bytes();
+    let mut payload = Vec::with_capacity(
+        STATE_UPDATE.len() + owner_ek_bytes.len() + settings_bytes.len() + ts.len(),
+    );
+    payload.extend_from_slice(STATE_UPDATE);
+    payload.extend_from_slice(owner_ek_bytes);
+    payload.extend_from_slice(&settings_bytes);
+    payload.extend_from_slice(&ts);
+    payload
+}
+
 impl Inbox {
     #[cfg(feature = "wasmbind")]
     pub fn new(
@@ -365,11 +408,12 @@ impl Inbox {
         messages: Vec<Message>,
         owner_ek_bytes: Vec<u8>,
     ) -> Self {
-        let inbox_signature = Self::sign(key, &owner_ek_bytes);
+        let last_update = Utc::now();
+        let inbox_signature = Self::sign(key, &owner_ek_bytes, &settings, last_update);
         Self {
             settings,
             messages,
-            last_update: Utc::now(),
+            last_update,
             owner_ek_bytes,
             inbox_signature,
         }
@@ -379,16 +423,20 @@ impl Inbox {
         serde_json::to_vec(self).map_err(|err| ContractError::Deser(format!("{err}")))
     }
 
-    /// Sign `STATE_UPDATE || owner_ek_bytes` with the inbox owner's
-    /// ML-DSA-65 signing key. Binding the ek to the signature means a
-    /// peer rebroadcasting `UpdateData::State` cannot substitute their
-    /// own encapsulation key — the contract host re-runs `verify` on
-    /// every merge and would reject the swap. The resulting signature
-    /// is stored in `Inbox::inbox_signature`.
-    pub fn sign(key: &MlDsaSigningKey<MlDsa65>, owner_ek_bytes: &[u8]) -> Signature {
-        let mut payload = Vec::with_capacity(STATE_UPDATE.len() + owner_ek_bytes.len());
-        payload.extend_from_slice(STATE_UPDATE);
-        payload.extend_from_slice(owner_ek_bytes);
+    /// Sign the full inbox-authority payload with the owner's ML-DSA-65
+    /// signing key. The signature binds `owner_ek_bytes`, `settings`, and
+    /// `last_update` so a peer rebroadcasting `UpdateData::State` cannot
+    /// substitute their own encapsulation key OR tamper with the
+    /// anti-flood policy / LWW timestamp — the contract host re-runs
+    /// `verify` on every State ingest and would reject the swap (#253).
+    /// The resulting signature is stored in `Inbox::inbox_signature`.
+    pub fn sign(
+        key: &MlDsaSigningKey<MlDsa65>,
+        owner_ek_bytes: &[u8],
+        settings: &InboxSettings,
+        last_update: DateTime<Utc>,
+    ) -> Signature {
+        let payload = sign_payload(owner_ek_bytes, settings, last_update);
         let sig: ml_dsa::Signature<MlDsa65> = MlDsaSigner::sign(key, &payload);
         sig.encode().to_vec().into_boxed_slice()
     }
@@ -399,9 +447,7 @@ impl Inbox {
             .ok_or(VerificationError::WrongSignature)?;
         let sig = decode_ml_dsa_signature(&self.inbox_signature)
             .map_err(|_| VerificationError::WrongSignature)?;
-        let mut payload = Vec::with_capacity(STATE_UPDATE.len() + self.owner_ek_bytes.len());
-        payload.extend_from_slice(STATE_UPDATE);
-        payload.extend_from_slice(&self.owner_ek_bytes);
+        let payload = sign_payload(&self.owner_ek_bytes, &self.settings, self.last_update);
         MlDsaVerifier::verify(&verifying_key, &payload, &sig)
             .map_err(|_e| VerificationError::WrongSignature)?;
         Ok(())
@@ -664,8 +710,10 @@ fn can_reemove_messages<'a>(
 
 fn can_update_settings(
     params: &InboxParams,
-    signature: &Signature,
+    inbox_signature: &Signature,
+    owner_ek_bytes: &[u8],
     settings: &InboxSettings,
+    last_update: DateTime<Utc>,
 ) -> Result<(), ContractError> {
     // Enforce the verified_senders size cap before checking the signature so
     // an oversized payload is rejected cheaply (no key decode needed).
@@ -674,13 +722,16 @@ fn can_update_settings(
             "verified_senders exceeds the maximum of {MAX_VERIFIED_SENDERS} entries"
         )));
     }
-    let serialized =
-        serde_json::to_vec(settings).map_err(|e| ContractError::Deser(format!("{e}")))?;
+    // Verify against the FULL authority payload — same bytes `Inbox::verify`
+    // recomputes on State ingest — so a settings change carries an owner
+    // signature that the stored state will re-verify under (#253). `ek` is
+    // unchanged by a settings edit, so it comes from the current state.
+    let payload = sign_payload(owner_ek_bytes, settings, last_update);
     let verifying_key = params
         .pub_key_decoded()
         .ok_or(ContractError::InvalidUpdate)?;
-    let sig = decode_ml_dsa_signature(signature)?;
-    MlDsaVerifier::verify(&verifying_key, &serialized, &sig)
+    let sig = decode_ml_dsa_signature(inbox_signature)?;
+    MlDsaVerifier::verify(&verifying_key, &payload, &sig)
         .map_err(|_err| ContractError::InvalidUpdate)?;
     Ok(())
 }
@@ -821,17 +872,15 @@ impl Inbox {
                     // Verify the incoming State carries a signature
                     // valid for its own `owner_ek_bytes` — without this
                     // a peer could broadcast a `State` whose
-                    // `owner_ek_bytes` was tampered with (or stripped to
-                    // empty) and `merge` would overwrite the local copy
-                    // with the bad bytes. The signature payload is
-                    // `STATE_UPDATE || owner_ek_bytes` so verifying here
-                    // closes the ek-substitution / ek-downgrade window.
-                    // Note: `settings` and `last_update` are NOT in the
-                    // signed payload — re-signing on every
-                    // `ModifySettings` requires the owner's signing key,
-                    // which is not available in the WASM contract host.
-                    // Tracked separately for a sender-side resigning
-                    // redesign.
+                    // `owner_ek_bytes`, `settings`, or `last_update` was
+                    // tampered with and `merge` would overwrite the local
+                    // copy with the bad fields. The signature payload is
+                    // `sign_payload(owner_ek_bytes, settings, last_update)`
+                    // (#253), so verifying here closes the
+                    // ek-substitution AND the settings/LWW-bump spoofing
+                    // windows. Legit `ModifySettings` carries an owner sig
+                    // over this same payload, so a settings-changed State
+                    // round-trips.
                     full_inbox.verify(&params)?;
                     inbox.merge(full_inbox)?;
                 }
@@ -856,22 +905,24 @@ impl Inbox {
                     }
                     UpdateInbox::ModifySettings {
                         settings,
-                        signature,
+                        inbox_signature,
+                        last_update,
                     } => {
-                        can_update_settings(&params, &signature, &settings)?;
+                        can_update_settings(
+                            &params,
+                            &inbox_signature,
+                            &inbox.owner_ek_bytes,
+                            &settings,
+                            last_update,
+                        )?;
+                        // Pin the owner-signed `last_update` (no host `+1µs`
+                        // bump) and store the signature so the resulting
+                        // state re-verifies under the widened payload (#253).
+                        // The owner is responsible for choosing a value that
+                        // wins the LWW comparison in `merge`.
                         inbox.settings = settings;
-                        // #223 bug 1: bump `last_update` so the new settings
-                        // win the last-write-wins comparison in `merge`.
-                        // Without this, two nodes can hold a `ModifySettings`
-                        // update each with `last_update` equal to the
-                        // pre-update value, and a subsequent State broadcast
-                        // would not propagate settings even with the merge
-                        // fix in place. Monotonic per-node step (1µs) avoids
-                        // pulling a wall clock into wasm.
-                        inbox.last_update = inbox
-                            .last_update
-                            .checked_add_signed(chrono::TimeDelta::microseconds(1))
-                            .unwrap_or(inbox.last_update);
+                        inbox.last_update = last_update;
+                        inbox.inbox_signature = inbox_signature;
                     }
                 },
                 UpdateData::RelatedState { related_to, state } => {
@@ -907,16 +958,21 @@ impl Inbox {
                         }
                         UpdateInbox::ModifySettings {
                             settings,
-                            signature,
+                            inbox_signature,
+                            last_update,
                         } => {
-                            can_update_settings(&params, &signature, &settings)?;
-                            inbox.settings = settings;
+                            can_update_settings(
+                                &params,
+                                &inbox_signature,
+                                &inbox.owner_ek_bytes,
+                                &settings,
+                                last_update,
+                            )?;
                             // See companion comment on the `Delta` arm above
-                            // (#223 bug 1). Same `last_update` bump applies.
-                            inbox.last_update = inbox
-                                .last_update
-                                .checked_add_signed(chrono::TimeDelta::microseconds(1))
-                                .unwrap_or(inbox.last_update);
+                            // (#253): pin owner-signed last_update + store sig.
+                            inbox.settings = settings;
+                            inbox.last_update = last_update;
+                            inbox.inbox_signature = inbox_signature;
                         }
                     }
                 }

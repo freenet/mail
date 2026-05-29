@@ -16,7 +16,8 @@ use common::{
     make_inbox_keypair, make_inbox_state, make_inbox_state_with_ek, make_inbox_value, make_message,
     make_message_no_token, make_params, make_settings_with_bypass, make_settings_with_bypass_multi,
     make_settings_with_policy, make_token_assignment, make_token_generator_keypair,
-    make_token_record, modify_settings_delta, related_state_update, token_record_id_for,
+    make_token_record, modify_settings_delta, modify_settings_delta_full, related_state_update,
+    token_record_id_for,
 };
 use freenet_aft_interface::Tier;
 use freenet_email_inbox::{Inbox, InboxSettings, MAX_VERIFIED_SENDERS};
@@ -48,24 +49,21 @@ fn validate_rejects_tampered_last_update() {
     let owner_vk = inbox_verifying_key(&owner_sk);
     let params = make_params(&owner_vk);
 
-    // Build a signed inbox, then mutate `last_update` post-signing. The
-    // signature itself doesn't cover `last_update` (it covers a fixed salt),
-    // so the on-the-wire payload still parses — but the test documents the
-    // current behavior of the validator and locks in that we never reach
-    // `Invalid` for a signature mismatch on this field. If/when the contract
-    // is hardened to cover `last_update` in the signature, this test should
-    // flip to `assert_eq!(result, ValidateResult::Invalid)`.
+    // #253: `last_update` is now bound into the signed payload. Build a
+    // validly-signed inbox, then mutate `last_update` post-signing — the
+    // signature no longer matches the recomputed payload, so `verify`
+    // rejects. This is the LWW-bump half of the settings-spoofing attack:
+    // without it a peer could bump `last_update` to win the merge.
     let mut value = make_inbox_value(&owner_sk, vec![], Utc::now(), InboxSettings::default());
     value["last_update"] = serde_json::json!("1999-01-01T00:00:00Z");
     let bytes = serde_json::to_vec(&value).expect("serialize tampered inbox");
     let state = State::from(bytes);
 
-    let result =
-        Inbox::validate_state(params, state, RelatedContracts::new()).expect("validate_state");
-    // Documented behavior: `last_update` is not part of the signed payload,
-    // so the validator currently accepts the tampered state. The test exists
-    // to make this fact visible and to fail loudly if the contract changes.
-    assert_eq!(result, ValidateResult::Valid);
+    let result = Inbox::validate_state(params, state, RelatedContracts::new());
+    assert!(
+        result.is_err(),
+        "tampered last_update must fail signature verify (#253); got {result:?}"
+    );
 }
 
 #[test]
@@ -207,7 +205,7 @@ fn update_state_arm_rejects_unsigned_incoming_state() {
     let mut value: serde_json::Value = serde_json::from_slice(attacker_state.as_ref()).unwrap();
     value["owner_ek_bytes"] = serde_json::json!(attacker_ek);
     let bad_state = State::from(serde_json::to_vec(&value).unwrap());
-    let result = Inbox::update_state(params, initial, vec![UpdateData::State(bad_state.into())]);
+    let result = Inbox::update_state(params, initial, vec![UpdateData::State(bad_state)]);
     assert!(
         result.is_err(),
         "update_state must reject a State arm whose incoming signature \
@@ -1606,9 +1604,12 @@ fn modify_settings_to_lower_tier_keeps_existing_higher_tier_messages() {
     );
 }
 
-/// Bug 1 (`Inbox::merge` drops settings): `ModifySettings` must advance
-/// `inbox.last_update` so the new settings win the last-write-wins
-/// comparison when a State broadcast carries them to another node.
+/// #223 bug 1 + #253: the new settings must win the last-write-wins
+/// comparison when a State broadcast carries them to another node. Post-#253
+/// the host pins the OWNER-supplied `last_update` (the convenience
+/// `modify_settings_delta` stamps `Utc::now()`); the owner is responsible
+/// for choosing a value that advances past the prior state. This locks in
+/// that a fresh ModifySettings yields a strictly-newer `last_update`.
 #[test]
 fn modify_settings_advances_last_update() {
     let owner_sk = make_inbox_keypair();
@@ -1698,6 +1699,211 @@ fn state_broadcast_with_older_last_update_keeps_local_settings() {
         decoded.settings.minimum_tier,
         Tier::Min1,
         "stale state must not overwrite locally-mutated settings (#223 bug 1)"
+    );
+}
+
+// ─── #253: settings + last_update bound into the inbox signature ──────────
+
+/// The core #253 attack: a peer takes a legit State (real ek + real
+/// signature), leaves ek/signature untouched, but rewrites `settings`
+/// to a permissive policy and bumps `last_update` to win the merge LWW.
+/// Pre-fix, `verify` only covered the ek, so this passed and `merge`
+/// adopted the spoofed policy. Post-fix the signature binds settings, so
+/// `update_state`'s State arm rejects it before merge.
+#[test]
+fn update_state_arm_rejects_tampered_settings_in_state() {
+    use freenet_stdlib::prelude::UpdateData;
+    use std::collections::BTreeSet;
+
+    let owner_sk = make_inbox_keypair();
+    let owner_vk = inbox_verifying_key(&owner_sk);
+    let params = make_params(&owner_vk);
+    let real_ek = vec![0x44_u8; 1184];
+
+    // Local state: strict policy (Tier::Day1, no bypass).
+    let initial = make_inbox_state_with_ek(
+        &owner_sk,
+        vec![],
+        Utc::now() - Duration::seconds(60),
+        make_settings_with_policy(Tier::Day1, 365 * 24 * 3600),
+        &real_ek,
+    );
+
+    // Attacker starts from a legitimately-signed State, then rewrites
+    // `settings` to a permissive policy (drop tier, enable bypass, inject a
+    // verified sender) leaving the legit ek + signature in place.
+    let legit = make_inbox_state_with_ek(
+        &owner_sk,
+        vec![],
+        Utc::now(),
+        make_settings_with_policy(Tier::Day1, 365 * 24 * 3600),
+        &real_ek,
+    );
+    let mut value: serde_json::Value = serde_json::from_slice(legit.as_ref()).unwrap();
+    let mut vs = BTreeSet::new();
+    vs.insert(vec![0x99_u8; 1952]);
+    let spoofed = freenet_email_inbox::InboxSettings {
+        minimum_tier: Tier::Min10,
+        allow_verified_skip_token: true,
+        verified_senders: vs,
+        ..freenet_email_inbox::InboxSettings::default()
+    };
+    value["settings"] = serde_json::to_value(&spoofed).unwrap();
+    let bad_state = State::from(serde_json::to_vec(&value).unwrap());
+
+    let result = Inbox::update_state(params, initial, vec![UpdateData::State(bad_state)]);
+    assert!(
+        result.is_err(),
+        "update_state must reject a State whose settings were tampered \
+         post-signing (#253); got {result:?}"
+    );
+}
+
+/// The LWW-bump half of the same attack: keep the legit settings but bump
+/// `last_update` to a future value so a stale-but-legit broadcast wins the
+/// merge. Post-fix `last_update` is in the signed payload, so the bump
+/// invalidates the signature.
+#[test]
+fn update_state_arm_rejects_bumped_last_update_in_state() {
+    use freenet_stdlib::prelude::UpdateData;
+
+    let owner_sk = make_inbox_keypair();
+    let owner_vk = inbox_verifying_key(&owner_sk);
+    let params = make_params(&owner_vk);
+    let real_ek = vec![0x44_u8; 1184];
+
+    let initial = make_inbox_state_with_ek(
+        &owner_sk,
+        vec![],
+        Utc::now() - Duration::seconds(60),
+        InboxSettings::default(),
+        &real_ek,
+    );
+    let legit = make_inbox_state_with_ek(
+        &owner_sk,
+        vec![],
+        Utc::now(),
+        InboxSettings::default(),
+        &real_ek,
+    );
+    let mut value: serde_json::Value = serde_json::from_slice(legit.as_ref()).unwrap();
+    value["last_update"] = serde_json::json!("2999-01-01T00:00:00Z");
+    let bad_state = State::from(serde_json::to_vec(&value).unwrap());
+
+    let result = Inbox::update_state(params, initial, vec![UpdateData::State(bad_state)]);
+    assert!(
+        result.is_err(),
+        "update_state must reject a State whose last_update was bumped \
+         post-signing (#253); got {result:?}"
+    );
+}
+
+/// Positive control: a legit owner-signed `ModifySettings` delta is
+/// accepted, the owner-supplied `last_update` is pinned verbatim (no
+/// host-side +1µs bump), and the resulting state re-verifies under the
+/// widened payload (i.e. it can be re-ingested as a State).
+#[test]
+fn modify_settings_pins_last_update_and_restate_verifies() {
+    let owner_sk = make_inbox_keypair();
+    let owner_vk = inbox_verifying_key(&owner_sk);
+    let params = make_params(&owner_vk);
+    let real_ek = vec![0x44_u8; 1184];
+
+    let initial = make_inbox_state_with_ek(
+        &owner_sk,
+        vec![],
+        Utc::now() - Duration::seconds(60),
+        InboxSettings::default(),
+        &real_ek,
+    );
+
+    let new_settings = make_settings_with_policy(Tier::Hour1, 7 * 24 * 3600);
+    let pinned = Utc::now();
+    let delta = modify_settings_delta_full(&owner_sk, new_settings.clone(), &real_ek, pinned);
+
+    let after = unwrap_valid(
+        Inbox::update_state(params.clone(), initial, vec![delta]).expect("ModifySettings accepted"),
+    );
+
+    // The stored state must pin the owner-signed last_update and re-verify.
+    let stored: serde_json::Value = serde_json::from_slice(after.as_ref()).unwrap();
+    let stored_lu: chrono::DateTime<Utc> =
+        serde_json::from_value(stored["last_update"].clone()).unwrap();
+    assert_eq!(
+        stored_lu.timestamp_micros(),
+        pinned.timestamp_micros(),
+        "host must pin the owner-supplied last_update, not bump it"
+    );
+    // Re-ingesting the resulting state as a State broadcast must verify —
+    // proving `inbox_signature` was updated to match the new settings.
+    let restate = Inbox::update_state(
+        params,
+        after.clone(),
+        vec![freenet_stdlib::prelude::UpdateData::State(after)],
+    );
+    assert!(
+        restate.is_ok(),
+        "state produced by a legit ModifySettings must re-verify (#253); got {restate:?}"
+    );
+}
+
+/// A `ModifySettings` whose signature was produced by a non-owner key must
+/// be rejected by `can_update_settings`.
+#[test]
+fn modify_settings_rejects_forged_signature() {
+    let owner_sk = make_inbox_keypair();
+    let owner_vk = inbox_verifying_key(&owner_sk);
+    let attacker_sk = make_inbox_keypair();
+    let params = make_params(&owner_vk);
+    let real_ek = vec![0x44_u8; 1184];
+
+    let initial = make_inbox_state_with_ek(
+        &owner_sk,
+        vec![],
+        Utc::now() - Duration::seconds(60),
+        InboxSettings::default(),
+        &real_ek,
+    );
+
+    // Signed by the attacker, not the owner.
+    let new_settings = make_settings_with_policy(Tier::Min10, 24 * 3600);
+    let delta = modify_settings_delta_full(&attacker_sk, new_settings, &real_ek, Utc::now());
+
+    let result = Inbox::update_state(params, initial, vec![delta]);
+    assert!(
+        result.is_err(),
+        "ModifySettings signed by a non-owner key must be rejected (#253); got {result:?}"
+    );
+}
+
+/// A `ModifySettings` whose signed `owner_ek_bytes` doesn't match the
+/// state's stored ek must be rejected — `can_update_settings` rebuilds the
+/// payload from `inbox.owner_ek_bytes`, so a mismatch fails verify.
+#[test]
+fn modify_settings_rejects_ek_mismatch() {
+    let owner_sk = make_inbox_keypair();
+    let owner_vk = inbox_verifying_key(&owner_sk);
+    let params = make_params(&owner_vk);
+    let real_ek = vec![0x44_u8; 1184];
+    let wrong_ek = vec![0x77_u8; 1184];
+
+    let initial = make_inbox_state_with_ek(
+        &owner_sk,
+        vec![],
+        Utc::now() - Duration::seconds(60),
+        InboxSettings::default(),
+        &real_ek,
+    );
+
+    // Owner signs over `wrong_ek`, but the state holds `real_ek`.
+    let new_settings = make_settings_with_policy(Tier::Min10, 24 * 3600);
+    let delta = modify_settings_delta_full(&owner_sk, new_settings, &wrong_ek, Utc::now());
+
+    let result = Inbox::update_state(params, initial, vec![delta]);
+    assert!(
+        result.is_err(),
+        "ModifySettings whose signed ek differs from the state's ek must be \
+         rejected (#253); got {result:?}"
     );
 }
 

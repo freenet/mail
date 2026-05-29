@@ -214,9 +214,11 @@ pub fn make_inbox_state_with_ek(
     settings: InboxSettings,
     owner_ek_bytes: &[u8],
 ) -> State<'static> {
-    let mut payload = Vec::with_capacity(STATE_UPDATE.len() + owner_ek_bytes.len());
-    payload.extend_from_slice(STATE_UPDATE);
-    payload.extend_from_slice(owner_ek_bytes);
+    // #253: signature payload is the FULL authority payload
+    // (`STATE_UPDATE || owner_ek_bytes || serde_json(settings) ||
+    // last_update_micros_be`). Reuse the contract's `sign_payload` so the
+    // helper stays byte-for-byte in lockstep with `Inbox::verify`.
+    let payload = freenet_email_inbox::sign_payload(owner_ek_bytes, &settings, last_update);
     let signature: ml_dsa::Signature<MlDsa65> = MlDsaSigner::sign(owner_sk, &payload);
     let signature_bytes: Vec<u8> = signature.encode().to_vec();
 
@@ -240,13 +242,17 @@ pub fn make_inbox_value(
     last_update: DateTime<Utc>,
     settings: InboxSettings,
 ) -> Value {
-    let signature: ml_dsa::Signature<MlDsa65> = MlDsaSigner::sign(owner_sk, STATE_UPDATE);
+    // #253: sign the full authority payload so the only thing a caller
+    // tampers with (e.g. flipping `last_update`) is what the test isolates.
+    let owner_ek_bytes: Vec<u8> = Vec::new();
+    let payload = freenet_email_inbox::sign_payload(&owner_ek_bytes, &settings, last_update);
+    let signature: ml_dsa::Signature<MlDsa65> = MlDsaSigner::sign(owner_sk, &payload);
     let signature_bytes: Vec<u8> = signature.encode().to_vec();
     json!({
         "messages": messages,
         "last_update": last_update,
         "settings": settings,
-        "owner_ek_bytes": Vec::<u8>::new(),
+        "owner_ek_bytes": owner_ek_bytes,
         "inbox_signature": signature_bytes,
     })
 }
@@ -314,16 +320,32 @@ pub fn token_record_id_for(seed: &[u8]) -> ContractInstanceId {
 /// This mirrors what `InboxModel::settings_modify_prepare` does in the UI
 /// crate — the contract verifies the owner's ML-DSA-65 signature against
 /// `InboxParams.pub_key` before applying the new settings.
+/// Convenience over [`modify_settings_delta_full`] for tests whose initial
+/// state carries an EMPTY `owner_ek_bytes` (the common `make_inbox_state`
+/// case). Stamps `last_update = Utc::now()`.
 pub fn modify_settings_delta(
     owner_sk: &MlDsaSigningKey<MlDsa65>,
     settings: freenet_email_inbox::InboxSettings,
 ) -> UpdateData<'static> {
-    let serialized = serde_json::to_vec(&settings).expect("serialize settings");
-    let sig: ml_dsa::Signature<MlDsa65> = MlDsaSigner::sign(owner_sk, &serialized);
-    let signature: Box<[u8]> = sig.encode().to_vec().into_boxed_slice();
+    modify_settings_delta_full(owner_sk, settings, &[], Utc::now())
+}
+
+pub fn modify_settings_delta_full(
+    owner_sk: &MlDsaSigningKey<MlDsa65>,
+    settings: freenet_email_inbox::InboxSettings,
+    owner_ek_bytes: &[u8],
+    last_update: DateTime<Utc>,
+) -> UpdateData<'static> {
+    // #253: the owner signs the FULL authority payload (ek + settings +
+    // last_update), not just `serialized(settings)`. The host pins
+    // `last_update` and stores this signature on the resulting state.
+    let payload = freenet_email_inbox::sign_payload(owner_ek_bytes, &settings, last_update);
+    let sig: ml_dsa::Signature<MlDsa65> = MlDsaSigner::sign(owner_sk, &payload);
+    let inbox_signature: Box<[u8]> = sig.encode().to_vec().into_boxed_slice();
     let delta = UpdateInbox::ModifySettings {
-        signature,
+        inbox_signature,
         settings,
+        last_update,
     };
     let bytes = serde_json::to_vec(&delta).expect("serialize delta");
     UpdateData::Delta(StateDelta::from(bytes))

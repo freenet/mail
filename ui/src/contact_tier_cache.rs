@@ -110,11 +110,11 @@ pub fn record_with_last_update(
     }
 }
 
-/// Convenience: record without a `last_update` (uses the current
-/// epoch — caller doesn't know the source's stamp). Used by the
-/// `ModifySettings`-delta arm where the delta carries the new
-/// settings but not the inbox's whole state. Treats the local
-/// observation as the freshest by stamping `Utc::now()`.
+/// Test-only convenience: record stamping `Utc::now()` as the source's
+/// `last_update`. Production code always has an authoritative timestamp
+/// (State snapshot or the owner-signed `ModifySettings.last_update` post
+/// #253), so this shim exists only for the cache unit tests.
+#[cfg(test)]
 pub fn record(key: ContractKey, settings: &InboxSettings) {
     record_with_last_update(key, settings, Utc::now());
 }
