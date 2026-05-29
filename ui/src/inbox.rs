@@ -1557,6 +1557,50 @@ mod tests {
         assert!(DecryptedMessage::from_stored(&bob_dk, ciphertext).is_none());
     }
 
+    /// #270/#283: the threading fields (`thread_id`, `in_reply_to`,
+    /// `quoted_excerpt`) must survive the REAL crypto path, not just bare
+    /// serde. `to_stored` does `serde_json::to_vec` → `ml_kem_encrypt`, and
+    /// the decrypt path does `ml_kem_decrypt` → `serde_json::from_slice`
+    /// (see `DecryptedMessage::from_stored`). This drives that exact seam:
+    /// `ml_kem_encrypt(ek, serde_json::to_vec(&msg))` then
+    /// `from_stored(dk, …)`, asserting all three fields come back
+    /// byte-for-byte. ML-KEM/ChaCha20-Poly1305 framing is opaque to the
+    /// contract, so a regression here would silently strip thread linkage
+    /// from every stored reply.
+    #[test]
+    fn thread_fields_survive_ml_kem_roundtrip() {
+        let dk = fresh_kem_dk();
+        let msg = DecryptedMessage {
+            title: "Re: design review".into(),
+            content: "agreed, ship it\n> the line being replied to".into(),
+            from: "bob".into(),
+            to: vec![],
+            cc: vec![],
+            time: Utc::now(),
+            thread_id: Some("thread-abc-123".into()),
+            in_reply_to: Some("7".into()),
+            quoted_excerpt: Some("the line being replied to".into()),
+        };
+
+        // Encrypt exactly as `to_stored` does: serde_json → ml_kem_encrypt.
+        let plaintext = serde_json::to_vec(&msg).unwrap();
+        let ciphertext = ml_kem_encrypt(dk.encapsulation_key(), &plaintext).unwrap();
+
+        // Decrypt via the real seam: ml_kem_decrypt → serde_json::from_slice.
+        let back = DecryptedMessage::from_stored(&dk, ciphertext)
+            .expect("ciphertext encrypted for this dk must decrypt");
+
+        assert_eq!(back.thread_id.as_deref(), Some("thread-abc-123"));
+        assert_eq!(back.in_reply_to.as_deref(), Some("7"));
+        assert_eq!(
+            back.quoted_excerpt.as_deref(),
+            Some("the line being replied to")
+        );
+        // Sanity: the rest of the message survives too.
+        assert_eq!(back.title, "Re: design review");
+        assert_eq!(back.from, "bob");
+    }
+
     /// Repro for #267 at the `from_state` level: an inbox whose stored
     /// messages include an entry encrypted for another identity must decode
     /// to a model that simply omits the undecryptable message, never panic.

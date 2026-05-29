@@ -1398,6 +1398,89 @@ mod thread_grouping_tests {
         assert_eq!(bob.count, 1);
     }
 
+    /// (#270 follow-up) A two-party LEGACY back-and-forth (both participants
+    /// alternating on one subject, NO `thread_id` on any message) SPLITS into
+    /// one group per sender rather than folding into a single conversation.
+    ///
+    /// This pins the load-bearing correctness limit of the heuristic fallback:
+    /// `heuristic_key = "heuristic:{normalized_subject}|{from}"` keys on the
+    /// SENDER only (see `threads::group_into_threads`), so a legacy two-party
+    /// thread renders as two single-sided groups. True multi-user legacy
+    /// grouping would need the *recipient* in the key as well — out of #270
+    /// scope (the inbox `Message` row carries no recipient field). Mail that
+    /// carries a shared `thread_id` (anything sent via the Reply button
+    /// post-#270) threads across senders correctly — contrast with
+    /// `legacy_two_party_with_shared_thread_id_folds` below.
+    #[test]
+    fn legacy_two_party_back_and_forth_splits_by_sender() {
+        // alice and bob alternate four turns on "Project sync", none carrying a
+        // thread_id (legacy / pre-#270 mail).
+        let msgs = vec![
+            m(0, "alice", "Project sync", 0, true, None, None),
+            m(1, "bob", "Re: Project sync", 10, true, None, None),
+            m(2, "alice", "Re: Project sync", 20, true, None, None),
+            m(3, "bob", "Re: Project sync", 30, false, None, None),
+        ];
+        let groups = group_into_threads(&msgs);
+        assert_eq!(
+            groups.len(),
+            2,
+            "legacy two-party back-and-forth splits one group per sender"
+        );
+        let alice = group_with_key(&groups, "heuristic:project sync|alice");
+        let bob = group_with_key(&groups, "heuristic:project sync|bob");
+        assert_eq!(alice.count, 2, "alice's two turns cluster together");
+        assert_eq!(bob.count, 2, "bob's two turns cluster together");
+    }
+
+    /// Counterpart to the split above: the SAME two-party alternating
+    /// conversation, but every message carries a shared `thread_id` (as a
+    /// post-#270 Reply-button exchange would). Now it folds into ONE group
+    /// across both senders. This is the regime in which #270's "two identities
+    /// exchanging N messages render as one expandable thread" acceptance holds.
+    #[test]
+    fn legacy_two_party_with_shared_thread_id_folds() {
+        let msgs = vec![
+            m(0, "alice", "Project sync", 0, true, Some("ts"), None),
+            m(
+                1,
+                "bob",
+                "Re: Project sync",
+                10,
+                true,
+                Some("ts"),
+                Some("0"),
+            ),
+            m(
+                2,
+                "alice",
+                "Re: Project sync",
+                20,
+                true,
+                Some("ts"),
+                Some("1"),
+            ),
+            m(
+                3,
+                "bob",
+                "Re: Project sync",
+                30,
+                false,
+                Some("ts"),
+                Some("2"),
+            ),
+        ];
+        let groups = group_into_threads(&msgs);
+        assert_eq!(
+            groups.len(),
+            1,
+            "a shared thread_id threads both senders into one conversation"
+        );
+        let g = group_with_key(&groups, "ts");
+        assert_eq!(g.count, 4);
+        assert_eq!(g.root_id, 0);
+    }
+
     /// `normalize_subject` strips repeated, mixed-case Re:/Fwd:/Fw: prefixes.
     #[test]
     fn normalize_subject_strips_repeated_prefixes() {
