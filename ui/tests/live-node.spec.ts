@@ -642,7 +642,11 @@ test.describe("Live node E2E", () => {
       // in. If kept_for() doesn't fire or the rebuild doesn't run,
       // the row disappears entirely.
       await bobApp.getByText(/round one/i).click();
-      await bobApp.locator('[data-testid="fm-detail-time"]').waitFor({
+      // Opening an inbox row now mounts the threaded detail (#270): a
+      // single received message is a 1-message thread. Wait for the
+      // thread container rather than the retired single-message
+      // `fm-detail-time` testid.
+      await bobApp.locator('[data-testid="fm-thread-container"]').waitFor({
         timeout: 5_000,
       });
       // After click, the row stays in the list (now `selected`) and
@@ -690,9 +694,18 @@ test.describe("Live node E2E", () => {
       // ── Archive: bob archives round one. Should leave the inbox
       // list and surface in the Archive folder.
       await bobApp.getByText(/round one/i).click();
-      const archiveBtn = bobApp.locator('[data-testid="fm-archive"]');
-      if (await archiveBtn.isVisible().catch(() => false)) {
-        await archiveBtn.click();
+      // #270: archive is now a per-message action inside the threaded
+      // detail (Nested view, the default). The single received message
+      // is the thread's only row, so `.first()` targets its archive
+      // button in the `.ft-nest-actions` cluster (in the DOM,
+      // opacity-toggled by hover — clickable without hovering).
+      await bobApp
+        .locator('[data-testid="fm-thread-container"]')
+        .waitFor({ timeout: 5_000 })
+        .catch(() => {});
+      const archiveBtn = bobApp.locator('[data-testid="fm-archive"]').first();
+      if ((await archiveBtn.count()) > 0) {
+        await archiveBtn.dispatchEvent("click");
         await expect(
           bobApp.getByText(/round one/i),
           "round one no longer in inbox after archive",

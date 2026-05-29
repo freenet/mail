@@ -1386,7 +1386,10 @@ mod migration_logic_tests {
         let back: DecryptedMessage = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(back.thread_id.as_deref(), Some("thread-xyz"));
         assert_eq!(back.in_reply_to.as_deref(), Some("42"));
-        assert_eq!(back.quoted_excerpt.as_deref(), Some("the line being replied to"));
+        assert_eq!(
+            back.quoted_excerpt.as_deref(),
+            Some("the line being replied to")
+        );
     }
 }
 

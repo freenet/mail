@@ -1312,9 +1312,7 @@ pub(crate) mod threads {
 #[cfg(test)]
 mod thread_grouping_tests {
     use super::Message;
-    use super::threads::{
-        MAX_THREAD_DEPTH, depth_map, group_into_threads, normalize_subject,
-    };
+    use super::threads::{MAX_THREAD_DEPTH, depth_map, group_into_threads, normalize_subject};
     use chrono::{TimeZone, Utc};
     use std::borrow::Cow;
 
@@ -1423,7 +1421,11 @@ mod thread_grouping_tests {
             m(2, "mary", "Re: Lunch?", 20, false, Some("t9"), Some("1")),
         ];
         let groups = group_into_threads(&msgs);
-        assert_eq!(groups.len(), 1, "legacy root folds into the threaded bucket");
+        assert_eq!(
+            groups.len(),
+            1,
+            "legacy root folds into the threaded bucket"
+        );
         let g = group_with_key(&groups, "t9");
         assert_eq!(g.count, 3);
         assert_eq!(g.root_id, 0);
