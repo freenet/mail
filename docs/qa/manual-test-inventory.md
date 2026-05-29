@@ -91,6 +91,7 @@ standalone). All rows below are `auto`.
 | Compact view default-expands only the newest message; clicking a row toggles it | auto | offline (`threads.spec.ts`): `default-expands only the newest message; clicking a row toggles it` |
 | Reply within a thread stays in the same thread (no new top-level row); compose has no legacy "> " quote hack | auto | offline (`threads.spec.ts`): `reply keeps the conversation in the same thread (no new top-level row); compose body has no '> ' quote hack` |
 | Thread grouping by thread_id / legacy subject+participant heuristic; depth capped at 4 | auto (rust) | `cargo test -p freenet-email-ui` — `app::thread_grouping_tests::*` (groups_by_thread_id, groups_legacy_by_heuristic_subject_and_participant, depth_computed_from_chain_and_capped, …) |
+| Thread-component storybook: renders real `ThreadDetail`/`ThreadNested`/`ThreadCompact` from hand-built `ThreadGroup` props (not mailbox seeds); `.is-me` accent on own messages, depth-4 cap, Nested-vs-Compact per `?view=`; screenshots each story | auto | offline (`threads-storybook.spec.ts`): `sender-sent interleaved thread shows .is-me accents`, `deep-nest clamps at MAX_THREAD_DEPTH (depth-4)`, `Nested view rails + quote chips`, `Compact view one row per message`. Host is `example-data`-only + gated on `?story=` (`ui/src/app.rs::storybook`); zero surface in `use-node`. Open in-app via `cargo make dev-example` + `/?story=sender-sent-in-thread\|deep-nest\|nested-vs-compact[&view=compact]`. |
 
 ### Compose / send
 

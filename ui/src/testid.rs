@@ -81,6 +81,10 @@ pub(crate) const FM_THREAD_CONTAINER: &str = "fm-thread-container";
 pub(crate) const FM_THREAD_GROUP: &str = "fm-thread-group";
 /// The Settings → Inbox thread-view `<select>` (Nested / Compact).
 pub(crate) const FM_THREAD_VIEW_SELECT: &str = "fm-thread-view-select";
+/// The in-app storybook host wrapper (`example-data` builds only, gated on a
+/// `?story=` query param). Wraps a single thread component rendered from a
+/// hand-built `ThreadGroup` so the views can be screenshotted in isolation.
+pub(crate) const FM_STORYBOOK: &str = "fm-storybook";
 
 // Toast
 pub(crate) const FM_TOAST: &str = "fm-toast";
@@ -192,6 +196,7 @@ mod tests {
             ("fmThreadContainer", super::FM_THREAD_CONTAINER),
             ("fmThreadGroup", super::FM_THREAD_GROUP),
             ("fmThreadViewSelect", super::FM_THREAD_VIEW_SELECT),
+            ("fmStorybook", super::FM_STORYBOOK),
             ("fmToast", super::FM_TOAST),
             ("fmActionCreate", super::FM_ACTION_CREATE),
             ("fmActionImport", super::FM_ACTION_IMPORT),

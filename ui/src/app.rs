@@ -258,6 +258,20 @@ pub(crate) fn app() -> Element {
     #[allow(unused_variables)]
     let actions = use_coroutine_handle::<NodeAction>();
 
+    // Storybook short-circuit (#270): when the URL carries `?story=<name>`
+    // AND this is an `example-data` build, render the isolated thread-component
+    // host instead of the normal app. Fully cfg-gated so `use-node` builds
+    // never compile it and the production path is untouched when no `?story=`
+    // is present.
+    #[cfg(feature = "example-data")]
+    if let Some(story) = storybook::story_param() {
+        let app_name = crate::app_name();
+        return rsx! {
+            document::Title { "{app_name}" }
+            storybook::Storybook { story }
+        };
+    }
+
     // Render login page if user not identified, otherwise render the inbox or identifiers list based on user's logged in state
     let body = if !user.read().identified {
         rsx! {
@@ -1306,6 +1320,323 @@ pub(crate) mod threads {
             out.insert(m.id, depth.min(MAX_THREAD_DEPTH));
         }
         out
+    }
+}
+
+/// In-app storybook for the #270 thread components (`example-data` builds
+/// only). Renders the REAL `ThreadDetail` / `ThreadNested` / `ThreadCompact`
+/// from hand-built `ThreadGroup` props — not from URL-seeded mailbox data —
+/// so the views can be screenshotted in isolation with prefilled state. Gated
+/// twice over: the module only compiles under `feature = "example-data"`, and
+/// the host only renders when the URL carries `?story=<name>` (see
+/// [`story_param`]). Zero surface in the production `use-node` build.
+#[cfg(feature = "example-data")]
+pub(crate) mod storybook {
+    use super::threads::ThreadGroup;
+    use super::{Message, User, UserId};
+    use crate::testid;
+    use chrono::{TimeZone, Utc};
+    use dioxus::prelude::*;
+    use std::borrow::Cow;
+
+    /// Read the `story` query parameter from the current URL in WASM. Returns
+    /// `Some(name)` when `?story=<name>` is present (and non-empty), else
+    /// `None`. Used by `app()` to decide whether to mount the storybook host
+    /// instead of the normal login/app routing.
+    pub(crate) fn story_param() -> Option<String> {
+        query_param("story").filter(|s| !s.is_empty())
+    }
+
+    /// Generic single-value query-param reader. Parses
+    /// `window.location.search` by hand (no extra dep) — the search string is
+    /// `?a=b&c=d`; we split on `&`, then `=`, and URL-decode `+` → space.
+    /// `web_sys` is wasm-only (gated in `ui/Cargo.toml`), so on native host
+    /// builds (cargo test) this always returns `None`.
+    fn query_param(key: &str) -> Option<String> {
+        #[cfg(target_family = "wasm")]
+        {
+            let search = web_sys::window()?.location().search().ok()?;
+            let q = search.strip_prefix('?').unwrap_or(&search);
+            for pair in q.split('&') {
+                let mut it = pair.splitn(2, '=');
+                let k = it.next()?;
+                if k == key {
+                    let v = it.next().unwrap_or("");
+                    return Some(v.replace('+', " "));
+                }
+            }
+            None
+        }
+        #[cfg(not(target_family = "wasm"))]
+        {
+            let _ = key;
+            None
+        }
+    }
+
+    /// Build a `Message` for a story. `from` is the displayed sender (set it to
+    /// the logged-in alias to trigger `.is-me` styling in Nested view).
+    #[allow(clippy::too_many_arguments)]
+    fn msg(
+        id: u64,
+        from: &str,
+        title: &str,
+        content: &str,
+        secs: i64,
+        read: bool,
+        tid: &str,
+        irt: Option<u64>,
+        quoted: Option<&str>,
+    ) -> Message {
+        Message {
+            id,
+            from: Cow::Owned(from.to_string()),
+            title: Cow::Owned(title.to_string()),
+            content: Cow::Owned(content.to_string()),
+            read,
+            time: Utc.timestamp_opt(1_700_000_000 + secs, 0).unwrap(),
+            sender_vk: Vec::new(),
+            signature_valid: false,
+            assignment_hash: [0u8; 32],
+            thread_id: Some(tid.to_string()),
+            in_reply_to: irt.map(|p| p.to_string()),
+            quoted_excerpt: quoted.map(str::to_string),
+        }
+    }
+
+    /// Finalize a `Vec<Message>` into a `ThreadGroup` (messages already
+    /// oldest→newest). Mirrors the aggregates `group_into_threads` computes.
+    fn group(key: &str, messages: Vec<Message>) -> ThreadGroup {
+        let root_id = messages.first().map(|m| m.id).unwrap_or(0);
+        let unread_count = messages.iter().filter(|m| !m.read).count();
+        let count = messages.len();
+        ThreadGroup {
+            key: key.to_string(),
+            messages,
+            root_id,
+            unread_count,
+            count,
+        }
+    }
+
+    /// Story 1 — interleaved own↔other conversation. Messages alternate
+    /// `from = "address1"` (the logged-in identity → `.is-me`) and
+    /// `from = "Mary"`, all under one `thread_id`, oldest→newest. Visualizes
+    /// the INTENDED look in which the user's Sent messages fold into the inbox
+    /// thread. NOTE: production does not yet fold Sent into the inbox thread
+    /// (the inbox `Message` vec carries inbound mail only); the storybook
+    /// builds the interleaved group directly to show the target rendering.
+    pub(crate) fn story_sender_sent() -> ThreadGroup {
+        let tid = "story-sender-sent";
+        group(
+            tid,
+            vec![
+                msg(
+                    0,
+                    "Mary",
+                    "Lunch tomorrow?",
+                    "Are you free for lunch tomorrow around noon?",
+                    0,
+                    true,
+                    tid,
+                    None,
+                    None,
+                ),
+                msg(
+                    1,
+                    "address1",
+                    "Re: Lunch tomorrow?",
+                    "Yes! Noon works great for me.",
+                    60,
+                    true,
+                    tid,
+                    Some(0),
+                    Some("Are you free for lunch tomorrow around noon?"),
+                ),
+                msg(
+                    2,
+                    "Mary",
+                    "Re: Lunch tomorrow?",
+                    "Perfect — the usual place?",
+                    120,
+                    true,
+                    tid,
+                    Some(1),
+                    Some("Yes! Noon works great for me."),
+                ),
+                msg(
+                    3,
+                    "address1",
+                    "Re: Lunch tomorrow?",
+                    "Sounds good, see you there.",
+                    180,
+                    true,
+                    tid,
+                    Some(2),
+                    Some("Perfect — the usual place?"),
+                ),
+            ],
+        )
+    }
+
+    /// Story 2 — a single thread with an `in_reply_to` chain 6 deep
+    /// (0←1←2←3←4←5). `depth_map` clamps at `MAX_THREAD_DEPTH = 4`, so the
+    /// rendered depths are 0,1,2,3,4,4 — exercising the connector rails and
+    /// the cap in `ThreadNested`.
+    pub(crate) fn story_deep_nest() -> ThreadGroup {
+        let tid = "story-deep-nest";
+        let mut messages = Vec::new();
+        for i in 0u64..6 {
+            let parent = if i == 0 { None } else { Some(i - 1) };
+            messages.push(msg(
+                i,
+                if i % 2 == 0 { "Mary" } else { "address1" },
+                if i == 0 {
+                    "Deploy plan"
+                } else {
+                    "Re: Deploy plan"
+                },
+                &format!("Reply number {i} in the chain — drilling one level deeper."),
+                (i as i64) * 60,
+                true,
+                tid,
+                parent,
+                if i == 0 {
+                    None
+                } else {
+                    Some("Reply number above in the chain — drilling one level deeper.")
+                },
+            ));
+        }
+        group(tid, messages)
+    }
+
+    /// Story 3 — a 4-message thread with `quoted_excerpt` chips, rendered both
+    /// ways. The spec drives Nested vs Compact via `?view=`; the group itself
+    /// is identical for both.
+    pub(crate) fn story_nested_vs_compact() -> ThreadGroup {
+        let tid = "story-nested-vs-compact";
+        group(
+            tid,
+            vec![
+                msg(
+                    0,
+                    "Mary",
+                    "Quarterly roadmap",
+                    "Sharing the draft roadmap for Q3. Thoughts welcome.",
+                    0,
+                    true,
+                    tid,
+                    None,
+                    None,
+                ),
+                msg(
+                    1,
+                    "address1",
+                    "Re: Quarterly roadmap",
+                    "Looks solid. One concern about the timeline on item 2.",
+                    60,
+                    true,
+                    tid,
+                    Some(0),
+                    Some("Sharing the draft roadmap for Q3. Thoughts welcome."),
+                ),
+                msg(
+                    2,
+                    "Mary",
+                    "Re: Quarterly roadmap",
+                    "Good catch — I'll push item 2 a week.",
+                    120,
+                    true,
+                    tid,
+                    Some(1),
+                    Some("One concern about the timeline on item 2."),
+                ),
+                msg(
+                    3,
+                    "address1",
+                    "Re: Quarterly roadmap",
+                    "Great, that works. Approving.",
+                    180,
+                    true,
+                    tid,
+                    Some(2),
+                    Some("I'll push item 2 a week."),
+                ),
+            ],
+        )
+    }
+
+    /// Resolve a story name to its `ThreadGroup`. Unknown names fall back to
+    /// story 1 so a typo'd URL still renders something.
+    fn group_for(story: &str) -> ThreadGroup {
+        match story {
+            "deep-nest" => story_deep_nest(),
+            "nested-vs-compact" => story_nested_vs_compact(),
+            _ => story_sender_sent(),
+        }
+    }
+
+    /// The storybook host. Provides the SAME Dioxus contexts the root `app()`
+    /// provides (with mock/default values) so the thread components'
+    /// `use_context` reads don't panic, logs in as `address1` so `.is-me`
+    /// styling resolves, sets the requested `thread_view`, then renders the
+    /// real `ThreadDetail` inside a `.fm-app` wrapper (so the `@scope`d
+    /// component CSS applies).
+    #[component]
+    pub(crate) fn Storybook(story: String) -> Element {
+        // Mirror the root-app provider block (app.rs ~149-178) so every
+        // `use_context::<…>()` the thread subtree performs resolves.
+        use_context_provider(|| Signal::new(super::login::LoginController::new()));
+        use_context_provider(|| {
+            let mut u = User::new();
+            // Log in as the first seeded identity ("address1", UserId(0)) so
+            // the active alias matches the story's own-message `from`,
+            // lighting up `.is-me` styling in the Nested view.
+            u.set_logged_id(UserId(0));
+            Signal::new(u)
+        });
+        let user = use_context::<Signal<User>>();
+        use_context_provider(|| Signal::new(super::InboxView::new()));
+        use_context_provider(super::InboxesData::new);
+        use_context_provider(|| super::AddressBookGen(Signal::new(0u32)));
+        use_context_provider(|| crate::toast::ToastQueue::new(Vec::new()));
+        use_context_provider(|| Signal::new(super::login::ImportBackup(false)));
+        use_context_provider(|| Signal::new(super::login::ImportContact::default()));
+        use_context_provider(|| Signal::new(super::login::ShareContact(false)));
+        use_context_provider(|| Signal::new(super::login::SharePending::default()));
+        // MenuSelection is normally provided by UserInbox, not app(); the
+        // thread rows read it, so provide it here too.
+        use_context_provider(|| Signal::new(super::menu::MenuSelection::default()));
+
+        // Pick the thread_view from `?view=` (defaults to Nested). Story 3
+        // uses this to request each rendering; stories 1 & 2 ignore it and
+        // get the Nested default.
+        let view = query_param("view").unwrap_or_default();
+        let thread_view = if view == "compact" {
+            mail_local_state::ThreadView::Compact
+        } else {
+            mail_local_state::ThreadView::Nested
+        };
+        let mut settings = crate::local_state::global_settings();
+        settings.inbox.thread_view = thread_view;
+        crate::local_state::local_set_global_settings(settings);
+
+        let _ = user; // touched only to anchor the provider above
+        let group = group_for(&story);
+        let label = story.clone();
+
+        rsx! {
+            div {
+                class: "fm-app",
+                "data-testid": testid::FM_STORYBOOK,
+                "data-story": "{label}",
+                "data-font-size": "default",
+                div { class: "main",
+                    super::ThreadDetail { group }
+                }
+            }
+        }
     }
 }
 

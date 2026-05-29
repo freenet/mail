@@ -43,6 +43,8 @@ interface TestIds {
   fmThreadContainer: string;
   fmThreadGroup: string;
   fmThreadViewSelect: string;
+  // In-app storybook host (example-data builds only, gated on ?story=).
+  fmStorybook: string;
   // Per-message "Add sender to address book" (rendered on a VerifiedUnknown
   // sender, in both OpenMessage and threaded rows).
   fmAddToAb: string;
