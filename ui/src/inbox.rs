@@ -63,7 +63,12 @@ pub(crate) const INBOX_CODE_HASH: &str = "";
 /// recorded hash and dispatches GETs against every newer historical key
 /// until one resolves. Append-only: never reorder, never delete entries.
 /// The current `INBOX_CODE_HASH` must NOT appear in this list.
-pub(crate) const LEGACY_INBOX_CODE_HASHES: &[&str] = &[];
+pub(crate) const LEGACY_INBOX_CODE_HASHES: &[&str] = &[
+    // Pre-#253 inbox: signature payload was `STATE_UPDATE || owner_ek_bytes`
+    // (settings + last_update unsigned). #253 widened the signed payload,
+    // rotating the wasm hash. Users on this hash migrate forward via #213/#251.
+    "Ht8rcMjTpnraRNbzkmDCBFJJfmQGJ8M2iUAGaZimE9Ji",
+];
 
 /// Build the ordered list of candidate code hashes to GET for a
 /// migration starting from `prior_hash`. The returned vec always
@@ -343,6 +348,13 @@ struct InternalSettings {
     /// contract ID via `hash(wasm, params)`.
     /// Wrapped in `Arc` because `MlDsaSigningKey` is not `Clone`.
     ml_dsa_signing_key: Arc<MlDsaSigningKey<MlDsa65>>,
+    /// Owner's ML-KEM-768 encapsulation key bytes (1184), as stored in
+    /// `Inbox.owner_ek_bytes` on-chain. The owner-authored inbox
+    /// signature binds these (#253), so `settings_modify_prepare` must
+    /// sign over the SAME bytes the contract holds — otherwise
+    /// `can_update_settings` (which rebuilds the payload from
+    /// `inbox.owner_ek_bytes`) rejects the delta.
+    owner_ek_bytes: Vec<u8>,
 }
 
 #[allow(dead_code)] // TODO: placeholder for decrypted settings persistence
@@ -365,10 +377,12 @@ impl InternalSettings {
         stored_settings: StoredSettings,
         next_id: u64,
         ml_dsa_signing_key: Arc<MlDsaSigningKey<MlDsa65>>,
+        owner_ek_bytes: Vec<u8>,
     ) -> Result<Self, DynError> {
         Ok(Self {
             next_msg_id: next_id,
             ml_dsa_signing_key,
+            owner_ek_bytes,
             minimum_tier: stored_settings.minimum_tier,
             max_age_secs: stored_settings.max_age_secs,
             allow_verified_skip_token: stored_settings.allow_verified_skip_token,
@@ -1100,6 +1114,7 @@ impl InboxModel {
                 state.settings,
                 messages.len() as u64,
                 ml_dsa_signing_key,
+                ml_kem_dk.encapsulation_key().to_bytes().to_vec(),
             )?,
             key,
             messages,
@@ -1212,17 +1227,28 @@ impl InboxModel {
         self.settings_modify_prepare()
     }
 
-    /// Shared implementation: serialize current settings, sign, wrap in a
-    /// `ModifySettings` delta, and return the `ContractRequest::Update`.
+    /// Shared implementation: stamp a fresh owner-supplied `last_update`,
+    /// sign the FULL authority payload (`sign_payload(owner_ek_bytes,
+    /// settings, last_update)`), wrap in a `ModifySettings` delta, and
+    /// return the `ContractRequest::Update`. The widened signature (#253)
+    /// binds settings + last_update so a peer cannot rebroadcast a tampered
+    /// State; the host pins `last_update` and stores this signature so the
+    /// resulting state re-verifies.
     fn settings_modify_prepare(&self) -> Result<ContractRequest<'static>, DynError> {
         let settings = self.settings.to_stored()?;
-        let serialized = serde_json::to_vec(&settings)?;
+        let last_update = Utc::now();
+        let payload = freenet_email_inbox::sign_payload(
+            &self.settings.owner_ek_bytes,
+            &settings,
+            last_update,
+        );
         let signing_key = self.settings.ml_dsa_signing_key.as_ref();
-        let ml_sig: ml_dsa::Signature<MlDsa65> = MlDsaSigner::sign(signing_key, &serialized);
-        let signature: Box<[u8]> = ml_sig.encode().to_vec().into_boxed_slice();
+        let ml_sig: ml_dsa::Signature<MlDsa65> = MlDsaSigner::sign(signing_key, &payload);
+        let inbox_signature: Box<[u8]> = ml_sig.encode().to_vec().into_boxed_slice();
         let delta = UpdateInbox::ModifySettings {
-            signature,
+            inbox_signature,
             settings,
+            last_update,
         };
         Ok(ContractRequest::Update {
             key: self.key,
@@ -1404,7 +1430,7 @@ mod tests {
     impl InboxModel {
         fn new(
             ml_dsa_signing_key: Arc<MlDsaSigningKey<MlDsa65>>,
-            _ml_kem_dk: DecapsulationKey<MlKem768>,
+            ml_kem_dk: DecapsulationKey<MlKem768>,
         ) -> Result<Self, DynError> {
             let vk = MlDsaKeypair::verifying_key(ml_dsa_signing_key.as_ref());
             let params = InboxParams::from_verifying_key(&vk);
@@ -1417,6 +1443,7 @@ mod tests {
                     allow_verified_skip_token: false,
                     verified_senders: std::collections::BTreeSet::new(),
                     ml_dsa_signing_key,
+                    owner_ek_bytes: ml_kem_dk.encapsulation_key().to_bytes().to_vec(),
                 },
                 key: ContractKey::from_params_and_code(
                     &params.try_into()?,

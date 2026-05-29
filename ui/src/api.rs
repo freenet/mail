@@ -2428,6 +2428,7 @@ pub(crate) async fn node_comms(
                                             if let Ok(
                                                 freenet_email_inbox::UpdateInbox::ModifySettings {
                                                     settings,
+                                                    last_update,
                                                     ..
                                                 },
                                             ) = serde_json::from_slice::<
@@ -2435,12 +2436,16 @@ pub(crate) async fn node_comms(
                                             >(
                                                 delta.as_ref()
                                             ) {
-                                                // Delta-only — no `last_update`
-                                                // wire-side; `record` stamps
-                                                // `Utc::now()` so the local
-                                                // observation is considered
-                                                // freshest.
-                                                crate::contact_tier_cache::record(key, &settings);
+                                                // The ModifySettings delta now
+                                                // carries the owner-signed
+                                                // `last_update` (#253); use it
+                                                // so cache freshness matches the
+                                                // authoritative LWW timestamp.
+                                                crate::contact_tier_cache::record_with_last_update(
+                                                    key,
+                                                    &settings,
+                                                    last_update,
+                                                );
                                             }
                                         }
                                         _ => {}
