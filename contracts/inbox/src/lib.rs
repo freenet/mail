@@ -390,8 +390,9 @@ pub fn sign_payload(
     let settings_bytes =
         serde_json::to_vec(settings).expect("InboxSettings is always serializable");
     let ts = last_update.timestamp_micros().to_be_bytes();
-    let mut payload =
-        Vec::with_capacity(STATE_UPDATE.len() + owner_ek_bytes.len() + settings_bytes.len() + ts.len());
+    let mut payload = Vec::with_capacity(
+        STATE_UPDATE.len() + owner_ek_bytes.len() + settings_bytes.len() + ts.len(),
+    );
     payload.extend_from_slice(STATE_UPDATE);
     payload.extend_from_slice(owner_ek_bytes);
     payload.extend_from_slice(&settings_bytes);
