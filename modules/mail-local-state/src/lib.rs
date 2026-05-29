@@ -104,6 +104,15 @@ pub struct ArchivedMessage {
     pub content: String,
     /// Unix millis at the time the user clicked Archive.
     pub archived_at: i64,
+    /// Threading metadata (#270). Carried so a reply launched from the
+    /// Archive folder continues the original conversation. All three default
+    /// to `None` for rows written before threading shipped.
+    #[serde(default)]
+    pub thread_id: Option<String>,
+    #[serde(default)]
+    pub in_reply_to: Option<String>,
+    #[serde(default)]
+    pub quoted_excerpt: Option<String>,
 }
 
 /// A snapshot of an outgoing message stashed locally on Send. Mirrors what the
@@ -127,6 +136,16 @@ pub struct SentMessage {
     pub sent_at: i64,
     #[serde(default)]
     pub delivery_state: DeliveryState,
+    /// Threading metadata (#270). `thread_id` ties this sent row to its
+    /// conversation; `in_reply_to`/`quoted_excerpt` carry the reply linkage
+    /// so the Sent view and Reply-from-Sent continue the same thread. All
+    /// three default to `None` for rows written before threading shipped.
+    #[serde(default)]
+    pub thread_id: Option<String>,
+    #[serde(default)]
+    pub in_reply_to: Option<String>,
+    #[serde(default)]
+    pub quoted_excerpt: Option<String>,
 }
 
 /// A draft message saved by the compose form. Stored pre-encryption.
@@ -137,6 +156,17 @@ pub struct Draft {
     pub body: String,
     /// Unix millis. Used to order the Drafts list newest-first.
     pub updated_at: i64,
+    /// Threading metadata (#270). When a draft is started as a reply, these
+    /// carry the conversation linkage so autosave → reopen → send keeps the
+    /// reply in the SAME thread instead of minting a fresh `thread_id` at
+    /// reopen time. All three default to `None` for drafts written before
+    /// threading shipped (backwards-compatible deserialization).
+    #[serde(default)]
+    pub thread_id: Option<String>,
+    #[serde(default)]
+    pub in_reply_to: Option<String>,
+    #[serde(default)]
+    pub quoted_excerpt: Option<String>,
 }
 
 /// A message snapshot kept locally after the inbox contract has been told to
@@ -423,6 +453,24 @@ pub struct InboxSettings {
     /// Move messages from senders not in the verified address book into a
     /// dedicated Quarantine folder instead of the inbox.
     pub quarantine_unknown: bool,
+    /// How a collapsed thread expands in the detail pane (#270): the
+    /// indentation-tree `Nested` view (default) or the power-user `Compact`
+    /// accordion. `#[serde(default)]` so older state loads as `Nested`.
+    #[serde(default)]
+    pub thread_view: ThreadView,
+}
+
+/// Threaded-detail rendering style (#270). Selected in Settings → Inbox.
+#[derive(Deserialize, Serialize, PartialEq, Eq, Debug, Clone, Copy, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadView {
+    /// Indentation tree with connector rails + per-message "in reply to"
+    /// quote chips. Default-expands the leaf of each branch.
+    #[default]
+    Nested,
+    /// Tight one-line accordion rows; default-expands the newest message
+    /// only. Click any row to toggle.
+    Compact,
 }
 
 /// Advanced / node-connection settings.
@@ -880,6 +928,7 @@ mod boundary_tests {
                 subject: "hi".into(),
                 body: "yo".into(),
                 updated_at: 42,
+                ..Default::default()
             },
         );
         alias.read.push(7);
@@ -992,6 +1041,41 @@ mod boundary_tests {
         assert_eq!(s.delivery_state, DeliveryState::Pending);
     }
 
+    /// #270: `SentMessage` written before the threading fields deserialises
+    /// with `thread_id`/`in_reply_to`/`quoted_excerpt` defaulting to `None`.
+    #[test]
+    fn sent_message_missing_thread_fields_defaults_none() {
+        let json = br#"{"to":"bob","recipient_fingerprint":"abcd","subject":"hi","body":"yo","sent_at":1}"#;
+        let s: SentMessage = serde_json::from_slice(json).expect("should deserialise");
+        assert_eq!(s.thread_id, None);
+        assert_eq!(s.in_reply_to, None);
+        assert_eq!(s.quoted_excerpt, None);
+    }
+
+    /// #270: `ArchivedMessage` written before the threading fields
+    /// deserialises with all three threading fields defaulting to `None`.
+    #[test]
+    fn archived_message_missing_thread_fields_defaults_none() {
+        let json = br#"{"from":"bob","title":"hi","content":"yo","archived_at":1}"#;
+        let a: ArchivedMessage = serde_json::from_slice(json).expect("should deserialise");
+        assert_eq!(a.thread_id, None);
+        assert_eq!(a.in_reply_to, None);
+        assert_eq!(a.quoted_excerpt, None);
+    }
+
+    /// #270: a `Draft` written before the threading fields landed
+    /// deserialises with `thread_id`/`in_reply_to`/`quoted_excerpt`
+    /// defaulting to `None`. Guards the backwards-compat invariant so old
+    /// autosaved drafts keep loading after the threading bump.
+    #[test]
+    fn draft_missing_thread_fields_defaults_none() {
+        let json = br#"{"to":"bob","subject":"hi","body":"yo","updated_at":1}"#;
+        let d: Draft = serde_json::from_slice(json).expect("should deserialise");
+        assert_eq!(d.thread_id, None);
+        assert_eq!(d.in_reply_to, None);
+        assert_eq!(d.quoted_excerpt, None);
+    }
+
     /// `AliasState` written before the Archive feature deserialises with an
     /// empty `archived` map. Pre-#47c state must keep loading.
     #[test]
@@ -1012,6 +1096,7 @@ mod boundary_tests {
                 title: "old".into(),
                 content: "stash".into(),
                 archived_at: 99,
+                ..Default::default()
             },
         );
         let bytes = serde_json::to_vec(&state).unwrap();
@@ -1160,6 +1245,7 @@ mod boundary_tests {
             inbox: InboxSettings {
                 drafts_in_inbox: true,
                 quarantine_unknown: false,
+                thread_view: ThreadView::Compact,
             },
             advanced: AdvancedSettings {
                 custom_relay: true,
@@ -1191,6 +1277,7 @@ mod boundary_tests {
                 body: "yo".into(),
                 sent_at: 42,
                 delivery_state: DeliveryState::Delivered,
+                ..Default::default()
             },
         );
         let bytes = serde_json::to_vec(&state).unwrap();

@@ -69,6 +69,23 @@ pub(crate) const FM_COMPOSE_RECIPIENT_HINT: &str = "fm-compose-recipient-hint";
 pub(crate) const FM_COMPOSE_AUTOCOMPLETE: &str = "fm-compose-autocomplete";
 pub(crate) const FM_COMPOSE_AUTOCOMPLETE_ITEM: &str = "fm-compose-autocomplete-item";
 
+// Threading (#270)
+/// A message row inside the threaded detail view (Nested or Compact).
+pub(crate) const FM_THREAD_ROW: &str = "fm-thread-row";
+/// The expand/collapse caret on a threaded message row.
+pub(crate) const FM_THREAD_EXPAND: &str = "fm-thread-expand";
+/// The container wrapping the threaded detail view.
+pub(crate) const FM_THREAD_CONTAINER: &str = "fm-thread-container";
+/// The collapsed inbox-list row representing a whole conversation (carries
+/// the message-count badge). Clicking it opens the threaded detail.
+pub(crate) const FM_THREAD_GROUP: &str = "fm-thread-group";
+/// The Settings → Inbox thread-view `<select>` (Nested / Compact).
+pub(crate) const FM_THREAD_VIEW_SELECT: &str = "fm-thread-view-select";
+/// The in-app storybook host wrapper (`example-data` builds only, gated on a
+/// `?story=` query param). Wraps a single thread component rendered from a
+/// hand-built `ThreadGroup` so the views can be screenshotted in isolation.
+pub(crate) const FM_STORYBOOK: &str = "fm-storybook";
+
 // Toast
 pub(crate) const FM_TOAST: &str = "fm-toast";
 
@@ -174,6 +191,12 @@ mod tests {
                 "fmComposeAutocompleteItem",
                 super::FM_COMPOSE_AUTOCOMPLETE_ITEM,
             ),
+            ("fmThreadRow", super::FM_THREAD_ROW),
+            ("fmThreadExpand", super::FM_THREAD_EXPAND),
+            ("fmThreadContainer", super::FM_THREAD_CONTAINER),
+            ("fmThreadGroup", super::FM_THREAD_GROUP),
+            ("fmThreadViewSelect", super::FM_THREAD_VIEW_SELECT),
+            ("fmStorybook", super::FM_STORYBOOK),
             ("fmToast", super::FM_TOAST),
             ("fmActionCreate", super::FM_ACTION_CREATE),
             ("fmActionImport", super::FM_ACTION_IMPORT),

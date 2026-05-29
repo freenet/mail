@@ -258,9 +258,11 @@ test.describe("Repro #106 + #107", () => {
 
       // Click the row on bob.
       await subjectLocator.click();
-      // Wait for detail open (detail timestamp surfaces).
+      // #270: opening an inbox row mounts the threaded detail (a single
+      // received message is a 1-message thread). Wait for the thread
+      // container rather than the retired `fm-detail-time` header testid.
       await bobApp
-        .locator('[data-testid="fm-detail-time"]')
+        .locator('[data-testid="fm-thread-container"]')
         .waitFor({ timeout: 10_000 });
 
       await bobPage.screenshot({

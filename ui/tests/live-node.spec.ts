@@ -642,7 +642,11 @@ test.describe("Live node E2E", () => {
       // in. If kept_for() doesn't fire or the rebuild doesn't run,
       // the row disappears entirely.
       await bobApp.getByText(/round one/i).click();
-      await bobApp.locator('[data-testid="fm-detail-time"]').waitFor({
+      // Opening an inbox row now mounts the threaded detail (#270): a
+      // single received message is a 1-message thread. Wait for the
+      // thread container rather than the retired single-message
+      // `fm-detail-time` testid.
+      await bobApp.locator('[data-testid="fm-thread-container"]').waitFor({
         timeout: 5_000,
       });
       // After click, the row stays in the list (now `selected`) and
@@ -680,6 +684,62 @@ test.describe("Live node E2E", () => {
         "alice receives bob's reply",
       ).toBeVisible({ timeout: 60_000 });
 
+      // ── Threading across nodes (#270): documented limitation ─────
+      //
+      // This assertion sits AFTER both rounds delivered successfully, so it
+      // never fires on the quarantined core-relay timeout path above.
+      //
+      // What we'd LIKE to assert is "alice↔bob's two-message exchange renders
+      // as one expandable fm-thread-group". That does NOT happen on a real
+      // node, for two independent reasons established by the #270 probe:
+      //
+      //   1. SENT↔RECEIVED gap: the inbox `Message` row has no recipient
+      //      field, and a sent message is stashed only to the Sent folder —
+      //      it is never folded back into the sender's own inbox Vec, which
+      //      is the ONLY input to group_into_threads (ui/src/app.rs). So
+      //      alice's "round one" (sent) and bob's "round two reply" (received)
+      //      never coexist in alice's inbox; likewise bob sees only the
+      //      inbound "round one". Each side's inbox holds exactly ONE half of
+      //      the conversation.
+      //   2. FRESH-COMPOSE thread_id: composeAndSend() uses a brand-new
+      //      compose, which mints a NEW thread_id per message (the Reply
+      //      button is what carries a parent's thread_id forward). Even if
+      //      both halves landed in one inbox, the distinct thread_ids +
+      //      distinct subjects ("round one" vs "round two reply") would keep
+      //      them in separate heuristic groups.
+      //
+      // So we assert the genuine behaviour: on bob's side, the received
+      // "round one" surfaces as a SINGLE standalone thread-group (a
+      // 1-message conversation, no count badge), proving cross-node delivery
+      // threads correctly as far as the data model allows — not a fabricated
+      // multi-message grouping that does not occur. Sender-side sent-folding
+      // is tracked as the #270 sent↔received data-model gap.
+      test.info().annotations.push({
+        type: "known-limitation",
+        description:
+          "#270: a real-node alice↔bob exchange does NOT render as one " +
+          "multi-message thread — sent messages are not folded into the " +
+          "sender's inbox view, and fresh-compose mints a new thread_id per " +
+          "message. Cross-version/cross-node threading requires the Reply " +
+          "button (shared thread_id) AND both halves in one inbox; neither " +
+          "holds here. Asserting the per-side standalone-group reality only.",
+      });
+      const bobRoundOneGroup = bobApp
+        .locator('[data-testid="fm-thread-group"]')
+        .filter({ hasText: /round one/i });
+      await expect(
+        bobRoundOneGroup,
+        "bob's received round-one is its own thread-group row",
+      ).toHaveCount(1);
+      // A standalone 1-message conversation emits no count badge (.ft-count is
+      // only rendered when a group has >1 member — ui/src/app.rs). Its absence
+      // confirms this is a single received message, not a (non-existent)
+      // multi-message cross-node thread.
+      await expect(
+        bobRoundOneGroup.locator(".ft-count"),
+        "single received message → no thread count badge",
+      ).toHaveCount(0);
+
       // Round 3 (alice → bob a second time) is currently uncoverable
       // on iso: bob's contact card encodes the recipient's tier at
       // share time and the sender mints against that frozen value
@@ -690,9 +750,18 @@ test.describe("Live node E2E", () => {
       // ── Archive: bob archives round one. Should leave the inbox
       // list and surface in the Archive folder.
       await bobApp.getByText(/round one/i).click();
-      const archiveBtn = bobApp.locator('[data-testid="fm-archive"]');
-      if (await archiveBtn.isVisible().catch(() => false)) {
-        await archiveBtn.click();
+      // #270: archive is now a per-message action inside the threaded
+      // detail (Nested view, the default). The single received message
+      // is the thread's only row, so `.first()` targets its archive
+      // button in the `.ft-nest-actions` cluster (in the DOM,
+      // opacity-toggled by hover — clickable without hovering).
+      await bobApp
+        .locator('[data-testid="fm-thread-container"]')
+        .waitFor({ timeout: 5_000 })
+        .catch(() => {});
+      const archiveBtn = bobApp.locator('[data-testid="fm-archive"]').first();
+      if ((await archiveBtn.count()) > 0) {
+        await archiveBtn.dispatchEvent("click");
         await expect(
           bobApp.getByText(/round one/i),
           "round one no longer in inbox after archive",

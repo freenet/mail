@@ -37,6 +37,17 @@ interface TestIds {
   fmSend: string;
   fmComposeAutocomplete: string;
   fmComposeAutocompleteItem: string;
+  // Threading (#270)
+  fmThreadRow: string;
+  fmThreadExpand: string;
+  fmThreadContainer: string;
+  fmThreadGroup: string;
+  fmThreadViewSelect: string;
+  // In-app storybook host (example-data builds only, gated on ?story=).
+  fmStorybook: string;
+  // Per-message "Add sender to address book" (rendered on a VerifiedUnknown
+  // sender, in both OpenMessage and threaded rows).
+  fmAddToAb: string;
   fmToast: string;
   fmActionCreate: string;
   fmActionImport: string;

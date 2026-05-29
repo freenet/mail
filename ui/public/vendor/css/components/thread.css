@@ -1,0 +1,543 @@
+/* Freenet Mail — message threading (#270).
+   Ported from the design extract (thread.css + nested.css). Design vars that
+   the project doesn't define as CSS custom properties are mapped to the
+   project's actual hardcoded values per AGENTS recon:
+     --font-display → "Fraunces"     --font-mono → "Geist Mono"
+     --font-body    → "DM Sans"       --fs-body-sm → 12.5px   --r-xl → 12px
+   Existing project tokens (--accent, --accent-bg, --accent-mid, --line,
+   --line2, --unread, --trust, --caution, --warn, --sh-sm, --c0..c3,
+   --ink0..ink4, --bg-card, --hover) are reused as-is so both light and dark
+   themes adapt. (--caution/--warn were promoted to real tokens in tokens.css
+   alongside this work.)
+
+   Two detail views, switched by the Settings→Inbox `thread_view` preference:
+     - NESTED  (default): indentation tree with connector rails + per-message
+       collapsible "in reply to" quote chip.
+     - COMPACT: power-user accordion — tight one-line rows that expand inline.
+   The inbox list collapses a back-and-forth into one .ft-thread-group row
+   carrying a .ft-count badge. */
+
+@layer components {
+  @scope (.fm-app) {
+    /* ============================================================
+       Collapsed inbox-list row — one conversation, count badge
+       (#270). Mirrors .msg-card (message-list.css) so a thread row
+       and a single-message row sit flush in the same list. The count
+       badge is the only structural addition.
+       ============================================================ */
+    .ft-thread-group {
+      position: relative;
+      padding: 11px 14px 12px 16px;
+      border-radius: 8px;
+      cursor: default;
+      margin-bottom: 2px;
+      transition: background 0.1s ease;
+      opacity: 0;
+      animation: fm-fadeUp 0.26s ease both;
+    }
+    .ft-thread-group:hover {
+      background: var(--hover);
+    }
+    .ft-thread-group.unread::before {
+      content: "";
+      position: absolute;
+      left: 6px;
+      top: 14px;
+      bottom: 14px;
+      width: 2px;
+      border-radius: 2px;
+      background: var(--unread);
+    }
+    .ft-thread-group.selected {
+      background: var(--bg-card);
+      box-shadow: var(--sh-sm), inset 3px 0 0 var(--accent);
+    }
+    .ft-thread-group.selected.unread::before {
+      display: none;
+    }
+    /* row 1: people + time, mirrors .msg-row1 */
+    .ft-group-row1 {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .ft-group-people {
+      font-size: 13.5px;
+      color: var(--ink2);
+      font-weight: 400;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .ft-thread-group.unread .ft-group-people {
+      color: var(--ink0);
+      font-weight: 600;
+    }
+    .ft-group-time {
+      font-family: "Geist Mono", monospace;
+      font-size: 10.5px;
+      color: var(--ink4);
+      flex: 0 0 auto;
+    }
+    /* row 2: subject + count badge */
+    .ft-group-subjwrap {
+      display: flex;
+      align-items: baseline;
+      gap: 7px;
+      margin-top: 3px;
+    }
+    .ft-group-subj {
+      font-family: "Fraunces", serif;
+      font-size: 14px;
+      font-weight: 400;
+      letter-spacing: -0.025em;
+      line-height: 1.25;
+      color: var(--ink1);
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .ft-thread-group.unread .ft-group-subj {
+      font-weight: 500;
+      color: var(--ink0);
+    }
+    .ft-group-prev {
+      font-size: 12.5px;
+      font-style: italic;
+      color: var(--ink4);
+      margin-top: 3px;
+      line-height: 1.4;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .ft-count {
+      flex: 0 0 auto;
+      font-family: "Geist Mono", monospace;
+      font-size: 10px;
+      color: var(--ink3);
+      background: var(--c1);
+      border: 1px solid var(--line2);
+      border-radius: 999px;
+      padding: 0 6px;
+      line-height: 16px;
+      height: 16px;
+    }
+
+    /* ============================================================
+       Thread detail — shared container, header, avatars, pills
+       ============================================================ */
+    .ft-thread-container {
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+      flex: 1;
+      overflow: hidden;
+    }
+    /* scroll region holding the message tree / accordion */
+    .ft-scroll {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      padding: 0;
+    }
+    .ft-scroll::-webkit-scrollbar {
+      width: 8px;
+    }
+    .ft-scroll::-webkit-scrollbar-thumb {
+      background: rgba(100, 116, 139, 0.18);
+      border-radius: 4px;
+    }
+
+    /* thread header — subject + participant facepile + meta line */
+    .ft-head {
+      padding: 24px 36px 18px;
+      border-bottom: 1px solid var(--line2);
+      animation: fm-detailIn 0.2s ease both;
+    }
+    .ft-head.is-compact {
+      padding: 16px 24px 14px;
+    }
+    .ft-subj {
+      font-family: "Fraunces", serif;
+      font-size: 25px;
+      font-weight: 400;
+      letter-spacing: -0.045em;
+      line-height: 1.15;
+      color: var(--ink0);
+      text-wrap: pretty;
+    }
+    .ft-head.is-compact .ft-subj {
+      font-size: 19px;
+    }
+    .ft-subj-meta {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-top: 12px;
+      font-family: "Geist Mono", monospace;
+      font-size: 11.5px;
+      color: var(--ink3);
+    }
+    .ft-facepile {
+      display: flex;
+      align-items: center;
+    }
+    .ft-facepile .ft-face {
+      margin-left: -7px;
+      box-shadow: 0 0 0 2px var(--bg-card);
+    }
+    .ft-facepile .ft-face:first-child {
+      margin-left: 0;
+    }
+
+    /* avatars (mirror .sender-orb in detail.css but sized for threads) */
+    .ft-face {
+      flex: 0 0 auto;
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+      background: var(--accent-bg);
+      border: 1px solid var(--accent-mid);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-family: "Fraunces", serif;
+      font-style: italic;
+      color: var(--accent);
+      font-size: 15px;
+    }
+    .ft-face.sm {
+      width: 26px;
+      height: 26px;
+      font-size: 13px;
+    }
+    .ft-face.me {
+      background: var(--c1);
+      border-color: var(--c3);
+      color: var(--ink2);
+    }
+
+    /* per-message trust pill (subtle, threaded analogue of .verif-badge) */
+    .ft-pill {
+      font-family: "Geist Mono", monospace;
+      font-size: 8.5px;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      padding: 1.5px 6px;
+      border-radius: 999px;
+      border: 1px solid currentColor;
+      line-height: 1.3;
+      white-space: nowrap;
+    }
+    .ft-pill.known {
+      color: var(--trust);
+    }
+    .ft-pill.unknown {
+      color: var(--caution);
+    }
+    .ft-pill.unsigned {
+      color: var(--warn);
+    }
+
+    /* body copy inside a threaded message */
+    .ft-body-text {
+      font-size: 15px;
+      color: var(--ink2);
+      line-height: 1.7;
+      letter-spacing: -0.005em;
+      text-wrap: pretty;
+    }
+    .ft-body-text p {
+      margin: 0;
+    }
+    .ft-body-text p + p {
+      margin-top: 12px;
+    }
+
+    /* ============================================================
+       NESTED view — quoted-reply indentation tree (default)
+       ============================================================ */
+    .ft-nest {
+      padding: 22px 28px 32px;
+    }
+    .ft-nest-msg {
+      position: relative;
+    }
+    .ft-nest-msg .ft-nest-inner {
+      position: relative;
+      background: var(--bg-card);
+      border: 1px solid var(--line);
+      border-radius: 12px; /* --r-xl */
+      box-shadow: var(--sh-sm);
+      padding: 15px 18px;
+      margin-bottom: 12px;
+    }
+    .ft-nest-msg.is-me .ft-nest-inner {
+      background: var(--accent-bg);
+      border-color: var(--accent-mid);
+    }
+    .ft-nest-msg.is-unread .ft-nest-inner {
+      box-shadow: var(--sh-sm), inset 3px 0 0 var(--unread);
+    }
+    /* indentation per depth, capped at 4 (depth_map() in app.rs) */
+    .ft-nest-msg.depth-1 { margin-left: 30px; }
+    .ft-nest-msg.depth-2 { margin-left: 60px; }
+    .ft-nest-msg.depth-3 { margin-left: 90px; }
+    .ft-nest-msg.depth-4 { margin-left: 120px; }
+    /* connector rails for nested replies (depths 1-4): a vertical spine
+       up the left gutter (::before) and a horizontal stub into the card
+       (::after). depth-0 (root) draws no rail. */
+    .ft-nest-msg.depth-1::before,
+    .ft-nest-msg.depth-2::before,
+    .ft-nest-msg.depth-3::before,
+    .ft-nest-msg.depth-4::before {
+      content: "";
+      position: absolute;
+      left: -16px;
+      top: -2px;
+      bottom: 14px;
+      width: 1px;
+      background: var(--line);
+    }
+    .ft-nest-msg.depth-1::after,
+    .ft-nest-msg.depth-2::after,
+    .ft-nest-msg.depth-3::after,
+    .ft-nest-msg.depth-4::after {
+      content: "";
+      position: absolute;
+      left: -16px;
+      top: 22px;
+      width: 14px;
+      height: 1px;
+      background: var(--line);
+    }
+
+    /* per-message header inside a nested card */
+    .ft-msg-head {
+      display: flex;
+      align-items: flex-start;
+      gap: 12px;
+    }
+    .ft-msg-id {
+      flex: 1;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 1px;
+    }
+    .ft-msg-namerow {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      flex-wrap: wrap;
+    }
+    .ft-msg-name {
+      font-size: 12.5px;
+      color: var(--ink0);
+      font-weight: 600;
+      letter-spacing: -0.01em;
+    }
+    .ft-msg-addr {
+      font-family: "Geist Mono", monospace;
+      font-size: 11.5px;
+      color: var(--ink3);
+    }
+    .ft-msg-time {
+      font-family: "Geist Mono", monospace;
+      font-size: 10.5px;
+      color: var(--ink4);
+      flex: 0 0 auto;
+      padding-top: 3px;
+    }
+    /* nested message body offset to align under the avatar+name */
+    .ft-nest-body {
+      margin-top: 10px;
+    }
+
+    /* hover-revealed actions (reply, etc.) pinned to card corner */
+    .ft-nest-actions {
+      position: absolute;
+      top: 11px;
+      right: 12px;
+      display: flex;
+      gap: 4px;
+      opacity: 0;
+      transform: translateY(-2px);
+      transition: opacity 0.12s ease, transform 0.12s ease;
+    }
+    .ft-nest-inner:hover .ft-nest-actions,
+    .ft-nest-inner:focus-within .ft-nest-actions {
+      opacity: 1;
+      transform: none;
+    }
+
+    /* #270 BLOCKER-1: per-message action buttons (Reply / Add-to-AB /
+       Archive / Delete) shared by both threaded views. In Nested they live in
+       the hover-revealed .ft-nest-actions cluster; in Compact in the
+       .ft-cz-actions footer row. */
+    .ft-act {
+      font-family: "Geist Mono", monospace;
+      font-size: 10px;
+      letter-spacing: 0.04em;
+      color: var(--ink4);
+      background: var(--bg-card);
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 3px 8px;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: color 0.12s ease, border-color 0.12s ease, background 0.12s ease;
+    }
+    .ft-act:hover {
+      color: var(--accent);
+      border-color: var(--accent-mid);
+      background: var(--accent-bg);
+    }
+
+    /* Compact-view per-message action row, under the token/signature line. */
+    .ft-cz-actions {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      margin-top: 12px;
+    }
+
+    /* token / signature footer under a nested message */
+    .ft-nest-meta {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 11px;
+      font-family: "Geist Mono", monospace;
+      font-size: 10px;
+      color: var(--ink4);
+    }
+
+    /* collapsible "in reply to" quote chip */
+    .ft-quote {
+      margin: 10px 0 0;
+      border-left: 2px solid var(--c3);
+      padding: 2px 0 2px 12px;
+    }
+    .ft-quote-toggle {
+      font-family: "Geist Mono", monospace;
+      font-size: 11px;
+      color: var(--ink4);
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 2px 0;
+      background: transparent;
+      border: 0;
+    }
+    .ft-quote-toggle:hover {
+      color: var(--accent);
+    }
+    .ft-quote-text {
+      font-size: 12.5px; /* --fs-body-sm */
+      color: var(--ink4);
+      font-style: italic;
+      line-height: 1.55;
+      margin-top: 6px;
+    }
+
+    /* ============================================================
+       COMPACT view — power-user accordion
+       ============================================================ */
+    .ft-compact {
+      padding: 4px 16px 20px;
+    }
+    .ft-cz-msg {
+      border-bottom: 1px solid var(--line2);
+    }
+    .ft-cz-msg:last-of-type {
+      border-bottom: 0;
+    }
+    .ft-cz-row {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      width: 100%;
+      text-align: left;
+      padding: 7px 6px;
+      background: transparent;
+      border: 0;
+      transition: background 0.1s ease;
+    }
+    .ft-cz-row:hover {
+      background: var(--hover);
+    }
+    .ft-cz-name {
+      font-size: 12.5px; /* --fs-body-sm */
+      color: var(--ink1);
+      flex: 0 0 118px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .ft-cz-row.is-open .ft-cz-name,
+    .ft-cz-row.unread .ft-cz-name {
+      color: var(--ink0);
+      font-weight: 600;
+    }
+    .ft-cz-snippet {
+      flex: 1;
+      min-width: 0;
+      font-size: 11.5px;
+      color: var(--ink4);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .ft-cz-meta {
+      flex: 0 0 auto;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-family: "Geist Mono", monospace;
+      font-size: 10px;
+      color: var(--ink4);
+    }
+    /* expanded message body — indented to clear the caret+avatar gutter */
+    .ft-cz-open {
+      padding: 2px 6px 16px 33px;
+    }
+    .ft-cz-open .ft-body-text {
+      font-size: 14px;
+    }
+    .ft-cz-tokenline {
+      font-family: "Geist Mono", monospace;
+      font-size: 10px;
+      color: var(--ink4);
+      margin-top: 10px;
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    .ft-dot {
+      width: 4px;
+      height: 4px;
+      border-radius: 50%;
+      background: var(--ink4);
+      flex: 0 0 auto;
+    }
+
+    /* expand/collapse caret (shared by both views) */
+    .ft-caret {
+      font-family: "Geist Mono", monospace;
+      font-size: 11px;
+      color: var(--ink4);
+      transition: transform 0.15s ease;
+      display: inline-block;
+      flex: 0 0 auto;
+    }
+    .ft-caret.open {
+      transform: rotate(90deg);
+    }
+  }
+}
