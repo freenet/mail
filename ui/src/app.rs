@@ -372,6 +372,13 @@ impl InboxView {
         recipient_inbox_wasm_hash: Option<String>,
         title: &str,
         content: &str,
+        // #270 threading linkage carried through to the wire `DecryptedMessage`.
+        // `thread_id` is the (possibly freshly-minted) conversation id;
+        // `in_reply_to` / `quoted_excerpt` link a reply to its parent. All
+        // `None` for a brand-new standalone compose.
+        thread_id: Option<String>,
+        in_reply_to: Option<String>,
+        quoted_excerpt: Option<String>,
         // Optional `(sender_alias, sent_id, inbox_key)` so the future can
         // flip the local Sent row to `Failed` if `start_sending` errors
         // out (AFT denied, encryption, etc.). None during legacy paths.
@@ -386,6 +393,9 @@ impl InboxView {
             to: vec![MlKemEncapsKey::from_key(&recipient_ek)],
             cc: vec![],
             time: Utc::now(),
+            thread_id,
+            in_reply_to,
+            quoted_excerpt,
         };
         let mut futs = Vec::with_capacity(content.to.len());
         #[cfg(feature = "use-node")]
@@ -472,6 +482,11 @@ impl InboxView {
                     sender_vk: Vec::new(),
                     signature_valid: false,
                     assignment_hash: [0u8; 32],
+                    // #270: propagate threading metadata into the in-memory
+                    // mock mailbox so offline replies thread correctly.
+                    thread_id: content.thread_id.clone(),
+                    in_reply_to: content.in_reply_to.clone(),
+                    quoted_excerpt: content.quoted_excerpt.clone(),
                 };
                 MOCK_SENT_MESSAGES.with(|map| {
                     map.borrow_mut()
@@ -556,10 +571,59 @@ impl InboxView {
             .into();
         let now = chrono::Utc::now();
         let t = |minutes_ago: i64| now - chrono::Duration::minutes(minutes_ago);
+        // #270: a stable conversation id shared by the seeded multi-message
+        // thread so the Nested / Compact views are exercisable offline (and
+        // by the Playwright suite) without a node.
+        const EXAMPLE_THREAD_ID: &str = "example-thread-0001";
         let mut emails = if id.id == UserId(0) {
             vec![
+                // ── #270 seeded thread (3 messages, root + 2 replies) ──────
                 Message {
                     id: 0,
+                    from: "Mary".into(),
+                    title: "Lunch tomorrow?".into(),
+                    content: "Are you free for lunch tomorrow around noon?".into(),
+                    read: true,
+                    time: t(60 * 28),
+                    sender_vk: Vec::new(),
+                    signature_valid: false,
+                    assignment_hash: [0u8; 32],
+                    thread_id: Some(EXAMPLE_THREAD_ID.to_string()),
+                    in_reply_to: None,
+                    quoted_excerpt: None,
+                },
+                Message {
+                    id: 1,
+                    from: "address1".into(),
+                    title: "Re: Lunch tomorrow?".into(),
+                    content: "Noon works for me — the usual place?".into(),
+                    read: true,
+                    time: t(60 * 27),
+                    sender_vk: Vec::new(),
+                    signature_valid: false,
+                    assignment_hash: [0u8; 32],
+                    thread_id: Some(EXAMPLE_THREAD_ID.to_string()),
+                    in_reply_to: Some("0".into()),
+                    quoted_excerpt: Some("Are you free for lunch tomorrow around noon?".into()),
+                },
+                Message {
+                    id: 2,
+                    from: "Mary".into(),
+                    title: "Re: Lunch tomorrow?".into(),
+                    content: "Perfect, see you there!".into(),
+                    read: false,
+                    time: t(60 * 26),
+                    sender_vk: Vec::new(),
+                    signature_valid: false,
+                    assignment_hash: [0u8; 32],
+                    thread_id: Some(EXAMPLE_THREAD_ID.to_string()),
+                    in_reply_to: Some("1".into()),
+                    quoted_excerpt: Some("Noon works for me — the usual place?".into()),
+                },
+                // ── standalone messages (no thread_id) so list grouping is
+                //    visibly mixed ───────────────────────────────────────────
+                Message {
+                    id: 3,
                     from: "Ian's Other Account".into(),
                     title: "Welcome to the offline preview".into(),
                     content: body.clone(),
@@ -568,20 +632,12 @@ impl InboxView {
                     sender_vk: Vec::new(),
                     signature_valid: false,
                     assignment_hash: [0u8; 32],
+                    thread_id: None,
+                    in_reply_to: None,
+                    quoted_excerpt: None,
                 },
                 Message {
-                    id: 1,
-                    from: "Mary".into(),
-                    title: "Lunch tomorrow?".into(),
-                    content: body.clone(),
-                    read: false,
-                    time: t(60 * 26),
-                    sender_vk: Vec::new(),
-                    signature_valid: false,
-                    assignment_hash: [0u8; 32],
-                },
-                Message {
-                    id: 2,
+                    id: 4,
                     from: "freenet-bot".into(),
                     title: "Your weekly digest".into(),
                     content: body,
@@ -590,6 +646,9 @@ impl InboxView {
                     sender_vk: Vec::new(),
                     signature_valid: false,
                     assignment_hash: [0u8; 32],
+                    thread_id: None,
+                    in_reply_to: None,
+                    quoted_excerpt: None,
                 },
             ]
         } else {
@@ -604,6 +663,9 @@ impl InboxView {
                     sender_vk: Vec::new(),
                     signature_valid: false,
                     assignment_hash: [0u8; 32],
+                    thread_id: None,
+                    in_reply_to: None,
+                    quoted_excerpt: None,
                 },
                 Message {
                     id: 1,
@@ -615,6 +677,9 @@ impl InboxView {
                     sender_vk: Vec::new(),
                     signature_valid: false,
                     assignment_hash: [0u8; 32],
+                    thread_id: None,
+                    in_reply_to: None,
+                    quoted_excerpt: None,
                 },
             ]
         };
@@ -747,7 +812,7 @@ impl User {
 }
 
 #[derive(Debug, Clone, Eq)]
-struct Message {
+pub(crate) struct Message {
     id: u64,
     from: Cow<'static, str>,
     title: Cow<'static, str>,
@@ -771,6 +836,16 @@ struct Message {
     /// kept-locally rows reconstructed from `KeptMessage` since the
     /// assignment hash isn't persisted there yet.
     assignment_hash: [u8; 32],
+    /// Stable conversation id (#270). Shared by every message in a thread.
+    /// `None` for legacy messages — those fall back to the heuristic
+    /// subject+participant grouping in `crate::threads::group_into_threads`.
+    thread_id: Option<String>,
+    /// Parent message id this is a reply to (#270). Drives the nested-view
+    /// depth calculation. `None` for thread roots and forwards.
+    in_reply_to: Option<String>,
+    /// The specific parent line being replied to (#270), surfaced as a
+    /// collapsible "in reply to" chip. `None` for fresh sends / forwards.
+    quoted_excerpt: Option<String>,
 }
 
 impl Message {
@@ -906,6 +981,11 @@ fn kept_to_message(
         sender_vk: kept.sender_vk,
         signature_valid: kept.signature_valid,
         assignment_hash: [0u8; 32],
+        // #270: kept-locally snapshots don't persist threading metadata yet;
+        // such rows group via the heuristic fallback (subject+participants).
+        thread_id: None,
+        in_reply_to: None,
+        quoted_excerpt: None,
     }
 }
 
@@ -968,6 +1048,12 @@ impl From<MessageModel> for Message {
             sender_vk: value.sender_vk,
             signature_valid: value.signature_valid,
             assignment_hash: value.token_assignment.assignment_hash,
+            // #270: carry the threading metadata through from the decrypted
+            // wire message so the inbox-list grouping + threaded detail view
+            // can reconstruct conversations.
+            thread_id: value.content.thread_id,
+            in_reply_to: value.content.in_reply_to,
+            quoted_excerpt: value.content.quoted_excerpt,
         }
     }
 }
@@ -987,6 +1073,472 @@ impl PartialOrd for Message {
 impl Ord for Message {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.id.cmp(&other.id)
+    }
+}
+
+/// #270 message threading: pure grouping logic.
+///
+/// `group_into_threads` collapses a flat `&[Message]` into conversations.
+/// The primary key is the wire `thread_id`; for legacy messages that predate
+/// threading (`thread_id == None`) it falls back to a heuristic key built
+/// from the normalized subject (leading `Re:` / `Fwd:` prefixes stripped,
+/// repeatedly + case-insensitively) plus the message's participant (the
+/// `from` field — inbox `Message`s only carry the sender). Mixed groups
+/// (some members carry a `thread_id`, some don't) resolve to the shared
+/// `thread_id` so a legacy root + threaded replies still cluster.
+///
+/// Kept deliberately Dioxus-free so it is unit-testable without a runtime;
+/// the phase-2 Nested / Compact views build on the `ThreadGroup` + per-message
+/// depth map this module produces.
+pub(crate) mod threads {
+    use super::Message;
+    use std::collections::HashMap;
+
+    /// Maximum nesting depth for the indentation tree (#270). Replies deeper
+    /// than this render at the cap so the tree stays readable on narrow
+    /// viewports — matches the design's `.depth-4` ceiling.
+    pub(crate) const MAX_THREAD_DEPTH: usize = 4;
+
+    /// One collapsed conversation. `messages` is sorted oldest→newest so the
+    /// views can render the chain top-down and default-expand the leaf.
+    // `PartialEq` so it can be passed as a Dioxus component prop (#270).
+    #[derive(Debug, Clone, PartialEq)]
+    pub(crate) struct ThreadGroup {
+        /// Resolved group key: the shared `thread_id` when any member has one,
+        /// else the `heuristic:<normalized-subject>|<participant>` fallback.
+        pub key: String,
+        /// Conversation members, oldest→newest (sender send time, tie-break
+        /// by `id`).
+        pub messages: Vec<Message>,
+        /// `id` of the oldest message — the conversation root for the tree.
+        pub root_id: u64,
+        /// Number of unread members. Drives the inbox-row count/badge styling.
+        pub unread_count: usize,
+        /// Total member count — the inbox row's "N messages" badge (#270).
+        pub count: usize,
+    }
+
+    /// Strip leading reply/forward prefixes (`Re:`, `Fwd:`, `Fw:`),
+    /// repeatedly and case-insensitively, then lower-case + trim. Used as the
+    /// subject half of the heuristic key so `Re: Re: Lunch` and `Lunch`
+    /// collapse together.
+    pub(crate) fn normalize_subject(subject: &str) -> String {
+        let mut s = subject.trim();
+        loop {
+            let lower = s.to_ascii_lowercase();
+            let stripped = if let Some(rest) = lower.strip_prefix("re:") {
+                &s[s.len() - rest.len()..]
+            } else if let Some(rest) = lower.strip_prefix("fwd:") {
+                &s[s.len() - rest.len()..]
+            } else if let Some(rest) = lower.strip_prefix("fw:") {
+                &s[s.len() - rest.len()..]
+            } else {
+                break;
+            };
+            s = stripped.trim_start();
+        }
+        s.trim().to_ascii_lowercase()
+    }
+
+    /// Heuristic group key for a legacy (thread-id-less) message: normalized
+    /// subject + participant. Prefixed `heuristic:` so it can never collide
+    /// with a real UUID `thread_id`.
+    ///
+    /// SHOULD-6 (#270): the participant half is `msg.from` only — the inbox
+    /// `Message` type carries the SENDER but NOT the recipient (the recipient
+    /// is always the logged-in identity at the inbox level, and outbound legacy
+    /// rows aren't part of the inbox `Vec` here). So two distinct legacy
+    /// conversations with the same sender and the same normalized subject —
+    /// e.g. a mailing-list digest the sender blasted to several of the user's
+    /// addresses — fold into one heuristic group. This is a known
+    /// data-model limitation, not a bug to fix in the grouping pass: the real
+    /// fix is per-message `thread_id` (which threaded mail already carries),
+    /// and this heuristic only ever applies to pre-#270 legacy mail.
+    fn heuristic_key(msg: &Message) -> String {
+        format!(
+            "heuristic:{}|{}",
+            normalize_subject(&msg.title),
+            msg.from.as_ref()
+        )
+    }
+
+    /// Group `msgs` into conversations (#270).
+    ///
+    /// Two-pass to handle mixed `thread_id`/legacy conversations:
+    /// 1. bucket every message by a provisional key (`thread_id` if present,
+    ///    else the heuristic key);
+    /// 2. for buckets that share a heuristic key AND also have a sibling
+    ///    bucket under a real `thread_id` (same normalized-subject +
+    ///    participant), fold the legacy bucket into the threaded one so a
+    ///    legacy root and its threaded replies cluster.
+    ///
+    /// The returned groups are NOT ordered — callers sort for display.
+    pub(crate) fn group_into_threads(msgs: &[Message]) -> Vec<ThreadGroup> {
+        // Pass 1: provisional bucketing.
+        let mut buckets: HashMap<String, Vec<Message>> = HashMap::new();
+        for m in msgs {
+            let key = match &m.thread_id {
+                Some(t) => t.clone(),
+                None => heuristic_key(m),
+            };
+            buckets.entry(key).or_default().push(m.clone());
+        }
+
+        // Pass 2: fold legacy (heuristic:) buckets into a threaded bucket that
+        // shares the same normalized-subject + participant. This lets a legacy
+        // root message join the thread its replies (which DO carry a
+        // thread_id) created. We compute, for each thread_id bucket, the set
+        // of (normalized-subject, participant) signatures it spans; a legacy
+        // bucket merges into the first thread_id bucket whose span contains
+        // the legacy bucket's signature.
+        let thread_signatures: HashMap<String, Vec<(String, String)>> = buckets
+            .iter()
+            .filter(|(k, _)| !k.starts_with("heuristic:"))
+            .map(|(k, ms)| {
+                let sigs: Vec<(String, String)> = ms
+                    .iter()
+                    .map(|m| (normalize_subject(&m.title), m.from.as_ref().to_string()))
+                    .collect();
+                (k.clone(), sigs)
+            })
+            .collect();
+
+        let legacy_keys: Vec<String> = buckets
+            .keys()
+            .filter(|k| k.starts_with("heuristic:"))
+            .cloned()
+            .collect();
+        for legacy_key in legacy_keys {
+            // Reconstruct the legacy signature from the key:
+            // "heuristic:<subj>|<participant>".
+            let body = &legacy_key["heuristic:".len()..];
+            let Some((subj, participant)) = body.split_once('|') else {
+                continue;
+            };
+            let sig = (subj.to_string(), participant.to_string());
+            // Find a thread_id bucket whose span contains this signature.
+            let target = thread_signatures
+                .iter()
+                .find(|(_, sigs)| sigs.contains(&sig))
+                .map(|(k, _)| k.clone());
+            if let Some(target_key) = target
+                && let Some(moved) = buckets.remove(&legacy_key)
+            {
+                buckets.entry(target_key).or_default().extend(moved);
+            }
+        }
+
+        // Finalize: sort each bucket oldest→newest and compute aggregates.
+        buckets
+            .into_iter()
+            .map(|(key, mut messages)| {
+                messages.sort_by(|a, b| a.time.cmp(&b.time).then(a.id.cmp(&b.id)));
+                let root_id = messages.first().map(|m| m.id).unwrap_or(0);
+                let unread_count = messages.iter().filter(|m| !m.read).count();
+                let count = messages.len();
+                ThreadGroup {
+                    key,
+                    messages,
+                    root_id,
+                    unread_count,
+                    count,
+                }
+            })
+            .collect()
+    }
+
+    /// Deterministic display order for the grouped inbox list (#270; the
+    /// #137/#233 determinism class).
+    ///
+    /// Primary key is the group's newest member via `super::sort_cmp_inbox`
+    /// (newest time first, then `assignment_hash` descending). When two groups'
+    /// newest members collide on BOTH time AND `assignment_hash` — e.g. two
+    /// seeded example threads, or two messages minted in the same millisecond
+    /// with an all-zero hash — that comparator returns `Equal` and `sort_by`'s
+    /// stability is no longer enough to guarantee a fixed order across renders
+    /// (the upstream `Vec<ThreadGroup>` arrives in `HashMap` iteration order,
+    /// which is randomized per process). The FINAL tie-break on `root_id`
+    /// descending makes the order total and reproducible.
+    pub(crate) fn sort_cmp_group(a: &ThreadGroup, b: &ThreadGroup) -> std::cmp::Ordering {
+        let primary = match (a.messages.last(), b.messages.last()) {
+            (Some(am), Some(bm)) => super::sort_cmp_inbox(am, bm),
+            _ => std::cmp::Ordering::Equal,
+        };
+        // Total tie-break: newest root_id first. `root_id` is unique per group
+        // (it's the oldest member's message id), so this can never itself tie.
+        primary.then_with(|| b.root_id.cmp(&a.root_id))
+    }
+
+    /// Per-message nesting depth for the Nested view (#270).
+    ///
+    /// Depth is the length of the `in_reply_to` chain from the root, capped at
+    /// [`MAX_THREAD_DEPTH`]. Returns a map keyed by `Message.id`. Roots (no
+    /// `in_reply_to`, or an `in_reply_to` that doesn't resolve within the
+    /// group) are depth 0. `in_reply_to` is the parent's stringified `id`.
+    pub(crate) fn depth_map(group: &ThreadGroup) -> HashMap<u64, usize> {
+        // id (as string) → parent id (as string), for members of this group.
+        let parent_of: HashMap<String, String> = group
+            .messages
+            .iter()
+            .filter_map(|m| m.in_reply_to.clone().map(|p| (m.id.to_string(), p)))
+            .collect();
+        let present: std::collections::HashSet<String> =
+            group.messages.iter().map(|m| m.id.to_string()).collect();
+
+        let mut out = HashMap::with_capacity(group.messages.len());
+        for m in &group.messages {
+            let mut depth = 0usize;
+            let mut cursor = m.id.to_string();
+            // Walk up the parent chain. Guard against cycles (malformed
+            // in_reply_to) with a hop budget == group size.
+            let mut budget = group.messages.len();
+            while let Some(parent) = parent_of.get(&cursor) {
+                if !present.contains(parent) {
+                    break; // dangling parent → treat current as a root branch
+                }
+                depth += 1;
+                cursor = parent.clone();
+                budget = budget.saturating_sub(1);
+                if budget == 0 {
+                    break;
+                }
+            }
+            out.insert(m.id, depth.min(MAX_THREAD_DEPTH));
+        }
+        out
+    }
+}
+
+#[cfg(test)]
+mod thread_grouping_tests {
+    use super::Message;
+    use super::threads::{
+        MAX_THREAD_DEPTH, depth_map, group_into_threads, normalize_subject,
+    };
+    use chrono::{TimeZone, Utc};
+    use std::borrow::Cow;
+
+    /// Build a `Message` for grouping tests. `secs` orders messages within a
+    /// thread; `from` is the participant; `tid` / `irt` are the threading
+    /// linkage.
+    #[allow(clippy::too_many_arguments)]
+    fn m(
+        id: u64,
+        from: &'static str,
+        title: &'static str,
+        secs: i64,
+        read: bool,
+        tid: Option<&str>,
+        irt: Option<&str>,
+    ) -> Message {
+        Message {
+            id,
+            from: Cow::Borrowed(from),
+            title: Cow::Borrowed(title),
+            content: Cow::Borrowed("body"),
+            read,
+            time: Utc.timestamp_opt(1_700_000_000 + secs, 0).unwrap(),
+            sender_vk: Vec::new(),
+            signature_valid: false,
+            assignment_hash: [0u8; 32],
+            thread_id: tid.map(str::to_string),
+            in_reply_to: irt.map(str::to_string),
+            quoted_excerpt: None,
+        }
+    }
+
+    fn group_with_key<'a>(
+        groups: &'a [super::threads::ThreadGroup],
+        key: &str,
+    ) -> &'a super::threads::ThreadGroup {
+        groups
+            .iter()
+            .find(|g| g.key == key)
+            .unwrap_or_else(|| panic!("no group with key {key}; got {:?}", keys(groups)))
+    }
+
+    fn keys(groups: &[super::threads::ThreadGroup]) -> Vec<String> {
+        groups.iter().map(|g| g.key.clone()).collect()
+    }
+
+    /// (a) Messages sharing a `thread_id` group together regardless of
+    /// subject, and the group reports the right count / unread / root / order.
+    #[test]
+    fn groups_by_thread_id() {
+        let msgs = vec![
+            m(0, "mary", "Lunch?", 0, true, Some("t1"), None),
+            m(2, "mary", "Re: Lunch?", 20, false, Some("t1"), Some("1")),
+            m(1, "me", "Re: Lunch?", 10, true, Some("t1"), Some("0")),
+        ];
+        let groups = group_into_threads(&msgs);
+        assert_eq!(groups.len(), 1);
+        let g = group_with_key(&groups, "t1");
+        assert_eq!(g.count, 3);
+        assert_eq!(g.unread_count, 1);
+        assert_eq!(g.root_id, 0, "oldest message is root");
+        // oldest→newest by time then id
+        let order: Vec<u64> = g.messages.iter().map(|x| x.id).collect();
+        assert_eq!(order, vec![0, 1, 2]);
+    }
+
+    /// (b) Legacy messages (no thread_id) group via the heuristic key, with
+    /// "Re:"/"Fwd:" normalization clustering them by base subject + sender.
+    #[test]
+    fn groups_legacy_by_heuristic_subject_and_participant() {
+        let msgs = vec![
+            m(0, "jane", "Design review", 0, false, None, None),
+            m(1, "jane", "Re: Design review", 10, false, None, None),
+            m(2, "jane", "Re: Re: Design review", 20, false, None, None),
+            // Different sender → different heuristic group.
+            m(3, "bob", "Design review", 30, false, None, None),
+        ];
+        let groups = group_into_threads(&msgs);
+        assert_eq!(groups.len(), 2, "two participants → two heuristic groups");
+        let jane = group_with_key(&groups, "heuristic:design review|jane");
+        assert_eq!(jane.count, 3);
+        let bob = group_with_key(&groups, "heuristic:design review|bob");
+        assert_eq!(bob.count, 1);
+    }
+
+    /// `normalize_subject` strips repeated, mixed-case Re:/Fwd:/Fw: prefixes.
+    #[test]
+    fn normalize_subject_strips_repeated_prefixes() {
+        assert_eq!(normalize_subject("Re: Re: Lunch"), "lunch");
+        assert_eq!(normalize_subject("FWD: re: Hello"), "hello");
+        assert_eq!(normalize_subject("fw: Status"), "status");
+        assert_eq!(normalize_subject("Plain"), "plain");
+        assert_eq!(normalize_subject("  Re:  Spaced  "), "spaced");
+    }
+
+    /// (c) A mixed conversation — a legacy root (no thread_id) plus threaded
+    /// replies sharing the same normalized subject + participant — folds into
+    /// a single group keyed by the real thread_id.
+    #[test]
+    fn mixed_thread_id_and_legacy_fold_together() {
+        let msgs = vec![
+            // legacy root, no thread_id
+            m(0, "mary", "Lunch?", 0, true, None, None),
+            // threaded replies carrying the (same-participant) thread_id
+            m(1, "mary", "Re: Lunch?", 10, false, Some("t9"), Some("0")),
+            m(2, "mary", "Re: Lunch?", 20, false, Some("t9"), Some("1")),
+        ];
+        let groups = group_into_threads(&msgs);
+        assert_eq!(groups.len(), 1, "legacy root folds into the threaded bucket");
+        let g = group_with_key(&groups, "t9");
+        assert_eq!(g.count, 3);
+        assert_eq!(g.root_id, 0);
+    }
+
+    /// (d) Depth is the in_reply_to chain length from the root, capped at 4.
+    #[test]
+    fn depth_computed_from_chain_and_capped() {
+        // 0 ← 1 ← 2 ← 3 ← 4 ← 5 ← 6 : depths 0,1,2,3,4,4,4 (cap 4)
+        let mut msgs = vec![m(0, "a", "Hi", 0, false, Some("t"), None)];
+        for i in 1..=6u64 {
+            msgs.push(m(
+                i,
+                "a",
+                "Re: Hi",
+                (i as i64) * 10,
+                false,
+                Some("t"),
+                Some(&(i - 1).to_string()),
+            ));
+        }
+        let groups = group_into_threads(&msgs);
+        let g = group_with_key(&groups, "t");
+        let depths = depth_map(g);
+        assert_eq!(depths[&0], 0);
+        assert_eq!(depths[&1], 1);
+        assert_eq!(depths[&2], 2);
+        assert_eq!(depths[&3], 3);
+        assert_eq!(depths[&4], 4);
+        assert_eq!(depths[&5], MAX_THREAD_DEPTH, "capped at 4");
+        assert_eq!(depths[&6], MAX_THREAD_DEPTH, "still capped at 4");
+    }
+
+    /// A dangling `in_reply_to` (parent not in the group) is treated as a
+    /// root branch (depth 0), not an infinite walk.
+    #[test]
+    fn depth_dangling_parent_is_root() {
+        let msgs = vec![
+            m(0, "a", "Hi", 0, false, Some("t"), None),
+            m(1, "a", "Re: Hi", 10, false, Some("t"), Some("999")),
+        ];
+        let groups = group_into_threads(&msgs);
+        let g = group_with_key(&groups, "t");
+        let depths = depth_map(g);
+        assert_eq!(depths[&1], 0, "dangling parent → depth 0");
+    }
+
+    /// (e) A conversation interleaving sent (from "me") and received messages
+    /// orders strictly chronologically oldest→newest.
+    #[test]
+    fn chronological_interleave_of_sent_and_received() {
+        let msgs = vec![
+            m(2, "me", "Re: Hi", 20, true, Some("t"), Some("0")),
+            m(0, "alice", "Hi", 0, true, Some("t"), None),
+            m(3, "alice", "Re: Hi", 30, false, Some("t"), Some("2")),
+            m(1, "me", "Re: Hi", 10, true, Some("t"), Some("0")),
+        ];
+        let groups = group_into_threads(&msgs);
+        let g = group_with_key(&groups, "t");
+        let order: Vec<u64> = g.messages.iter().map(|x| x.id).collect();
+        assert_eq!(order, vec![0, 1, 2, 3], "sorted by time then id");
+    }
+
+    /// Sanity: standalone (no thread_id, unique subject+participant) messages
+    /// each land in their own single-message group, mixed with grouped ones.
+    #[test]
+    fn standalone_messages_stay_separate() {
+        let msgs = vec![
+            m(0, "mary", "Lunch?", 0, false, Some("t1"), None),
+            m(1, "mary", "Re: Lunch?", 10, false, Some("t1"), Some("0")),
+            m(2, "bot", "Weekly digest", 20, false, None, None),
+            m(3, "ian", "Welcome", 30, false, None, None),
+        ];
+        let groups = group_into_threads(&msgs);
+        assert_eq!(groups.len(), 3, "one thread + two standalone");
+        assert_eq!(group_with_key(&groups, "t1").count, 2);
+    }
+
+    /// SHOULD-4 (#270, #137/#233 determinism class): two groups whose newest
+    /// members collide on BOTH time AND `assignment_hash` (the `m()` helper
+    /// uses an all-zero hash) must still sort into a single, stable order
+    /// driven by the final `root_id`-descending tie-break — not by `HashMap`
+    /// iteration order. Asserts the comparator is a total order (newest
+    /// root_id first) regardless of input order.
+    #[test]
+    fn groups_with_identical_time_and_hash_sort_deterministically() {
+        use super::threads::sort_cmp_group;
+        // Two single-message groups, same time (secs=0) and same all-zero
+        // assignment_hash, differing only in root_id (5 vs 9).
+        let msgs_ab = vec![
+            m(5, "a", "Alpha", 0, true, Some("ta"), None),
+            m(9, "b", "Beta", 0, true, Some("tb"), None),
+        ];
+        let mut groups = group_into_threads(&msgs_ab);
+        groups.sort_by(sort_cmp_group);
+        let order_ab: Vec<u64> = groups.iter().map(|g| g.root_id).collect();
+        assert_eq!(order_ab, vec![9, 5], "newest root_id first on a full tie");
+
+        // Reversed input must yield the SAME order — the comparator, not the
+        // (randomized) bucket iteration order, decides.
+        let msgs_ba = vec![
+            m(9, "b", "Beta", 0, true, Some("tb"), None),
+            m(5, "a", "Alpha", 0, true, Some("ta"), None),
+        ];
+        let mut groups2 = group_into_threads(&msgs_ba);
+        groups2.sort_by(sort_cmp_group);
+        let order_ba: Vec<u64> = groups2.iter().map(|g| g.root_id).collect();
+        assert_eq!(order_ba, order_ab, "order is independent of input order");
+
+        // And the comparator never returns Equal for distinct groups.
+        assert_ne!(
+            sort_cmp_group(&groups[0], &groups[1]),
+            std::cmp::Ordering::Equal,
+            "distinct groups must compare as a strict order"
+        );
     }
 }
 
@@ -1080,6 +1632,14 @@ mod menu {
         pub subject: String,
         pub body: String,
         pub draft_id: Option<String>,
+        /// #270 threading linkage carried into the compose sheet. A reply
+        /// sets all three: `thread_id` (the parent's, or freshly minted),
+        /// `in_reply_to` (parent message id), `quoted_excerpt` (the parent
+        /// line being replied to). A fresh compose / forward leaves them
+        /// `None`, starting a new conversation on send.
+        pub thread_id: Option<String>,
+        pub in_reply_to: Option<String>,
+        pub quoted_excerpt: Option<String>,
     }
 
     /// Which Settings screen is open. `None` means the mailbox is showing.
@@ -1134,6 +1694,11 @@ mod menu {
         email: Option<u64>,
         sent_id: Option<String>,
         archived_id: Option<u64>,
+        /// #270: the `root_id` of the conversation opened from the grouped
+        /// inbox list. When set, the Inbox/Quarantine detail pane renders the
+        /// whole `ThreadGroup` (Nested or Compact) instead of a single
+        /// message. Resolved back to its group by `root_id` in `DetailPanel`.
+        thread_root: Option<u64>,
         new_msg: bool,
         search: String,
         compose_prefill: Option<ComposePrefill>,
@@ -1150,6 +1715,7 @@ mod menu {
                 self.email = None;
                 self.sent_id = None;
                 self.archived_id = None;
+                self.thread_root = None;
             }
         }
 
@@ -1188,16 +1754,36 @@ mod menu {
             self.email = None;
             self.sent_id = None;
             self.archived_id = None;
+            self.thread_root = None;
             self.new_msg = false;
             self.compose_prefill = None;
         }
 
+        // #270: Inbox/Quarantine rows now open as threads via `open_thread`;
+        // this single-message opener is retained for deep-link / search-result
+        // selection (the DetailPanel `OpenMessage` fallback) but currently has
+        // no caller, hence the allow.
+        #[allow(dead_code)]
         pub fn open_email(&mut self, id: u64) {
             self.email = Some(id);
+            // Opening a single message clears any thread selection so the two
+            // detail-pane paths can't both fire (#270).
+            self.thread_root = None;
         }
 
         pub fn email(&self) -> Option<u64> {
             self.email
+        }
+
+        /// #270: open the conversation rooted at `root_id` (the oldest message
+        /// of a `ThreadGroup`). The detail pane renders the whole group.
+        pub fn open_thread(&mut self, root_id: u64) {
+            self.thread_root = Some(root_id);
+            self.email = None;
+        }
+
+        pub fn thread_root(&self) -> Option<u64> {
+            self.thread_root
         }
 
         pub fn folder(&self) -> Folder {
@@ -1210,6 +1796,7 @@ mod menu {
                 self.email = None;
                 self.sent_id = None;
                 self.archived_id = None;
+                self.thread_root = None;
             }
         }
 
@@ -1301,6 +1888,50 @@ fn folder_count(emails: &[Message], folder: menu::Folder, alias: &str) -> usize 
         menu::Folder::Sent => crate::local_state::sent_for(alias).len(),
         menu::Folder::Archive => crate::local_state::archived_for(alias).len(),
     }
+}
+
+/// Build the visible Inbox/Quarantine message set for `folder`, applying the
+/// same archived/deleted/hide-unsigned/quarantine-split filters the
+/// `MessageList` render uses, then sorting newest-first. Shared by the list
+/// (#270 grouping) and the detail pane (thread resolution) so the two agree
+/// on the population a `root_id` is grouped against. `search` is applied only
+/// when non-empty — the detail pane passes "" so an open thread isn't lost
+/// when the search box changes.
+fn visible_inbox_messages(
+    emails: &[Message],
+    alias: &str,
+    folder: menu::Folder,
+    search: &str,
+) -> Vec<Message> {
+    let inbox_settings = crate::local_state::global_settings().inbox;
+    let hide_unsigned = crate::local_state::identity_settings_for(alias)
+        .privacy
+        .hide_unsigned;
+    let mut v: Vec<Message> = emails
+        .iter()
+        .filter(|m| !crate::local_state::is_archived(alias, m.id))
+        .filter(|m| !crate::local_state::is_deleted(alias, m.id))
+        .filter(|m| matches_search(m, search))
+        .filter(|m| {
+            if !hide_unsigned {
+                return true;
+            }
+            m.signature_valid && !m.sender_vk.is_empty()
+        })
+        .filter(|m| {
+            if !inbox_settings.quarantine_unknown {
+                return matches!(folder, menu::Folder::Inbox);
+            }
+            if matches!(folder, menu::Folder::Quarantine) {
+                !is_sender_verified(m)
+            } else {
+                is_sender_verified(m)
+            }
+        })
+        .cloned()
+        .collect();
+    v.sort_by(sort_cmp_inbox);
+    v
 }
 
 fn matches_search(m: &Message, q: &str) -> bool {
@@ -1657,7 +2288,11 @@ fn MessageList() -> Element {
 
     let folder = menu_selection.read().folder();
     let search = menu_selection.read().search().to_string();
-    let selected_id = menu_selection.read().email();
+    // #270: the open conversation's root id, so the grouped inbox row that
+    // owns it can show as `selected`. Inbox/Quarantine rows always open as
+    // threads now, so the per-message `selected_id` is no longer consulted
+    // here (the single-message `OpenMessage` path is a DetailPanel fallback).
+    let selected_thread_root = menu_selection.read().thread_root();
     // Touch the local-state generation so this component re-renders when
     // drafts are added/removed.
     let _local_gen = crate::local_state::GENERATION();
@@ -1674,52 +2309,13 @@ fn MessageList() -> Element {
         .map(|id| id.alias.to_string())
         .unwrap_or_default();
     let inbox_settings = crate::local_state::global_settings().inbox;
-    let privacy_prefs = crate::local_state::identity_settings_for(&active_alias).privacy;
     // Inbox and Quarantine share every filter except the verified-sender
-    // split, so build the common candidate set once and partition by
-    // `is_sender_verified` only when the user opted into quarantine.
+    // split; `visible_inbox_messages` applies them (and the search box) and
+    // sorts newest-first (#49/#137). Shared with `DetailPanel` so the grouped
+    // list and the thread it opens agree on the population (#270).
     let visible: Vec<Message> = if matches!(folder, menu::Folder::Inbox | menu::Folder::Quarantine)
     {
-        let mut v: Vec<Message> = emails
-            .iter()
-            // Hide archived/deleted rows. In offline mode the populate loop
-            // above is a no-op (no inbox_data), so emails are seeded once at
-            // login and never re-filtered without this guard. Same call also
-            // hides them in use-node mode if the contract eviction is still
-            // in flight.
-            .filter(|m| !crate::local_state::is_archived(&active_alias, m.id))
-            .filter(|m| !crate::local_state::is_deleted(&active_alias, m.id))
-            .filter(|m| matches_search(m, &search))
-            // IdentityPrivacyPrefs.hide_unsigned: drop rows whose signature
-            // didn't validate. Sender-vk empty also counts as unsigned.
-            .filter(|m| {
-                if !privacy_prefs.hide_unsigned {
-                    return true;
-                }
-                m.signature_valid && !m.sender_vk.is_empty()
-            })
-            // GlobalSettings.inbox.quarantine_unknown split: when off, every
-            // surviving row is an Inbox row (Quarantine folder is hidden).
-            // When on, verified senders stay in Inbox and everyone else is
-            // diverted to Quarantine.
-            .filter(|m| {
-                if !inbox_settings.quarantine_unknown {
-                    return matches!(folder, menu::Folder::Inbox);
-                }
-                if matches!(folder, menu::Folder::Quarantine) {
-                    !is_sender_verified(m)
-                } else {
-                    is_sender_verified(m)
-                }
-            })
-            .cloned()
-            .collect();
-        // Newest first (#49). Sender-stamped time is what the design assumes.
-        // Tie-break by id descending so that messages with identical 1-second
-        // timestamps always appear in a deterministic order regardless of the
-        // HashMap iteration order of the underlying kept-message map (#137).
-        v.sort_by(sort_cmp_inbox);
-        v
+        visible_inbox_messages(&emails, &active_alias, folder, &search)
     } else {
         Vec::new()
     };
@@ -1877,6 +2473,12 @@ fn MessageList() -> Element {
                                     subject: d.subject.clone(),
                                     body: d.body.clone(),
                                     draft_id: Some(id.clone()),
+                                    // #270: carry the draft's persisted thread
+                                    // linkage back into compose so reopening a
+                                    // reply-draft stays in the same thread.
+                                    thread_id: d.thread_id.clone(),
+                                    in_reply_to: d.in_reply_to.clone(),
+                                    quoted_excerpt: d.quoted_excerpt.clone(),
                                 };
                                 let id_for_dom = id.clone();
                                 rsx! {
@@ -1919,6 +2521,12 @@ fn MessageList() -> Element {
                                     subject: d.subject.clone(),
                                     body: d.body.clone(),
                                     draft_id: Some(id.clone()),
+                                    // #270: carry the draft's persisted thread
+                                    // linkage back into compose so reopening a
+                                    // reply-draft stays in the same thread.
+                                    thread_id: d.thread_id.clone(),
+                                    in_reply_to: d.in_reply_to.clone(),
+                                    quoted_excerpt: d.quoted_excerpt.clone(),
                                 };
                                 let id_for_dom = id.clone();
                                 rsx! {
@@ -1947,35 +2555,74 @@ fn MessageList() -> Element {
                         } else {
                             testid::FM_MSG_CARD
                         };
-                        visible.into_iter().map(move |email| {
-                            let id = email.id;
-                            let mut classes = String::from("msg-card");
-                            if !email.read { classes.push_str(" unread"); }
-                            if Some(id) == selected_id { classes.push_str(" selected"); }
-                            let from = email.from.clone();
-                            let title = email.title.clone();
-                            let preview = email.content.clone();
-                            let time_short = format_time_short(email.time);
+                        // #270: collapse back-and-forth conversations into one
+                        // row per thread. `visible` is already filtered + sorted
+                        // newest-first; group it, then order groups by their
+                        // newest member descending so the list stays "newest
+                        // conversation on top". A single-message thread renders
+                        // like an ordinary row (count badge suppressed).
+                        let mut groups = threads::group_into_threads(&visible);
+                        groups.sort_by(threads::sort_cmp_group);
+                        groups.into_iter().map(move |group| {
+                            // Newest member drives the row's sender / time /
+                            // preview; subject is the conversation's normalized
+                            // base subject (without the Re:/Fwd: churn).
+                            let newest = group.messages.last().cloned().unwrap_or_else(|| group.messages[0].clone());
+                            let root_id = group.root_id;
+                            let count = group.count;
+                            let unread = group.unread_count > 0;
+                            // Distinct senders across the conversation, newest
+                            // first, for the row's sender label.
+                            let mut seen = std::collections::HashSet::new();
+                            let mut senders: Vec<String> = Vec::new();
+                            for m in group.messages.iter().rev() {
+                                let name = m.from.to_string();
+                                if seen.insert(name.clone()) {
+                                    senders.push(name);
+                                }
+                            }
+                            let sender_label = if senders.len() > 1 {
+                                format!("{} +{}", senders[0], senders.len() - 1)
+                            } else {
+                                senders.first().cloned().unwrap_or_default()
+                            };
+                            let subj = newest.title.clone();
+                            let preview = newest.content.clone();
+                            let time_short = format_time_short(newest.time);
+                            // The .ft-thread-group row mirrors .msg-card so a
+                            // conversation and a single-message row sit flush in
+                            // the list; the .ft-count badge is the only addition
+                            // and is suppressed for one-message threads.
+                            let mut classes = String::from("ft-thread-group");
+                            if unread { classes.push_str(" unread"); }
+                            if Some(root_id) == selected_thread_root { classes.push_str(" selected"); }
                             rsx! {
                                 article {
                                     class: "{classes}",
-                                    id: "email-inbox-accessor-{id}",
-                                    "data-testid": "{card_testid}",
-                                    "data-msg-id": "{id}",
-                                    onclick: move |_| { menu_selection.write().open_email(id); },
-                                    div { class: "msg-row1",
-                                        span { class: "msg-sender", "{from}" }
+                                    id: "email-inbox-accessor-{root_id}",
+                                    "data-testid": testid::FM_THREAD_GROUP,
+                                    "data-msg-card-testid": "{card_testid}",
+                                    "data-msg-id": "{root_id}",
+                                    "data-thread-count": "{count}",
+                                    onclick: move |_| { menu_selection.write().open_thread(root_id); },
+                                    div { class: "ft-group-row1",
+                                        span { class: "ft-group-people", "{sender_label}" }
                                         if in_quarantine {
                                             span { class: "badge badge-failed", "unverified" }
                                         }
                                         span {
-                                            class: "msg-time",
+                                            class: "ft-group-time",
                                             "data-testid": testid::FM_MSG_TIME,
                                             "{time_short}"
                                         }
                                     }
-                                    div { class: "msg-subj", "{title}" }
-                                    div { class: "msg-prev", "{preview}" }
+                                    div { class: "ft-group-subjwrap",
+                                        div { class: "ft-group-subj", "{subj}" }
+                                        if count > 1 {
+                                            span { class: "ft-count", "{count}" }
+                                        }
+                                    }
+                                    div { class: "ft-group-prev", "{preview}" }
                                 }
                             }
                         })
@@ -1993,8 +2640,13 @@ fn DetailPanel() -> Element {
     let user = use_context::<Signal<User>>();
     let folder = menu_selection.read().folder();
     let selected_id = menu_selection.read().email();
+    let selected_thread_root = menu_selection.read().thread_root();
     let selected_sent_id = menu_selection.read().sent_id().map(str::to_string);
     let selected_archived_id = menu_selection.read().archived_id();
+    // Subscribe to address-book mutations so re-grouping picks up freshly
+    // imported contacts (verification can move a sender Inbox↔Quarantine).
+    let ab_gen_ctx = use_context::<AddressBookGen>();
+    let _ab_gen = ab_gen_ctx.0.read();
     let view = inbox.read();
     let emails = view.messages.borrow();
     let selected = selected_id.and_then(|id| emails.iter().find(|m| m.id == id).cloned());
@@ -2003,7 +2655,37 @@ fn DetailPanel() -> Element {
     // Quarantine rows are ordinary inbox Messages keyed by id, so they open
     // through the same OpenMessage path as the Inbox.
     if matches!(folder, menu::Folder::Inbox | menu::Folder::Quarantine) {
+        // #270: a conversation was opened from the grouped list — render the
+        // whole thread (Nested or Compact per the inbox setting). Resolve the
+        // group by `root_id` over the same filtered population the list builds
+        // so the row and the detail agree.
+        if let Some(root_id) = selected_thread_root {
+            let active_alias = user
+                .read()
+                .logged_id()
+                .map(|id| id.alias.to_string())
+                .unwrap_or_default();
+            let pop = visible_inbox_messages(&emails, &active_alias, folder, "");
+            let group = threads::group_into_threads(&pop)
+                .into_iter()
+                .find(|g| g.root_id == root_id);
+            return match group {
+                Some(group) => rsx! { ThreadDetail { group } },
+                // The conversation evaporated (every member archived/deleted
+                // while it was open) — fall back to the empty hint.
+                None => rsx! {
+                    section { class: "detail-col",
+                        div { class: "empty",
+                            div { class: "empty-glyph", "✉" }
+                            div { class: "empty-hint", "Select a message" }
+                        }
+                    }
+                },
+            };
+        }
         if let Some(msg) = selected {
+            // Single message opened directly (e.g. via deep-link / search
+            // result) — keep the existing single-message detail.
             rsx! { OpenMessage { msg } }
         } else {
             let hint = if matches!(folder, menu::Folder::Quarantine) {
@@ -2079,13 +2761,522 @@ fn DetailPanel() -> Element {
     }
 }
 
-/// Quote `body` as plain-text reply/forward block (each line prefixed with
-/// "> "). Mirrors the Drafts/compose-sheet's plain-text body model.
-fn quote_body(body: &str) -> String {
+/// #270: the specific parent line surfaced as the reply's collapsible
+/// "in reply to" chip (`ComposePrefill.quoted_excerpt`). Replaces the old
+/// "> "-prefixed plain-text quote-body hack — replies now start with an
+/// empty body and carry the structured excerpt instead. Returns the first
+/// non-empty line of the parent body trimmed; `None` for an empty body.
+fn reply_excerpt(body: &str) -> Option<String> {
     body.lines()
-        .map(|l| format!("> {l}"))
-        .collect::<Vec<_>>()
-        .join("\n")
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .map(str::to_string)
+}
+
+/// #270: map a message's three-valued verification to the `.ft-pill` class
+/// suffix + label used in the threaded views. Mirrors the `verif-badge`
+/// mapping in `OpenMessage` but in the compact pill vocabulary the design
+/// uses (`known` / `unknown` / `unsigned`).
+fn thread_pill(m: &Message) -> (&'static str, &'static str) {
+    use crate::inbox::VerificationState;
+    match m.verification_state() {
+        VerificationState::VerifiedKnown => ("ft-pill known", "verified"),
+        VerificationState::VerifiedUnknown => ("ft-pill unknown", "signed"),
+        VerificationState::Unverified => ("ft-pill unsigned", "unsigned"),
+    }
+}
+
+/// #270: build the reply prefill for continuing a conversation from a
+/// specific message in the thread. Mints a fresh `thread_id` only when the
+/// parent lacks one (legacy), links `in_reply_to` to the parent, and carries
+/// the parent's first body line as the structured `quoted_excerpt`.
+fn thread_reply_prefill(m: &Message) -> menu::ComposePrefill {
+    menu::ComposePrefill {
+        to: m.from.to_string(),
+        subject: format!("Re: {}", m.title),
+        body: String::new(),
+        draft_id: None,
+        thread_id: Some(
+            m.thread_id
+                .clone()
+                .unwrap_or_else(crate::local_state::new_thread_id),
+        ),
+        in_reply_to: Some(m.id.to_string()),
+        quoted_excerpt: reply_excerpt(&m.content),
+    }
+}
+
+/// #270: the threaded detail pane. Renders an entire `ThreadGroup` as either
+/// the Nested indentation tree or the Compact accordion, chosen by the
+/// Settings → Inbox `thread_view` preference. Opening a thread marks all of
+/// its messages read (same persistence path as `OpenMessage`, applied to the
+/// whole set). The bottom reply dock continues the conversation from the
+/// newest message.
+#[component]
+fn ThreadDetail(group: crate::app::threads::ThreadGroup) -> Element {
+    let mut menu_selection = use_context::<Signal<menu::MenuSelection>>();
+    let client = crate::api::WEB_API_SENDER.get().unwrap();
+    let mut inbox = use_context::<Signal<InboxView>>();
+    let inbox_data = use_context::<InboxesData>();
+    let user = use_context::<Signal<User>>();
+    // Re-render the badges when the address book changes (#134).
+    let ab_gen_ctx = use_context::<AddressBookGen>();
+    let _ab_gen = ab_gen_ctx.0.read();
+
+    let thread_view = crate::local_state::global_settings().inbox.thread_view;
+
+    // Mark every message in the conversation read — opening a thread reads it
+    // (#270). Mirrors the single-message path in `OpenMessage`: flip the
+    // in-memory flag AND persist a kept snapshot + delegate write per unread
+    // member.
+    let unread_ids: Vec<u64> = group
+        .messages
+        .iter()
+        .filter(|m| !m.read)
+        .map(|m| m.id)
+        .collect();
+    if !unread_ids.is_empty() {
+        let result = inbox
+            .write()
+            .mark_as_read(client.clone(), &unread_ids, inbox_data)
+            .unwrap();
+        DELAYED_ACTIONS.with(|queue| {
+            queue.borrow_mut().push(result);
+        });
+        let alias = user
+            .read()
+            .logged_id()
+            .map(|id| id.alias.to_string())
+            .unwrap_or_default();
+        if !alias.is_empty() {
+            for m in group.messages.iter().filter(|m| !m.read) {
+                let kept = mail_local_state::KeptMessage {
+                    from: m.from.to_string(),
+                    title: m.title.to_string(),
+                    content: m.content.to_string(),
+                    kept_at: chrono::Utc::now().timestamp_millis(),
+                    sent_at: Some(m.time.timestamp_millis()),
+                    sender_vk: m.sender_vk.clone(),
+                    signature_valid: m.signature_valid,
+                };
+                crate::local_state::local_mark_read(&alias, m.id, kept.clone());
+                #[cfg(feature = "use-node")]
+                {
+                    let mut client_clone = client.clone();
+                    let alias_for_send = alias.clone();
+                    let mid = m.id;
+                    spawn(async move {
+                        if let Err(e) = crate::local_state::mark_read(
+                            &mut client_clone,
+                            alias_for_send,
+                            mid,
+                            kept,
+                        )
+                        .await
+                        {
+                            crate::log::local_state_failure("mark thread message read", e);
+                        }
+                    });
+                }
+            }
+        }
+    }
+
+    // Header: normalized subject, facepile of distinct senders, meta line.
+    let newest = group
+        .messages
+        .last()
+        .cloned()
+        .unwrap_or_else(|| group.messages[0].clone());
+    let subject = newest.title.clone();
+    let msg_count = group.count;
+    let mut seen = std::collections::HashSet::new();
+    let mut participants: Vec<String> = Vec::new();
+    for m in &group.messages {
+        let name = m.from.to_string();
+        if seen.insert(name.clone()) {
+            participants.push(name);
+        }
+    }
+    let participant_count = participants.len();
+    // Up to four avatars in the facepile; the rest fold into the count.
+    let facepile: Vec<String> = participants
+        .iter()
+        .take(4)
+        .map(|p| p.chars().next().unwrap_or('·').to_string())
+        .collect();
+
+    // Reply continues from the newest message in the conversation.
+    let reply_prefill = thread_reply_prefill(&newest);
+
+    rsx! {
+        section { class: "detail-col",
+            div {
+                class: "ft-thread-container",
+                "data-testid": testid::FM_THREAD_CONTAINER,
+                "data-thread-view": match thread_view {
+                    mail_local_state::ThreadView::Nested => "nested",
+                    mail_local_state::ThreadView::Compact => "compact",
+                },
+                div { class: "ft-head",
+                    div { class: "ft-subj", "{subject}" }
+                    div { class: "ft-subj-meta",
+                        span { class: "ft-facepile",
+                            {facepile.into_iter().map(|initial| rsx! {
+                                span { class: "ft-face sm", "{initial}" }
+                            })}
+                        }
+                        span { "{msg_count} messages" }
+                        span { "·" }
+                        span { "{participant_count} participants" }
+                    }
+                }
+                div { class: "detail-scroll",
+                    match thread_view {
+                        mail_local_state::ThreadView::Nested => rsx! { ThreadNested { group: group.clone() } },
+                        mail_local_state::ThreadView::Compact => rsx! { ThreadCompact { group: group.clone() } },
+                    }
+                }
+                div { class: "toolbar",
+                    div { class: "spacer" }
+                    button {
+                        class: "btn btn-primary",
+                        "data-testid": testid::FM_REPLY,
+                        onclick: move |_| {
+                            menu_selection.write().open_draft(reply_prefill.clone());
+                        },
+                        "Reply"
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// #270 BLOCKER-1: per-message action cluster shared by the Nested and Compact
+/// threaded views. Restores the affordances the old single-message
+/// `OpenMessage` carried — Reply, Archive, Delete, and (only for a
+/// verified-but-unknown sender) Add-to-address-book — onto every row of a
+/// thread, routing through the same shared `archive_message` /
+/// `delete_message` / `add_sender_to_address_book` helpers `OpenMessage` now
+/// uses so behavior can't drift.
+///
+/// The buttons reuse the existing `FM_REPLY` / `FM_ARCHIVE` / `FM_DELETE` /
+/// `FM_ADD_TO_AB` testids; they repeat once per row, so a Playwright spec
+/// targets a specific message's actions by first scoping to the row via its
+/// `data-msg-id` on the enclosing `FM_THREAD_ROW`, then the action testid
+/// within (e.g. `row.getByTestId(testids.fmArchive)`).
+///
+/// `thread_total` is the conversation's current member count; after an
+/// archive/delete the helper stays in the thread while `thread_total - 1 > 0`
+/// and otherwise returns to the inbox list.
+#[component]
+fn ThreadRowActions(msg: Message, root_id: u64, thread_total: usize) -> Element {
+    let menu_selection = use_context::<Signal<menu::MenuSelection>>();
+    let client = crate::api::WEB_API_SENDER.get().unwrap();
+    let inbox = use_context::<Signal<InboxView>>();
+    let inbox_data = use_context::<InboxesData>();
+    let import_contact = use_context::<Signal<crate::app::login::ImportContact>>();
+    let user = use_context::<Signal<User>>();
+    let alias = user
+        .read()
+        .logged_id()
+        .map(|id| id.alias.to_string())
+        .unwrap_or_default();
+
+    let id = msg.id;
+    let reply_prefill = thread_reply_prefill(&msg);
+    let show_add_to_ab = matches!(
+        msg.verification_state(),
+        crate::inbox::VerificationState::VerifiedUnknown
+    );
+    let add_to_ab_vk = msg.sender_vk.clone();
+    // After removing this row the thread keeps `thread_total - 1` members.
+    let remaining = thread_total.saturating_sub(1);
+    let post = PostMessageAction::LeaveThread {
+        root_id,
+        removed_id: id,
+        remaining,
+    };
+
+    let archive_client = client.clone();
+    let archive_alias = alias.clone();
+    let archive_msg = msg.clone();
+    let delete_client = client.clone();
+    let delete_alias = alias.clone();
+
+    let mut menu_for_reply = menu_selection;
+
+    // Returns just the buttons (a fragment); each view wraps them in its own
+    // positioning container (`.ft-nest-actions` hover cluster in Nested, the
+    // `.ft-cz-actions` footer row in Compact).
+    rsx! {
+        button {
+            class: "ft-act",
+            "data-testid": testid::FM_REPLY,
+            title: "Reply",
+            onclick: move |_| {
+                menu_for_reply.write().open_draft(reply_prefill.clone());
+            },
+            "Reply"
+        }
+        if show_add_to_ab {
+            button {
+                class: "ft-act",
+                "data-testid": testid::FM_ADD_TO_AB,
+                title: "Add sender to address book",
+                onclick: move |_| {
+                    add_sender_to_address_book(import_contact, &add_to_ab_vk);
+                },
+                "Add to address book"
+            }
+        }
+        button {
+            class: "ft-act",
+            "data-testid": testid::FM_ARCHIVE,
+            title: "Archive",
+            onclick: move |_| {
+                archive_message(
+                    inbox,
+                    menu_selection,
+                    archive_client.clone(),
+                    inbox_data,
+                    &archive_alias,
+                    &archive_msg,
+                    post,
+                );
+            },
+            "Archive"
+        }
+        button {
+            class: "ft-act",
+            "data-testid": testid::FM_DELETE,
+            title: "Delete",
+            onclick: move |_| {
+                delete_message(
+                    inbox,
+                    menu_selection,
+                    delete_client.clone(),
+                    inbox_data,
+                    &delete_alias,
+                    id,
+                    post,
+                );
+            },
+            "Delete"
+        }
+    }
+}
+
+/// #270 Nested view: indentation tree. Depth comes from the `in_reply_to`
+/// chain (`threads::depth_map`, capped at `MAX_THREAD_DEPTH`); connector
+/// rails + per-depth margins are pure CSS (`.ft-nest-msg.depth-N`). Each
+/// message carries a collapsible "in reply to" quote chip when it has a
+/// `quoted_excerpt`. Default expansion: the leaf of each branch (a message
+/// that is no one's parent) is expanded; interior nodes collapse. Any node
+/// can be toggled.
+#[component]
+fn ThreadNested(group: crate::app::threads::ThreadGroup) -> Element {
+    let depths = threads::depth_map(&group);
+    // A message is a leaf if no other message replies to it. Leaves default
+    // to expanded (#270).
+    let has_child: std::collections::HashSet<String> = group
+        .messages
+        .iter()
+        .filter_map(|m| m.in_reply_to.clone())
+        .collect();
+    let active_alias = use_context::<Signal<User>>()
+        .read()
+        .logged_id()
+        .map(|id| id.alias.to_string())
+        .unwrap_or_default();
+
+    // Per-message body + quote expansion state, keyed by message id. Seeded so
+    // leaves are expanded; interior nodes collapsed.
+    let init_open: std::collections::HashMap<u64, bool> = group
+        .messages
+        .iter()
+        .map(|m| (m.id, !has_child.contains(&m.id.to_string())))
+        .collect();
+    let open = use_signal(|| init_open);
+    let quote_open = use_signal(std::collections::HashMap::<u64, bool>::new);
+
+    let root_id = group.root_id;
+    let thread_total = group.count;
+    let messages = group.messages;
+    rsx! {
+        div { class: "ft-nest",
+            {messages.into_iter().map(move |m| {
+                let id = m.id;
+                let depth = depths.get(&id).copied().unwrap_or(0);
+                let is_me = m.from.as_ref() == active_alias && !active_alias.is_empty();
+                let mut classes = format!("ft-nest-msg depth-{depth}");
+                if is_me { classes.push_str(" is-me"); }
+                let (pill_class, pill_label) = thread_pill(&m);
+                let from = m.from.clone();
+                let from_initial = from.chars().next().unwrap_or('·').to_string();
+                let time_short = format_time_short(m.time);
+                let quote = m.quoted_excerpt.clone();
+                let content = m.content.clone();
+                let body_open = open.read().get(&id).copied().unwrap_or(true);
+                let q_open = quote_open.read().get(&id).copied().unwrap_or(false);
+                let mut open_sig = open;
+                let mut quote_sig = quote_open;
+                let actions_msg = m.clone();
+                rsx! {
+                    div {
+                        class: "{classes}",
+                        "data-testid": testid::FM_THREAD_ROW,
+                        "data-msg-id": "{id}",
+                        div { class: "ft-nest-inner",
+                            div { class: "ft-nest-actions",
+                                ThreadRowActions {
+                                    msg: actions_msg,
+                                    root_id,
+                                    thread_total,
+                                }
+                            }
+                            div { class: "ft-msg-head",
+                                div { class: "ft-face sm", "{from_initial}" }
+                                div { class: "ft-msg-id",
+                                    div { class: "ft-msg-namerow",
+                                        span { class: "ft-msg-name", "{from}" }
+                                        span { class: "{pill_class}", "{pill_label}" }
+                                    }
+                                }
+                                span {
+                                    class: "ft-msg-time",
+                                    style: "cursor:pointer",
+                                    "data-testid": testid::FM_THREAD_EXPAND,
+                                    onclick: move |_| {
+                                        let cur = open_sig.read().get(&id).copied().unwrap_or(true);
+                                        open_sig.write().insert(id, !cur);
+                                    },
+                                    "{time_short}"
+                                }
+                            }
+                            if let Some(q) = quote {
+                                div { class: "ft-quote",
+                                    button {
+                                        class: "ft-quote-toggle",
+                                        onclick: move |_| {
+                                            let cur = quote_sig.read().get(&id).copied().unwrap_or(false);
+                                            quote_sig.write().insert(id, !cur);
+                                        },
+                                        span {
+                                            class: if q_open { "ft-caret open" } else { "ft-caret" },
+                                            "›"
+                                        }
+                                        if q_open { "hide quoted" } else { "in reply to" }
+                                    }
+                                    if q_open {
+                                        div { class: "ft-quote-text", "“{q}”" }
+                                    }
+                                }
+                            }
+                            if body_open {
+                                div { class: "ft-body-text", style: "margin-top:10px",
+                                    {content.split("\n\n").map(|para| rsx! { p { "{para}" } })}
+                                }
+                            }
+                        }
+                    }
+                }
+            })}
+        }
+    }
+}
+
+/// #270 Compact view: power-user accordion. One tight row per message
+/// (caret, avatar, name, snippet, key-pill, time). Default expansion: the
+/// newest message only. Click a row to toggle; the expanded row reveals the
+/// body and a `.ft-cz-tokenline` footer (sender + signature scheme).
+#[component]
+fn ThreadCompact(group: crate::app::threads::ThreadGroup) -> Element {
+    let newest_id = group.messages.last().map(|m| m.id).unwrap_or(0);
+    let init_open: std::collections::HashMap<u64, bool> = group
+        .messages
+        .iter()
+        .map(|m| (m.id, m.id == newest_id))
+        .collect();
+    let open = use_signal(|| init_open);
+
+    let root_id = group.root_id;
+    let thread_total = group.count;
+    let messages = group.messages;
+    rsx! {
+        div { class: "ft-compact",
+            {messages.into_iter().map(move |m| {
+                let id = m.id;
+                let is_open = open.read().get(&id).copied().unwrap_or(false);
+                let (pill_class, pill_label) = thread_pill(&m);
+                let from = m.from.clone();
+                let from_initial = from.chars().next().unwrap_or('·').to_string();
+                let time_short = format_time_short(m.time);
+                let snippet = reply_excerpt(&m.content).unwrap_or_default();
+                let content = m.content.clone();
+                let actions_msg = m.clone();
+                // Sender fingerprint short-form for the token footer line.
+                let footer_id = if m.sender_vk.is_empty() {
+                    "unsigned".to_string()
+                } else {
+                    let words = address_book::fingerprint_words(&m.sender_vk, &m.sender_vk);
+                    format!("{}-{}-{}", words[0], words[1], words[2])
+                };
+                let mut row_classes = String::from("ft-cz-row");
+                if is_open { row_classes.push_str(" is-open"); }
+                if !m.read { row_classes.push_str(" unread"); }
+                let mut open_sig = open;
+                rsx! {
+                    div {
+                        class: "ft-cz-msg",
+                        "data-testid": testid::FM_THREAD_ROW,
+                        "data-msg-id": "{id}",
+                        button {
+                            class: "{row_classes}",
+                            "data-testid": testid::FM_THREAD_EXPAND,
+                            onclick: move |_| {
+                                let cur = open_sig.read().get(&id).copied().unwrap_or(false);
+                                open_sig.write().insert(id, !cur);
+                            },
+                            span {
+                                class: if is_open { "ft-caret open" } else { "ft-caret" },
+                                "›"
+                            }
+                            span { class: "ft-face sm", "{from_initial}" }
+                            span { class: "ft-cz-name", "{from}" }
+                            if !is_open {
+                                span { class: "ft-cz-snippet", "{snippet}" }
+                            }
+                            span { class: "ft-cz-meta",
+                                span { class: "{pill_class}", "{pill_label}" }
+                                span { "{time_short}" }
+                            }
+                        }
+                        if is_open {
+                            div { class: "ft-cz-open",
+                                div { class: "ft-body-text",
+                                    {content.split("\n\n").map(|para| rsx! { p { "{para}" } })}
+                                }
+                                div { class: "ft-cz-tokenline",
+                                    span { "{footer_id}" }
+                                    span { class: "ft-dot" }
+                                    span { "ml-dsa-65" }
+                                }
+                                div { class: "ft-cz-actions",
+                                    ThreadRowActions {
+                                        msg: actions_msg,
+                                        root_id,
+                                        thread_total,
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            })}
+        }
+    }
 }
 
 #[component]
@@ -2100,7 +3291,16 @@ fn OpenArchivedMessage(msg_id: u64, msg: mail_local_state::ArchivedMessage) -> E
     let content = msg.content.clone();
     let reply_to = from.clone();
     let reply_subj = format!("Re: {title}");
-    let reply_body = quote_body(&content);
+    // #270: reply continues the thread. Carry the parent's thread_id
+    // (minting a fresh one for legacy rows that predate threading), the
+    // parent message id, and the parent's first body line as the excerpt.
+    let reply_thread_id = Some(
+        msg.thread_id
+            .clone()
+            .unwrap_or_else(crate::local_state::new_thread_id),
+    );
+    let reply_in_reply_to = Some(msg_id.to_string());
+    let reply_excerpt = reply_excerpt(&content);
     let time_full = chrono::DateTime::from_timestamp_millis(msg.archived_at)
         .map(format_time_full)
         .unwrap_or_default();
@@ -2137,8 +3337,13 @@ fn OpenArchivedMessage(msg_id: u64, msg: mail_local_state::ArchivedMessage) -> E
                         menu_selection.write().open_draft(menu::ComposePrefill {
                             to: reply_to.to_string(),
                             subject: reply_subj.clone(),
-                            body: reply_body.clone(),
+                            // #270: fresh body; the parent line rides along as
+                            // the structured quoted_excerpt instead.
+                            body: String::new(),
                             draft_id: None,
+                            thread_id: reply_thread_id.clone(),
+                            in_reply_to: reply_in_reply_to.clone(),
+                            quoted_excerpt: reply_excerpt.clone(),
                         });
                     },
                     "Reply"
@@ -2212,19 +3417,38 @@ fn OpenSentMessage(msg: mail_local_state::SentMessage) -> Element {
         mail_local_state::DeliveryState::Failed => "failed",
     };
 
-    // Reply: same recipient, "Re: <subject>", original quoted.
+    // #270: reply continues the conversation this sent message belonged to,
+    // minting a thread id for legacy rows that predate threading. The sent
+    // row has no numeric inbox id, so `in_reply_to` stays None (it isn't a
+    // node in the recipient's inbox tree); the parent's first line rides as
+    // the structured excerpt and the body starts fresh.
+    let reply_thread_id = Some(
+        msg.thread_id
+            .clone()
+            .unwrap_or_else(crate::local_state::new_thread_id),
+    );
+    let reply_excerpt = reply_excerpt(&body);
+    // Reply: same recipient, "Re: <subject>", thread continues.
     let reply_prefill = menu::ComposePrefill {
         to: to.clone(),
         subject: format!("Re: {subject}"),
-        body: quote_body(&body),
+        body: String::new(),
         draft_id: None,
+        thread_id: reply_thread_id,
+        in_reply_to: None,
+        quoted_excerpt: reply_excerpt,
     };
-    // Forward: blank recipient, "Fwd: <subject>", body quoted.
+    // Forward: blank recipient, "Fwd: <subject>". A forward starts a NEW
+    // conversation (#270) — no thread_id, no in_reply_to. The original body
+    // is kept verbatim so the forwarder can frame it.
     let forward_prefill = menu::ComposePrefill {
         to: String::new(),
         subject: format!("Fwd: {subject}"),
-        body: quote_body(&body),
+        body: body.clone(),
         draft_id: None,
+        thread_id: None,
+        in_reply_to: None,
+        quoted_excerpt: None,
     };
     // Resend: identical fields, fresh draft id (a new send → new Sent row).
     let resend_prefill = menu::ComposePrefill {
@@ -2232,6 +3456,9 @@ fn OpenSentMessage(msg: mail_local_state::SentMessage) -> Element {
         subject: subject.clone(),
         body: body.clone(),
         draft_id: None,
+        thread_id: None,
+        in_reply_to: None,
+        quoted_excerpt: None,
     };
 
     rsx! {
@@ -2301,6 +3528,165 @@ fn OpenSentMessage(msg: mail_local_state::SentMessage) -> Element {
     }
 }
 
+/// Where to navigate after a per-message archive / delete (#270 BLOCKER-1).
+///
+/// `OpenMessage` (single-message detail) always returns to the inbox list.
+/// The threaded views stay inside the open thread as long as it still has
+/// members AND the removed message wasn't the thread root — `DetailPanel`
+/// resolves the open thread by `root_id`, and removing the root message
+/// shifts the surviving group's `root_id` to the next-oldest member, so a
+/// re-open of the stale `root_id` would resolve to nothing. In that case we
+/// fall back to the inbox list rather than stranding the user on an empty
+/// detail pane.
+#[derive(Clone, Copy)]
+enum PostMessageAction {
+    /// Single-message detail: always go back to the inbox list.
+    ToInboxList,
+    /// Thread row. `root_id` is the thread's current root, `removed_id` the
+    /// message being archived/deleted, `remaining` the member count after
+    /// removal. Stay in the thread only when members remain AND the root
+    /// survives; otherwise return to the inbox list.
+    LeaveThread {
+        root_id: u64,
+        removed_id: u64,
+        remaining: usize,
+    },
+}
+
+impl PostMessageAction {
+    /// Apply the navigation to `menu_selection` after the inbox mutation.
+    fn apply(self, menu_selection: &mut Signal<menu::MenuSelection>) {
+        match self {
+            PostMessageAction::ToInboxList => {
+                menu_selection.write().at_inbox_list();
+            }
+            PostMessageAction::LeaveThread {
+                root_id,
+                removed_id,
+                remaining,
+            } => {
+                if remaining == 0 || removed_id == root_id {
+                    menu_selection.write().at_inbox_list();
+                } else {
+                    // Re-open the (now smaller) thread so the detail pane
+                    // re-resolves the group and re-renders without the removed
+                    // row. `open_thread` is idempotent on the same root_id.
+                    menu_selection.write().open_thread(root_id);
+                }
+            }
+        }
+    }
+}
+
+/// Shared Archive logic (#270 BLOCKER-1): stash a local copy of the message in
+/// mail-local-state (preserving threading metadata so a later Reply continues
+/// the conversation), then remove it from the inbox contract. Used by both the
+/// single-message `OpenMessage` toolbar and the per-message action clusters in
+/// the threaded views, so the behavior can't drift between them.
+#[allow(clippy::too_many_arguments)]
+fn archive_message(
+    mut inbox: Signal<InboxView>,
+    mut menu_selection: Signal<menu::MenuSelection>,
+    client: WebApiRequestClient,
+    inbox_data: InboxesData,
+    alias: &str,
+    msg: &Message,
+    post: PostMessageAction,
+) {
+    let id = msg.id;
+    let archived = mail_local_state::ArchivedMessage {
+        from: msg.from.to_string(),
+        title: msg.title.to_string(),
+        content: msg.content.to_string(),
+        archived_at: chrono::Utc::now().timestamp_millis(),
+        thread_id: msg.thread_id.clone(),
+        in_reply_to: msg.in_reply_to.clone(),
+        quoted_excerpt: msg.quoted_excerpt.clone(),
+    };
+    if !alias.is_empty() {
+        crate::local_state::local_archive_message(alias, id, archived.clone());
+        #[cfg(feature = "use-node")]
+        {
+            let mut c = client.clone();
+            let a = alias.to_string();
+            let ar = archived.clone();
+            spawn(async move {
+                if let Err(e) = crate::local_state::archive_message(&mut c, a, id, ar).await {
+                    crate::log::local_state_failure("archive message", e);
+                }
+            });
+        }
+    }
+    let result = inbox
+        .write()
+        .remove_messages(client, &[id], inbox_data)
+        .unwrap();
+    DELAYED_ACTIONS.with(|queue| {
+        queue.borrow_mut().push(result);
+    });
+    post.apply(&mut menu_selection);
+    crate::toast::push_toast("Archived", crate::toast::ToastLevel::Success);
+}
+
+/// Shared Delete logic (#270 BLOCKER-1): drop any local kept/archived copies
+/// AND remove the message from the inbox contract — distinct from Archive
+/// because it leaves no trace. Shared between `OpenMessage` and the threaded
+/// per-message action clusters.
+fn delete_message(
+    mut inbox: Signal<InboxView>,
+    mut menu_selection: Signal<menu::MenuSelection>,
+    client: WebApiRequestClient,
+    inbox_data: InboxesData,
+    alias: &str,
+    id: u64,
+    post: PostMessageAction,
+) {
+    if !alias.is_empty() {
+        crate::local_state::local_delete_message(alias, id);
+        #[cfg(feature = "use-node")]
+        {
+            let mut c = client.clone();
+            let a = alias.to_string();
+            spawn(async move {
+                if let Err(e) = crate::local_state::delete_message(&mut c, a, id).await {
+                    crate::log::error(format!("delete_message failed: {e}"), None);
+                }
+            });
+        }
+    }
+    let result = inbox
+        .write()
+        .remove_messages(client, &[id], inbox_data)
+        .unwrap();
+    DELAYED_ACTIONS.with(|queue| {
+        queue.borrow_mut().push(result);
+    });
+    post.apply(&mut menu_selection);
+    crate::toast::push_toast("Deleted", crate::toast::ToastLevel::Success);
+}
+
+/// Shared Add-to-address-book logic (#270 BLOCKER-1): derive the sender's bs58
+/// inbox address from their `sender_vk` and open the import modal pre-seeded
+/// with it (#272). Shared between `OpenMessage` and the threaded per-message
+/// clusters. Only meaningful when the sender is verified-but-unknown — callers
+/// gate on `VerificationState::VerifiedUnknown` before exposing the affordance.
+fn add_sender_to_address_book(
+    mut import_contact: Signal<crate::app::login::ImportContact>,
+    sender_vk: &[u8],
+) {
+    match crate::inbox::inbox_address_bs58_from_vk_bytes(sender_vk) {
+        Ok(addr) => {
+            *import_contact.write() = crate::app::login::ImportContact::opened_with(addr);
+        }
+        Err(e) => {
+            crate::toast::push_toast(
+                format!("Could not derive sender address: {e}"),
+                crate::toast::ToastLevel::Error,
+            );
+        }
+    }
+}
+
 #[component]
 fn OpenMessage(msg: Message) -> Element {
     let mut menu_selection = use_context::<Signal<menu::MenuSelection>>();
@@ -2308,7 +3694,7 @@ fn OpenMessage(msg: Message) -> Element {
     let mut inbox = use_context::<Signal<InboxView>>();
     let inbox_data = use_context::<InboxesData>();
     let user = use_context::<Signal<User>>();
-    let mut import_contact = use_context::<Signal<crate::app::login::ImportContact>>();
+    let import_contact = use_context::<Signal<crate::app::login::ImportContact>>();
     let email_id = [msg.id];
 
     let result = inbox
@@ -2369,7 +3755,18 @@ fn OpenMessage(msg: Message) -> Element {
     let id = msg.id;
     let reply_to = from.clone();
     let reply_subj = format!("Re: {}", title);
-    let reply_body = quote_body(&content);
+    // #270: reply continues this message's thread (minting a fresh thread id
+    // for legacy messages without one), links to this message via
+    // `in_reply_to`, and carries the parent's first line as the structured
+    // quoted_excerpt. The body starts fresh — the old "> "-prefix quote hack
+    // is gone.
+    let reply_thread_id = Some(
+        msg.thread_id
+            .clone()
+            .unwrap_or_else(crate::local_state::new_thread_id),
+    );
+    let reply_in_reply_to = Some(id.to_string());
+    let reply_excerpt = reply_excerpt(&content);
     let time_full = format_time_full(msg.time);
     // Subscribe to address-book mutations so the verification badge
     // updates immediately when the user imports the sender's contact
@@ -2406,19 +3803,20 @@ fn OpenMessage(msg: Message) -> Element {
     );
     let add_to_ab_vk = msg.sender_vk.clone();
 
-    let archive_client = client.clone();
-    let archive_inbox_data = inbox_data;
-    let delete_client = client.clone();
-    let delete_inbox_data = inbox_data;
     let active_alias = user
         .read()
         .logged_id()
         .map(|id| id.alias.to_string())
         .unwrap_or_default();
+    // #270 BLOCKER-1: the single-message detail's Archive / Delete reuse the
+    // shared `archive_message` / `delete_message` helpers (same code the
+    // threaded per-message rows call). A clone of the message carries the
+    // threading metadata into the helper so a reply launched from Archive
+    // continues the conversation.
+    let archive_client = client.clone();
+    let archive_msg = msg.clone();
     let archive_alias = active_alias.clone();
-    let archive_from = msg.from.to_string();
-    let archive_title = msg.title.to_string();
-    let archive_content = msg.content.to_string();
+    let delete_client = client.clone();
     let delete_alias = active_alias.clone();
 
     rsx! {
@@ -2458,24 +3856,7 @@ fn OpenMessage(msg: Message) -> Element {
                         class: "btn btn-secondary",
                         "data-testid": testid::FM_ADD_TO_AB,
                         onclick: move |_| {
-                            // #272: derive the sender's bs58 inbox address
-                            // from the message's `sender_vk` and open the
-                            // import modal pre-seeded with it. The modal's
-                            // effect runs the same parse + `FetchContactKeys`
-                            // it would for a manual paste, so the contact's
-                            // ML-KEM ek + tier policy are pulled live.
-                            match crate::inbox::inbox_address_bs58_from_vk_bytes(&add_to_ab_vk) {
-                                Ok(addr) => {
-                                    *import_contact.write() =
-                                        crate::app::login::ImportContact::opened_with(addr);
-                                }
-                                Err(e) => {
-                                    crate::toast::push_toast(
-                                        format!("Could not derive sender address: {e}"),
-                                        crate::toast::ToastLevel::Error,
-                                    );
-                                }
-                            }
+                            add_sender_to_address_book(import_contact, &add_to_ab_vk);
                         },
                         "Add to address book"
                     }
@@ -2487,8 +3868,11 @@ fn OpenMessage(msg: Message) -> Element {
                         menu_selection.write().open_draft(menu::ComposePrefill {
                             to: reply_to.to_string(),
                             subject: reply_subj.clone(),
-                            body: reply_body.clone(),
+                            body: String::new(),
                             draft_id: None,
+                            thread_id: reply_thread_id.clone(),
+                            in_reply_to: reply_in_reply_to.clone(),
+                            quoted_excerpt: reply_excerpt.clone(),
                         });
                     },
                     "Reply"
@@ -2497,44 +3881,15 @@ fn OpenMessage(msg: Message) -> Element {
                     class: "btn btn-secondary",
                     "data-testid": testid::FM_ARCHIVE,
                     onclick: move |_| {
-                        // Archive: stash a local copy in mail-local-state then
-                        // remove from the inbox contract. Phase 1 of #47c —
-                        // re-PUT-on-unarchive lands in #60.
-                        let archived = mail_local_state::ArchivedMessage {
-                            from: archive_from.clone(),
-                            title: archive_title.clone(),
-                            content: archive_content.clone(),
-                            archived_at: chrono::Utc::now().timestamp_millis(),
-                        };
-                        if !archive_alias.is_empty() {
-                            crate::local_state::local_archive_message(
-                                &archive_alias,
-                                id,
-                                archived.clone(),
-                            );
-                            #[cfg(feature = "use-node")]
-                            {
-                                let mut c = archive_client.clone();
-                                let a = archive_alias.clone();
-                                let ar = archived.clone();
-                                spawn(async move {
-                                    if let Err(e) = crate::local_state::archive_message(
-                                        &mut c, a, id, ar,
-                                    )
-                                    .await
-                                    {
-                                        crate::log::local_state_failure("archive message", e);
-                                    }
-                                });
-                            }
-                        }
-                        let result = inbox
-                            .write()
-                            .remove_messages(archive_client.clone(), &[id], archive_inbox_data)
-                            .unwrap();
-                        DELAYED_ACTIONS.with(|queue| { queue.borrow_mut().push(result); });
-                        menu_selection.write().at_inbox_list();
-                        crate::toast::push_toast("Archived", crate::toast::ToastLevel::Success);
+                        archive_message(
+                            inbox,
+                            menu_selection,
+                            archive_client.clone(),
+                            inbox_data,
+                            &archive_alias,
+                            &archive_msg,
+                            PostMessageAction::ToInboxList,
+                        );
                     },
                     "Archive"
                 }
@@ -2542,36 +3897,15 @@ fn OpenMessage(msg: Message) -> Element {
                     class: "btn btn-secondary",
                     "data-testid": testid::FM_DELETE,
                     onclick: move |_| {
-                        // Delete: drop any local kept/archived copies AND
-                        // remove from the inbox contract. Distinct from
-                        // Archive because it leaves no trace.
-                        if !delete_alias.is_empty() {
-                            crate::local_state::local_delete_message(&delete_alias, id);
-                            #[cfg(feature = "use-node")]
-                            {
-                                let mut c = delete_client.clone();
-                                let a = delete_alias.clone();
-                                spawn(async move {
-                                    if let Err(e) = crate::local_state::delete_message(
-                                        &mut c, a, id,
-                                    )
-                                    .await
-                                    {
-                                        crate::log::error(
-                                            format!("delete_message failed: {e}"),
-                                            None,
-                                        );
-                                    }
-                                });
-                            }
-                        }
-                        let result = inbox
-                            .write()
-                            .remove_messages(delete_client.clone(), &[id], delete_inbox_data)
-                            .unwrap();
-                        DELAYED_ACTIONS.with(|queue| { queue.borrow_mut().push(result); });
-                        menu_selection.write().at_inbox_list();
-                        crate::toast::push_toast("Deleted", crate::toast::ToastLevel::Success);
+                        delete_message(
+                            inbox,
+                            menu_selection,
+                            delete_client.clone(),
+                            inbox_data,
+                            &delete_alias,
+                            id,
+                            PostMessageAction::ToInboxList,
+                        );
                     },
                     "Delete"
                 }
@@ -2629,11 +3963,20 @@ fn ComposeSheet() -> Element {
         .as_ref()
         .and_then(|p| p.draft_id.clone())
         .unwrap_or_else(crate::local_state::new_draft_id);
+    // #270: threading linkage carried from the reply/forward prefill into
+    // the compose form's signals so it survives onto the wire `send_message`
+    // + the local Sent snapshot. None for a brand-new compose.
+    let initial_thread_id = prefill.as_ref().and_then(|p| p.thread_id.clone());
+    let initial_in_reply_to = prefill.as_ref().and_then(|p| p.in_reply_to.clone());
+    let initial_quoted_excerpt = prefill.as_ref().and_then(|p| p.quoted_excerpt.clone());
 
     let mut to = use_signal(|| initial_to.clone());
     let mut title = use_signal(|| initial_subj.clone());
     let mut content = use_signal(|| initial_body.clone());
     let draft_id = use_signal(|| initial_draft_id.clone());
+    let thread_id = use_signal(|| initial_thread_id.clone());
+    let in_reply_to = use_signal(|| initial_in_reply_to.clone());
+    let quoted_excerpt = use_signal(|| initial_quoted_excerpt.clone());
     // Autocomplete state: index of the highlighted suggestion (-1 = none).
     let mut ac_highlighted: Signal<i32> = use_signal(|| -1i32);
     // Whether the autocomplete dropdown is open. Closed by default; opened
@@ -2666,11 +4009,17 @@ fn ComposeSheet() -> Element {
         }
         let id = draft_id.read().clone();
         let updated_at = chrono::Utc::now().timestamp_millis();
+        // #270: persist the conversation linkage so a reply that's autosaved
+        // and reopened keeps the SAME thread_id rather than minting a fresh
+        // one. None for a brand-new compose.
         let draft = mail_local_state::Draft {
             to: to_v,
             subject: subj_v,
             body: body_v,
             updated_at,
+            thread_id: thread_id.read().clone(),
+            in_reply_to: in_reply_to.read().clone(),
+            quoted_excerpt: quoted_excerpt.read().clone(),
         };
         crate::local_state::local_save_draft(&alias_for_save, &id, draft.clone());
 
@@ -2874,6 +4223,20 @@ fn ComposeSheet() -> Element {
         let sent_id = crate::local_state::new_sent_id();
         let sender_alias = alias.clone();
 
+        // #270: resolve the outgoing message's threading linkage. A reply
+        // carries the parent's thread_id (already minted at reply time); a
+        // brand-new compose mints a fresh thread_id so the conversation is
+        // groupable from the first message. `in_reply_to` / `quoted_excerpt`
+        // are non-None only for replies.
+        let send_thread_id = Some(
+            thread_id
+                .read()
+                .clone()
+                .unwrap_or_else(crate::local_state::new_thread_id),
+        );
+        let send_in_reply_to = in_reply_to.read().clone();
+        let send_quoted_excerpt = quoted_excerpt.read().clone();
+
         // Build ack_meta only when we have an inbox_key in hand (use-node
         // path). The future will use it to flip Pending → Failed if
         // start_sending errors out post-enqueue.
@@ -2895,6 +4258,9 @@ fn ComposeSheet() -> Element {
             recipient.inbox_wasm_hash.clone(),
             &title_val,
             &content_val,
+            send_thread_id.clone(),
+            send_in_reply_to.clone(),
+            send_quoted_excerpt.clone(),
             ack_meta,
         ) {
             Ok(futs) => {
@@ -2940,6 +4306,11 @@ fn ComposeSheet() -> Element {
                 body: content_val.clone(),
                 sent_at: chrono::Utc::now().timestamp_millis(),
                 delivery_state: initial_state,
+                // #270: mirror the threading linkage onto the local Sent row
+                // so the Sent folder + reply-from-Sent stay in the thread.
+                thread_id: send_thread_id.clone(),
+                in_reply_to: send_in_reply_to.clone(),
+                quoted_excerpt: send_quoted_excerpt.clone(),
             };
             crate::local_state::local_save_sent(&sender_alias, &sent_id, sent.clone());
 
@@ -3294,6 +4665,9 @@ mod folder_count_tests {
             sender_vk: Vec::new(),
             signature_valid: false,
             assignment_hash: [0u8; 32],
+            thread_id: None,
+            in_reply_to: None,
+            quoted_excerpt: None,
         }
     }
 
@@ -3340,6 +4714,7 @@ mod folder_count_tests {
                 title: "t".into(),
                 content: "c".into(),
                 archived_at: 0,
+                ..Default::default()
             },
         );
         assert_eq!(
@@ -3526,6 +4901,9 @@ mod quarantine_tests {
             sender_vk: vk,
             signature_valid: true,
             assignment_hash: [0u8; 32],
+            thread_id: None,
+            in_reply_to: None,
+            quoted_excerpt: None,
         }
     }
 
@@ -3565,6 +4943,9 @@ mod inbox_sort_tests {
             sender_vk: Vec::new(),
             signature_valid: false,
             assignment_hash,
+            thread_id: None,
+            in_reply_to: None,
+            quoted_excerpt: None,
         }
     }
 
@@ -3723,6 +5104,9 @@ mod merge_inbox_list_tests {
             sender_vk: Vec::new(),
             signature_valid: false,
             assignment_hash: [0u8; 32],
+            thread_id: None,
+            in_reply_to: None,
+            quoted_excerpt: None,
         }
     }
 
@@ -3795,6 +5179,7 @@ mod folder_sort_tests {
                 subject: "s".to_string(),
                 body: "b".to_string(),
                 updated_at,
+                ..Default::default()
             },
         )
     }
@@ -3810,6 +5195,7 @@ mod folder_sort_tests {
                 body: "b".to_string(),
                 sent_at,
                 delivery_state: mail_local_state::DeliveryState::Delivered,
+                ..Default::default()
             },
         )
     }
@@ -3822,6 +5208,7 @@ mod folder_sort_tests {
                 title: "t".to_string(),
                 content: "c".to_string(),
                 archived_at,
+                ..Default::default()
             },
         )
     }

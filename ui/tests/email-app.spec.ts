@@ -104,24 +104,40 @@ test.describe("Inbox view", () => {
     await expect(page.getByText("Your weekly digest")).toBeVisible();
   });
 
-  test("opens an email and shows content", async ({ page }) => {
+  test("opens a conversation and shows the threaded detail", async ({
+    page,
+  }) => {
     await page.goto("/");
     await waitForApp(page);
     await selectIdentity(page, "address1");
 
-    // Click the first email (id=0).
+    // #270: inbox rows are now thread GROUPS, and the accessor id is the
+    // thread root_id (ui/src/app.rs ~2602). accessor-0 is the seeded
+    // "Lunch tomorrow?" conversation (ids 0/1/2), not a single message.
     await page.locator("#email-inbox-accessor-0").click();
 
-    // Detail panel renders the subject + body.
-    await expect(page.locator(".detail-subj")).toContainText(
-      "Welcome to the offline preview",
-    );
-    await expect(page.locator("#email-content-0")).toContainText("Lorem ipsum");
+    // Opening shows the threaded detail container (ThreadDetail), not the
+    // single-message OpenMessage panel.
+    const container = page.locator('[data-testid="fm-thread-container"]');
+    await container.waitFor({ state: "attached", timeout: 10_000 });
+    // Header subject carries the conversation subject.
+    await expect(container.locator(".ft-subj")).toContainText("Lunch tomorrow?");
+    // All three members render as thread rows.
+    await expect(
+      container.locator('[data-testid="fm-thread-row"]'),
+    ).toHaveCount(3);
+    // Default Nested view expands the leaf (newest, id=2) so its body shows.
+    await expect(container).toContainText("Perfect, see you there!");
 
-    // Toolbar actions are visible.
-    await expect(page.locator('[data-testid="fm-reply"]')).toBeVisible();
-    await expect(page.locator('[data-testid="fm-archive"]')).toBeVisible();
-    await expect(page.locator('[data-testid="fm-delete"]')).toBeVisible();
+    // Per-message affordances are present on the rows (Reply + Archive +
+    // Delete restored onto every thread row in #270 BLOCKER-1). The footer
+    // also carries a conversation-level Reply, so assert "at least one".
+    const leafRow = container.locator(
+      '[data-testid="fm-thread-row"][data-msg-id="2"]',
+    );
+    await expect(leafRow.locator('[data-testid="fm-reply"]')).toHaveCount(1);
+    await expect(leafRow.locator('[data-testid="fm-archive"]')).toHaveCount(1);
+    await expect(leafRow.locator('[data-testid="fm-delete"]')).toHaveCount(1);
   });
 
   test("non-inbox folders show empty state", async ({ page }) => {
@@ -182,8 +198,11 @@ test.describe("Quarantine folder", () => {
 
     await toggleQuarantine(page);
 
-    // Quarantine folder now appears with a count badge (2 unread of the 3
-    // seeded example messages — "Your weekly digest" is pre-read).
+    // Quarantine folder now appears with a count badge = the UNREAD count over
+    // unverified rows (folder_count, ui/src/app.rs ~1881). The #270 seed has 5
+    // messages, all unsigned/unknown, of which 2 are unread (id=2 "Perfect, see
+    // you there!" and id=3 "Welcome to the offline preview"); the rest are
+    // pre-read. So the badge is "2".
     const quarantineBtn = page.locator('[data-testid="fm-folder-quarantine"]');
     await expect(quarantineBtn).toBeVisible();
     await expect(quarantineBtn.locator(".count")).toHaveText("2");
@@ -192,12 +211,23 @@ test.describe("Quarantine folder", () => {
     await page.locator('[data-testid="fm-folder-inbox"]').click();
     await expect(page.getByText("Lunch tomorrow?")).toHaveCount(0);
 
-    // The diverted rows render in Quarantine with an `unverified` badge.
+    // The diverted rows render in Quarantine. #270 unified the inbox/quarantine
+    // list onto the grouped `fm-thread-group` row (the old `fm-quarantine-card`
+    // testid is now only carried as the `data-msg-card-testid` ATTRIBUTE, not a
+    // real testid). The 5 unverified messages group into 3 rows: the seeded
+    // "Lunch tomorrow?" conversation + the 2 standalone messages.
     await quarantineBtn.click();
-    const cards = page.locator('[data-testid="fm-quarantine-card"]');
-    await expect(cards).toHaveCount(3);
+    const rows = page.locator('[data-testid="fm-thread-group"]');
+    await expect(rows).toHaveCount(3);
+    // The rows carry the quarantine card testid as an attribute marker.
+    await expect(
+      page.locator(
+        '[data-testid="fm-thread-group"][data-msg-card-testid="fm-quarantine-card"]',
+      ),
+    ).toHaveCount(3);
     await expect(page.getByText("Lunch tomorrow?")).toBeVisible();
-    await expect(cards.first().locator(".badge")).toContainText("unverified");
+    // Each quarantined row shows the `unverified` badge.
+    await expect(rows.first().locator(".badge")).toContainText("unverified");
   });
 });
 
@@ -370,14 +400,20 @@ test.describe("Multi-turn cross-inbox messaging", () => {
     // The reply from address2 should now appear.
     await expect(page.getByText("Reply from address2")).toBeVisible();
 
-    // Open it and verify content.
+    // Open it and verify content. The fresh reply has no thread_id, so it is a
+    // standalone single-message conversation (#270): clicking the row opens the
+    // threaded detail with one message. Subject lands in `.ft-subj`; the body
+    // is the (default-expanded, sole-leaf) `.ft-body-text`.
     await page.getByText("Reply from address2").click();
-    await expect(page.locator(".detail-subj")).toContainText(
+    const container = page.locator('[data-testid="fm-thread-container"]');
+    await container.waitFor({ state: "attached", timeout: 10_000 });
+    await expect(container.locator(".ft-subj")).toContainText(
       "Reply from address2",
     );
-    await expect(page.locator(".detail-body")).toContainText(
-      "Got your message, here is my reply.",
-    );
+    await expect(
+      container.locator('[data-testid="fm-thread-row"]'),
+    ).toHaveCount(1);
+    await expect(container).toContainText("Got your message, here is my reply.");
   });
 });
 
@@ -980,11 +1016,15 @@ test.describe("Sent folder (#47b)", () => {
     await expect(sheet.locator('input[placeholder="subject"]')).toHaveValue(
       "Re: original",
     );
-    // #274B: reply now quotes the original body (each line prefixed with "> ").
-    await expect(sheet.locator("textarea.sheet-textarea")).toHaveValue("> hello");
+    // #270: the reply rework replaced the "> "-prefixed body quote with a
+    // STRUCTURED quoted_excerpt that rides on the outgoing message (not the
+    // textarea). The body now starts EMPTY — assert no legacy "> " hack.
+    const body = await sheet.locator("textarea.sheet-textarea").inputValue();
+    expect(body).toBe("");
+    expect(body).not.toContain("> ");
   });
 
-  test("Forward prefills blank recipient + Fwd: subject + quoted body", async ({
+  test("Forward prefills blank recipient + Fwd: subject + verbatim body", async ({
     page,
   }) => {
     await page.goto("/");
@@ -1010,8 +1050,11 @@ test.describe("Sent folder (#47b)", () => {
     await expect(sheet.locator('input[placeholder="subject"]')).toHaveValue(
       "Fwd: fwd-me",
     );
+    // #270: a forward starts a NEW conversation and keeps the original body
+    // VERBATIM (ui/src/app.rs::OpenSentMessage forward_prefill) — no more
+    // "> "-prefixed quoting.
     await expect(sheet.locator("textarea.sheet-textarea")).toHaveValue(
-      "> first line\n> second line",
+      "first line\nsecond line",
     );
   });
 
@@ -1164,19 +1207,28 @@ test.describe("Archive folder (#47c)", () => {
     await waitForApp(page);
     await selectIdentity(page, "address1");
 
-    // Open the first inbox message (id=0 = Welcome to the offline preview).
-    await page.locator("#email-inbox-accessor-0").click();
-    await expect(page.locator(".detail-subj")).toContainText(
+    // #270: inbox rows are thread groups. Use the STANDALONE row id=3
+    // ("Welcome to the offline preview") — a one-message conversation —
+    // so archiving its sole row empties the conversation and removes the
+    // top-level row, matching the original single-message semantics.
+    await page.locator("#email-inbox-accessor-3").click();
+    const container = page.locator('[data-testid="fm-thread-container"]');
+    await container.waitFor({ state: "attached", timeout: 10_000 });
+    await expect(container.locator(".ft-subj")).toContainText(
       "Welcome to the offline preview",
     );
 
-    // Archive it. Mobile viewports stack columns and the list-col can
-    // intercept the toolbar's pointer events; dispatchEvent fires the
-    // synthetic click directly on the button.
-    await page.locator('[data-testid="fm-archive"]').dispatchEvent("click");
+    // Archive the single thread row via its per-row Archive action (#270
+    // BLOCKER-1). dispatchEvent fires the synthetic click directly so a
+    // stacked list-col on mobile viewports can't intercept it.
+    const row = container.locator(
+      '[data-testid="fm-thread-row"][data-msg-id="3"]',
+    );
+    await row.locator('[data-testid="fm-archive"]').dispatchEvent("click");
 
-    // Inbox no longer shows the row.
-    await expect(page.locator("#email-inbox-accessor-0")).toHaveCount(0);
+    // Inbox no longer shows the row (removing the sole member empties the
+    // conversation → returns to the list, group row gone).
+    await expect(page.locator("#email-inbox-accessor-3")).toHaveCount(0);
 
     // Archive folder shows the row.
     await page.locator('[data-testid="fm-folder-archive"]').click();
@@ -1204,10 +1256,16 @@ test.describe("Archive folder (#47c)", () => {
     await waitForApp(page);
     await selectIdentity(page, "address1");
 
-    await page.locator("#email-inbox-accessor-1").click();
-    await page.locator('[data-testid="fm-delete"]').dispatchEvent("click");
+    // Standalone row id=4 ("Your weekly digest") — delete its sole row.
+    await page.locator("#email-inbox-accessor-4").click();
+    const container = page.locator('[data-testid="fm-thread-container"]');
+    await container.waitFor({ state: "attached", timeout: 10_000 });
+    await container
+      .locator('[data-testid="fm-thread-row"][data-msg-id="4"]')
+      .locator('[data-testid="fm-delete"]')
+      .dispatchEvent("click");
 
-    await expect(page.locator("#email-inbox-accessor-1")).toHaveCount(0);
+    await expect(page.locator("#email-inbox-accessor-4")).toHaveCount(0);
 
     await page.locator('[data-testid="fm-folder-archive"]').click();
     await expect(page.locator('[data-testid="fm-archive-card"]')).toHaveCount(0);
@@ -1221,10 +1279,90 @@ test.describe("Archive folder (#47c)", () => {
     const archiveBtn = page.locator('[data-testid="fm-folder-archive"]');
     await expect(archiveBtn.locator(".count")).toHaveText("");
 
-    await page.locator("#email-inbox-accessor-2").click();
-    await page.locator('[data-testid="fm-archive"]').dispatchEvent("click");
+    // Archive the standalone "Your weekly digest" (id=4).
+    await page.locator("#email-inbox-accessor-4").click();
+    const container = page.locator('[data-testid="fm-thread-container"]');
+    await container.waitFor({ state: "attached", timeout: 10_000 });
+    await container
+      .locator('[data-testid="fm-thread-row"][data-msg-id="4"]')
+      .locator('[data-testid="fm-archive"]')
+      .dispatchEvent("click");
 
     await expect(archiveBtn.locator(".count")).toHaveText("1");
+  });
+
+  test("archiving one message in a conversation drops the thread count", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await waitForApp(page);
+    await selectIdentity(page, "address1");
+
+    // The seeded "Lunch tomorrow?" conversation (root_id=0) has 3 members.
+    const group = page
+      .locator('[data-testid="fm-thread-group"]')
+      .filter({ hasText: "Lunch tomorrow?" });
+    await expect(group.locator(".ft-count")).toHaveText("3");
+
+    await page.locator("#email-inbox-accessor-0").click();
+    const container = page.locator('[data-testid="fm-thread-container"]');
+    await container.waitFor({ state: "attached", timeout: 10_000 });
+    await expect(
+      container.locator('[data-testid="fm-thread-row"]'),
+    ).toHaveCount(3);
+
+    // Archive the leaf reply (id=2). It's NOT the root, and members remain,
+    // so the detail re-opens the now-smaller thread instead of bouncing to
+    // the list. The thread row count drops 3 → 2.
+    await container
+      .locator('[data-testid="fm-thread-row"][data-msg-id="2"]')
+      .locator('[data-testid="fm-archive"]')
+      .dispatchEvent("click");
+    await expect(
+      container.locator('[data-testid="fm-thread-row"]'),
+    ).toHaveCount(2);
+
+    // Back at the list the conversation's count badge has dropped to 2.
+    await expect(group.locator(".ft-count")).toHaveText("2");
+
+    // The archived reply landed in Archive.
+    await page.locator('[data-testid="fm-folder-archive"]').click();
+    await expect(
+      page.locator('[data-testid="fm-archive-card"]'),
+    ).toHaveCount(1);
+  });
+
+  test("deleting one message in a conversation drops the thread count", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await waitForApp(page);
+    await selectIdentity(page, "address1");
+
+    const group = page
+      .locator('[data-testid="fm-thread-group"]')
+      .filter({ hasText: "Lunch tomorrow?" });
+    await expect(group.locator(".ft-count")).toHaveText("3");
+
+    await page.locator("#email-inbox-accessor-0").click();
+    const container = page.locator('[data-testid="fm-thread-container"]');
+    await container.waitFor({ state: "attached", timeout: 10_000 });
+
+    // Delete the mid reply (id=1) — a non-root member; the thread stays open.
+    await container
+      .locator('[data-testid="fm-thread-row"][data-msg-id="1"]')
+      .locator('[data-testid="fm-delete"]')
+      .dispatchEvent("click");
+    await expect(
+      container.locator('[data-testid="fm-thread-row"]'),
+    ).toHaveCount(2);
+    await expect(group.locator(".ft-count")).toHaveText("2");
+
+    // Delete leaves no Archive trace.
+    await page.locator('[data-testid="fm-folder-archive"]').click();
+    await expect(
+      page.locator('[data-testid="fm-archive-card"]'),
+    ).toHaveCount(0);
   });
 
   test("Delete on archived row removes it from Archive too", async ({
@@ -1234,8 +1372,14 @@ test.describe("Archive folder (#47c)", () => {
     await waitForApp(page);
     await selectIdentity(page, "address1");
 
-    await page.locator("#email-inbox-accessor-0").click();
-    await page.locator('[data-testid="fm-archive"]').dispatchEvent("click");
+    // Archive the standalone "Welcome…" (id=3), then delete it in Archive.
+    await page.locator("#email-inbox-accessor-3").click();
+    const container = page.locator('[data-testid="fm-thread-container"]');
+    await container.waitFor({ state: "attached", timeout: 10_000 });
+    await container
+      .locator('[data-testid="fm-thread-row"][data-msg-id="3"]')
+      .locator('[data-testid="fm-archive"]')
+      .dispatchEvent("click");
 
     await page.locator('[data-testid="fm-folder-archive"]').click();
     await page.locator('[data-testid="fm-archive-card"]').first().click();
@@ -1252,46 +1396,66 @@ test.describe("Message timestamps (#49)", () => {
     await selectIdentity(page, "address1");
 
     const times = page.locator('[data-testid="fm-msg-time"]');
-    // address1 has 3 example-data messages (welcome / lunch / digest).
+    // #270: address1's 5 example messages collapse into 3 inbox rows (the
+    // "Lunch tomorrow?" conversation + 2 standalone), each row carrying one
+    // `fm-msg-time` on its `.ft-group-time`.
     await expect(times).toHaveCount(3);
     // First one (~15min ago) is rendered as `H:MM`, contains a colon.
     await expect(times.first()).toContainText(":");
 
-    // Newest-first sort: the welcome (id=0, 15min ago) ranks above the
-    // weekly digest (id=2, ~4 days ago). The card for id=0 must render
-    // before id=2 in the DOM.
+    // Newest-first sort over the grouped rows (`fm-thread-group`, keyed by
+    // root_id via data-msg-id). Each group sorts by its NEWEST member:
+    //   id=3 "Welcome…"        ~15min ago   (newest)
+    //   id=0 "Lunch…" thread   newest member id=2, ~26h ago
+    //   id=4 "Your weekly…"    ~4 days ago  (oldest)
+    // So the DOM order of root ids is 3, 0, 4.
     const idAttrs = await page
-      .locator('[data-testid="fm-msg-card"]')
+      .locator('[data-testid="fm-thread-group"]')
       .evaluateAll((els) => els.map((e) => e.getAttribute("data-msg-id")));
-    expect(idAttrs.indexOf("0")).toBeLessThan(idAttrs.indexOf("2"));
+    expect(idAttrs.indexOf("3")).toBeLessThan(idAttrs.indexOf("0"));
+    expect(idAttrs.indexOf("0")).toBeLessThan(idAttrs.indexOf("4"));
   });
 
-  test("detail header shows full timestamp", async ({ page }) => {
+  test("thread row shows a per-message timestamp", async ({ page }) => {
     await page.goto("/");
     await waitForApp(page);
     await selectIdentity(page, "address1");
 
-    await page.locator("#email-inbox-accessor-0").click();
+    // #270: the threaded detail has no single `fm-detail-time` header; each
+    // message row carries its own short timestamp (`.ft-msg-time`, which is
+    // also the Nested expand control `fm-thread-expand`). Open the recent
+    // standalone "Welcome…" (id=3, ~15min ago) — its short time is H:MM.
+    await page.locator("#email-inbox-accessor-3").click();
+    const container = page.locator('[data-testid="fm-thread-container"]');
+    await container.waitFor({ state: "attached", timeout: 10_000 });
 
-    const t = page.locator('[data-testid="fm-detail-time"]');
-    await expect(t).toHaveCount(1);
-    // 15 minutes ago → bucketed as "Today, H:MM".
-    await expect(t).toContainText(/^Today, \d{1,2}:\d{2}$/);
+    const rowTime = container
+      .locator('[data-testid="fm-thread-row"][data-msg-id="3"]')
+      .locator('[data-testid="fm-thread-expand"]');
+    await expect(rowTime).toHaveCount(1);
+    // Today → rendered as `H:MM`, so it contains a colon.
+    await expect(rowTime).toContainText(/\d{1,2}:\d{2}/);
   });
 });
 
 test.describe("Sender trust badge (#51)", () => {
-  test("detail header shows verified badge for incoming message", async ({ page }) => {
+  test("thread row shows a per-message trust pill for incoming message", async ({
+    page,
+  }) => {
     await page.goto("/");
     await waitForApp(page);
     await selectIdentity(page, "address1");
     await page.locator("#email-inbox-accessor-0").click();
 
-    // example-data messages are unsigned (no real send path), so they
-    // render as "unverified". The badge surface is what matters here.
-    const badge = page.locator('[data-testid="fm-detail-verif"]');
-    await expect(badge).toHaveCount(1);
-    await expect(badge).toContainText("unverified");
+    // #270: the threaded detail surfaces trust per message via the `.ft-pill`
+    // (ui/src/app.rs::thread_pill) instead of the single-message header's
+    // `fm-detail-verif`. example-data messages are unsigned (no real send
+    // path), so the pill reads "unsigned".
+    const container = page.locator('[data-testid="fm-thread-container"]');
+    await container.waitFor({ state: "attached", timeout: 10_000 });
+    const pills = container.locator(".ft-pill");
+    // Presence + content (the detail-col collapses to zero-size on mobile).
+    await expect(pills.first()).toContainText("unsigned");
   });
 
   test("compose sheet shows 'Sending as: <fingerprint>' label", async ({

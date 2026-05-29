@@ -697,6 +697,13 @@ pub(crate) fn new_sent_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
+/// Mint a fresh stable conversation id (#270). Used when a reply is the first
+/// message to thread a conversation that previously had no `thread_id` (legacy
+/// parent), and whenever a new outbound message starts a fresh conversation.
+pub(crate) fn new_thread_id() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -877,6 +884,7 @@ mod tests {
                 title: "read then archive".into(),
                 content: "body".into(),
                 archived_at: 1,
+                ..Default::default()
             },
         );
 
@@ -993,6 +1001,7 @@ mod tests {
                 title: "to archive".into(),
                 content: "body".into(),
                 archived_at: 1,
+                ..Default::default()
             },
         );
         assert!(is_archived("alice", 33), "archive recorded optimistically");
@@ -1075,6 +1084,7 @@ mod tests {
             subject: subject.into(),
             body: "body".into(),
             updated_at: 0,
+            ..Default::default()
         }
     }
 

@@ -20,9 +20,9 @@ manual gap by adding a test, flip status to `auto` and link the test.
 
 ## Suites
 
-- **offline** — `ui/tests/email-app.spec.ts`. `--features
-  example-data,no-sync`. No Freenet node. Run via `cargo make
-  test-ui-playwright`.
+- **offline** — `ui/tests/email-app.spec.ts` + `ui/tests/threads.spec.ts`
+  (#270). `--features example-data,no-sync`. No Freenet node. Run via
+  `cargo make test-ui-playwright`.
 - **iso** — `ui/tests/live-node.spec.ts`. Real `use-node` build against
   isolated 2-node net (`scripts/run-isolated-nodes.sh`). Run via `cargo
   make test-e2e-real-node`. Cross-node send tests gated on
@@ -74,6 +74,23 @@ manual gap by adding a test, flip status to `auto` and link the test.
 | Search filter | manual | Send 3 messages with distinct subjects, type substring in sidebar Search, only matching rows visible |
 | Quarantine unknown sender | manual | Toggle in Settings → Inbox, send from unknown sender, confirm a Quarantine folder appears with a count badge and the row lands there (not Inbox); verified senders stay in Inbox |
 | Hide unsigned (privacy pref) | manual | Toggle, deliver pre-#51 message, confirm hidden |
+
+### Threading (#270)
+
+Offline coverage lives in `ui/tests/threads.spec.ts`, driven by the
+seeded conversation in `ui/src/app.rs::load_example_messages` (thread
+"example-thread-0001", subject "Lunch tomorrow?", 3 messages + 2
+standalone). All rows below are `auto`.
+
+| Behavior | Status | Test / recipe |
+|---|---|---|
+| Inbox list collapses a back-and-forth into one row with a count badge; standalone rows stay separate | auto | offline (`threads.spec.ts`): `collapses a back-and-forth into one row with a count badge, standalone rows stay separate` |
+| Clicking a thread group opens the threaded detail container | auto | offline (`threads.spec.ts`): `clicking the thread group opens the threaded detail container` |
+| Nested view default-expands the last (leaf) message; collapsed nodes expand on click | auto | offline (`threads.spec.ts`): `default-expands the last message of the branch; collapsed nodes expand on click` |
+| Nested view "in reply to" quote chip toggles the quoted excerpt | auto | offline (`threads.spec.ts`): `the 'in reply to' quote chip toggles` |
+| Compact view default-expands only the newest message; clicking a row toggles it | auto | offline (`threads.spec.ts`): `default-expands only the newest message; clicking a row toggles it` |
+| Reply within a thread stays in the same thread (no new top-level row); compose has no legacy "> " quote hack | auto | offline (`threads.spec.ts`): `reply keeps the conversation in the same thread (no new top-level row); compose body has no '> ' quote hack` |
+| Thread grouping by thread_id / legacy subject+participant heuristic; depth capped at 4 | auto (rust) | `cargo test -p freenet-email-ui` — `app::thread_grouping_tests::*` (groups_by_thread_id, groups_legacy_by_heuristic_subject_and_participant, depth_computed_from_chain_and_capped, …) |
 
 ### Compose / send
 

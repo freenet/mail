@@ -545,6 +545,22 @@ pub(crate) struct DecryptedMessage {
     pub to: Vec<MlKemEncapsKey>,
     pub cc: Vec<String>,
     pub time: DateTime<Utc>,
+    /// Stable conversation id (#270). Shared by every message in a thread.
+    /// `None` for legacy messages sent before threading shipped — those
+    /// fall back to the heuristic subject+participant grouping. Minted as a
+    /// UUID v4 the first time a thread is started (see
+    /// `crate::local_state::new_thread_id`).
+    #[serde(default)]
+    pub thread_id: Option<String>,
+    /// Parent message id this is a reply to (#270). Drives the nested-view
+    /// depth calculation. `None` for thread roots and forwards.
+    #[serde(default)]
+    pub in_reply_to: Option<String>,
+    /// The specific parent line being replied to (#270), surfaced as a
+    /// collapsible "in reply to" chip. Replaces the old "> "-prefixed
+    /// quote-body hack. `None` for fresh sends / forwards.
+    #[serde(default)]
+    pub quoted_excerpt: Option<String>,
 }
 
 impl DecryptedMessage {
@@ -1332,6 +1348,46 @@ mod migration_logic_tests {
              append it only AFTER bumping to a new hash",
         );
     }
+
+    /// #270: a `DecryptedMessage` serialized before the threading fields
+    /// (`thread_id`, `in_reply_to`, `quoted_excerpt`) existed must still
+    /// deserialize, with all three defaulting to `None`. This is what
+    /// `#[serde(default)]` guarantees and is the load-bearing
+    /// backwards-compat claim — old inbox messages can't be lost or
+    /// fail to render after the threading bump.
+    #[test]
+    fn decrypted_message_missing_thread_fields_defaults_none() {
+        // Legacy plaintext: no thread_id / in_reply_to / quoted_excerpt.
+        let json = br#"{"title":"hi","content":"yo","from":"alice","to":[],"cc":[],"time":"2024-01-01T00:00:00Z"}"#;
+        let msg: DecryptedMessage =
+            serde_json::from_slice(json).expect("legacy DecryptedMessage should deserialise");
+        assert_eq!(msg.thread_id, None);
+        assert_eq!(msg.in_reply_to, None);
+        assert_eq!(msg.quoted_excerpt, None);
+        assert_eq!(msg.title, "hi");
+    }
+
+    /// #270: new threading fields round-trip through serde so a reply's
+    /// thread linkage survives the encrypt → store → decrypt path.
+    #[test]
+    fn decrypted_message_thread_fields_round_trip() {
+        let msg = DecryptedMessage {
+            title: "Re: hi".into(),
+            content: "reply body".into(),
+            from: "bob".into(),
+            to: vec![],
+            cc: vec![],
+            time: Utc::now(),
+            thread_id: Some("thread-xyz".into()),
+            in_reply_to: Some("42".into()),
+            quoted_excerpt: Some("the line being replied to".into()),
+        };
+        let bytes = serde_json::to_vec(&msg).unwrap();
+        let back: DecryptedMessage = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(back.thread_id.as_deref(), Some("thread-xyz"));
+        assert_eq!(back.in_reply_to.as_deref(), Some("42"));
+        assert_eq!(back.quoted_excerpt.as_deref(), Some("the line being replied to"));
+    }
 }
 
 #[cfg(test)]
@@ -1485,6 +1541,9 @@ mod tests {
             to: vec![],
             cc: vec![],
             time: Utc::now(),
+            thread_id: None,
+            in_reply_to: None,
+            quoted_excerpt: None,
         };
         let plaintext = serde_json::to_vec(&msg).unwrap();
         let ciphertext = ml_kem_encrypt(alice_dk.encapsulation_key(), &plaintext).unwrap();
@@ -1512,6 +1571,9 @@ mod tests {
                 to: vec![],
                 cc: vec![],
                 time: Utc::now(),
+                thread_id: None,
+                in_reply_to: None,
+                quoted_excerpt: None,
             };
             let pt = serde_json::to_vec(&msg).unwrap();
             StoredMessage {

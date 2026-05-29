@@ -44,6 +44,13 @@
 
       --unread: #d97706;
 
+      /* Trust-state accents — signed-but-unknown (amber) and unsigned/forged
+         (red). Referenced by detail.css verif-badge and thread.css ft-pill
+         (#270). Previously only existed as var() fallbacks; promoted to real
+         tokens so dark mode adapts. */
+      --caution: #a6731f;
+      --warn: #a32f2f;
+
       position: fixed;
       inset: 0;
       display: flex;
@@ -98,6 +105,8 @@
     --amber-bg: rgba(217, 119, 6, 0.12);
     --amber-border: rgba(251, 191, 36, 0.3);
     --amber-ink: #fbbf24;
+    --caution: #d6a44e;
+    --warn: #e06c6c;
   }
 
   @media (prefers-color-scheme: dark) {
@@ -124,6 +133,8 @@
       --amber-bg: rgba(217, 119, 6, 0.12);
       --amber-border: rgba(251, 191, 36, 0.3);
       --amber-ink: #fbbf24;
+      --caution: #d6a44e;
+      --warn: #e06c6c;
     }
   }
 

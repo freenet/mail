@@ -17,7 +17,7 @@ use dioxus::prelude::*;
 use mail_local_state::IdentityAftPrefs;
 use mail_local_state::{
     Density, FontSize, GlobalSettings, IdentityPrivacyPrefs, IdentitySettings, InboxSettings,
-    PermissionDecision, Theme,
+    PermissionDecision, Theme, ThreadView,
 };
 
 use crate::app::User;
@@ -1190,7 +1190,17 @@ fn ScrInbox() -> Element {
     let g = use_global_settings();
     let drafts_in_inbox = g.inbox.drafts_in_inbox;
     let quarantine_unknown = g.inbox.quarantine_unknown;
+    // #270: how a collapsed conversation expands in the detail pane.
+    let thread_view_value = match g.inbox.thread_view {
+        ThreadView::Nested => "nested",
+        ThreadView::Compact => "compact",
+    };
 
+    // #270: thread-view picker follows the FontSize <select> pattern from
+    // ScrAppearance — onchange maps the string value back to the enum and
+    // persists the whole GlobalSettings snapshot. Clone before the toggle
+    // builder moves `g`.
+    let g_thread_view = g.clone();
     let mk_global_toggle = move |mutate: fn(&mut InboxSettings)| {
         let g = g.clone();
         move |_| {
@@ -1201,6 +1211,14 @@ fn ScrInbox() -> Element {
     };
     let on_drafts_in_inbox = mk_global_toggle(|i| i.drafts_in_inbox = !i.drafts_in_inbox);
     let on_quarantine = mk_global_toggle(|i| i.quarantine_unknown = !i.quarantine_unknown);
+    let on_thread_view = move |ev: Event<FormData>| {
+        let mut next = g_thread_view.clone();
+        next.inbox.thread_view = match ev.value().as_str() {
+            "compact" => ThreadView::Compact,
+            _ => ThreadView::Nested,
+        };
+        local_state::persist_global_settings(next);
+    };
     rsx! {
         div { class: "fm-set-inner",
             p { class: "fm-set-lede", "How messages move through this inbox." }
@@ -1209,6 +1227,22 @@ fn ScrInbox() -> Element {
                     label: "Show drafts in Inbox",
                     help: "Off: drafts stay in Drafts only. On: surface them in Inbox above the unread band.",
                     control: rsx! { Toggle { on: drafts_in_inbox, ontoggle: on_drafts_in_inbox } },
+                }
+            }
+            Card { title: "Conversations",
+                SettingRow {
+                    label: "Thread view",
+                    help: "Nested: indent replies under their parent. Compact: a tight, scannable list.",
+                    control: rsx! {
+                        select {
+                            class: "fm-select",
+                            "data-testid": testid::FM_THREAD_VIEW_SELECT,
+                            value: "{thread_view_value}",
+                            onchange: on_thread_view,
+                            option { value: "nested", "nested" }
+                            option { value: "compact", "compact" }
+                        }
+                    },
                 }
             }
             Card {
