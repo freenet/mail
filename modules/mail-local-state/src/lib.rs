@@ -445,7 +445,7 @@ impl Default for AppearanceSettings {
 /// Quarantine folder (with its own sidebar entry + count badge) instead of
 /// the inbox. Defaulting it off keeps first-run UX friendly; users who want
 /// strict quarantine flip the toggle in Settings > Inbox.
-#[derive(Deserialize, Serialize, PartialEq, Eq, Debug, Clone, Default)]
+#[derive(Deserialize, Serialize, PartialEq, Eq, Debug, Clone)]
 pub struct InboxSettings {
     /// Show drafts inline in the inbox list rather than only in the
     /// Drafts folder.
@@ -453,11 +453,32 @@ pub struct InboxSettings {
     /// Move messages from senders not in the verified address book into a
     /// dedicated Quarantine folder instead of the inbox.
     pub quarantine_unknown: bool,
+    /// Master switch for conversation threading (#270). When `true`
+    /// (default), the inbox collapses back-and-forth messages into one row
+    /// per thread and the detail pane renders the `thread_view` style. When
+    /// `false`, the inbox shows a flat one-row-per-message list and threads
+    /// don't group. Toggled globally in Settings → Appearance; the
+    /// `thread_view` picker below only matters while this is on.
+    /// `#[serde(default = "default_true")]` so older persisted state (which
+    /// predates this field) loads with threading ON, preserving #270 behavior.
+    #[serde(default = "default_true")]
+    pub threading_enabled: bool,
     /// How a collapsed thread expands in the detail pane (#270): the
     /// indentation-tree `Nested` view (default) or the power-user `Compact`
     /// accordion. `#[serde(default)]` so older state loads as `Nested`.
     #[serde(default)]
     pub thread_view: ThreadView,
+}
+
+impl Default for InboxSettings {
+    fn default() -> Self {
+        Self {
+            drafts_in_inbox: false,
+            quarantine_unknown: false,
+            threading_enabled: true,
+            thread_view: ThreadView::default(),
+        }
+    }
 }
 
 /// Threaded-detail rendering style (#270). Selected in Settings → Inbox.
@@ -1245,6 +1266,7 @@ mod boundary_tests {
             inbox: InboxSettings {
                 drafts_in_inbox: true,
                 quarantine_unknown: false,
+                threading_enabled: false,
                 thread_view: ThreadView::Compact,
             },
             advanced: AdvancedSettings {

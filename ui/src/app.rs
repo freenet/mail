@@ -1261,6 +1261,23 @@ pub(crate) mod threads {
             .collect()
     }
 
+    /// Flat fallback when threading is disabled (Settings → Appearance,
+    /// `threading_enabled = false`). Each message becomes its own
+    /// single-member `ThreadGroup`, so the inbox renders one row per
+    /// message with no grouping and no count badge. Mirrors the
+    /// finalize step of `group_into_threads` for a 1-message bucket.
+    pub(crate) fn group_flat(msgs: &[Message]) -> Vec<ThreadGroup> {
+        msgs.iter()
+            .map(|m| ThreadGroup {
+                key: format!("flat:{}", m.id),
+                messages: vec![m.clone()],
+                root_id: m.id,
+                unread_count: usize::from(!m.read),
+                count: 1,
+            })
+            .collect()
+    }
+
     /// Deterministic display order for the grouped inbox list (#270; the
     /// #137/#233 determinism class).
     ///
@@ -2977,7 +2994,17 @@ fn MessageList() -> Element {
                         // newest member descending so the list stays "newest
                         // conversation on top". A single-message thread renders
                         // like an ordinary row (count badge suppressed).
-                        let mut groups = threads::group_into_threads(&visible);
+                        // When threading is disabled globally (Settings →
+                        // Appearance), fall back to a flat one-row-per-message
+                        // list via `group_flat` — `sort_cmp_group` still orders
+                        // newest-first.
+                        let threading_on =
+                            crate::local_state::global_settings().inbox.threading_enabled;
+                        let mut groups = if threading_on {
+                            threads::group_into_threads(&visible)
+                        } else {
+                            threads::group_flat(&visible)
+                        };
                         groups.sort_by(threads::sort_cmp_group);
                         groups.into_iter().map(move |group| {
                             // Newest member drives the row's sender / time /
