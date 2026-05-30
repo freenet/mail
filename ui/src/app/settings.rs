@@ -305,7 +305,7 @@ fn SettingRow(
 }
 
 #[component]
-fn Toggle(on: bool, ontoggle: EventHandler<()>) -> Element {
+fn Toggle(on: bool, ontoggle: EventHandler<()>, testid: Option<String>) -> Element {
     let cls = if on { "fm-toggle on" } else { "fm-toggle" };
     rsx! {
         button {
@@ -313,6 +313,7 @@ fn Toggle(on: bool, ontoggle: EventHandler<()>) -> Element {
             r#type: "button",
             role: "switch",
             "aria-checked": "{on}",
+            "data-testid": testid,
             onclick: move |_| ontoggle.call(()),
         }
     }
@@ -1398,6 +1399,7 @@ fn ScrContacts() -> Element {
 fn ScrAppearance() -> Element {
     let g = use_global_settings();
     let serif_subjects = g.appearance.serif_subjects;
+    let threading_enabled = g.inbox.threading_enabled;
     let theme_value = match g.appearance.theme {
         Theme::System => "auto",
         Theme::Light => "light",
@@ -1437,6 +1439,12 @@ fn ScrAppearance() -> Element {
     let on_serif = move |_| {
         let mut next = g_serif.clone();
         next.appearance.serif_subjects = !next.appearance.serif_subjects;
+        local_state::persist_global_settings(next);
+    };
+    let g_threading = g.clone();
+    let on_threading = move |_| {
+        let mut next = g_threading.clone();
+        next.inbox.threading_enabled = !next.inbox.threading_enabled;
         local_state::persist_global_settings(next);
     };
     let g_font_size = g.clone();
@@ -1500,6 +1508,19 @@ fn ScrAppearance() -> Element {
                     label: "Subjects in serif",
                     help: "Off: subjects render in DM Sans like the rest of the UI.",
                     control: rsx! { Toggle { on: serif_subjects, ontoggle: on_serif } },
+                }
+            }
+            Card { title: "Conversations",
+                SettingRow {
+                    label: "Group messages into threads",
+                    help: "On: collapse back-and-forth messages into one inbox row per conversation. Off: a flat list, one row per message. Pick Nested vs Compact under Settings → Inbox.",
+                    control: rsx! {
+                        Toggle {
+                            testid: testid::FM_THREADING_ENABLED_TOGGLE.to_string(),
+                            on: threading_enabled,
+                            ontoggle: on_threading,
+                        }
+                    },
                 }
             }
         }

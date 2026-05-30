@@ -41,6 +41,7 @@
   "fmThreadContainer": "fm-thread-container",
   "fmThreadGroup": "fm-thread-group",
   "fmThreadViewSelect": "fm-thread-view-select",
+  "fmThreadingEnabledToggle": "fm-threading-enabled-toggle",
   "fmStorybook": "fm-storybook",
   "fmToast": "fm-toast",
   "fmActionCreate": "fm-action-create",

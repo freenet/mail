@@ -85,6 +85,7 @@ standalone). All rows below are `auto`.
 | Behavior | Status | Test / recipe |
 |---|---|---|
 | Inbox list collapses a back-and-forth into one row with a count badge; standalone rows stay separate | auto | offline (`threads.spec.ts`): `collapses a back-and-forth into one row with a count badge, standalone rows stay separate` |
+| Global threading on/off toggle (Settings → Appearance → Conversations, `FM_THREADING_ENABLED_TOGGLE`). On (default): inbox groups threads. Off: flat one-row-per-message list (no `+N` sender suffix, no count badge); thread-view picker becomes inert. Persists across sessions via `GlobalSettings.inbox.threading_enabled` (`#[serde(default = "default_true")]`). | manual | offline (`cargo make dev-example`): open address1 inbox → "Re: Lunch tomorrow?" shows "Mary +1" + badge "3". Settings → Appearance → toggle "Group messages into threads" off → back to mailbox → expect 5 flat rows, no badge. Gated in `app.rs` via `threads::group_flat` vs `group_into_threads`. |
 | Clicking a thread group opens the threaded detail container | auto | offline (`threads.spec.ts`): `clicking the thread group opens the threaded detail container` |
 | Nested view default-expands the last (leaf) message; collapsed nodes expand on click | auto | offline (`threads.spec.ts`): `default-expands the last message of the branch; collapsed nodes expand on click` |
 | Nested view "in reply to" quote chip toggles the quoted excerpt | auto | offline (`threads.spec.ts`): `the 'in reply to' quote chip toggles` |

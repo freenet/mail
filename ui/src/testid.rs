@@ -81,6 +81,10 @@ pub(crate) const FM_THREAD_CONTAINER: &str = "fm-thread-container";
 pub(crate) const FM_THREAD_GROUP: &str = "fm-thread-group";
 /// The Settings → Inbox thread-view `<select>` (Nested / Compact).
 pub(crate) const FM_THREAD_VIEW_SELECT: &str = "fm-thread-view-select";
+/// The Settings → Appearance master threading on/off toggle. When off the
+/// inbox renders flat (one row per message) and the thread-view select is
+/// inert.
+pub(crate) const FM_THREADING_ENABLED_TOGGLE: &str = "fm-threading-enabled-toggle";
 /// The in-app storybook host wrapper (`example-data` builds only, gated on a
 /// `?story=` query param). Wraps a single thread component rendered from a
 /// hand-built `ThreadGroup` so the views can be screenshotted in isolation.
@@ -196,6 +200,10 @@ mod tests {
             ("fmThreadContainer", super::FM_THREAD_CONTAINER),
             ("fmThreadGroup", super::FM_THREAD_GROUP),
             ("fmThreadViewSelect", super::FM_THREAD_VIEW_SELECT),
+            (
+                "fmThreadingEnabledToggle",
+                super::FM_THREADING_ENABLED_TOGGLE,
+            ),
             ("fmStorybook", super::FM_STORYBOOK),
             ("fmToast", super::FM_TOAST),
             ("fmActionCreate", super::FM_ACTION_CREATE),
