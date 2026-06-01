@@ -695,16 +695,79 @@ impl InboxView {
                     in_reply_to: None,
                     quoted_excerpt: None,
                 },
+                // ── #287 seeded LEGACY two-party thread (no thread_id) ──────
+                // A real back-and-forth between "Carol" and this identity on
+                // one subject, but pre-#270 mail carries no shared thread_id.
+                // `group_into_threads` keys legacy mail by subject|SENDER, so
+                // today this renders as TWO single-sided groups instead of one
+                // conversation — exactly the "threaded view only shows one
+                // side" report (#287). Lives on UserId(1) so it doesn't
+                // disturb the address1 row-count assertions in threads.spec.ts.
+                Message {
+                    id: 2,
+                    from: "Carol".into(),
+                    title: "Picnic this weekend?".into(),
+                    content: "Want to join the picnic on Saturday?".into(),
+                    read: true,
+                    time: t(60 * 20),
+                    sender_vk: Vec::new(),
+                    signature_valid: false,
+                    assignment_hash: [0u8; 32],
+                    thread_id: None,
+                    in_reply_to: None,
+                    quoted_excerpt: None,
+                },
+                Message {
+                    id: 3,
+                    from: "address2".into(),
+                    title: "Re: Picnic this weekend?".into(),
+                    content: "Sounds great — what should I bring?".into(),
+                    read: true,
+                    time: t(60 * 19),
+                    sender_vk: Vec::new(),
+                    signature_valid: false,
+                    assignment_hash: [0u8; 32],
+                    thread_id: None,
+                    in_reply_to: None,
+                    quoted_excerpt: None,
+                },
+                Message {
+                    id: 4,
+                    from: "Carol".into(),
+                    title: "Re: Picnic this weekend?".into(),
+                    content: "Just drinks. See you at noon!".into(),
+                    read: false,
+                    time: t(60 * 18),
+                    sender_vk: Vec::new(),
+                    signature_valid: false,
+                    assignment_hash: [0u8; 32],
+                    thread_id: None,
+                    in_reply_to: None,
+                    quoted_excerpt: None,
+                },
             ]
         };
         // Append any messages sent to this identity via the mock in-memory
         // mailbox (composed in a previous session by another identity).
+        //
+        // The append id MUST NOT collide with the parent id that a delivered
+        // reply carries in its `in_reply_to`. A reply minted by the Reply
+        // button references its parent by the parent's id *in the sender's
+        // inbox*. The old `base_id = emails.len()` made the Nth delivered
+        // message land at the same id in EVERY inbox, so a reply whose parent
+        // sat at index N on the sender's side could land at id N on the
+        // recipient's side too — i.e. `msg.id == msg.in_reply_to`, a
+        // self-referential link that breaks thread grouping (the parent of a
+        // received reply isn't in the recipient's own inbox vec anyway). Make
+        // the append id space large and per-identity-disjoint so a delivered
+        // message can never reuse the id its own `in_reply_to` points at, and
+        // so it can't collide with the small seeded ids either.
         let alias = id.alias.to_string();
+        let inbox_id_offset = 1_000_000 + (id.id.0 as u64) * 10_000;
         MOCK_SENT_MESSAGES.with(|map| {
             if let Some(sent) = map.borrow_mut().remove(&alias) {
-                let base_id = emails.len() as u64;
                 for (i, mut msg) in sent.into_iter().enumerate() {
-                    msg.id = base_id + i as u64;
+                    msg.id = inbox_id_offset + i as u64;
                     emails.push(msg);
                 }
             }
@@ -1972,6 +2035,49 @@ mod thread_grouping_tests {
             std::cmp::Ordering::Equal,
             "distinct groups must compare as a strict order"
         );
+    }
+
+    /// #289 root cause (unit-level): the reply prefill addresses the To field
+    /// by the incoming message's *display sender* (`m.from`) — the alias the
+    /// SENDER chose — not by the sender's VK / inbox key. So when the
+    /// recipient imported that sender under a DIFFERENT local nickname, the
+    /// reply's To carries a string that won't resolve against their address
+    /// book, and the send is blocked until they hand-edit it.
+    ///
+    /// This pins the load-bearing claim. The full UI reply round-trip is
+    /// covered by the deferred iso test tracked in #291. Once #289 is fixed
+    /// (reply resolves by VK / inbox key, and/or the contact-add modal
+    /// pre-fills the nickname from the incoming sender), the prefill should
+    /// carry a stable handle rather than the raw sender alias and this
+    /// assertion will need to move to the new contract.
+    #[test]
+    fn reply_prefill_addresses_by_display_sender_not_vk_289() {
+        // A received message whose sender called themselves "alice-from-work".
+        let received = m(
+            7,
+            "alice-from-work",
+            "Project kickoff",
+            0,
+            true,
+            Some("thread-x"),
+            None,
+        );
+
+        let prefill = super::thread_reply_prefill(&received);
+
+        // The reply is addressed to the raw display-sender string. If the
+        // recipient imported alice under a different local label (e.g.
+        // "ally"), `address_book::lookup("alice-from-work")` misses and the
+        // reply can't be sent — exactly #289.
+        assert_eq!(
+            prefill.to, "alice-from-work",
+            "reply To is the incoming sender's display alias (#289 root cause); \
+             a recipient who imported them under a different nickname can't resolve it",
+        );
+        // Sanity: the prefill keeps the conversation in-thread and quotes the
+        // parent — only the recipient resolution is broken, not the threading.
+        assert_eq!(prefill.thread_id.as_deref(), Some("thread-x"));
+        assert_eq!(prefill.in_reply_to.as_deref(), Some("7"));
     }
 }
 

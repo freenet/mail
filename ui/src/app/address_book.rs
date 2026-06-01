@@ -1078,4 +1078,52 @@ mod tests {
             "is_contact_inbox_key on an empty address book must return false",
         );
     }
+
+    /// #289 (resolver half): a contact imported under a local label that
+    /// differs from the sender's own send-alias cannot be resolved by that
+    /// send-alias. The reply path (`thread_reply_prefill`, app.rs) addresses
+    /// the To field by the incoming message's display sender, so the alias-
+    /// keyed `lookup` misses and the reply is blocked — the user must hand-
+    /// edit To to their local label. This is the address-book half of the
+    /// root cause unit-tested by `reply_prefill_addresses_by_display_sender_not_vk_289`.
+    ///
+    /// The fix (resolve by VK / inbox key, and/or pre-fill the contact-add
+    /// nickname from the incoming sender) will make a by-send-alias resolution
+    /// succeed (or make the prefill carry a stable handle); update this test
+    /// to the new contract when #289 lands.
+    #[test]
+    fn lookup_misses_when_contact_imported_under_different_nickname_289() {
+        use ml_dsa::{KeyGen, MlDsa65, signature::Keypair as MlDsaKeypair};
+        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+
+        // Alice sends under her own alias "alice-from-work". The recipient
+        // imports her contact card but labels it locally as "ally".
+        let sk = MlDsa65::from_seed(&[42u8; 32].into());
+        let vk_bytes = MlDsaKeypair::verifying_key(&sk).encode().to_vec();
+        insert_contact(Contact {
+            local_alias: "ally".into(),
+            description: String::new(),
+            ml_dsa_vk_bytes: vk_bytes,
+            ml_kem_ek_bytes: vec![0u8; 1184],
+            required_tier: Tier::Day1,
+            max_age_secs: DEFAULT_MAX_AGE_SECS,
+            verified: true,
+            inbox_wasm_hash: None,
+        })
+        .unwrap();
+
+        // The reply To carries Alice's send-alias, not the local label.
+        assert!(
+            lookup("alice-from-work").is_none(),
+            "resolving by the sender's own alias must MISS when the contact \
+             was imported under a different local nickname (#289)",
+        );
+        // The same contact IS resolvable by the local label the user chose —
+        // proving the contact exists and only the addressing handle is wrong.
+        assert!(
+            lookup("ally").is_some(),
+            "the contact resolves under its local label; #289 is purely an \
+             addressing-handle mismatch, not a missing contact",
+        );
+    }
 }

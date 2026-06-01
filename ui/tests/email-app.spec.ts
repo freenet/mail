@@ -298,6 +298,60 @@ test.describe("Send returns to inbox view (regression: spawn_forever)", () => {
   });
 });
 
+// ─── #290 'Sent' toast must auto-dismiss ─────────────────────────────────────
+//
+// Ivvor (2026-06-01): "the 'Sent' bubbles that pop up when you send a message
+// don't disappear on their own." Root cause: in compose's send handler
+// (app.rs ~4857) the ordering is navigate_away → push_toast("Sent"). The
+// TTL auto-dismiss timer in toast.rs::push_toast is started with `spawn()`,
+// which is COMPONENT-SCOPED — it is cancelled when the spawning component
+// unmounts. Because navigate_away unmounts the compose sheet first, the
+// success toast's 2.2s TTL future is cancelled the instant it's created, so
+// the toast never auto-dismisses. (See memory dioxus_spawn_vs_spawn_forever:
+// a handler that also navigates must use spawn_forever / a navigation-stable
+// scope for the timer.)
+//
+// EXPECTED (once #290 is fixed): the 'Sent' toast disappears on its own after
+// its TTL. TODAY it sticks, so this is test.fail() and flips to a hard
+// failure once the timer survives navigation.
+test.describe("'Sent' toast auto-dismisses after send (#290)", () => {
+  test("the success toast disappears on its own after its TTL", async ({
+    page,
+  }) => {
+    // #290 is an OPEN bug: the navigate-away cancels the toast's TTL timer so
+    // it never auto-dismisses. This reproduces it, so it's expected-to-fail
+    // until #290 is fixed.
+    test.fail(true, "reproduces open bug #290 ('Sent' toast never auto-dismisses)");
+
+    await page.goto("/");
+    await waitForApp(page);
+    await selectIdentity(page, "address1");
+    await openCompose(page);
+
+    // Own-identity send (address1 → address2 are both seeded identities) so
+    // verification is bypassed and the green "Sent" toast fires.
+    await fillCompose(page, "address2", "toast dismiss check", "body");
+    await clickSend(page);
+
+    const toast = page
+      .locator('[data-testid="fm-toast"]')
+      .filter({ hasText: "Sent" });
+
+    // The toast appears on send.
+    await expect(toast, "'Sent' toast shows after send (#290)").toBeVisible({
+      timeout: 5_000,
+    });
+
+    // Success TTL is 2.2s (toast.rs::ttl_ms). Give a generous margin: if the
+    // auto-dismiss timer survived navigation, the toast is gone well within
+    // 6s. If it was cancelled on unmount (the bug), it sticks indefinitely.
+    await expect(
+      toast,
+      "'Sent' toast must auto-dismiss after its TTL (#290)",
+    ).toHaveCount(0, { timeout: 6_000 });
+  });
+});
+
 // Regression: identity persists across page reload.
 //
 // PR #37 (freenet/mail) restored runtime wiring (INBOX_TO_ID +
