@@ -2023,6 +2023,49 @@ mod thread_grouping_tests {
             "distinct groups must compare as a strict order"
         );
     }
+
+    /// #289 root cause (unit-level): the reply prefill addresses the To field
+    /// by the incoming message's *display sender* (`m.from`) — the alias the
+    /// SENDER chose — not by the sender's VK / inbox key. So when the
+    /// recipient imported that sender under a DIFFERENT local nickname, the
+    /// reply's To carries a string that won't resolve against their address
+    /// book, and the send is blocked until they hand-edit it.
+    ///
+    /// This pins the load-bearing claim. The full UI reply round-trip is
+    /// covered by the deferred iso test tracked in #291. Once #289 is fixed
+    /// (reply resolves by VK / inbox key, and/or the contact-add modal
+    /// pre-fills the nickname from the incoming sender), the prefill should
+    /// carry a stable handle rather than the raw sender alias and this
+    /// assertion will need to move to the new contract.
+    #[test]
+    fn reply_prefill_addresses_by_display_sender_not_vk_289() {
+        // A received message whose sender called themselves "alice-from-work".
+        let received = m(
+            7,
+            "alice-from-work",
+            "Project kickoff",
+            0,
+            true,
+            Some("thread-x"),
+            None,
+        );
+
+        let prefill = super::thread_reply_prefill(&received);
+
+        // The reply is addressed to the raw display-sender string. If the
+        // recipient imported alice under a different local label (e.g.
+        // "ally"), `address_book::lookup("alice-from-work")` misses and the
+        // reply can't be sent — exactly #289.
+        assert_eq!(
+            prefill.to, "alice-from-work",
+            "reply To is the incoming sender's display alias (#289 root cause); \
+             a recipient who imported them under a different nickname can't resolve it",
+        );
+        // Sanity: the prefill keeps the conversation in-thread and quotes the
+        // parent — only the recipient resolution is broken, not the threading.
+        assert_eq!(prefill.thread_id.as_deref(), Some("thread-x"));
+        assert_eq!(prefill.in_reply_to.as_deref(), Some("7"));
+    }
 }
 
 /// Format a timestamp for message-list cards. Buckets:
