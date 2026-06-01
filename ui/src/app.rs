@@ -695,6 +695,56 @@ impl InboxView {
                     in_reply_to: None,
                     quoted_excerpt: None,
                 },
+                // ── #287 seeded LEGACY two-party thread (no thread_id) ──────
+                // A real back-and-forth between "Carol" and this identity on
+                // one subject, but pre-#270 mail carries no shared thread_id.
+                // `group_into_threads` keys legacy mail by subject|SENDER, so
+                // today this renders as TWO single-sided groups instead of one
+                // conversation — exactly the "threaded view only shows one
+                // side" report (#287). Lives on UserId(1) so it doesn't
+                // disturb the address1 row-count assertions in threads.spec.ts.
+                Message {
+                    id: 2,
+                    from: "Carol".into(),
+                    title: "Picnic this weekend?".into(),
+                    content: "Want to join the picnic on Saturday?".into(),
+                    read: true,
+                    time: t(60 * 20),
+                    sender_vk: Vec::new(),
+                    signature_valid: false,
+                    assignment_hash: [0u8; 32],
+                    thread_id: None,
+                    in_reply_to: None,
+                    quoted_excerpt: None,
+                },
+                Message {
+                    id: 3,
+                    from: "address2".into(),
+                    title: "Re: Picnic this weekend?".into(),
+                    content: "Sounds great — what should I bring?".into(),
+                    read: true,
+                    time: t(60 * 19),
+                    sender_vk: Vec::new(),
+                    signature_valid: false,
+                    assignment_hash: [0u8; 32],
+                    thread_id: None,
+                    in_reply_to: None,
+                    quoted_excerpt: None,
+                },
+                Message {
+                    id: 4,
+                    from: "Carol".into(),
+                    title: "Re: Picnic this weekend?".into(),
+                    content: "Just drinks. See you at noon!".into(),
+                    read: false,
+                    time: t(60 * 18),
+                    sender_vk: Vec::new(),
+                    signature_valid: false,
+                    assignment_hash: [0u8; 32],
+                    thread_id: None,
+                    in_reply_to: None,
+                    quoted_excerpt: None,
+                },
             ]
         };
         // Append any messages sent to this identity via the mock in-memory

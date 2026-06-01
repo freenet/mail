@@ -377,3 +377,71 @@ test.describe("Reply within a thread (#270)", () => {
     expect(Number(badgeText)).toBeGreaterThanOrEqual(SEEDED_THREAD_SIZE);
   });
 });
+
+// ─── #287 legacy two-party thread only shows one side ────────────────────────
+//
+// Ivvor (2026-06-01): "threaded/nested conversations only show one side of the
+// conversation." Root cause (see app.rs::group_into_threads + the
+// `legacy_two_party_back_and_forth_splits_by_sender` unit test): legacy mail
+// that carries no shared `thread_id` is keyed by `subject|SENDER`, so a
+// two-party back-and-forth splits into one single-sided group per author
+// instead of merging into a single conversation.
+//
+// address2 (UserId 1) is seeded with a legacy "Picnic this weekend?" exchange:
+//   Carol   "Want to join the picnic on Saturday?"
+//   address2 "Sounds great — what should I bring?"
+//   Carol   "Just drinks. See you at noon!"
+//
+// EXPECTED (once #287 is fixed): one thread-group row containing all three
+// messages — both Carol's and address2's. TODAY it splits by sender, so this
+// test is marked test.fail() and flips to a hard failure the moment the
+// grouping is fixed.
+const LEGACY_THREAD_SUBJECT = "Picnic this weekend?";
+const CAROL_BODY_1 = "Want to join the picnic on Saturday?";
+const SELF_BODY = "Sounds great — what should I bring?";
+const CAROL_BODY_2 = "Just drinks. See you at noon!";
+
+test.describe("Legacy two-party thread shows both sides (#287)", () => {
+  test("a no-thread_id back-and-forth folds into ONE group carrying both senders", async ({
+    page,
+  }) => {
+    // #287 is an OPEN bug: legacy mail splits by sender so the thread shows
+    // only one side. This reproduces it, so it's expected-to-fail until #287
+    // is fixed — Playwright flips it to a hard failure once grouping merges
+    // both sides and it starts passing.
+    test.fail(true, "reproduces open bug #287 (legacy thread splits by sender)");
+
+    await page.goto("/");
+    await waitForApp(page);
+    await selectIdentity(page, "address2");
+
+    // The legacy exchange must collapse into exactly ONE thread-group row.
+    const picnicGroups = page
+      .locator(`[data-testid="${TID.fmThreadGroup}"]`)
+      .filter({ hasText: LEGACY_THREAD_SUBJECT });
+    await expect(
+      picnicGroups,
+      "legacy two-party thread should be ONE group, not split by sender (#287)",
+    ).toHaveCount(1, { timeout: 10_000 });
+
+    // Open it and assert BOTH participants' messages are present in the thread.
+    await picnicGroups.first().click();
+    const container = page.locator(
+      `[data-testid="${TID.fmThreadContainer}"]`,
+    );
+    await container.waitFor({ timeout: 10_000 });
+
+    await expect(
+      container,
+      "Carol's first message present (#287)",
+    ).toContainText(CAROL_BODY_1);
+    await expect(
+      container,
+      "this identity's reply present — the missing 'other side' (#287)",
+    ).toContainText(SELF_BODY);
+    await expect(
+      container,
+      "Carol's follow-up present (#287)",
+    ).toContainText(CAROL_BODY_2);
+  });
+});
