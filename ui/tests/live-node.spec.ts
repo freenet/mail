@@ -70,6 +70,8 @@ const ALIAS_T5_ALICE = "alice5";
 const ALIAS_T5_BOB = "bob5";
 const ALIAS_T6_ALICE = "alice6";
 const ALIAS_T6_BOB = "bob6";
+const ALIAS_T7_ALICE = "alice7";
+const ALIAS_T7_BOB = "bob7";
 test.describe("Live node E2E", () => {
   test.skip(
     !process.env.FREENET_EMAIL_BASE_URL?.includes("/v1/contract/web/"),
@@ -1344,6 +1346,140 @@ test.describe("Live node E2E", () => {
         consoleErrors,
         `no WASM panics / PolicyTierMismatch in either browser context: ${consoleErrors.join("\n")}`,
       ).toEqual([]);
+    } finally {
+      await aliceCtx.close().catch(() => {});
+      await bobCtx.close().catch(() => {});
+      stopGwPump();
+      stopPeerPump();
+    }
+  });
+
+  // Sender-side persistence across reload (regression target: #286).
+  //
+  // User-reported bug (2026-06-01): after sending a message, a page
+  // refresh moves the sent message into the DRAFTS folder, and the
+  // same leak survives a full session boundary. The offline suite
+  // cannot catch this — it has no persistence layer (every reload
+  // reseeds `load_example_messages` from memory; see
+  // docs/qa/manual-test-inventory.md §"Persistence is iso-only"). This
+  // is a contract-state round-trip property and only reproduces against
+  // a real node.
+  //
+  // Scope is SENDER-side only: we assert the Sent row survives reload
+  // and does NOT reappear in Drafts. We deliberately do NOT assert
+  // bob-receives here (that's covered by the #81 test and is subject to
+  // the same-host core-relay quarantine #3279/#3465); the sent-folder
+  // row is written locally on send regardless of relay outcome, so this
+  // test stays green on the iso harness even when cross-node relay is
+  // flaky.
+  test("sent message stays in Sent (not Drafts) across reload (#286)", async ({
+    browser,
+  }) => {
+    test.skip(
+      !PEER_BASE_URL,
+      "requires FREENET_EMAIL_BASE_URL to include the contract id",
+    );
+    const stopGwPump = startPermissionPump(ISO_GW_ORIGIN);
+    const stopPeerPump = startPermissionPump(ISO_PEER_ORIGIN);
+    const aliceCtx = await browser.newContext();
+    const bobCtx = await browser.newContext();
+    const alicePage = await aliceCtx.newPage();
+    const bobPage = await bobCtx.newPage();
+
+    try {
+      await Promise.all([alicePage.goto(""), bobPage.goto(PEER_BASE_URL)]);
+      await Promise.all([
+        createIdentity(alicePage, ALIAS_T7_ALICE),
+        createIdentity(bobPage, ALIAS_T7_BOB),
+      ]);
+
+      // Bob shares; alice imports — same proven setup as the #81 test.
+      const bobApp = bobPage.frameLocator("iframe#app");
+      await bobApp
+        .locator(
+          `[data-testid="fm-id-row"][data-alias="${ALIAS_T7_BOB}"] [data-testid="fm-id-share"]`,
+        )
+        .click();
+      const shareModal = bobApp.locator('[data-testid="fm-share-modal"]');
+      await shareModal.waitFor({ timeout: 5_000 });
+      const bobCard = (await shareModal.getAttribute("data-share-text")) ?? "";
+      await shareModal.locator(".modal-x").click();
+
+      const aliceApp = alicePage.frameLocator("iframe#app");
+      await aliceApp.locator('[data-testid="fm-contact-import"]').click();
+      const importModal = aliceApp.locator(
+        '[data-testid="fm-import-contact-modal"]',
+      );
+      await importModal.locator("textarea").fill(bobCard);
+      await aliceApp
+        .locator('input[placeholder="e.g. Alice (work)"]')
+        .fill(ALIAS_T7_BOB);
+      const verifyCheck = aliceApp.locator('[data-testid="fm-verify-check"]');
+      await verifyCheck.waitFor({ timeout: 30_000 });
+      await verifyCheck.click();
+      await aliceApp.locator('[data-testid="fm-import-submit"]').click();
+
+      // Alice composes + sends.
+      await aliceApp
+        .locator(
+          `[data-testid="fm-id-row"][data-alias="${ALIAS_T7_ALICE}"] [data-testid="fm-id-open"]`,
+        )
+        .first()
+        .click();
+      await aliceApp.locator('[data-testid="fm-compose-btn"]').click();
+      const sheet = aliceApp.locator('[data-testid="fm-compose-sheet"]');
+      await sheet.locator('input[placeholder="alias or address"]').fill(
+        ALIAS_T7_BOB,
+      );
+      await expect(
+        aliceApp.getByTestId("compose-recipient-fingerprint"),
+        `fingerprint resolves for ${ALIAS_T7_BOB}`,
+      ).toBeVisible({ timeout: 15_000 });
+      await sheet.locator('input[placeholder="subject"]').fill("persist subj");
+      await sheet.locator("textarea.sheet-textarea").fill("persist body");
+      await sheet.locator('[data-testid="fm-send"]').click();
+      await expect(
+        sheet,
+        "compose sheet dismisses on send",
+      ).toHaveCount(0, { timeout: 15_000 });
+
+      // ── Pre-reload: message is in Sent, Drafts is empty ───────────
+      await aliceApp.locator('[data-testid="fm-folder-sent"]').click();
+      await expect(
+        aliceApp.locator('[data-testid="fm-sent-card"]').first(),
+        "sent message appears in Sent before reload",
+      ).toBeVisible({ timeout: 30_000 });
+      await expect(
+        aliceApp.locator('[data-testid="fm-folder-drafts"] .count'),
+        "Drafts empty before reload",
+      ).toHaveText("");
+
+      // ── Reload (the #286 trigger) ─────────────────────────────────
+      await alicePage.reload();
+      const aliceAfter = alicePage.frameLocator("iframe#app");
+      await expect(
+        aliceAfter.locator(".brand-name").first(),
+        "app re-mounts after reload",
+      ).toContainText(APP_NAME, { timeout: 60_000 });
+      await aliceAfter
+        .locator(
+          `[data-testid="fm-id-row"][data-alias="${ALIAS_T7_ALICE}"] [data-testid="fm-id-open"]`,
+        )
+        .first()
+        .click();
+
+      // ── Post-reload: STILL in Sent, STILL not in Drafts ───────────
+      // This is the assertion the suite was missing. On the #286 bug the
+      // message has migrated to Drafts and Sent is empty here.
+      await aliceAfter.locator('[data-testid="fm-folder-sent"]').click();
+      await expect(
+        aliceAfter.locator('[data-testid="fm-sent-card"]').first(),
+        "sent message STILL in Sent after reload (#286 regression target)",
+      ).toBeVisible({ timeout: 30_000 });
+      await expect(
+        aliceAfter.locator('[data-testid="fm-folder-drafts"] .count'),
+        "sent message did NOT leak into Drafts after reload (#286)",
+      ).toHaveText("");
     } finally {
       await aliceCtx.close().catch(() => {});
       await bobCtx.close().catch(() => {});

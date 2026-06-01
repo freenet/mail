@@ -31,6 +31,29 @@ manual gap by adding a test, flip status to `auto` and link the test.
   deployed gateway. Run via `scripts/smoke-test-production.sh`.
 - **rust** — `cargo test -p freenet-email-ui` (and per-crate).
 
+## Persistence is iso-only — offline cannot test reload round-trips
+
+The **offline** suite (`example-data,no-sync`) has **no persistence
+layer**. Messages live in an in-memory `inbox.messages` borrow
+(`ui/src/app.rs`); on `page.reload()` the WASM app restarts, memory
+wipes, and `load_example_messages` reseeds from scratch. Logout even
+explicitly `.clear()`s the cache to force a reseed. So every offline
+`page.reload()` test can only assert **identity-list** survival (#36) —
+a sent/deleted/draft *message* cannot be re-asserted after reload
+offline, because nothing persists it either way.
+
+Consequence: **any "survives reload / across session" property is a
+contract-state round-trip and is testable ONLY in the iso suite.** Do
+NOT add an offline "persists after reload" test — it would be a
+false-green (it passes on reseed, not on real persistence). The
+sent→Drafts and deleted-returns bugs (#286) live exactly in this blind
+spot.
+
+Rule: a folder-mutating behavior (send / delete / archive / draft) may
+be marked `auto` for its **across-reload** property only if a real
+`test("…")` in `live-node.spec.ts` reloads and re-asserts the folder
+state. In-session offline coverage is a separate, weaker row.
+
 ## Coverage matrix
 
 ### Identity & login
@@ -100,7 +123,7 @@ standalone). All rows below are `auto`.
 |---|---|---|
 | Compose sheet renders + dismiss on Send | auto | offline: `compose sheet renders and log out returns to identity list`, `clicking Send dismisses the compose sheet` |
 | Sending-as fingerprint label | auto | offline: `compose sheet shows 'Sending as: <fingerprint>' label` |
-| Recipient fingerprint badge resolves | auto (implicit, used in many tests) | covered transitively |
+| Recipient fingerprint badge resolves | auto | offline: `import contact card → appears in contacts section → compose accepts alias` (badge asserted); iso: `composeAndSend` helper waits on `compose-recipient-fingerprint` every send |
 | Cross-node send delivers | auto | iso: `alice → bob across nodes: send + receive end-to-end (#81)` |
 | Multi-recipient (To: alice, bob, charlie) | manual | Compose, type comma-separated aliases, confirm 3 fingerprint badges, send, confirm 3 inboxes receive |
 | Auto-sign appends signature once (idempotent on resend) | manual | Settings → Auto-sign on, set signature, send, inspect Sent body for sig; Resend, confirm not duplicated |
@@ -117,7 +140,8 @@ standalone). All rows below are `auto`.
 | Typing populates Drafts; reopen restores fields | auto | offline: `typing in compose populates Drafts; reopening restores fields` |
 | Discard removes the draft | auto | offline: `Discard removes the draft` |
 | Send removes the draft | auto | offline: `Send removes the draft` |
-| Sent doesn't leak into Drafts (#107) | auto | implicit via `Send removes the draft`; cross-node iso `multi-round` |
+| Sent doesn't leak into Drafts, in-session (#107) | auto | offline: `Send removes the draft` (in-session only — does NOT reload). `repro-106-107.spec.ts` asserts the *draft persists*, not sent-vs-draft routing, and contains no reload. |
+| Sent stays in Sent / out of Drafts **across reload** | auto | iso: `sent message stays in Sent (not Drafts) across reload (#286)` — sends, reloads, asserts Sent row survives + Drafts count empty. |
 | Draft folder count badge | auto | offline: `draft folder count badge reflects pending drafts` |
 | Long typing burst → debounced delegate save | manual | Type 200+ chars rapidly, wait 1s, reload, confirm draft state |
 
@@ -137,7 +161,8 @@ standalone). All rows below are `auto`.
 | Behavior | Status | Test / recipe |
 |---|---|---|
 | Archive moves Inbox row to Archive folder | auto | offline: `Archive moves message from Inbox to Archive folder` |
-| Delete from Inbox does NOT create Archive entry | auto | offline: `Delete from Inbox does not produce an Archive entry` |
+| Delete from Inbox does NOT create Archive entry (in-session) | auto | offline: `Delete from Inbox does not produce an Archive entry` (in-session only — no reload) |
+| Deleted message stays deleted **across reload** | **gap** | NOT COVERED. Reproduced as a user bug (deleted-returns on refresh, #286). Offline can't test it (no persistence). Needs an iso test: delete → reload → re-open inbox → assert still gone, no resurrection from contract re-fetch. |
 | Archive count badge | auto | offline: `Archive count badge reflects archived rows` |
 | Delete on archived row removes from Archive | auto | offline: `Delete on archived row removes it from Archive too` |
 | True unarchive (move back to Inbox) | blocked | Issue #60 — contract OwnerInsert not yet wired; UI button hidden |
