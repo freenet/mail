@@ -749,12 +749,25 @@ impl InboxView {
         };
         // Append any messages sent to this identity via the mock in-memory
         // mailbox (composed in a previous session by another identity).
+        //
+        // The append id MUST NOT collide with the parent id that a delivered
+        // reply carries in its `in_reply_to`. A reply minted by the Reply
+        // button references its parent by the parent's id *in the sender's
+        // inbox*. The old `base_id = emails.len()` made the Nth delivered
+        // message land at the same id in EVERY inbox, so a reply whose parent
+        // sat at index N on the sender's side could land at id N on the
+        // recipient's side too — i.e. `msg.id == msg.in_reply_to`, a
+        // self-referential link that breaks thread grouping (the parent of a
+        // received reply isn't in the recipient's own inbox vec anyway). Make
+        // the append id space large and per-identity-disjoint so a delivered
+        // message can never reuse the id its own `in_reply_to` points at, and
+        // so it can't collide with the small seeded ids either.
         let alias = id.alias.to_string();
+        let inbox_id_offset = 1_000_000 + (id.id.0 as u64) * 10_000;
         MOCK_SENT_MESSAGES.with(|map| {
             if let Some(sent) = map.borrow_mut().remove(&alias) {
-                let base_id = emails.len() as u64;
                 for (i, mut msg) in sent.into_iter().enumerate() {
-                    msg.id = base_id + i as u64;
+                    msg.id = inbox_id_offset + i as u64;
                     emails.push(msg);
                 }
             }
