@@ -69,6 +69,7 @@ state. In-session offline coverage is a separate, weaker row.
 | Delete identity (confirm-modal + row removed) | manual | Open IdentifiersList, click 🗑 on an id-row, type alias verbatim, click Delete identity, confirm row disappears and `Identity::get_alias()` no longer returns it. Inbox + AFT contracts remain on-chain (no on-chain delete primitive). |
 | Delete identity refuses without exact alias match | manual | Open delete modal, type wrong alias, expect inline error "Type the alias exactly as shown to confirm." and no row removal. |
 | Delete identity while logged in clears active id | manual | Open inbox, navigate back to IdentifiersList, delete the currently-active identity, confirm app falls back to the identifiers list and active selection is cleared. |
+| Delete + regen identity (same alias) shows no old messages (#5) | fixme (iso) | iso: `delete + regen identity with same alias shows no old messages (#5)` — scaffolded but `test.fixme`; bleed mechanism not yet pinned (same-key on-chain inbox vs stale local cache). Resolve which, then enable. Tracked in #291. |
 | 3+ identities switch + sidebar fingerprint flips | auto (2 ids) / manual (3+) | offline: `fingerprint changes when switching identities` covers 2; 3+ via `cargo make dev-example` + create another + cycle |
 | Switcher in Settings (popover open/close + active row) | manual | Open Settings, click ident switcher button, click a non-active row, verify identity context flipped |
 
@@ -162,7 +163,7 @@ standalone). All rows below are `auto`.
 |---|---|---|
 | Archive moves Inbox row to Archive folder | auto | offline: `Archive moves message from Inbox to Archive folder` |
 | Delete from Inbox does NOT create Archive entry (in-session) | auto | offline: `Delete from Inbox does not produce an Archive entry` (in-session only — no reload) |
-| Deleted message stays deleted **across reload** | **gap** | NOT COVERED. Reproduced as a user bug (deleted-returns on refresh, #286). Offline can't test it (no persistence). Needs an iso test: delete → reload → re-open inbox → assert still gone, no resurrection from contract re-fetch. |
+| Deleted message stays deleted **across reload** | auto | iso: `deleted message stays deleted across reload (#286)` — bob receives, deletes, reloads, asserts still gone (no resurrection from contract re-fetch). Carries the same-host core-relay quarantine. |
 | Archive count badge | auto | offline: `Archive count badge reflects archived rows` |
 | Delete on archived row removes from Archive | auto | offline: `Delete on archived row removes it from Archive too` |
 | True unarchive (move back to Inbox) | blocked | Issue #60 — contract OwnerInsert not yet wired; UI button hidden |

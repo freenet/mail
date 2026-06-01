@@ -72,6 +72,10 @@ const ALIAS_T6_ALICE = "alice6";
 const ALIAS_T6_BOB = "bob6";
 const ALIAS_T7_ALICE = "alice7";
 const ALIAS_T7_BOB = "bob7";
+const ALIAS_T8_ALICE = "alice8";
+const ALIAS_T8_BOB = "bob8";
+const ALIAS_T9_ALICE = "alice9";
+const ALIAS_T9_BOB = "bob9";
 test.describe("Live node E2E", () => {
   test.skip(
     !process.env.FREENET_EMAIL_BASE_URL?.includes("/v1/contract/web/"),
@@ -1487,6 +1491,234 @@ test.describe("Live node E2E", () => {
       stopPeerPump();
     }
   });
+
+  // Deleted message stays deleted across reload (regression target: #286).
+  //
+  // User-reported bug (2026-06-01): deleting a message and refreshing
+  // brings it back. This is a contract round-trip property — the delete
+  // must commit to inbox state (or be filtered on re-fetch), not just
+  // mutate the in-memory model. Offline can't test it (no persistence);
+  // only the iso harness re-fetches from a real contract on reload.
+  //
+  // Unlike the sent-persistence test, this needs a RECEIVED message to
+  // delete, so it depends on cross-node delivery and carries the same
+  // same-host core-relay quarantine (#3279/#3465) as the #81 / multi-
+  // round tests.
+  test("deleted message stays deleted across reload (#286)", async ({
+    browser,
+  }) => {
+    test.skip(
+      !PEER_BASE_URL,
+      "requires FREENET_EMAIL_BASE_URL to include the contract id",
+    );
+    const stopGwPump = startPermissionPump(ISO_GW_ORIGIN);
+    const stopPeerPump = startPermissionPump(ISO_PEER_ORIGIN);
+    const aliceCtx = await browser.newContext();
+    const bobCtx = await browser.newContext();
+    const alicePage = await aliceCtx.newPage();
+    const bobPage = await bobCtx.newPage();
+
+    try {
+      await Promise.all([alicePage.goto(""), bobPage.goto(PEER_BASE_URL)]);
+      await Promise.all([
+        createIdentity(alicePage, ALIAS_T8_ALICE),
+        createIdentity(bobPage, ALIAS_T8_BOB),
+      ]);
+
+      // Bob shares; alice imports (verified).
+      const bobApp = bobPage.frameLocator("iframe#app");
+      await bobApp
+        .locator(
+          `[data-testid="fm-id-row"][data-alias="${ALIAS_T8_BOB}"] [data-testid="fm-id-share"]`,
+        )
+        .click();
+      const shareModal = bobApp.locator('[data-testid="fm-share-modal"]');
+      await shareModal.waitFor({ timeout: 5_000 });
+      const bobCard = (await shareModal.getAttribute("data-share-text")) ?? "";
+      await shareModal.locator(".modal-x").click();
+
+      const aliceApp = alicePage.frameLocator("iframe#app");
+      await aliceApp.locator('[data-testid="fm-contact-import"]').click();
+      const importModal = aliceApp.locator(
+        '[data-testid="fm-import-contact-modal"]',
+      );
+      await importModal.locator("textarea").fill(bobCard);
+      await aliceApp
+        .locator('input[placeholder="e.g. Alice (work)"]')
+        .fill(ALIAS_T8_BOB);
+      const verifyCheck = aliceApp.locator('[data-testid="fm-verify-check"]');
+      await verifyCheck.waitFor({ timeout: 30_000 });
+      await verifyCheck.click();
+      await aliceApp.locator('[data-testid="fm-import-submit"]').click();
+
+      // Open both inboxes; alice sends; bob receives (quarantined).
+      await aliceApp
+        .locator(
+          `[data-testid="fm-id-row"][data-alias="${ALIAS_T8_ALICE}"] [data-testid="fm-id-open"]`,
+        )
+        .first()
+        .click();
+      await bobApp
+        .locator(
+          `[data-testid="fm-id-row"][data-alias="${ALIAS_T8_BOB}"] [data-testid="fm-id-open"]`,
+        )
+        .first()
+        .click();
+      await composeAndSend(aliceApp, ALIAS_T8_BOB, "delete me", "doomed body");
+      try {
+        await expect(
+          bobApp.getByText(/delete me/i),
+          "bob receives the message",
+        ).toBeVisible({ timeout: 60_000 });
+      } catch (e) {
+        const genuineRegression = grepPeerLog(
+          /missing field `tier`|delta_apply_failed|slot.*collision|failed to deserialize.*Inbox|InboxUpdateError|task .* panicked/,
+        );
+        if (coreRelayBugDetected() && !genuineRegression) {
+          test.skip(
+            true,
+            "quarantined: freenet-core cross-node UPDATE relay bug (#3279/#3465)",
+          );
+        }
+        throw e;
+      }
+
+      // ── Bob opens the message and deletes it ──────────────────────
+      await bobApp.getByText(/delete me/i).click();
+      await bobApp.locator('[data-testid="fm-thread-container"]').waitFor({
+        timeout: 5_000,
+      });
+      // Delete via the thread-detail action bar (FM_DELETE).
+      await bobApp.locator('[data-testid="fm-delete"]').first().click();
+      await expect(
+        bobApp.getByText(/delete me/i),
+        "message gone from bob's inbox after delete",
+      ).toHaveCount(0, { timeout: 15_000 });
+
+      // ── Reload (the #286 trigger) ─────────────────────────────────
+      await bobPage.reload();
+      const bobAfter = bobPage.frameLocator("iframe#app");
+      await expect(
+        bobAfter.locator(".brand-name").first(),
+        "app re-mounts after reload",
+      ).toContainText(APP_NAME, { timeout: 60_000 });
+      await bobAfter
+        .locator(
+          `[data-testid="fm-id-row"][data-alias="${ALIAS_T8_BOB}"] [data-testid="fm-id-open"]`,
+        )
+        .first()
+        .click();
+
+      // ── Post-reload: STILL deleted (no resurrection from re-fetch) ─
+      // On the #286 bug the message reappears here, re-fetched from the
+      // inbox contract because the delete never committed to state.
+      await expect(
+        bobAfter.getByText(/delete me/i),
+        "deleted message STILL gone after reload (#286 regression target)",
+      ).toHaveCount(0, { timeout: 30_000 });
+    } finally {
+      await aliceCtx.close().catch(() => {});
+      await bobCtx.close().catch(() => {});
+      stopGwPump();
+      stopPeerPump();
+    }
+  });
+
+  // Delete + regenerate identity with the same alias → no message bleed
+  // (regression target: bug #5, 2026-06-01).
+  //
+  // User-reported: "delete and generate a new ID with the same name, I
+  // had old messages turning up in the new ID." After deleting an
+  // identity and recreating one under the SAME alias, the new identity's
+  // inbox must be EMPTY — old messages must not resurface.
+  //
+  // OPEN QUESTION (why this is `fixme`, not live): the bleed mechanism
+  // isn't pinned yet. Two candidates, and the correct assertions differ:
+  //   (a) Same on-chain inbox key. If a regenerated identity re-derives
+  //       the SAME ML-DSA key (e.g. alias-seeded), it lands on the same
+  //       inbox contract — which AGENTS.md says is NOT deleted on-chain
+  //       (no delete primitive). Then old messages legitimately re-load
+  //       and the fix is a key-rotation / inbox-reset on regen.
+  //   (b) Stale local cache. If regen mints a FRESH key (random seed),
+  //       the on-chain inbox differs and the bleed is the UI failing to
+  //       clear `inbox.messages` / INBOX_TO_ID on delete (cf. the logout
+  //       `.clear()` in app.rs) — a client-state bug.
+  // Resolve which by inspecting whether createIdentity twice with the
+  // same alias yields the same `fm-id-row` fingerprint / inbox key, THEN
+  // write the matching assertion. Until then this scaffolds the flow so
+  // it isn't lost. Tracked in #291.
+  test.fixme(
+    "delete + regen identity with same alias shows no old messages (#5)",
+    async ({ browser }) => {
+      test.skip(
+        !PEER_BASE_URL,
+        "requires FREENET_EMAIL_BASE_URL to include the contract id",
+      );
+      const stopGwPump = startPermissionPump(ISO_GW_ORIGIN);
+      const stopPeerPump = startPermissionPump(ISO_PEER_ORIGIN);
+      const aliceCtx = await browser.newContext();
+      const bobCtx = await browser.newContext();
+      const alicePage = await aliceCtx.newPage();
+      const bobPage = await bobCtx.newPage();
+
+      try {
+        await Promise.all([alicePage.goto(""), bobPage.goto(PEER_BASE_URL)]);
+        await Promise.all([
+          createIdentity(alicePage, ALIAS_T9_ALICE),
+          createIdentity(bobPage, ALIAS_T9_BOB),
+        ]);
+
+        const aliceApp = alicePage.frameLocator("iframe#app");
+
+        // TODO(#291): deliver a message to alice (bob shares → alice
+        // imports → bob sends → alice receives, with the same core-relay
+        // quarantine as the other cross-node tests), so the "old"
+        // messages exist before deletion.
+
+        // Delete alice's identity via the confirm-modal flow.
+        await aliceApp
+          .locator(
+            `[data-testid="fm-id-row"][data-alias="${ALIAS_T9_ALICE}"] [data-testid="fm-id-delete"]`,
+          )
+          .click();
+        const confirm = aliceApp.locator(
+          '[data-testid="fm-delete-confirm-input"]',
+        );
+        await confirm.waitFor({ timeout: 5_000 });
+        await confirm.fill(ALIAS_T9_ALICE);
+        await aliceApp
+          .locator('[data-testid="fm-delete-confirm-submit"]')
+          .click();
+        await expect(
+          aliceApp.locator(
+            `[data-testid="fm-id-row"][data-alias="${ALIAS_T9_ALICE}"]`,
+          ),
+          "old identity row removed",
+        ).toHaveCount(0, { timeout: 10_000 });
+
+        // Recreate under the SAME alias.
+        await createIdentity(alicePage, ALIAS_T9_ALICE);
+        await aliceApp
+          .locator(
+            `[data-testid="fm-id-row"][data-alias="${ALIAS_T9_ALICE}"] [data-testid="fm-id-open"]`,
+          )
+          .first()
+          .click();
+
+        // CORE ASSERTION (#5): the regenerated identity's inbox is empty —
+        // no message bled through from the deleted identity.
+        await expect(
+          aliceApp.locator('[data-testid="fm-thread-group"]'),
+          "regenerated identity inbox must be empty — no message bleed (#5)",
+        ).toHaveCount(0, { timeout: 30_000 });
+      } finally {
+        await aliceCtx.close().catch(() => {});
+        await bobCtx.close().catch(() => {});
+        stopGwPump();
+        stopPeerPump();
+      }
+    },
+  );
 });
 
 async function composeAndSend(
