@@ -698,10 +698,10 @@ impl InboxView {
                 // ── #287 seeded LEGACY two-party thread (no thread_id) ──────
                 // A real back-and-forth between "Carol" and this identity on
                 // one subject, but pre-#270 mail carries no shared thread_id.
-                // `group_into_threads` keys legacy mail by subject|SENDER, so
-                // today this renders as TWO single-sided groups instead of one
-                // conversation — exactly the "threaded view only shows one
-                // side" report (#287). Lives on UserId(1) so it doesn't
+                // Since the #287 fix `group_into_threads` keys legacy mail by
+                // normalized subject ALONE, so this folds into ONE group
+                // carrying both sides — the guard for the "threaded view only
+                // shows one side" report. Lives on UserId(1) so it doesn't
                 // disturb the address1 row-count assertions in threads.spec.ts.
                 Message {
                     id: 2,
@@ -1183,7 +1183,9 @@ pub(crate) mod threads {
     #[derive(Debug, Clone, PartialEq)]
     pub(crate) struct ThreadGroup {
         /// Resolved group key: the shared `thread_id` when any member has one,
-        /// else the `heuristic:<normalized-subject>|<participant>` fallback.
+        /// else the `heuristic:<normalized-subject>` fallback (or
+        /// `heuristic-blank:<id>` for a subjectless legacy message, which
+        /// stands alone). See `heuristic_key`.
         pub key: String,
         /// Conversation members, oldest→newest (sender send time, tie-break
         /// by `id`).
@@ -1218,9 +1220,8 @@ pub(crate) mod threads {
         s.trim().to_ascii_lowercase()
     }
 
-    /// Heuristic group key for a legacy (thread-id-less) message: normalized
-    /// subject + participant. Prefixed `heuristic:` so it can never collide
-    /// with a real UUID `thread_id`.
+    /// Heuristic group key for a legacy (thread-id-less) message. Prefixed
+    /// `heuristic:` so it can never collide with a real UUID `thread_id`.
     ///
     /// Legacy (no-`thread_id`) mail is grouped by NORMALIZED SUBJECT ALONE.
     ///
@@ -1237,8 +1238,21 @@ pub(crate) mod threads {
     /// heuristic group. That's strictly less wrong than splitting every
     /// two-party thread, and only ever applies to pre-#270 mail — anything sent
     /// via Reply carries a real `thread_id` and threads precisely.
+    ///
+    /// EXCEPTION (blank subjects): a message whose subject normalizes to the
+    /// empty string (`""`, `"Re:"`, whitespace-only) gets a per-message key
+    /// keyed on its `id`, NOT the shared empty-subject key. Otherwise every
+    /// subjectless legacy message from every sender would collapse into one
+    /// giant pseudo-conversation — an over-merge worse than the #287 split. A
+    /// blank subject carries no grouping signal, so each such message stands
+    /// alone (matching pre-#287 behaviour for these).
     fn heuristic_key(msg: &Message) -> String {
-        format!("heuristic:{}", normalize_subject(&msg.title))
+        let subject = normalize_subject(&msg.title);
+        if subject.is_empty() {
+            format!("heuristic-blank:{}", msg.id)
+        } else {
+            format!("heuristic:{subject}")
+        }
     }
 
     /// Group `msgs` into conversations (#270).
@@ -1246,10 +1260,11 @@ pub(crate) mod threads {
     /// Two-pass to handle mixed `thread_id`/legacy conversations:
     /// 1. bucket every message by a provisional key (`thread_id` if present,
     ///    else the heuristic key);
-    /// 2. for buckets that share a heuristic key AND also have a sibling
-    ///    bucket under a real `thread_id` (same normalized-subject +
-    ///    participant), fold the legacy bucket into the threaded one so a
-    ///    legacy root and its threaded replies cluster.
+    /// 2. for a legacy (`heuristic:`) bucket that shares its normalized
+    ///    subject with a real `thread_id` bucket, fold the legacy bucket into
+    ///    the threaded one (deterministically, smallest key wins on ties) so a
+    ///    legacy root and its threaded replies cluster. `heuristic-blank:`
+    ///    buckets (subjectless legacy mail) never fold.
     ///
     /// The returned groups are NOT ordered — callers sort for display.
     pub(crate) fn group_into_threads(msgs: &[Message]) -> Vec<ThreadGroup> {
@@ -1271,9 +1286,13 @@ pub(crate) mod threads {
         // bucket whose span contains the legacy bucket's subject. Matching on
         // subject alone (not subject+sender) keeps Pass 2 consistent with the
         // sender-agnostic legacy key (#287).
+        // A "real thread_id" bucket is anything not produced by heuristic_key:
+        // neither the subject-keyed `heuristic:` nor the per-message
+        // `heuristic-blank:` (blank subjects never fold — see heuristic_key).
+        let is_legacy = |k: &str| k.starts_with("heuristic:") || k.starts_with("heuristic-blank:");
         let thread_subjects: HashMap<String, Vec<String>> = buckets
             .iter()
-            .filter(|(k, _)| !k.starts_with("heuristic:"))
+            .filter(|(k, _)| !is_legacy(k))
             .map(|(k, ms)| {
                 let subjects: Vec<String> =
                     ms.iter().map(|m| normalize_subject(&m.title)).collect();
@@ -1281,6 +1300,7 @@ pub(crate) mod threads {
             })
             .collect();
 
+        // Only subject-keyed legacy buckets fold; `heuristic-blank:` stand alone.
         let legacy_keys: Vec<String> = buckets
             .keys()
             .filter(|k| k.starts_with("heuristic:"))
@@ -1289,11 +1309,19 @@ pub(crate) mod threads {
         for legacy_key in legacy_keys {
             // Reconstruct the legacy subject from the key: "heuristic:<subj>".
             let subj = legacy_key["heuristic:".len()..].to_string();
-            // Find a thread_id bucket whose span contains this subject.
-            let target = thread_subjects
+            // Find a thread_id bucket whose span contains this subject. When
+            // several thread_id buckets share the subject, pick the
+            // lexicographically smallest key so the fold target is DETERMINISTIC
+            // (buckets is a HashMap with randomized iteration order; an
+            // unsorted `find` would fold into a different conversation per
+            // process — the #137/#233 determinism class).
+            let mut candidates: Vec<&String> = thread_subjects
                 .iter()
-                .find(|(_, subjects)| subjects.contains(&subj))
-                .map(|(k, _)| k.clone());
+                .filter(|(_, subjects)| subjects.contains(&subj))
+                .map(|(k, _)| k)
+                .collect();
+            candidates.sort();
+            let target = candidates.first().map(|k| (*k).clone());
             if let Some(target_key) = target
                 && let Some(moved) = buckets.remove(&legacy_key)
             {
@@ -1766,6 +1794,13 @@ mod thread_grouping_tests {
         groups.iter().map(|g| g.key.clone()).collect()
     }
 
+    fn group_with_key_opt<'a>(
+        groups: &'a [super::threads::ThreadGroup],
+        key: &str,
+    ) -> Option<&'a super::threads::ThreadGroup> {
+        groups.iter().find(|g| g.key == key)
+    }
+
     /// (a) Messages sharing a `thread_id` group together regardless of
     /// subject, and the group reports the right count / unread / root / order.
     #[test]
@@ -1837,6 +1872,53 @@ mod thread_grouping_tests {
         let g = group_with_key(&groups, "heuristic:project sync");
         assert_eq!(g.count, 4, "all four turns — both sides — in one thread");
         assert_eq!(g.root_id, 0, "oldest message is the thread root");
+    }
+
+    /// (#287 review M2) Legacy messages whose subject normalizes to empty
+    /// ("", "Re:", whitespace) must each stand ALONE, not collapse into one
+    /// giant pseudo-conversation. The blank subject carries no grouping signal,
+    /// so the key falls back to per-message `heuristic-blank:<id>`.
+    #[test]
+    fn blank_subject_legacy_messages_stand_alone() {
+        let msgs = vec![
+            m(0, "alice", "", 0, false, None, None),
+            m(1, "bob", "   ", 10, false, None, None),
+            m(2, "carol", "Re:", 20, false, None, None),
+        ];
+        let groups = group_into_threads(&msgs);
+        assert_eq!(
+            groups.len(),
+            3,
+            "blank-subject legacy mail must NOT merge across senders (#287 M2)"
+        );
+        for id in 0..3 {
+            assert!(
+                group_with_key_opt(&groups, &format!("heuristic-blank:{id}")).is_some(),
+                "message {id} stands alone under its per-id blank key"
+            );
+        }
+    }
+
+    /// (#287 review M1) When two distinct `thread_id` conversations share a
+    /// normalized subject and a legacy orphan also carries that subject, the
+    /// fold target must be DETERMINISTIC (smallest thread_id key wins), not
+    /// dependent on HashMap iteration order (the #137/#233 determinism class).
+    #[test]
+    fn legacy_fold_target_is_deterministic_across_shared_subject_threads() {
+        let msgs = vec![
+            m(0, "a", "Standup", 0, true, Some("tA"), None),
+            m(1, "b", "Standup", 10, true, Some("tB"), None),
+            m(2, "c", "Re: Standup", 20, false, None, None), // legacy "standup"
+        ];
+        // Run repeatedly: the legacy orphan must land in the same bucket every
+        // time. "tA" < "tB" lexicographically, so it always folds into tA.
+        for _ in 0..50 {
+            let groups = group_into_threads(&msgs);
+            let ta = group_with_key(&groups, "tA");
+            let tb = group_with_key(&groups, "tB");
+            assert_eq!(ta.count, 2, "legacy orphan deterministically folds into tA");
+            assert_eq!(tb.count, 1, "tB never receives the legacy orphan");
+        }
     }
 
     /// Counterpart to the split above: the SAME two-party alternating
