@@ -13,9 +13,14 @@
 //! # Queue semantics
 //!
 //! Multiple toasts can be in flight simultaneously. [`push_toast`] appends to
-//! the queue; the TTL timer spawned for each toast uses the captured id to
-//! remove only *that* toast.  [`dismiss_toast`] performs an immediate id-keyed
-//! removal and is wired to the "✕" button in [`ToastView`].
+//! the queue; the TTL auto-dismiss timer is started with
+//! `dioxus_core::spawn_forever` (root-scoped, so it survives the pushing
+//! component unmounting — #290) and inlines its own id-keyed `retain`, mutating
+//! the captured queue Signal directly rather than calling [`dismiss_toast`]
+//! (which reads `use_context` and would resolve no component scope from a
+//! detached root task). [`dismiss_toast`] is the component-scoped path wired to
+//! the "✕" button in [`ToastView`]. Both remove only the captured id, so a
+//! newer toast at the same Vec index is never cleared (#161).
 //!
 //! # ARIA
 //!
