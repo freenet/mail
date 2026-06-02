@@ -123,10 +123,20 @@ pub(crate) fn push_toast(message: impl Into<String>, level: ToastLevel) -> Toast
 
     // Spawn a TTL timer. It captures the id and only removes *this* toast,
     // so a newer toast that happens to sit at the same index is never cleared.
+    //
+    // spawn_forever, not spawn (#290): the "Sent" toast is pushed from the
+    // compose component, whose send handler then navigates away and unmounts
+    // it. A bare spawn() ties the TTL future to that scope and cancels it on
+    // unmount, so the toast never auto-dismissed and stuck on screen forever.
+    // spawn_forever detaches the timer so it outlives the pushing component.
+    //
+    // The queue Signal is Copy and captured by value, so the detached task
+    // mutates it directly instead of re-reading use_context (which would read
+    // the wrong scope's context outside the component tree).
     let ttl = level.ttl_ms();
-    spawn(async move {
+    let _task = dioxus_core::spawn_forever(async move {
         gloo_timers::future::TimeoutFuture::new(ttl).await;
-        dismiss_toast(id);
+        queue.write().retain(|t| t.id != id);
     });
 
     id

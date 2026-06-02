@@ -311,18 +311,14 @@ test.describe("Send returns to inbox view (regression: spawn_forever)", () => {
 // a handler that also navigates must use spawn_forever / a navigation-stable
 // scope for the timer.)
 //
-// EXPECTED (once #290 is fixed): the 'Sent' toast disappears on its own after
-// its TTL. TODAY it sticks, so this is test.fail() and flips to a hard
-// failure once the timer survives navigation.
+// #290 FIXED: toast.rs::push_toast now starts the TTL timer with
+// dioxus_core::spawn_forever, so it survives the compose sheet unmounting on
+// navigate-away. The 'Sent' toast auto-dismisses after its TTL. This guards
+// the fix — it fails if the timer is ever re-tied to a component scope.
 test.describe("'Sent' toast auto-dismisses after send (#290)", () => {
   test("the success toast disappears on its own after its TTL", async ({
     page,
   }) => {
-    // #290 is an OPEN bug: the navigate-away cancels the toast's TTL timer so
-    // it never auto-dismisses. This reproduces it, so it's expected-to-fail
-    // until #290 is fixed.
-    test.fail(true, "reproduces open bug #290 ('Sent' toast never auto-dismisses)");
-
     await page.goto("/");
     await waitForApp(page);
     await selectIdentity(page, "address1");
