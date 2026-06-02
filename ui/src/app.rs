@@ -845,6 +845,7 @@ impl User {
         #[cfg(not(feature = "use-node"))]
         let _ = address_book::insert_contact(address_book::Contact {
             local_alias: "alice-example".into(),
+            suggested_alias: None,
             description: "Example contact for offline testing".into(),
             ml_dsa_vk_bytes: vec![0xAA; 1952],
             ml_kem_ek_bytes: vec![0xBB; 1184],
