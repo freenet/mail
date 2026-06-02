@@ -423,7 +423,12 @@ test.describe("Legacy two-party thread shows both sides (#287)", () => {
     const container = page.locator(
       `[data-testid="${TID.fmThreadContainer}"]`,
     );
-    await container.waitFor({ timeout: 10_000 });
+    // Wait for ATTACHED, not visible: on the narrow mobile profile (Pixel 5)
+    // the inline detail-col collapses to a zero-size box, so the container is
+    // in the DOM but layout-hidden. The toContainText assertions below operate
+    // on attached elements regardless of visibility — same pattern the
+    // openSeededThread helper documents.
+    await container.waitFor({ state: "attached", timeout: 10_000 });
 
     await expect(
       container,
