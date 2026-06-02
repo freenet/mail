@@ -1222,22 +1222,23 @@ pub(crate) mod threads {
     /// subject + participant. Prefixed `heuristic:` so it can never collide
     /// with a real UUID `thread_id`.
     ///
-    /// SHOULD-6 (#270): the participant half is `msg.from` only — the inbox
-    /// `Message` type carries the SENDER but NOT the recipient (the recipient
-    /// is always the logged-in identity at the inbox level, and outbound legacy
-    /// rows aren't part of the inbox `Vec` here). So two distinct legacy
-    /// conversations with the same sender and the same normalized subject —
-    /// e.g. a mailing-list digest the sender blasted to several of the user's
-    /// addresses — fold into one heuristic group. This is a known
-    /// data-model limitation, not a bug to fix in the grouping pass: the real
-    /// fix is per-message `thread_id` (which threaded mail already carries),
-    /// and this heuristic only ever applies to pre-#270 legacy mail.
+    /// Legacy (no-`thread_id`) mail is grouped by NORMALIZED SUBJECT ALONE.
+    ///
+    /// #287: keying on `subject|sender` split a two-party back-and-forth into
+    /// one single-sided group per author — the threaded view showed only one
+    /// side of the conversation. Since every inbox `Message` is addressed to
+    /// the same logged-in identity (the recipient half carries no
+    /// distinguishing information), two legacy messages that share a normalized
+    /// subject are overwhelmingly the same conversation, so we fold them
+    /// together regardless of sender.
+    ///
+    /// Tradeoff: distinct same-subject legacy conversations the user happens to
+    /// have (e.g. a recurring mailing-list digest subject) fold into one
+    /// heuristic group. That's strictly less wrong than splitting every
+    /// two-party thread, and only ever applies to pre-#270 mail — anything sent
+    /// via Reply carries a real `thread_id` and threads precisely.
     fn heuristic_key(msg: &Message) -> String {
-        format!(
-            "heuristic:{}|{}",
-            normalize_subject(&msg.title),
-            msg.from.as_ref()
-        )
+        format!("heuristic:{}", normalize_subject(&msg.title))
     }
 
     /// Group `msgs` into conversations (#270).
@@ -1263,21 +1264,20 @@ pub(crate) mod threads {
         }
 
         // Pass 2: fold legacy (heuristic:) buckets into a threaded bucket that
-        // shares the same normalized-subject + participant. This lets a legacy
-        // root message join the thread its replies (which DO carry a
-        // thread_id) created. We compute, for each thread_id bucket, the set
-        // of (normalized-subject, participant) signatures it spans; a legacy
-        // bucket merges into the first thread_id bucket whose span contains
-        // the legacy bucket's signature.
-        let thread_signatures: HashMap<String, Vec<(String, String)>> = buckets
+        // shares the same normalized subject. This lets a legacy root message
+        // join the thread its replies (which DO carry a thread_id) created.
+        // We compute, for each thread_id bucket, the set of normalized
+        // subjects it spans; a legacy bucket merges into the first thread_id
+        // bucket whose span contains the legacy bucket's subject. Matching on
+        // subject alone (not subject+sender) keeps Pass 2 consistent with the
+        // sender-agnostic legacy key (#287).
+        let thread_subjects: HashMap<String, Vec<String>> = buckets
             .iter()
             .filter(|(k, _)| !k.starts_with("heuristic:"))
             .map(|(k, ms)| {
-                let sigs: Vec<(String, String)> = ms
-                    .iter()
-                    .map(|m| (normalize_subject(&m.title), m.from.as_ref().to_string()))
-                    .collect();
-                (k.clone(), sigs)
+                let subjects: Vec<String> =
+                    ms.iter().map(|m| normalize_subject(&m.title)).collect();
+                (k.clone(), subjects)
             })
             .collect();
 
@@ -1287,17 +1287,12 @@ pub(crate) mod threads {
             .cloned()
             .collect();
         for legacy_key in legacy_keys {
-            // Reconstruct the legacy signature from the key:
-            // "heuristic:<subj>|<participant>".
-            let body = &legacy_key["heuristic:".len()..];
-            let Some((subj, participant)) = body.split_once('|') else {
-                continue;
-            };
-            let sig = (subj.to_string(), participant.to_string());
-            // Find a thread_id bucket whose span contains this signature.
-            let target = thread_signatures
+            // Reconstruct the legacy subject from the key: "heuristic:<subj>".
+            let subj = legacy_key["heuristic:".len()..].to_string();
+            // Find a thread_id bucket whose span contains this subject.
+            let target = thread_subjects
                 .iter()
-                .find(|(_, sigs)| sigs.contains(&sig))
+                .find(|(_, subjects)| subjects.contains(&subj))
                 .map(|(k, _)| k.clone());
             if let Some(target_key) = target
                 && let Some(moved) = buckets.remove(&legacy_key)
@@ -1791,40 +1786,40 @@ mod thread_grouping_tests {
         assert_eq!(order, vec![0, 1, 2]);
     }
 
-    /// (b) Legacy messages (no thread_id) group via the heuristic key, with
-    /// "Re:"/"Fwd:" normalization clustering them by base subject + sender.
+    /// (b) Legacy messages (no thread_id) group via the heuristic key by
+    /// NORMALIZED SUBJECT ALONE, with "Re:"/"Fwd:" normalization. Different
+    /// senders on the same subject fold into ONE group (#287) — a two-party
+    /// legacy conversation is one thread, not one-per-author.
     #[test]
-    fn groups_legacy_by_heuristic_subject_and_participant() {
+    fn groups_legacy_by_heuristic_subject_across_senders() {
         let msgs = vec![
             m(0, "jane", "Design review", 0, false, None, None),
             m(1, "jane", "Re: Design review", 10, false, None, None),
             m(2, "jane", "Re: Re: Design review", 20, false, None, None),
-            // Different sender → different heuristic group.
+            // Different sender, same normalized subject → SAME group (#287).
             m(3, "bob", "Design review", 30, false, None, None),
         ];
         let groups = group_into_threads(&msgs);
-        assert_eq!(groups.len(), 2, "two participants → two heuristic groups");
-        let jane = group_with_key(&groups, "heuristic:design review|jane");
-        assert_eq!(jane.count, 3);
-        let bob = group_with_key(&groups, "heuristic:design review|bob");
-        assert_eq!(bob.count, 1);
+        assert_eq!(
+            groups.len(),
+            1,
+            "same normalized subject folds across senders (#287)"
+        );
+        let g = group_with_key(&groups, "heuristic:design review");
+        assert_eq!(g.count, 4, "all four messages in one conversation");
     }
 
-    /// (#270 follow-up) A two-party LEGACY back-and-forth (both participants
-    /// alternating on one subject, NO `thread_id` on any message) SPLITS into
-    /// one group per sender rather than folding into a single conversation.
+    /// (#287) A two-party LEGACY back-and-forth (both participants alternating
+    /// on one subject, NO `thread_id` on any message) FOLDS into a single
+    /// conversation carrying both sides.
     ///
-    /// This pins the load-bearing correctness limit of the heuristic fallback:
-    /// `heuristic_key = "heuristic:{normalized_subject}|{from}"` keys on the
-    /// SENDER only (see `threads::group_into_threads`), so a legacy two-party
-    /// thread renders as two single-sided groups. True multi-user legacy
-    /// grouping would need the *recipient* in the key as well — out of #270
-    /// scope (the inbox `Message` row carries no recipient field). Mail that
-    /// carries a shared `thread_id` (anything sent via the Reply button
-    /// post-#270) threads across senders correctly — contrast with
-    /// `legacy_two_party_with_shared_thread_id_folds` below.
+    /// Pre-#287 the heuristic key was `subject|sender`, so this split into one
+    /// single-sided group per author and the threaded view showed only one
+    /// side (#287). The key is now normalized-subject alone, so both sides
+    /// merge. Mail carrying a shared `thread_id` (post-#270 Reply) threads the
+    /// same way — see `legacy_two_party_with_shared_thread_id_folds` below.
     #[test]
-    fn legacy_two_party_back_and_forth_splits_by_sender() {
+    fn legacy_two_party_back_and_forth_folds_across_senders() {
         // alice and bob alternate four turns on "Project sync", none carrying a
         // thread_id (legacy / pre-#270 mail).
         let msgs = vec![
@@ -1836,13 +1831,12 @@ mod thread_grouping_tests {
         let groups = group_into_threads(&msgs);
         assert_eq!(
             groups.len(),
-            2,
-            "legacy two-party back-and-forth splits one group per sender"
+            1,
+            "legacy two-party back-and-forth folds into one conversation (#287)"
         );
-        let alice = group_with_key(&groups, "heuristic:project sync|alice");
-        let bob = group_with_key(&groups, "heuristic:project sync|bob");
-        assert_eq!(alice.count, 2, "alice's two turns cluster together");
-        assert_eq!(bob.count, 2, "bob's two turns cluster together");
+        let g = group_with_key(&groups, "heuristic:project sync");
+        assert_eq!(g.count, 4, "all four turns — both sides — in one thread");
+        assert_eq!(g.root_id, 0, "oldest message is the thread root");
     }
 
     /// Counterpart to the split above: the SAME two-party alternating

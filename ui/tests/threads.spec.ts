@@ -392,10 +392,10 @@ test.describe("Reply within a thread (#270)", () => {
 //   address2 "Sounds great — what should I bring?"
 //   Carol   "Just drinks. See you at noon!"
 //
-// EXPECTED (once #287 is fixed): one thread-group row containing all three
-// messages — both Carol's and address2's. TODAY it splits by sender, so this
-// test is marked test.fail() and flips to a hard failure the moment the
-// grouping is fixed.
+// #287 FIXED: the legacy heuristic key is now normalized-subject alone (was
+// subject|sender), so a no-thread_id two-party back-and-forth folds into one
+// group carrying both sides. This guards the fix — it fails if the key ever
+// re-includes the sender and the thread splits again.
 const LEGACY_THREAD_SUBJECT = "Picnic this weekend?";
 const CAROL_BODY_1 = "Want to join the picnic on Saturday?";
 const SELF_BODY = "Sounds great — what should I bring?";
@@ -405,12 +405,6 @@ test.describe("Legacy two-party thread shows both sides (#287)", () => {
   test("a no-thread_id back-and-forth folds into ONE group carrying both senders", async ({
     page,
   }) => {
-    // #287 is an OPEN bug: legacy mail splits by sender so the thread shows
-    // only one side. This reproduces it, so it's expected-to-fail until #287
-    // is fixed — Playwright flips it to a hard failure once grouping merges
-    // both sides and it starts passing.
-    test.fail(true, "reproduces open bug #287 (legacy thread splits by sender)");
-
     await page.goto("/");
     await waitForApp(page);
     await selectIdentity(page, "address2");
