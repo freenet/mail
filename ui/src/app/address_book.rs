@@ -143,6 +143,13 @@ pub fn identity_inbox_address(identity: &Identity) -> Result<String, String> {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Contact {
     pub local_alias: Rc<str>,
+    /// The alias the sender chose for themselves on their shared card
+    /// (`ContactCard.suggested_alias`). Retained so the To field can
+    /// still resolve the contact when the importer relabelled them with
+    /// a different `local_alias` but types the name the *sender*
+    /// advertised. `None` for cards with no suggested alias or contacts
+    /// imported before this field shipped.
+    pub suggested_alias: Option<Rc<str>>,
     pub description: String,
     pub ml_dsa_vk_bytes: Vec<u8>,
     pub ml_kem_ek_bytes: Vec<u8>,
@@ -303,9 +310,16 @@ pub fn remove_contact(alias: &str) {
 }
 
 /// Resolve an alias to a `Recipient`.  Walks both own identities and contacts.
+///
+/// Matching order: first the exact `local_alias` HashMap key, then — only
+/// on a miss — a scan for a contact whose sender-advertised
+/// `suggested_alias` equals `alias`. The fallback lets a user who
+/// relabelled a contact on import still address them by the name the
+/// sender shared. Exact local-alias matches always win, so relabelling
+/// is never shadowed by someone else's suggested alias.
 pub fn lookup(alias: &str) -> Option<Recipient> {
-    ADDRESS_BOOK.with(|ab| {
-        ab.borrow().get(alias).map(|entry| match entry {
+    fn entry_to_recipient(entry: &Entry) -> Recipient {
+        match entry {
             Entry::Own(id) => {
                 let ml_dsa_vk_bytes = id.ml_dsa_vk_bytes();
                 let ml_kem_ek_bytes = id.ml_kem_ek_bytes();
@@ -336,6 +350,23 @@ pub fn lookup(alias: &str) -> Option<Recipient> {
                     inbox_wasm_hash: c.inbox_wasm_hash.clone(),
                 }
             }
+        }
+    }
+
+    ADDRESS_BOOK.with(|ab| {
+        let ab = ab.borrow();
+        // Exact local-alias / own-identity-alias match wins.
+        if let Some(entry) = ab.get(alias) {
+            return Some(entry_to_recipient(entry));
+        }
+        // Fallback: a contact whose sender-advertised suggested_alias
+        // matches. Only contacts carry a suggested_alias, so this never
+        // collides with an own identity.
+        ab.values().find_map(|entry| match entry {
+            Entry::Contact(c) if c.suggested_alias.as_deref() == Some(alias) => {
+                Some(entry_to_recipient(entry))
+            }
+            _ => None,
         })
     })
 }
@@ -588,6 +619,7 @@ impl StoredContactKeys {
     pub fn into_contact(self, local_alias: Rc<str>, description: String) -> Contact {
         Contact {
             local_alias,
+            suggested_alias: self.suggested_alias.map(Rc::from),
             description,
             ml_dsa_vk_bytes: self.ml_dsa_vk_bytes,
             ml_kem_ek_bytes: self.ml_kem_ek_bytes,
@@ -765,6 +797,7 @@ mod tests {
     fn make_contact(alias: &str, vk: u8, ek: u8) -> Contact {
         Contact {
             local_alias: alias.into(),
+            suggested_alias: None,
             description: String::new(),
             ml_dsa_vk_bytes: vec![vk; 1952],
             ml_kem_ek_bytes: vec![ek; 1184],
@@ -783,6 +816,64 @@ mod tests {
         let err =
             insert_contact(make_contact("bob", 3, 2)).expect_err("different VK should be rejected");
         assert!(err.contains("different contact"), "got: {err}");
+    }
+
+    fn make_contact_suggested(local: &str, suggested: Option<&str>, vk: u8, ek: u8) -> Contact {
+        Contact {
+            suggested_alias: suggested.map(Rc::from),
+            ..make_contact(local, vk, ek)
+        }
+    }
+
+    #[test]
+    fn lookup_resolves_by_local_alias() {
+        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+        insert_contact(make_contact_suggested("7511", Some("test7511"), 1, 2)).unwrap();
+        let r = lookup("7511").expect("exact local alias resolves");
+        assert_eq!(&*r.local_alias, "7511");
+        assert!(!r.is_own);
+    }
+
+    #[test]
+    fn lookup_falls_back_to_suggested_alias() {
+        // The user relabelled the contact "7511" but types the name the
+        // sender advertised ("test7511"). The fallback must still resolve.
+        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+        insert_contact(make_contact_suggested("7511", Some("test7511"), 1, 2)).unwrap();
+        let r = lookup("test7511").expect("suggested alias resolves on local-alias miss");
+        assert_eq!(
+            &*r.local_alias, "7511",
+            "resolved recipient keeps the local alias, not the suggested one"
+        );
+    }
+
+    #[test]
+    fn lookup_exact_local_alias_wins_over_suggested() {
+        // If one contact's local_alias equals another contact's
+        // suggested_alias, the exact local-alias match must win.
+        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+        insert_contact(make_contact_suggested("shared", Some("other"), 1, 2)).unwrap();
+        insert_contact(make_contact_suggested("real", Some("shared"), 3, 4)).unwrap();
+        let r = lookup("shared").expect("resolves");
+        assert_eq!(
+            &*r.local_alias, "shared",
+            "exact local-alias match must win over a suggested-alias collision"
+        );
+    }
+
+    #[test]
+    fn lookup_unknown_alias_returns_none() {
+        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+        insert_contact(make_contact_suggested("7511", Some("test7511"), 1, 2)).unwrap();
+        assert!(lookup("nobody").is_none());
+    }
+
+    #[test]
+    fn lookup_no_suggested_alias_is_local_only() {
+        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+        insert_contact(make_contact_suggested("7511", None, 1, 2)).unwrap();
+        assert!(lookup("7511").is_some());
+        assert!(lookup("anything-else").is_none());
     }
 
     #[test]
@@ -970,6 +1061,7 @@ mod tests {
 
         let contact = Contact {
             local_alias: "bob".into(),
+            suggested_alias: None,
             description: String::new(),
             ml_dsa_vk_bytes: vk_bytes.clone(),
             ml_kem_ek_bytes: vec![0u8; 1184],
@@ -998,6 +1090,7 @@ mod tests {
         let vk_a_bytes = MlDsaKeypair::verifying_key(&sk_a).encode().to_vec();
         insert_contact(Contact {
             local_alias: "alice".into(),
+            suggested_alias: None,
             description: String::new(),
             ml_dsa_vk_bytes: vk_a_bytes,
             ml_kem_ek_bytes: vec![0u8; 1184],
@@ -1033,6 +1126,7 @@ mod tests {
 
         insert_contact(Contact {
             local_alias: "alice".into(),
+            suggested_alias: None,
             description: String::new(),
             ml_dsa_vk_bytes: vk_bytes.clone(),
             ml_kem_ek_bytes: vec![0xCC; 1184],
@@ -1102,6 +1196,7 @@ mod tests {
         let vk_bytes = MlDsaKeypair::verifying_key(&sk).encode().to_vec();
         insert_contact(Contact {
             local_alias: "ally".into(),
+            suggested_alias: None,
             description: String::new(),
             ml_dsa_vk_bytes: vk_bytes,
             ml_kem_ek_bytes: vec![0u8; 1184],
@@ -1125,5 +1220,39 @@ mod tests {
             "the contact resolves under its local label; #289 is purely an \
              addressing-handle mismatch, not a missing contact",
         );
+    }
+
+    #[test]
+    fn lookup_resolves_by_sender_alias_when_suggested_preserved_289() {
+        use ml_dsa::{KeyGen, MlDsa65, signature::Keypair as MlDsaKeypair};
+        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+
+        // Same scenario as the miss test above, but the import preserved
+        // the sender's advertised alias ("alice-from-work") as
+        // suggested_alias even though the user relabelled locally to "ally".
+        // This is the #289 fix: the reply To resolves by the sender's
+        // alias via the suggested_alias fallback.
+        let sk = MlDsa65::from_seed(&[42u8; 32].into());
+        let vk_bytes = MlDsaKeypair::verifying_key(&sk).encode().to_vec();
+        insert_contact(Contact {
+            local_alias: "ally".into(),
+            suggested_alias: Some("alice-from-work".into()),
+            description: String::new(),
+            ml_dsa_vk_bytes: vk_bytes,
+            ml_kem_ek_bytes: vec![0u8; 1184],
+            required_tier: Tier::Day1,
+            max_age_secs: DEFAULT_MAX_AGE_SECS,
+            verified: true,
+            inbox_wasm_hash: None,
+        })
+        .unwrap();
+
+        let r = lookup("alice-from-work")
+            .expect("sender alias resolves via suggested_alias fallback (#289)");
+        assert_eq!(
+            &*r.local_alias, "ally",
+            "resolved recipient keeps the user's local label",
+        );
+        assert!(lookup("ally").is_some(), "local label still resolves too");
     }
 }

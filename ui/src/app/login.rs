@@ -1955,6 +1955,11 @@ pub(super) fn ImportContactForm() -> Element {
 
     let mut paste_text = use_signal(String::new);
     let mut local_alias = use_signal(String::new);
+    // The alias the sender advertised on their card, captured at decode
+    // time and preserved even if the user relabels `local_alias` before
+    // import — so the To field can still resolve by the sender's name
+    // (address_book::lookup suggested_alias fallback).
+    let mut card_suggested_alias: Signal<Option<String>> = use_signal(|| None);
     let mut description = use_signal(String::new);
     let mut verified = use_signal(|| false);
     let mut error_msg = use_signal(String::new);
@@ -2044,6 +2049,9 @@ pub(super) fn ImportContactForm() -> Element {
 
         match crate::app::address_book::ContactCard::decode(addr_input) {
             Ok(card) => {
+                // Preserve the sender's advertised alias regardless of
+                // whether the user keeps or overrides it as local_alias.
+                card_suggested_alias.set(card.suggested_alias.clone());
                 if local_alias.read().is_empty()
                     && let Some(ref s) = card.suggested_alias
                 {
@@ -2285,10 +2293,20 @@ pub(super) fn ImportContactForm() -> Element {
                                 error_msg.set("That address belongs to one of your own identities.".into());
                                 return;
                             }
+                            // Persist the SENDER's advertised alias (from the
+                            // card), not the possibly-relabelled local_alias —
+                            // that's what makes the suggested_alias resolver
+                            // fallback useful. Fall back to local_alias for
+                            // cards that carried no suggested alias, so the
+                            // field is never silently empty.
+                            let suggested = card_suggested_alias
+                                .read()
+                                .clone()
+                                .filter(|s| !s.is_empty() && *s != alias_str);
                             let stored = crate::app::address_book::StoredContactKeys {
                                 ml_dsa_vk_bytes: vk,
                                 ml_kem_ek_bytes: ek,
-                                suggested_alias: Some(alias_str.clone()),
+                                suggested_alias: suggested,
                                 verified: *verified.read(),
                                 required_tier: tier,
                                 max_age_secs: max_age,
@@ -2306,6 +2324,7 @@ pub(super) fn ImportContactForm() -> Element {
                             *import_contact_form.write() = ImportContact::default();
                             paste_text.set(String::new());
                             local_alias.set(String::new());
+                            card_suggested_alias.set(None);
                             description.set(String::new());
                             verified.set(false);
                             fingerprint_words.set(None);

@@ -955,7 +955,15 @@ mod identity_management {
         let stored = crate::app::address_book::StoredContactKeys {
             ml_dsa_vk_bytes: contact.ml_dsa_vk_bytes.clone(),
             ml_kem_ek_bytes: contact.ml_kem_ek_bytes.clone(),
-            suggested_alias: Some(contact.local_alias.to_string()),
+            // Persist the sender's advertised alias carried on the contact
+            // (the suggested_alias resolver fallback depends on it). Falls
+            // back to local_alias only when the card had none, matching the
+            // import-form submit path.
+            suggested_alias: contact
+                .suggested_alias
+                .as_deref()
+                .map(str::to_string)
+                .or_else(|| Some(contact.local_alias.to_string())),
             verified: contact.verified,
             required_tier: contact.required_tier,
             max_age_secs: contact.max_age_secs,
