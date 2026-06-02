@@ -1379,11 +1379,9 @@ test.describe("Live node E2E", () => {
   test("sent message stays in Sent (not Drafts) across reload (#286)", async ({
     browser,
   }) => {
-    // #286 is an OPEN bug: sent messages revert to Drafts on reload. This
-    // test reproduces it, so it is expected-to-fail until #286 is fixed.
-    // Playwright flips it back to a hard failure the moment it starts
-    // passing — i.e. when the bug is fixed and this guard becomes stale.
-    test.fail(true, "reproduces open bug #286 (sent reverts on reload)");
+    // #286 FIXED (spawn_forever for the SaveSent delegate write, app.rs):
+    // the sent row now persists across reload instead of re-deriving as a
+    // Draft. This guards the fix — it fails if the regression returns.
     test.skip(
       !PEER_BASE_URL,
       "requires FREENET_EMAIL_BASE_URL to include the contract id",
@@ -1512,11 +1510,9 @@ test.describe("Live node E2E", () => {
   test("deleted message stays deleted across reload (#286)", async ({
     browser,
   }) => {
-    // #286 is an OPEN bug: deleted messages return on reload. This test
-    // reproduces it, so it is expected-to-fail until #286 is fixed.
-    // Playwright flips it back to a hard failure the moment it starts
-    // passing — i.e. when the bug is fixed and this guard becomes stale.
-    test.fail(true, "reproduces open bug #286 (deleted returns on reload)");
+    // #286 FIXED (spawn_forever for the DeleteMessage delegate write,
+    // app.rs): the deletion now commits durably instead of being cancelled
+    // on unmount. This guards the fix — it fails if the regression returns.
     test.skip(
       !PEER_BASE_URL,
       "requires FREENET_EMAIL_BASE_URL to include the contract id",

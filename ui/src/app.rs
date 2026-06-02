@@ -3414,7 +3414,12 @@ fn ThreadDetail(group: crate::app::threads::ThreadGroup) -> Element {
                     let mut client_clone = client.clone();
                     let alias_for_send = alias.clone();
                     let mid = m.id;
-                    spawn(async move {
+                    // spawn_forever: opening a message then immediately
+                    // navigating away (archive/delete/back) unmounts this
+                    // view; a bare spawn() would cancel the MarkRead delegate
+                    // write, so the message resurfaced as unread on reload
+                    // (#286 read-state variant).
+                    let _task = dioxus_core::spawn_forever(async move {
                         if let Err(e) = crate::local_state::mark_read(
                             &mut client_clone,
                             alias_for_send,
@@ -3910,7 +3915,12 @@ fn OpenArchivedMessage(msg_id: u64, msg: mail_local_state::ArchivedMessage) -> E
                             {
                                 let mut c = client.clone();
                                 let a = delete_alias.clone();
-                                spawn(async move {
+                                // spawn_forever: at_inbox_list() below
+                                // navigates away and unmounts this view, which
+                                // would cancel a bare spawn() before the
+                                // DeleteMessage delegate write committed —
+                                // message returns after reload (#286).
+                                let _task = dioxus_core::spawn_forever(async move {
                                     if let Err(e) = crate::local_state::delete_message(
                                         &mut c, a, msg_id,
                                     )
@@ -4159,7 +4169,11 @@ fn archive_message(
             let mut c = client.clone();
             let a = alias.to_string();
             let ar = archived.clone();
-            spawn(async move {
+            // spawn_forever: the caller runs post.apply() right after this,
+            // navigating away and unmounting the view. A bare spawn() would
+            // cancel the ArchiveMessage delegate write on unmount, so the
+            // archived message bounced back to the Inbox after reload (#286).
+            let _task = dioxus_core::spawn_forever(async move {
                 if let Err(e) = crate::local_state::archive_message(&mut c, a, id, ar).await {
                     crate::log::local_state_failure("archive message", e);
                 }
@@ -4196,7 +4210,12 @@ fn delete_message(
         {
             let mut c = client.clone();
             let a = alias.to_string();
-            spawn(async move {
+            // spawn_forever: the caller runs post.apply() right after this,
+            // which navigates away and unmounts the message view. A bare
+            // spawn() would cancel the DeleteMessage delegate write on
+            // unmount, so the deletion never committed to the node and the
+            // message returned after reload (#286).
+            let _task = dioxus_core::spawn_forever(async move {
                 if let Err(e) = crate::local_state::delete_message(&mut c, a, id).await {
                     crate::log::error(format!("delete_message failed: {e}"), None);
                 }
@@ -4281,7 +4300,11 @@ fn OpenMessage(msg: Message) -> Element {
             {
                 let mut client_clone = client.clone();
                 let alias_for_send = alias.clone();
-                spawn(async move {
+                // spawn_forever: same as the group-open path — navigating
+                // away right after opening unmounts this view and a bare
+                // spawn() would cancel the MarkRead write, resurfacing the
+                // message as unread on reload (#286 read-state variant).
+                let _task = dioxus_core::spawn_forever(async move {
                     if let Err(e) = crate::local_state::mark_read(
                         &mut client_clone,
                         alias_for_send,
@@ -4633,7 +4656,12 @@ fn ComposeSheet() -> Element {
         {
             let mut client_clone = client.clone();
             let alias = alias_for_delete.clone();
-            spawn(async move {
+            // spawn_forever: delete_draft_now fires on Send, which navigates
+            // away and unmounts this component. A bare spawn() would cancel
+            // the DeleteDraft delegate write on unmount, leaving the draft
+            // persisted on the node — it then reappears (and the sent message
+            // re-derives as a Draft) after reload (#286).
+            let _task = dioxus_core::spawn_forever(async move {
                 if let Err(e) = crate::local_state::delete_draft(&mut client_clone, alias, id).await
                 {
                     crate::log::local_state_failure("delete draft", e);
@@ -4887,7 +4915,13 @@ fn ComposeSheet() -> Element {
                 let mut client_clone = client.clone();
                 let alias_async = sender_alias.clone();
                 let id_async = sent_id.clone();
-                spawn(async move {
+                // spawn_forever, not spawn: the send handler navigates away
+                // (at_new_msg() below) and unmounts this compose component.
+                // spawn() ties the task to this scope and cancels it on
+                // unmount, so the SaveSent delegate write never reached the
+                // wire — the message persisted only in the in-session
+                // snapshot and re-derived as a Draft after reload (#286).
+                let _task = dioxus_core::spawn_forever(async move {
                     if let Err(e) = crate::local_state::save_sent(
                         &mut client_clone,
                         alias_async,

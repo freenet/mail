@@ -145,7 +145,7 @@ standalone). All rows below are `auto`.
 | Discard removes the draft | auto | offline: `Discard removes the draft` |
 | Send removes the draft | auto | offline: `Send removes the draft` |
 | Sent doesn't leak into Drafts, in-session (#107) | auto | offline: `Send removes the draft` (in-session only — does NOT reload). `repro-106-107.spec.ts` asserts the *draft persists*, not sent-vs-draft routing, and contains no reload. |
-| Sent stays in Sent / out of Drafts **across reload** | auto | iso: `sent message stays in Sent (not Drafts) across reload (#286)` — sends, reloads, asserts Sent row survives + Drafts count empty. |
+| Sent stays in Sent / out of Drafts **across reload** | auto | iso: `sent message stays in Sent (not Drafts) across reload (#286)` — sends, reloads, asserts Sent row survives + Drafts count empty. Fixed by `spawn_forever` on the SaveSent delegate write (#286). |
 | Draft folder count badge | auto | offline: `draft folder count badge reflects pending drafts` |
 | Long typing burst → debounced delegate save | manual | Type 200+ chars rapidly, wait 1s, reload, confirm draft state |
 
@@ -166,7 +166,7 @@ standalone). All rows below are `auto`.
 |---|---|---|
 | Archive moves Inbox row to Archive folder | auto | offline: `Archive moves message from Inbox to Archive folder` |
 | Delete from Inbox does NOT create Archive entry (in-session) | auto | offline: `Delete from Inbox does not produce an Archive entry` (in-session only — no reload) |
-| Deleted message stays deleted **across reload** | auto | iso: `deleted message stays deleted across reload (#286)` — bob receives, deletes, reloads, asserts still gone (no resurrection from contract re-fetch). Carries the same-host core-relay quarantine. |
+| Deleted message stays deleted **across reload** | auto | iso: `deleted message stays deleted across reload (#286)` — bob receives, deletes, reloads, asserts still gone (no resurrection from contract re-fetch). Carries the same-host core-relay quarantine. Fixed by `spawn_forever` on the DeleteMessage delegate write (#286). |
 | Archive count badge | auto | offline: `Archive count badge reflects archived rows` |
 | Delete on archived row removes from Archive | auto | offline: `Delete on archived row removes it from Archive too` |
 | True unarchive (move back to Inbox) | blocked | Issue #60 — contract OwnerInsert not yet wired; UI button hidden |
