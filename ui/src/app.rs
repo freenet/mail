@@ -1247,7 +1247,12 @@ pub(crate) mod threads {
     /// blank subject carries no grouping signal, so each such message stands
     /// alone (matching pre-#287 behaviour for these).
     fn heuristic_key(msg: &Message) -> String {
-        format!("heuristic:{}", normalize_subject(&msg.title))
+        let subject = normalize_subject(&msg.title);
+        if subject.is_empty() {
+            format!("heuristic-blank:{}", msg.id)
+        } else {
+            format!("heuristic:{subject}")
+        }
     }
 
     /// Group `msgs` into conversations (#270).
@@ -1310,10 +1315,13 @@ pub(crate) mod threads {
             // (buckets is a HashMap with randomized iteration order; an
             // unsorted `find` would fold into a different conversation per
             // process — the #137/#233 determinism class).
-            let target = thread_subjects
+            let mut candidates: Vec<&String> = thread_subjects
                 .iter()
-                .find(|(_, subjects)| subjects.contains(&subj))
-                .map(|(k, _)| k.clone());
+                .filter(|(_, subjects)| subjects.contains(&subj))
+                .map(|(k, _)| k)
+                .collect();
+            candidates.sort();
+            let target = candidates.first().map(|k| (*k).clone());
             if let Some(target_key) = target
                 && let Some(moved) = buckets.remove(&legacy_key)
             {
