@@ -142,6 +142,26 @@ target for production publishes: `publish-email`, `publish-production`,
 and `scripts/release.sh`. The first publish takes ~30s to propagate
 before the gateway URL resolves.
 
+> **⚠️ Port collision — never test-publish onto a running `freenet network` node.**
+> `freenet local`/`fdev` both default to **port 7509**. If a long-running
+> `freenet network` node already owns 7509 (some dev machines run one under
+> launchd), then `cargo make publish-email-test` / `publish-all` will publish
+> the **test-key contract onto the real network** and drive your manual QA
+> against the wrong node. Before any test publish:
+> 1. `ps aux | grep "[f]reenet network"` — if one is up, 7509 is the real net.
+> 2. Start a dedicated sandbox on a free port and target it, e.g.
+>    `freenet local --ws-api-port 7600`, then publish/QA against 7600.
+> 3. `publish-email-test`/`publish-all` run `update-published-contract`, which
+>    **overwrites** `published-contract/contract-id.txt` + `webapp.parameters`
+>    with the TEST id, clobbering the committed **prod** snapshot. After QA:
+>    `git checkout -- published-contract/contract-id.txt published-contract/webapp.parameters`.
+>    **Never commit that diff** — the committed snapshot is the prod-key id.
+>
+> (`WEB_CONTAINER_CONTRACT_ID` is embedded from `contract-id.txt` at build
+> time but is **diagnostic-only** — logged in `ui/src/lib.rs`, never used for a
+> contract op — so a wrong embedded id is cosmetic console noise, not a
+> functional break.)
+
 ### Testing
 
 ```bash
