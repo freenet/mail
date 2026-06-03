@@ -1974,7 +1974,14 @@ async function createIdentity(
   await expect(app.locator(".brand-name").first()).toContainText(APP_NAME, {
     timeout: 60_000,
   });
-  await app.locator('[data-testid="fm-id-create"]').click();
+  // #300: the brand-name text can render before the WASM app finishes wiring
+  // the create-identity handler on a cold iso-node start, so a bare click()
+  // with the default 10s timeout flaked (~1-in-1 on CI under load). Gate on
+  // the button being actionable and give the click the same 60s budget as the
+  // brand-name wait.
+  const createBtn = app.locator('[data-testid="fm-id-create"]');
+  await expect(createBtn).toBeVisible({ timeout: 60_000 });
+  await createBtn.click({ timeout: 60_000 });
   await app.locator('[data-testid="fm-create-alias-input"]').fill(alias);
   await app.locator('[data-testid="fm-create-submit"]').click();
   await app.locator('[data-testid="fm-create-confirm"]').click();
