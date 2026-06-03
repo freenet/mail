@@ -4354,7 +4354,10 @@ fn add_sender_to_address_book(
     sender_from: &str,
 ) {
     // #289: thread the sender's display name (`Message.from`) into the modal
-    // so the nickname defaults to it and is persisted as `suggested_alias`.
+    // so the nickname defaults to it — matching what a reply prefills
+    // (`to: Message.from`), so resolution hits the contact's `local_alias`
+    // exactly. The advertised name is persisted as `suggested_alias` only if
+    // the user relabels (the save filter drops it when it equals local_alias).
     // Blank/whitespace-only display names contribute no suggestion.
     let alias = {
         let trimmed = sender_from.trim();
