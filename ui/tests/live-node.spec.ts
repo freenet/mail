@@ -1982,10 +1982,19 @@ async function createIdentity(
   await expect(app.locator(".brand-name").first()).toContainText(APP_NAME, {
     timeout: 60_000,
   });
-  await app.locator('[data-testid="fm-id-create"]').click();
+  // #300: gate every click on the button being actionable with a 60s budget.
+  // On a cold iso-node start under CI load the create-modal steps can lag past
+  // the default 10s click timeout — particularly fm-create-confirm, which only
+  // becomes clickable after the identity-delegate round-trip echoes back.
+  const clickWhenReady = async (testid: string) => {
+    const btn = app.locator(`[data-testid="${testid}"]`);
+    await expect(btn).toBeVisible({ timeout: 60_000 });
+    await btn.click({ timeout: 60_000 });
+  };
+  await clickWhenReady("fm-id-create");
   await app.locator('[data-testid="fm-create-alias-input"]').fill(alias);
-  await app.locator('[data-testid="fm-create-submit"]').click();
-  await app.locator('[data-testid="fm-create-confirm"]').click();
+  await clickWhenReady("fm-create-submit");
+  await clickWhenReady("fm-create-confirm");
 
   const target = app.locator(
     `[data-testid="fm-id-row"][data-alias="${alias}"]`,
