@@ -740,6 +740,16 @@ pub fn migrate_legacy_identities() {
 mod tests {
     use super::*;
 
+    /// Reset the address book between tests. Bumps the generation so the
+    /// bs58 lookup cache (#255) can't carry a prior test's contacts into
+    /// this one — the test runner reuses threads, so the thread-local cache
+    /// would otherwise persist across tests. A bare `ADDRESS_BOOK.clear()`
+    /// alone leaves the cache stale.
+    fn reset_address_book() {
+        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+        bump_address_book_gen();
+    }
+
     #[test]
     fn fingerprint_is_six_bip39_words() {
         let vk = vec![0u8; 1952];
@@ -877,7 +887,7 @@ mod tests {
     #[test]
     fn insert_contact_rejects_alias_with_different_vk() {
         // Use a thread-local scope by clearing first.
-        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+        reset_address_book();
         insert_contact(make_contact("bob", 1, 2)).unwrap();
         let err =
             insert_contact(make_contact("bob", 3, 2)).expect_err("different VK should be rejected");
@@ -893,7 +903,7 @@ mod tests {
 
     #[test]
     fn lookup_resolves_by_local_alias() {
-        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+        reset_address_book();
         insert_contact(make_contact_suggested("7511", Some("test7511"), 1, 2)).unwrap();
         let r = lookup("7511").expect("exact local alias resolves");
         assert_eq!(&*r.local_alias, "7511");
@@ -904,7 +914,7 @@ mod tests {
     fn lookup_falls_back_to_suggested_alias() {
         // The user relabelled the contact "7511" but types the name the
         // sender advertised ("test7511"). The fallback must still resolve.
-        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+        reset_address_book();
         insert_contact(make_contact_suggested("7511", Some("test7511"), 1, 2)).unwrap();
         let r = lookup("test7511").expect("suggested alias resolves on local-alias miss");
         assert_eq!(
@@ -917,7 +927,7 @@ mod tests {
     fn lookup_exact_local_alias_wins_over_suggested() {
         // If one contact's local_alias equals another contact's
         // suggested_alias, the exact local-alias match must win.
-        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+        reset_address_book();
         insert_contact(make_contact_suggested("shared", Some("other"), 1, 2)).unwrap();
         insert_contact(make_contact_suggested("real", Some("shared"), 3, 4)).unwrap();
         let r = lookup("shared").expect("resolves");
@@ -929,14 +939,14 @@ mod tests {
 
     #[test]
     fn lookup_unknown_alias_returns_none() {
-        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+        reset_address_book();
         insert_contact(make_contact_suggested("7511", Some("test7511"), 1, 2)).unwrap();
         assert!(lookup("nobody").is_none());
     }
 
     #[test]
     fn lookup_no_suggested_alias_is_local_only() {
-        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+        reset_address_book();
         insert_contact(make_contact_suggested("7511", None, 1, 2)).unwrap();
         assert!(lookup("7511").is_some());
         assert!(lookup("anything-else").is_none());
@@ -947,7 +957,7 @@ mod tests {
         // Same VK but a substituted EK must also be rejected, otherwise an
         // attacker who knows the recipient's signing pubkey could swap in
         // their own encryption key under a trusted alias.
-        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+        reset_address_book();
         insert_contact(make_contact("alice", 4, 5)).unwrap();
         let err = insert_contact(make_contact("alice", 4, 9))
             .expect_err("different EK should be rejected");
@@ -956,7 +966,7 @@ mod tests {
 
     #[test]
     fn insert_contact_overwrites_when_keys_match() {
-        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+        reset_address_book();
         let mut c = make_contact("carol", 7, 8);
         insert_contact(c.clone()).unwrap();
         c.description = "updated".into();
@@ -972,7 +982,7 @@ mod tests {
 
     #[test]
     fn lookup_finds_inserted_contact() {
-        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+        reset_address_book();
         insert_contact(make_contact("dave", 11, 12)).unwrap();
         let r = lookup("dave").expect("contact should resolve");
         assert!(!r.is_own);
@@ -987,13 +997,13 @@ mod tests {
 
     #[test]
     fn lookup_misses_for_unknown_alias() {
-        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+        reset_address_book();
         assert!(lookup("nobody").is_none());
     }
 
     #[test]
     fn remove_contact_clears_lookup() {
-        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+        reset_address_book();
         insert_contact(make_contact("eve", 13, 14)).unwrap();
         assert!(lookup("eve").is_some());
         remove_contact("eve");
@@ -1002,7 +1012,7 @@ mod tests {
 
     #[test]
     fn filter_contacts_empty_needle_returns_nothing() {
-        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+        reset_address_book();
         insert_contact(make_contact("alice", 1, 2)).unwrap();
         assert!(
             filter_contacts("", 8).is_empty(),
@@ -1012,7 +1022,7 @@ mod tests {
 
     #[test]
     fn filter_contacts_case_insensitive_alias_substring() {
-        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+        reset_address_book();
         insert_contact(make_contact("Alice", 1, 2)).unwrap();
         insert_contact(make_contact("bob", 3, 4)).unwrap();
         insert_contact(make_contact("alice-work", 5, 6)).unwrap();
@@ -1034,7 +1044,7 @@ mod tests {
     /// fix). A contact whose description contains the needle must not appear.
     #[test]
     fn filter_contacts_does_not_match_description() {
-        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+        reset_address_book();
         let mut c = make_contact("carol", 7, 8);
         c.description = "work colleague".into();
         insert_contact(c).unwrap();
@@ -1052,7 +1062,7 @@ mod tests {
     /// contacts sort before unverified within the same tier.
     #[test]
     fn filter_contacts_tier_and_verified_sort() {
-        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+        reset_address_book();
         // "alice" is a prefix match for "ali" — tier 0.
         let mut alice = make_contact("alice", 1, 2);
         alice.verified = true;
@@ -1074,7 +1084,7 @@ mod tests {
 
     #[test]
     fn filter_contacts_respects_limit() {
-        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+        reset_address_book();
         for i in 0..10u8 {
             insert_contact(make_contact(&format!("user{i}"), i, i.wrapping_add(1))).unwrap();
         }
@@ -1119,7 +1129,7 @@ mod tests {
     #[test]
     fn is_contact_inbox_key_recognises_imported_contact() {
         use ml_dsa::{KeyGen, MlDsa65, signature::Keypair as MlDsaKeypair};
-        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+        reset_address_book();
 
         // Real ML-DSA-65 keypair so vk_from_bytes succeeds.
         let sk = MlDsa65::from_seed(&[7u8; 32].into());
@@ -1149,7 +1159,7 @@ mod tests {
     #[test]
     fn is_contact_inbox_key_returns_false_for_unrelated_key() {
         use ml_dsa::{KeyGen, MlDsa65, signature::Keypair as MlDsaKeypair};
-        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+        reset_address_book();
 
         // Insert one contact.
         let sk_a = MlDsa65::from_seed(&[1u8; 32].into());
@@ -1182,7 +1192,7 @@ mod tests {
     #[test]
     fn lookup_by_bs58_finds_imported_contact() {
         use ml_dsa::{KeyGen, MlDsa65, signature::Keypair as MlDsaKeypair};
-        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+        reset_address_book();
 
         let sk = MlDsa65::from_seed(&[9u8; 32].into());
         let vk = MlDsaKeypair::verifying_key(&sk);
@@ -1216,8 +1226,7 @@ mod tests {
     #[test]
     fn lookup_by_bs58_cache_invalidates_on_remove_255() {
         use ml_dsa::{KeyGen, MlDsa65, signature::Keypair as MlDsaKeypair};
-        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
-        bump_address_book_gen();
+        reset_address_book();
 
         let sk = MlDsa65::from_seed(&[11u8; 32].into());
         let vk = MlDsaKeypair::verifying_key(&sk);
@@ -1256,7 +1265,7 @@ mod tests {
 
     #[test]
     fn lookup_by_bs58_returns_none_for_unknown_address() {
-        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+        reset_address_book();
         // Valid bs58 32-byte string but no matching contact.
         let id = freenet_stdlib::prelude::ContractInstanceId::new([7u8; 32]);
         assert!(lookup_by_bs58(&id.encode()).is_none());
@@ -1264,14 +1273,14 @@ mod tests {
 
     #[test]
     fn lookup_by_bs58_returns_none_for_invalid_address() {
-        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+        reset_address_book();
         assert!(lookup_by_bs58("not bs58 at all").is_none());
     }
 
     #[test]
     fn is_contact_inbox_key_empty_book_returns_false() {
         use ml_dsa::{KeyGen, MlDsa65, signature::Keypair as MlDsaKeypair};
-        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+        reset_address_book();
 
         let sk = MlDsa65::from_seed(&[3u8; 32].into());
         let vk = MlDsaKeypair::verifying_key(&sk);
@@ -1297,7 +1306,7 @@ mod tests {
     #[test]
     fn lookup_misses_when_contact_imported_under_different_nickname_289() {
         use ml_dsa::{KeyGen, MlDsa65, signature::Keypair as MlDsaKeypair};
-        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+        reset_address_book();
 
         // Alice sends under her own alias "alice-from-work". The recipient
         // imports her contact card but labels it locally as "ally".
@@ -1334,7 +1343,7 @@ mod tests {
     #[test]
     fn lookup_resolves_by_sender_alias_when_suggested_preserved_289() {
         use ml_dsa::{KeyGen, MlDsa65, signature::Keypair as MlDsaKeypair};
-        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+        reset_address_book();
 
         // Same scenario as the miss test above, but the import preserved
         // the sender's advertised alias ("alice-from-work") as

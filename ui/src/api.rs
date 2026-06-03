@@ -2738,48 +2738,61 @@ pub(crate) async fn node_comms(
                 let awaiting_inbox = inbox_management::AWAITING_MIGRATION_ACK
                     .with(|a| take_awaiting_ack(&mut a.borrow_mut(), &contract_key));
                 if let Some(alias) = awaiting_inbox {
-                    if let Err(e) =
-                        identity_management::clear_pending_migration_api_call(&mut client, &alias)
-                            .await
+                    // #260: the migration PUT is durably on the network now —
+                    // clear the persistent marker. Only surface the success
+                    // toast if the clear lands; if it fails the marker stays
+                    // set (re-attempted next session), so a "migrated"
+                    // toast would over-promise.
+                    match identity_management::clear_pending_migration_api_call(&mut client, &alias)
+                        .await
                     {
-                        crate::log::error(
-                            format!(
-                                "inbox migration: clear pending marker for `{alias}` failed: {e} (#260)"
-                            ),
-                            None,
-                        );
+                        Ok(()) => {
+                            crate::toast::push_toast(
+                                format!(
+                                    "Inbox `{alias}` migrated to the new contract id after webapp upgrade."
+                                ),
+                                crate::toast::ToastLevel::Info,
+                            );
+                        }
+                        Err(e) => {
+                            crate::log::error(
+                                format!(
+                                    "inbox migration: clear pending marker for `{alias}` failed: {e} — will retry next session (#260)"
+                                ),
+                                None,
+                            );
+                        }
                     }
-                    crate::toast::push_toast(
-                        format!(
-                            "Inbox `{alias}` migrated to the new contract id after webapp upgrade."
-                        ),
-                        crate::toast::ToastLevel::Info,
-                    );
                     return;
                 }
 
                 let awaiting_aft = token_record_management::AWAITING_AFT_MIGRATION_ACK
                     .with(|a| take_awaiting_ack(&mut a.borrow_mut(), &contract_key));
                 if let Some(alias) = awaiting_aft {
-                    if let Err(e) = identity_management::clear_pending_aft_migration_api_call(
+                    // #260: same deferred-clear discipline as the inbox branch.
+                    match identity_management::clear_pending_aft_migration_api_call(
                         &mut client,
                         &alias,
                     )
                     .await
                     {
-                        crate::log::error(
-                            format!(
-                                "AFT migration: clear pending marker for `{alias}` failed: {e} (#260)"
-                            ),
-                            None,
-                        );
+                        Ok(()) => {
+                            crate::toast::push_toast(
+                                format!(
+                                    "Token ledger `{alias}` migrated to the new contract id after webapp upgrade."
+                                ),
+                                crate::toast::ToastLevel::Info,
+                            );
+                        }
+                        Err(e) => {
+                            crate::log::error(
+                                format!(
+                                    "AFT migration: clear pending marker for `{alias}` failed: {e} — will retry next session (#260)"
+                                ),
+                                None,
+                            );
+                        }
                     }
-                    crate::toast::push_toast(
-                        format!(
-                            "Token ledger `{alias}` migrated to the new contract id after webapp upgrade."
-                        ),
-                        crate::toast::ToastLevel::Info,
-                    );
                 }
             }
             HostResponse::DelegateResponse { key, values } => {
