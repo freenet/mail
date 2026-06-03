@@ -1240,8 +1240,15 @@ test.describe("Live node E2E", () => {
   // (#85 / #179) — once those land, an inverted assertion can verify
   // the bypass actually frees sends through a depleted cap.
   test("verified-skip toggle dispatches ModifySettings + flips state (#157)", async ({
-    page,
+    browser,
   }) => {
+    // #300: own context (like every sibling cross-node test) instead of the
+    // default `page`. The default context is shared across tests in the file,
+    // so a prior test that left an identity in localStorage booted this test
+    // straight into the mailbox — no `fm-id-create` on screen — and
+    // createIdentity's button wait failed with "element(s) not found".
+    const aliceCtx = await browser.newContext();
+    const page = await aliceCtx.newPage();
     const stopPermissionPump = startPermissionPump();
     let bypassDispatched = false;
     page.on("console", (m) => {
@@ -1345,6 +1352,7 @@ test.describe("Live node E2E", () => {
         .toBe(true);
     } finally {
       stopPermissionPump();
+      await aliceCtx.close().catch(() => {});
     }
   });
 
@@ -1974,22 +1982,10 @@ async function createIdentity(
   await expect(app.locator(".brand-name").first()).toContainText(APP_NAME, {
     timeout: 60_000,
   });
-  // #300: each step of the create-identity modal can lag past the default 10s
-  // click timeout on a cold iso-node start under CI load — the brand-name text
-  // renders before the WASM app wires the create handler, and the final
-  // confirm button only becomes actionable after the identity-delegate
-  // round-trip echoes back (which is what actually flaked at fm-create-confirm,
-  // ~1-in-1 on CI). Gate every click on the button being actionable and give
-  // each the same 60s budget as the brand-name wait.
-  const clickWhenReady = async (testid: string) => {
-    const btn = app.locator(`[data-testid="${testid}"]`);
-    await expect(btn).toBeVisible({ timeout: 60_000 });
-    await btn.click({ timeout: 60_000 });
-  };
-  await clickWhenReady("fm-id-create");
+  await app.locator('[data-testid="fm-id-create"]').click();
   await app.locator('[data-testid="fm-create-alias-input"]').fill(alias);
-  await clickWhenReady("fm-create-submit");
-  await clickWhenReady("fm-create-confirm");
+  await app.locator('[data-testid="fm-create-submit"]').click();
+  await app.locator('[data-testid="fm-create-confirm"]').click();
 
   const target = app.locator(
     `[data-testid="fm-id-row"][data-alias="${alias}"]`,
