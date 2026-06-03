@@ -798,9 +798,12 @@ impl ImportContact {
     }
 
     /// Open the modal pre-seeded with a sender's inbox `address` (bs58) and,
-    /// optionally, the sender's advertised display name (`alias`) so the
-    /// nickname field defaults to it and it's persisted as `suggested_alias`
-    /// for the #289 reply-resolution fallback.
+    /// optionally, the sender's advertised display name (`alias`). The modal
+    /// defaults the local nickname to `alias` (the primary #289 fix: a reply
+    /// addressed to the sender's display name then matches the contact's
+    /// `local_alias` exactly). It also seeds `card_suggested_alias` so that IF
+    /// the user relabels the contact, the original name survives as the
+    /// `suggested_alias` resolver fallback (#295).
     pub(crate) fn opened_with(address: String, alias: Option<String>) -> Self {
         Self {
             open: true,
@@ -808,6 +811,29 @@ impl ImportContact {
             prefill_alias: alias,
         }
     }
+}
+
+/// Compute the `suggested_alias` to persist on a contact at import time.
+///
+/// `card_suggested` is the sender's advertised display name (from a contact
+/// card, or seeded from the incoming message on the add-from-message path);
+/// `local_alias` is the nickname the user is saving the contact under.
+///
+/// Returns the advertised name ONLY when it is non-empty AND differs from the
+/// local nickname. When the user accepts the seeded default (so the two are
+/// equal) the result is `None` — storing a `suggested_alias` identical to
+/// `local_alias` would be redundant, since the reply path already resolves by
+/// exact `local_alias` match. The field earns its keep only as a relabel
+/// fallback: user saves "alice-from-work" as local "ally" → persist
+/// `Some("alice-from-work")` so a reply addressed to "alice-from-work" still
+/// resolves (#289 / #295).
+pub(crate) fn persisted_suggested_alias(
+    card_suggested: Option<&str>,
+    local_alias: &str,
+) -> Option<String> {
+    card_suggested
+        .filter(|s| !s.is_empty() && *s != local_alias)
+        .map(str::to_string)
 }
 
 /// Carries the `Contact` whose verified flag the user is about to flip.
@@ -2155,10 +2181,16 @@ pub(super) fn ImportContactForm() -> Element {
         if let Some(addr) = prefill {
             apply_address(addr);
             // #289: a bare bs58 address carries no card metadata, so
-            // `apply_address` leaves `card_suggested_alias` empty. Seed both
-            // the nickname default AND the persisted suggested_alias from the
-            // sender's display name handed over by the add-from-message path,
-            // so the reply resolver fallback (#295) has a handle to match.
+            // `apply_address` leaves `local_alias` / `card_suggested_alias`
+            // empty. Default the nickname to the sender's display name handed
+            // over by the add-from-message path — this is the PRIMARY fix: a
+            // reply addressed to that display name then matches the contact's
+            // `local_alias` exactly. Also seed `card_suggested_alias` so that
+            // if the user relabels the contact, the original name survives as
+            // the #295 resolver fallback (see `persisted_suggested_alias`: when
+            // the user accepts this default, the two are equal and the field is
+            // dropped at save — by design, not a bug). Guards never clobber a
+            // real card's own metadata, which `apply_address` set first.
             if let Some(alias) = prefill_alias.filter(|a| !a.is_empty()) {
                 if local_alias.read().is_empty() {
                     local_alias.set(alias.clone());
@@ -2326,15 +2358,15 @@ pub(super) fn ImportContactForm() -> Element {
                                 return;
                             }
                             // Persist the SENDER's advertised alias (from the
-                            // card), not the possibly-relabelled local_alias —
-                            // that's what makes the suggested_alias resolver
-                            // fallback useful. Fall back to local_alias for
-                            // cards that carried no suggested alias, so the
-                            // field is never silently empty.
-                            let suggested = card_suggested_alias
-                                .read()
-                                .clone()
-                                .filter(|s| !s.is_empty() && *s != alias_str);
+                            // card / add-from-message seed), not the
+                            // possibly-relabelled local_alias — that's what
+                            // makes the suggested_alias resolver fallback (#295)
+                            // useful when the user relabels. See
+                            // `persisted_suggested_alias` for the dedup rule.
+                            let suggested = persisted_suggested_alias(
+                                card_suggested_alias.read().as_deref(),
+                                &alias_str,
+                            );
                             let stored = crate::app::address_book::StoredContactKeys {
                                 ml_dsa_vk_bytes: vk,
                                 ml_kem_ek_bytes: ek,
@@ -2592,14 +2624,15 @@ fn ContactsSection() -> Element {
 
 #[cfg(test)]
 mod tests {
-    use super::{ImportContact, backup_filename, sanitize_filename_stem};
+    use super::{
+        ImportContact, backup_filename, persisted_suggested_alias, sanitize_filename_stem,
+    };
 
-    /// #289 (add-from-message half): when the modal is opened from a received
-    /// message's "Add to address book", the sender's display name must be
-    /// carried into `prefill_alias` so the nickname field defaults to it and
-    /// it is persisted as `suggested_alias`. Without this the user picks an
-    /// arbitrary local label and the reply path can't resolve the sender's
-    /// send-alias (the resolver fallback shipped in #295 has nothing to match).
+    /// #289 (add-from-message half): the modal constructor must carry the
+    /// sender's display name into `prefill_alias` so the prefill effect can
+    /// default the nickname to it. This pins the constructor seam only — the
+    /// save-time persistence rule is covered by the
+    /// `persisted_suggested_alias_*` tests below.
     #[test]
     fn opened_with_carries_sender_alias_for_289() {
         let modal = ImportContact::opened_with(
@@ -2611,8 +2644,7 @@ mod tests {
         assert_eq!(
             modal.prefill_alias.as_deref(),
             Some("alice-from-work"),
-            "sender's advertised display name must reach the modal so the \
-             nickname defaults to it and it's persisted as suggested_alias (#289)",
+            "sender's advertised display name must reach the modal (#289)",
         );
     }
 
@@ -2622,6 +2654,32 @@ mod tests {
         let modal = ImportContact::opened();
         assert!(modal.prefill_alias.is_none());
         assert!(modal.prefill.is_none());
+    }
+
+    /// #289 / #295 save-path rule: the relabel case is the ONLY case that
+    /// persists a `suggested_alias`. Accepting the seeded default (local ==
+    /// advertised) drops it — the reply already resolves by exact local_alias.
+    #[test]
+    fn persisted_suggested_alias_kept_only_on_relabel_289() {
+        // User relabels: advertised "alice-from-work" saved as local "ally"
+        // → the fallback handle is persisted so a reply to "alice-from-work"
+        // still resolves via #295.
+        assert_eq!(
+            persisted_suggested_alias(Some("alice-from-work"), "ally"),
+            Some("alice-from-work".to_string()),
+            "relabel must persist the advertised alias as the resolver fallback",
+        );
+        // User accepts the seeded default (local == advertised): redundant, so
+        // dropped. The reply still resolves by exact local_alias match.
+        assert_eq!(
+            persisted_suggested_alias(Some("alice-from-work"), "alice-from-work"),
+            None,
+            "default-accepted nickname must NOT duplicate into suggested_alias",
+        );
+        // No advertised alias (manual paste of a bare address) → nothing.
+        assert_eq!(persisted_suggested_alias(None, "ally"), None);
+        // Empty advertised alias is treated as absent.
+        assert_eq!(persisted_suggested_alias(Some(""), "ally"), None);
     }
 
     #[test]
