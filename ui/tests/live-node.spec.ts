@@ -76,6 +76,12 @@ const ALIAS_T8_ALICE = "alice8";
 const ALIAS_T8_BOB = "bob8";
 const ALIAS_T9_ALICE = "alice9";
 const ALIAS_T9_BOB = "bob9";
+// #289 reply-after-add-from-message: distinct from every other test's pair so
+// the identities created here don't already exist on the shared iso node when
+// another test (e.g. #157, which owns alice5/bob5) creates its own — a
+// pre-existing identity boots the app into the mailbox with no create button.
+const ALIAS_T10_ALICE = "alice10";
+const ALIAS_T10_BOB = "bob10";
 test.describe("Live node E2E", () => {
   test.skip(
     !process.env.FREENET_EMAIL_BASE_URL?.includes("/v1/contract/web/"),
@@ -795,6 +801,216 @@ test.describe("Live node E2E", () => {
       await bobCtx.tracing
         .stop({ path: "test-results/multi-round-bob-trace.zip" })
         .catch(() => {});
+      await aliceCtx.close().catch(() => {});
+      await bobCtx.close().catch(() => {});
+      stopGwPump();
+      stopPeerPump();
+    }
+  });
+
+  // #289 regression: reply resolves after add-from-message under a DIFFERENT
+  // local nickname.
+  //
+  // The exact reporter repro (Ivvor, 2026-06-01): Bob does NOT pre-import
+  // Alice. Alice sends to Bob. Bob adds Alice straight from the received
+  // message via "Add to address book", relabels her to a local nickname that
+  // differs from Alice's send-alias, then replies. Pre-fix the reply's To
+  // (prefilled with Alice's send-alias) failed to resolve — Bob had to hand-
+  // edit it. The fix threads Alice's display name into the add-from-message
+  // modal so (a) the nickname DEFAULTS to it (primary fix: exact local_alias
+  // match) and (b) on relabel the original survives as the suggested_alias
+  // resolver fallback (#295).
+  //
+  // This is the live-node half of the unit coverage in
+  // `app::login::tests` (persisted_suggested_alias_*) and
+  // `address_book::tests` (lookup_resolves_by_sender_alias_*). It exercises
+  // the real verified-unknown gate that the offline suite can't (offline
+  // delivery stamps signature_valid=false, so the "Add to address book"
+  // affordance never appears).
+  //
+  // Verified red→green on the iso harness: pre-fix the nickname assertion
+  // below fails with `unexpected value ""` (modal opens blank); with the fix
+  // it pre-fills, the relabeled reply resolves, and alice receives it.
+  //
+  // Asserts:
+  //   - the add-from-message modal opens pre-filled with Alice's send-alias
+  //     as the nickname (the #289 thread-through)
+  //   - after relabeling + import, Bob's reply To resolves: the
+  //     compose-recipient-fingerprint badge appears (the badge is gated on a
+  //     successful address-book lookup — its presence IS the #289 fix)
+  //   - Alice receives the reply end-to-end
+  const ALIAS_T289_RELABEL = "ally-relabeled";
+  test("reply resolves after add-from-message under a different nickname (#289)", async ({
+    browser,
+  }) => {
+    test.skip(
+      !PEER_BASE_URL,
+      "cross-node test requires FREENET_EMAIL_BASE_URL to include the contract id",
+    );
+    const stopGwPump = startPermissionPump(ISO_GW_ORIGIN);
+    const stopPeerPump = startPermissionPump(ISO_PEER_ORIGIN);
+    const aliceCtx = await browser.newContext();
+    const bobCtx = await browser.newContext();
+    const alicePage = await aliceCtx.newPage();
+    const bobPage = await bobCtx.newPage();
+    const consoleErrors: string[] = [];
+    for (const [page, label] of [
+      [alicePage, "alice"],
+      [bobPage, "bob"],
+    ] as const) {
+      page.on("console", (m) => {
+        const t = m.text();
+        console.log(`[console:${label}:${m.type()}] ${t}`);
+        if (
+          /WASM PANIC|RuntimeError: unreachable executed|Result::unwrap.*on an .Err/.test(
+            t,
+          )
+        ) {
+          consoleErrors.push(`[${label}] ${t}`);
+        }
+      });
+      page.on("pageerror", (e) =>
+        console.log(`[pageerror:${label}] ${e.message}`),
+      );
+    }
+
+    try {
+      await Promise.all([alicePage.goto(""), bobPage.goto(PEER_BASE_URL)]);
+      await Promise.all([
+        createIdentity(alicePage, ALIAS_T10_ALICE),
+        createIdentity(bobPage, ALIAS_T10_BOB),
+      ]);
+
+      const aliceApp = alicePage.frameLocator("iframe#app");
+      const bobApp = bobPage.frameLocator("iframe#app");
+
+      // Capture bob's share card so alice can import him (alice must import
+      // bob to send round 1). Bob deliberately does NOT import alice: the
+      // whole point of #289 is that he adds her later from the received
+      // message.
+      await bobApp
+        .locator(
+          `[data-testid="fm-id-row"][data-alias="${ALIAS_T10_BOB}"] [data-testid="fm-id-share"]`,
+        )
+        .click();
+      const bobShare = bobApp.locator('[data-testid="fm-share-modal"]');
+      await bobShare.waitFor({ timeout: 5_000 });
+      const bobCard = (await bobShare.getAttribute("data-share-text")) ?? "";
+      await bobShare.locator(".modal-x").click();
+
+      // Alice imports bob (verified) so round 1 can resolve.
+      await aliceApp.locator('[data-testid="fm-contact-import"]').click();
+      await aliceApp
+        .locator('[data-testid="fm-import-contact-modal"] textarea')
+        .fill(bobCard);
+      await aliceApp
+        .locator('input[placeholder="e.g. Alice (work)"]')
+        .fill(ALIAS_T10_BOB);
+      const aliceVerify = aliceApp.locator('[data-testid="fm-verify-check"]');
+      await aliceVerify.waitFor({ timeout: 30_000 });
+      await aliceVerify.click();
+      await aliceApp.locator('[data-testid="fm-import-submit"]').click();
+
+      // Open both inboxes.
+      await aliceApp
+        .locator(
+          `[data-testid="fm-id-row"][data-alias="${ALIAS_T10_ALICE}"] [data-testid="fm-id-open"]`,
+        )
+        .first()
+        .click();
+      await bobApp
+        .locator(
+          `[data-testid="fm-id-row"][data-alias="${ALIAS_T10_BOB}"] [data-testid="fm-id-open"]`,
+        )
+        .first()
+        .click();
+
+      // ── alice → bob ──────────────────────────────────────────────
+      await composeAndSend(
+        aliceApp,
+        ALIAS_T10_BOB,
+        "two eighty nine",
+        "add me from this message",
+      );
+      try {
+        await expect(
+          bobApp.getByText(/two eighty nine/i),
+          "bob receives alice's message",
+        ).toBeVisible({ timeout: 60_000 });
+      } catch (e) {
+        const genuineRegression = grepPeerLog(
+          /missing field `tier`|delta_apply_failed|slot.*collision|failed to deserialize.*Inbox|InboxUpdateError|task .* panicked/,
+        );
+        if (coreRelayBugDetected() && !genuineRegression) {
+          test.skip(
+            true,
+            "quarantined: freenet-core cross-node UPDATE relay bug (#3279/#3465)",
+          );
+        }
+        throw e;
+      }
+
+      // ── Bob opens the message and adds alice FROM it ─────────────
+      await bobApp.getByText(/two eighty nine/i).click();
+      await bobApp
+        .locator('[data-testid="fm-thread-container"]')
+        .waitFor({ timeout: 5_000 });
+
+      // The "Add to address book" affordance only renders for a verified-
+      // but-unknown sender — alice's signature validates and bob has no
+      // contact for her. This is the gate the offline suite cannot reach.
+      const addToAb = bobApp.locator('[data-testid="fm-add-to-ab"]').first();
+      await addToAb.waitFor({ timeout: 15_000 });
+      await addToAb.click();
+
+      const importModal = bobApp.locator(
+        '[data-testid="fm-import-contact-modal"]',
+      );
+      await importModal.waitFor({ timeout: 10_000 });
+
+      // #289 thread-through: the nickname field must be PRE-FILLED with
+      // alice's send-alias (her display name on the message). Pre-fix this
+      // opened blank (verified red on the iso harness: `unexpected value ""`).
+      const nick = importModal.locator(
+        'input[placeholder="e.g. Alice (work)"]',
+      );
+      await expect(
+        nick,
+        "add-from-message modal pre-fills the nickname with the sender's display name (#289)",
+      ).toHaveValue(ALIAS_T10_ALICE, { timeout: 15_000 });
+
+      // Bob deliberately RELABELS to a different local nickname — the exact
+      // repro condition. The original alias must survive as suggested_alias.
+      await nick.fill(ALIAS_T289_RELABEL);
+      const bobVerify = importModal.locator('[data-testid="fm-verify-check"]');
+      await bobVerify.waitFor({ timeout: 15_000 });
+      await bobVerify.click();
+      await importModal.locator('[data-testid="fm-import-submit"]').click();
+
+      // ── Bob replies — the To must resolve WITHOUT hand-editing ───
+      // Reply prefills To with alice's send-alias (ALIAS_T10_ALICE), NOT the
+      // relabeled local nickname. Pre-fix the address-book lookup missed and
+      // the fingerprint badge never appeared, blocking the send.
+      await bobApp.locator('[data-testid="fm-reply"]').first().click();
+      const replySheet = bobApp.locator('[data-testid="fm-compose-sheet"]');
+      await replySheet.waitFor({ timeout: 10_000 });
+      await expect(
+        bobApp.getByTestId("compose-recipient-fingerprint"),
+        "reply To resolves the relabeled contact by the sender's alias (#289 fix)",
+      ).toBeVisible({ timeout: 20_000 });
+
+      await replySheet
+        .locator("textarea.sheet-textarea")
+        .fill("resolved reply");
+      await replySheet.locator('[data-testid="fm-send"]').click();
+
+      await expect(
+        aliceApp.getByText(/resolved reply/i),
+        "alice receives bob's reply (#289 end-to-end)",
+      ).toBeVisible({ timeout: 60_000 });
+
+      expect(consoleErrors, consoleErrors.join("\n")).toHaveLength(0);
+    } finally {
       await aliceCtx.close().catch(() => {});
       await bobCtx.close().catch(() => {});
       stopGwPump();

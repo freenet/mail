@@ -3654,6 +3654,7 @@ fn ThreadRowActions(msg: Message, root_id: u64, thread_total: usize) -> Element 
         crate::inbox::VerificationState::VerifiedUnknown
     );
     let add_to_ab_vk = msg.sender_vk.clone();
+    let add_to_ab_from = msg.from.to_string(); // #289: sender display name → modal nickname default
     // After removing this row the thread keeps `thread_total - 1` members.
     let remaining = thread_total.saturating_sub(1);
     let post = PostMessageAction::LeaveThread {
@@ -3689,7 +3690,7 @@ fn ThreadRowActions(msg: Message, root_id: u64, thread_total: usize) -> Element 
                 "data-testid": testid::FM_ADD_TO_AB,
                 title: "Add sender to address book",
                 onclick: move |_| {
-                    add_sender_to_address_book(import_contact, &add_to_ab_vk);
+                    add_sender_to_address_book(import_contact, &add_to_ab_vk, &add_to_ab_from);
                 },
                 "Add to address book"
             }
@@ -4350,10 +4351,21 @@ fn delete_message(
 fn add_sender_to_address_book(
     mut import_contact: Signal<crate::app::login::ImportContact>,
     sender_vk: &[u8],
+    sender_from: &str,
 ) {
+    // #289: thread the sender's display name (`Message.from`) into the modal
+    // so the nickname defaults to it — matching what a reply prefills
+    // (`to: Message.from`), so resolution hits the contact's `local_alias`
+    // exactly. The advertised name is persisted as `suggested_alias` only if
+    // the user relabels (the save filter drops it when it equals local_alias).
+    // Blank/whitespace-only display names contribute no suggestion.
+    let alias = {
+        let trimmed = sender_from.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    };
     match crate::inbox::inbox_address_bs58_from_vk_bytes(sender_vk) {
         Ok(addr) => {
-            *import_contact.write() = crate::app::login::ImportContact::opened_with(addr);
+            *import_contact.write() = crate::app::login::ImportContact::opened_with(addr, alias);
         }
         Err(e) => {
             crate::toast::push_toast(
@@ -4483,6 +4495,7 @@ fn OpenMessage(msg: Message) -> Element {
         crate::inbox::VerificationState::VerifiedUnknown
     );
     let add_to_ab_vk = msg.sender_vk.clone();
+    let add_to_ab_from = msg.from.to_string(); // #289: sender display name → modal nickname default
 
     let active_alias = user
         .read()
@@ -4537,7 +4550,7 @@ fn OpenMessage(msg: Message) -> Element {
                         class: "btn btn-secondary",
                         "data-testid": testid::FM_ADD_TO_AB,
                         onclick: move |_| {
-                            add_sender_to_address_book(import_contact, &add_to_ab_vk);
+                            add_sender_to_address_book(import_contact, &add_to_ab_vk, &add_to_ab_from);
                         },
                         "Add to address book"
                     }
