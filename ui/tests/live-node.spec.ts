@@ -76,6 +76,12 @@ const ALIAS_T8_ALICE = "alice8";
 const ALIAS_T8_BOB = "bob8";
 const ALIAS_T9_ALICE = "alice9";
 const ALIAS_T9_BOB = "bob9";
+// #289 reply-after-add-from-message: distinct from every other test's pair so
+// the identities created here don't already exist on the shared iso node when
+// another test (e.g. #157, which owns alice5/bob5) creates its own — a
+// pre-existing identity boots the app into the mailbox with no create button.
+const ALIAS_T10_ALICE = "alice10";
+const ALIAS_T10_BOB = "bob10";
 test.describe("Live node E2E", () => {
   test.skip(
     !process.env.FREENET_EMAIL_BASE_URL?.includes("/v1/contract/web/"),
@@ -871,8 +877,8 @@ test.describe("Live node E2E", () => {
     try {
       await Promise.all([alicePage.goto(""), bobPage.goto(PEER_BASE_URL)]);
       await Promise.all([
-        createIdentity(alicePage, ALIAS_T5_ALICE),
-        createIdentity(bobPage, ALIAS_T5_BOB),
+        createIdentity(alicePage, ALIAS_T10_ALICE),
+        createIdentity(bobPage, ALIAS_T10_BOB),
       ]);
 
       const aliceApp = alicePage.frameLocator("iframe#app");
@@ -884,7 +890,7 @@ test.describe("Live node E2E", () => {
       // message.
       await bobApp
         .locator(
-          `[data-testid="fm-id-row"][data-alias="${ALIAS_T5_BOB}"] [data-testid="fm-id-share"]`,
+          `[data-testid="fm-id-row"][data-alias="${ALIAS_T10_BOB}"] [data-testid="fm-id-share"]`,
         )
         .click();
       const bobShare = bobApp.locator('[data-testid="fm-share-modal"]');
@@ -899,7 +905,7 @@ test.describe("Live node E2E", () => {
         .fill(bobCard);
       await aliceApp
         .locator('input[placeholder="e.g. Alice (work)"]')
-        .fill(ALIAS_T5_BOB);
+        .fill(ALIAS_T10_BOB);
       const aliceVerify = aliceApp.locator('[data-testid="fm-verify-check"]');
       await aliceVerify.waitFor({ timeout: 30_000 });
       await aliceVerify.click();
@@ -908,13 +914,13 @@ test.describe("Live node E2E", () => {
       // Open both inboxes.
       await aliceApp
         .locator(
-          `[data-testid="fm-id-row"][data-alias="${ALIAS_T5_ALICE}"] [data-testid="fm-id-open"]`,
+          `[data-testid="fm-id-row"][data-alias="${ALIAS_T10_ALICE}"] [data-testid="fm-id-open"]`,
         )
         .first()
         .click();
       await bobApp
         .locator(
-          `[data-testid="fm-id-row"][data-alias="${ALIAS_T5_BOB}"] [data-testid="fm-id-open"]`,
+          `[data-testid="fm-id-row"][data-alias="${ALIAS_T10_BOB}"] [data-testid="fm-id-open"]`,
         )
         .first()
         .click();
@@ -922,7 +928,7 @@ test.describe("Live node E2E", () => {
       // ── alice → bob ──────────────────────────────────────────────
       await composeAndSend(
         aliceApp,
-        ALIAS_T5_BOB,
+        ALIAS_T10_BOB,
         "two eighty nine",
         "add me from this message",
       );
@@ -971,7 +977,7 @@ test.describe("Live node E2E", () => {
       await expect(
         nick,
         "add-from-message modal pre-fills the nickname with the sender's display name (#289)",
-      ).toHaveValue(ALIAS_T5_ALICE, { timeout: 15_000 });
+      ).toHaveValue(ALIAS_T10_ALICE, { timeout: 15_000 });
 
       // Bob deliberately RELABELS to a different local nickname — the exact
       // repro condition. The original alias must survive as suggested_alias.
@@ -982,7 +988,7 @@ test.describe("Live node E2E", () => {
       await importModal.locator('[data-testid="fm-import-submit"]').click();
 
       // ── Bob replies — the To must resolve WITHOUT hand-editing ───
-      // Reply prefills To with alice's send-alias (ALIAS_T5_ALICE), NOT the
+      // Reply prefills To with alice's send-alias (ALIAS_T10_ALICE), NOT the
       // relabeled local nickname. Pre-fix the address-book lookup missed and
       // the fingerprint badge never appeared, blocking the send.
       await bobApp.locator('[data-testid="fm-reply"]').first().click();
@@ -1240,15 +1246,8 @@ test.describe("Live node E2E", () => {
   // (#85 / #179) — once those land, an inverted assertion can verify
   // the bypass actually frees sends through a depleted cap.
   test("verified-skip toggle dispatches ModifySettings + flips state (#157)", async ({
-    browser,
+    page,
   }) => {
-    // #300: own context (like every sibling cross-node test) instead of the
-    // default `page`. The default context is shared across tests in the file,
-    // so a prior test that left an identity in localStorage booted this test
-    // straight into the mailbox — no `fm-id-create` on screen — and
-    // createIdentity's button wait failed with "element(s) not found".
-    const aliceCtx = await browser.newContext();
-    const page = await aliceCtx.newPage();
     const stopPermissionPump = startPermissionPump();
     let bypassDispatched = false;
     page.on("console", (m) => {
@@ -1352,7 +1351,6 @@ test.describe("Live node E2E", () => {
         .toBe(true);
     } finally {
       stopPermissionPump();
-      await aliceCtx.close().catch(() => {});
     }
   });
 
@@ -1982,19 +1980,10 @@ async function createIdentity(
   await expect(app.locator(".brand-name").first()).toContainText(APP_NAME, {
     timeout: 60_000,
   });
-  // #300: gate every click on the button being actionable with a 60s budget.
-  // On a cold iso-node start under CI load the create-modal steps can lag past
-  // the default 10s click timeout — particularly fm-create-confirm, which only
-  // becomes clickable after the identity-delegate round-trip echoes back.
-  const clickWhenReady = async (testid: string) => {
-    const btn = app.locator(`[data-testid="${testid}"]`);
-    await expect(btn).toBeVisible({ timeout: 60_000 });
-    await btn.click({ timeout: 60_000 });
-  };
-  await clickWhenReady("fm-id-create");
+  await app.locator('[data-testid="fm-id-create"]').click();
   await app.locator('[data-testid="fm-create-alias-input"]').fill(alias);
-  await clickWhenReady("fm-create-submit");
-  await clickWhenReady("fm-create-confirm");
+  await app.locator('[data-testid="fm-create-submit"]').click();
+  await app.locator('[data-testid="fm-create-confirm"]').click();
 
   const target = app.locator(
     `[data-testid="fm-id-row"][data-alias="${alias}"]`,
