@@ -774,10 +774,18 @@ pub(crate) struct SharePendingData {
 /// `prefill` carries an inbox address (bs58) to seed the paste field
 /// when the modal is opened from a known sender — e.g. "Add to address
 /// book" on a received message (#272). `None` prefill = manual paste.
+///
+/// `prefill_alias` carries the sender's *display name* from the incoming
+/// message (`Message.from`) so the modal can default the local nickname
+/// AND persist it as `suggested_alias` (#289). Without it the
+/// add-from-message path opens the nickname field blank, the user picks
+/// an arbitrary local label, and the reply path can't resolve the
+/// sender's send-alias — the exact #289 repro. `None` = no suggestion.
 #[derive(Clone, Default)]
 pub(crate) struct ImportContact {
     pub(crate) open: bool,
     pub(crate) prefill: Option<String>,
+    pub(crate) prefill_alias: Option<String>,
 }
 
 impl ImportContact {
@@ -785,13 +793,19 @@ impl ImportContact {
         Self {
             open: true,
             prefill: None,
+            prefill_alias: None,
         }
     }
 
-    pub(crate) fn opened_with(address: String) -> Self {
+    /// Open the modal pre-seeded with a sender's inbox `address` (bs58) and,
+    /// optionally, the sender's advertised display name (`alias`) so the
+    /// nickname field defaults to it and it's persisted as `suggested_alias`
+    /// for the #289 reply-resolution fallback.
+    pub(crate) fn opened_with(address: String, alias: Option<String>) -> Self {
         Self {
             open: true,
             prefill: Some(address),
+            prefill_alias: alias,
         }
     }
 }
@@ -2134,10 +2148,28 @@ pub(super) fn ImportContactForm() -> Element {
     // fetch exactly once, then clear the prefill so a later manual edit
     // (or a re-render) doesn't clobber the user's typing.
     use_effect(move || {
-        let prefill = import_contact_form.read().prefill.clone();
+        let (prefill, prefill_alias) = {
+            let form = import_contact_form.read();
+            (form.prefill.clone(), form.prefill_alias.clone())
+        };
         if let Some(addr) = prefill {
             apply_address(addr);
-            import_contact_form.write().prefill = None;
+            // #289: a bare bs58 address carries no card metadata, so
+            // `apply_address` leaves `card_suggested_alias` empty. Seed both
+            // the nickname default AND the persisted suggested_alias from the
+            // sender's display name handed over by the add-from-message path,
+            // so the reply resolver fallback (#295) has a handle to match.
+            if let Some(alias) = prefill_alias.filter(|a| !a.is_empty()) {
+                if local_alias.read().is_empty() {
+                    local_alias.set(alias.clone());
+                }
+                if card_suggested_alias.read().is_none() {
+                    card_suggested_alias.set(Some(alias));
+                }
+            }
+            let mut form = import_contact_form.write();
+            form.prefill = None;
+            form.prefill_alias = None;
         }
     });
 
@@ -2560,7 +2592,37 @@ fn ContactsSection() -> Element {
 
 #[cfg(test)]
 mod tests {
-    use super::{backup_filename, sanitize_filename_stem};
+    use super::{ImportContact, backup_filename, sanitize_filename_stem};
+
+    /// #289 (add-from-message half): when the modal is opened from a received
+    /// message's "Add to address book", the sender's display name must be
+    /// carried into `prefill_alias` so the nickname field defaults to it and
+    /// it is persisted as `suggested_alias`. Without this the user picks an
+    /// arbitrary local label and the reply path can't resolve the sender's
+    /// send-alias (the resolver fallback shipped in #295 has nothing to match).
+    #[test]
+    fn opened_with_carries_sender_alias_for_289() {
+        let modal = ImportContact::opened_with(
+            "addr-bs58".to_string(),
+            Some("alice-from-work".to_string()),
+        );
+        assert!(modal.open);
+        assert_eq!(modal.prefill.as_deref(), Some("addr-bs58"));
+        assert_eq!(
+            modal.prefill_alias.as_deref(),
+            Some("alice-from-work"),
+            "sender's advertised display name must reach the modal so the \
+             nickname defaults to it and it's persisted as suggested_alias (#289)",
+        );
+    }
+
+    /// A bare manual-paste open carries no alias suggestion.
+    #[test]
+    fn opened_has_no_prefill_alias() {
+        let modal = ImportContact::opened();
+        assert!(modal.prefill_alias.is_none());
+        assert!(modal.prefill.is_none());
+    }
 
     #[test]
     fn sanitize_plain_ascii() {
