@@ -1974,17 +1974,22 @@ async function createIdentity(
   await expect(app.locator(".brand-name").first()).toContainText(APP_NAME, {
     timeout: 60_000,
   });
-  // #300: the brand-name text can render before the WASM app finishes wiring
-  // the create-identity handler on a cold iso-node start, so a bare click()
-  // with the default 10s timeout flaked (~1-in-1 on CI under load). Gate on
-  // the button being actionable and give the click the same 60s budget as the
-  // brand-name wait.
-  const createBtn = app.locator('[data-testid="fm-id-create"]');
-  await expect(createBtn).toBeVisible({ timeout: 60_000 });
-  await createBtn.click({ timeout: 60_000 });
+  // #300: each step of the create-identity modal can lag past the default 10s
+  // click timeout on a cold iso-node start under CI load — the brand-name text
+  // renders before the WASM app wires the create handler, and the final
+  // confirm button only becomes actionable after the identity-delegate
+  // round-trip echoes back (which is what actually flaked at fm-create-confirm,
+  // ~1-in-1 on CI). Gate every click on the button being actionable and give
+  // each the same 60s budget as the brand-name wait.
+  const clickWhenReady = async (testid: string) => {
+    const btn = app.locator(`[data-testid="${testid}"]`);
+    await expect(btn).toBeVisible({ timeout: 60_000 });
+    await btn.click({ timeout: 60_000 });
+  };
+  await clickWhenReady("fm-id-create");
   await app.locator('[data-testid="fm-create-alias-input"]').fill(alias);
-  await app.locator('[data-testid="fm-create-submit"]').click();
-  await app.locator('[data-testid="fm-create-confirm"]').click();
+  await clickWhenReady("fm-create-submit");
+  await clickWhenReady("fm-create-confirm");
 
   const target = app.locator(
     `[data-testid="fm-id-row"][data-alias="${alias}"]`,
