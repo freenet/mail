@@ -4362,8 +4362,7 @@ fn add_sender_to_address_book(
     };
     match crate::inbox::inbox_address_bs58_from_vk_bytes(sender_vk) {
         Ok(addr) => {
-            *import_contact.write() =
-                crate::app::login::ImportContact::opened_with(addr, alias);
+            *import_contact.write() = crate::app::login::ImportContact::opened_with(addr, alias);
         }
         Err(e) => {
             crate::toast::push_toast(
