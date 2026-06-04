@@ -453,21 +453,22 @@ impl InboxView {
                     // recipient should be unaffected) and flip the row
                     // to Failed so the user sees the truth.
                     crate::inbox::remove_pending_sent_ack(&inbox_key, &sender_alias, &sent_id);
-                    crate::local_state::local_set_sent_delivery_state(
+                    if crate::local_state::local_set_sent_delivery_state(
                         &sender_alias,
                         &sent_id,
                         mail_local_state::DeliveryState::Failed,
-                    );
-                    let mut client_clone = client.clone();
-                    if let Err(e) = crate::local_state::set_sent_delivery_state(
-                        &mut client_clone,
-                        sender_alias,
-                        sent_id,
-                        mail_local_state::DeliveryState::Failed,
-                    )
-                    .await
-                    {
-                        crate::log::local_state_failure("update delivery state", e);
+                    ) {
+                        let mut client_clone = client.clone();
+                        if let Err(e) = crate::local_state::set_sent_delivery_state(
+                            &mut client_clone,
+                            sender_alias,
+                            sent_id,
+                            mail_local_state::DeliveryState::Failed,
+                        )
+                        .await
+                        {
+                            crate::log::local_state_failure("update delivery state", e);
+                        }
                     }
                 }
             };
@@ -4997,13 +4998,14 @@ fn ComposeSheet() -> Element {
             #[cfg(not(feature = "use-node"))]
             let initial_state = mail_local_state::DeliveryState::Delivered;
 
+            let sent_at_ms = chrono::Utc::now().timestamp_millis();
             let sent = mail_local_state::SentMessage {
                 to: to_val.clone(),
                 recipient_fingerprint: recipient.fingerprint_short(),
                 recipient_fingerprint_full: recipient.fingerprint_full(),
                 subject: title_val.clone(),
                 body: content_val.clone(),
-                sent_at: chrono::Utc::now().timestamp_millis(),
+                sent_at: sent_at_ms,
                 delivery_state: initial_state,
                 // #270: mirror the threading linkage onto the local Sent row
                 // so the Sent folder + reply-from-Sent stay in the thread.
@@ -5022,6 +5024,7 @@ fn ComposeSheet() -> Element {
                         inbox_key,
                         sender_alias.clone(),
                         sent_id.clone(),
+                        sent_at_ms,
                     );
                 }
                 Err(e) => {

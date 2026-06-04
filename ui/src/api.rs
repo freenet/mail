@@ -2028,15 +2028,31 @@ pub(crate) async fn node_comms(
                                         None,
                                     );
                                 } else if let Some(id) = InboxModel::contract_identity(key) {
-                                    // FIXME: in case this is for an inbox contract we were trying to update, this means that
-                                    // the message wasn't sent and should propgate that to the UI
+                                    // A failed UPDATE to a recipient inbox is the
+                                    // terminal signal that the send didn't land
+                                    // (e.g. the recipient-node hang / GET-starvation
+                                    // of freenet-core#4345, or any other UPDATE
+                                    // rejection). Mirror the AFT-`Failure` path
+                                    // (#85) and the import-`Get` path (#302): flip
+                                    // every Sent row queued against this inbox from
+                                    // Pending → Failed and toast the user, instead
+                                    // of leaving the row spinning Pending forever
+                                    // (#288).
                                     let alias = id.alias();
                                     crate::log::error(
                                         format!(
-                                            "the message for {alias} (inbox contract: {key}) wasn't delievered succesffully, so may need to try again and/or notify the user"
+                                            "message for {alias} (inbox contract: {key}) wasn't delivered — flipping queued sends to Failed"
                                         ),
-                                        None,
+                                        Some(TryNodeAction::SendMessage),
                                     );
+                                    crate::toast::push_toast(
+                                        format!(
+                                            "Message to {alias} wasn't delivered. The recipient's node may be temporarily unreachable — try sending again."
+                                        ),
+                                        crate::toast::ToastLevel::Error,
+                                    );
+                                    crate::inbox::fail_pending_sent_for_inbox(&mut client, *key)
+                                        .await;
                                 }
                             }
                             RequestError::ContractError(ContractError::Get { key, cause }) => {
@@ -2630,26 +2646,32 @@ pub(crate) async fn node_comms(
                 if let Some((sender_alias, sent_id)) =
                     crate::inbox::take_next_pending_sent_ack(&key)
                 {
-                    crate::local_state::local_set_sent_delivery_state(
+                    // Only persist the Delivered flip if the row actually
+                    // transitioned from Pending. A late UpdateResponse that
+                    // arrives after the stale-send sweep already failed this
+                    // (or mis-pairs onto a sibling already terminal) must not
+                    // resurrect a Failed row to Delivered (#288).
+                    if crate::local_state::local_set_sent_delivery_state(
                         &sender_alias,
                         &sent_id,
                         mail_local_state::DeliveryState::Delivered,
-                    );
-                    let mut client_clone = client.clone();
-                    let alias_async = sender_alias;
-                    let id_async = sent_id;
-                    wasm_bindgen_futures::spawn_local(async move {
-                        if let Err(e) = crate::local_state::set_sent_delivery_state(
-                            &mut client_clone,
-                            alias_async,
-                            id_async,
-                            mail_local_state::DeliveryState::Delivered,
-                        )
-                        .await
-                        {
-                            crate::log::local_state_failure("update delivery state", e);
-                        }
-                    });
+                    ) {
+                        let mut client_clone = client.clone();
+                        let alias_async = sender_alias;
+                        let id_async = sent_id;
+                        wasm_bindgen_futures::spawn_local(async move {
+                            if let Err(e) = crate::local_state::set_sent_delivery_state(
+                                &mut client_clone,
+                                alias_async,
+                                id_async,
+                                mail_local_state::DeliveryState::Delivered,
+                            )
+                            .await
+                            {
+                                crate::log::local_state_failure("update delivery state", e);
+                            }
+                        });
+                    }
                 }
 
                 if let Some(identity) = token_rec_to_id.remove(&key) {
@@ -3538,7 +3560,8 @@ pub(crate) async fn node_comms(
                 let expired = AftRecords::expire_stale(
                     crate::aft::PENDING_ASSIGNMENT_TIMEOUT_SECS,
                 );
-                for assignment in expired {
+                let mut aft_failed_inboxes: Vec<ContractKey> = Vec::new();
+                for (assignment, inbox) in expired {
                     crate::log::error(
                         format!(
                             "AFT assignment confirmation timed out (>{}s) for tier={} slot={} hash={}",
@@ -3551,6 +3574,41 @@ pub(crate) async fn node_comms(
                     );
                     crate::toast::push_toast(
                         crate::aft::format_expired_assignment_toast(assignment.tier),
+                        crate::toast::ToastLevel::Error,
+                    );
+                    if !aft_failed_inboxes.contains(&inbox) {
+                        aft_failed_inboxes.push(inbox);
+                    }
+                }
+                // Flip the Sent rows for AFT-timed-out sends to Failed right
+                // away rather than waiting out the longer send-sweep window
+                // (#288 review): an AFT stall is terminal for that send.
+                for inbox in aft_failed_inboxes {
+                    let mut aft_client = WEB_API_SENDER.get().unwrap().clone();
+                    crate::inbox::fail_pending_sent_for_inbox(&mut aft_client, inbox).await;
+                }
+
+                // #288 "no terminal reply at all": a send whose recipient
+                // inbox UPDATE got neither an `UpdateResponse` nor a
+                // `ContractError::Update` (e.g. the recipient node hung and
+                // the request was silently dropped) would otherwise leave
+                // the Sent row spinning Pending forever. Fail rows older
+                // than `PENDING_SENT_TIMEOUT_SECS` and toast once.
+                let mut sweep_client = WEB_API_SENDER.get().unwrap().clone();
+                let now_ms = chrono::Utc::now().timestamp_millis();
+                let expired_sends = crate::inbox::expire_stale_pending_sent(
+                    &mut sweep_client,
+                    crate::inbox::PENDING_SENT_TIMEOUT_SECS,
+                    now_ms,
+                )
+                .await;
+                if !expired_sends.is_empty() {
+                    crate::toast::push_toast(
+                        format!(
+                            "{} message(s) got no delivery confirmation within {}s and were marked failed. The recipient's node may be unreachable — try sending again.",
+                            expired_sends.len(),
+                            crate::inbox::PENDING_SENT_TIMEOUT_SECS,
+                        ),
                         crate::toast::ToastLevel::Error,
                     );
                 }

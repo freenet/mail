@@ -186,24 +186,28 @@ impl AftRecords {
     }
 
     /// Drain pending confirmations older than `timeout_secs` and return
-    /// the expired records so the caller can surface the failure to the
-    /// UI. Also clears the matching entry in `PENDING_INBOXES_UPDATES`
-    /// so a retry can re-queue without colliding with a stale entry.
+    /// the expired `(record, inbox)` pairs so the caller can surface the
+    /// failure to the UI *and* flip the corresponding Sent row to Failed
+    /// immediately (#288 — without the inbox key the row only failed later
+    /// via the 60s send-sweep, leaving a ~30s window where the AFT-timeout
+    /// toast showed but the row still spun Pending). Also clears the
+    /// matching entry in `PENDING_INBOXES_UPDATES` so a retry can re-queue
+    /// without colliding with a stale entry.
     ///
     /// Without this sweep, a `confirm_allocation` that never arrives
     /// (host crash, network drop, malformed summary) leaves the user's
     /// send hanging forever with no UI feedback — see #1 in the AFT
     /// audit.
-    pub fn expire_stale(timeout_secs: i64) -> Vec<TokenAssignment> {
+    pub fn expire_stale(timeout_secs: i64) -> Vec<(TokenAssignment, InboxContract)> {
         let now = Utc::now();
-        let mut expired: Vec<TokenAssignment> = Vec::new();
+        let mut expired: Vec<(TokenAssignment, InboxContract)> = Vec::new();
         PENDING_CONFIRMED_ASSIGNMENTS.with(|pending| {
             let mut pending = pending.borrow_mut();
             for registers in pending.values_mut() {
                 registers.retain(|r| {
                     let elapsed = now.signed_duration_since(r.start).num_seconds();
                     if elapsed >= timeout_secs {
-                        expired.push(r.record.clone());
+                        expired.push((r.record.clone(), r.inbox));
                         false
                     } else {
                         true
@@ -213,8 +217,10 @@ impl AftRecords {
             pending.retain(|_, v| !v.is_empty());
         });
         if !expired.is_empty() {
-            let expired_hashes: HashMap<AssignmentHash, ()> =
-                expired.iter().map(|r| (r.assignment_hash, ())).collect();
+            let expired_hashes: HashMap<AssignmentHash, ()> = expired
+                .iter()
+                .map(|(r, _)| (r.assignment_hash, ()))
+                .collect();
             PENDING_INBOXES_UPDATES.with(|queue| {
                 queue
                     .borrow_mut()
