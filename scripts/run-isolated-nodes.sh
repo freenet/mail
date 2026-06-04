@@ -46,6 +46,28 @@ GW_PGIDFILE="$ROOT/gw.pgid"
 PEER_PGIDFILE="$ROOT/peer.pgid"
 GW_PUBKEY_FILE="$ROOT/gw.pubkey"
 
+# Block freenet's startup auto-update probe.
+#
+# At boot freenet (a clean release build) hits
+# https://api.github.com/repos/freenet/freenet-core/releases/latest and,
+# if a newer release exists, gracefully shuts itself down to auto-update
+# (crates/core/src/bin/freenet.rs — gated only on a dirty git build, with
+# no env knob to disable). That self-shutdown kills the iso gateway
+# mid-E2E whenever the local binary trails the latest freenet-core
+# release, which broke a production release run (the gw on :7510 died
+# seconds after bind → publish hit connection-refused).
+#
+# The update check uses `reqwest::Client` with no `.no_proxy()`, so it
+# honors HTTPS_PROXY. Point it at a dead local port: the probe's
+# `send()` errors, `startup_update_check` returns None, and the node
+# fails-open and stays up. The P2P transport is raw UDP (no reqwest) and
+# the public-gateway-index fetch is already suppressed by
+# `gateways = []` + `--skip-load-from-network`, so nothing load-bearing
+# routes through this proxy. CI achieves the same effect by routing
+# api.github.com → 127.0.0.1 in /etc/hosts (e2e-real-node.yml), which
+# needs sudo; the proxy approach keeps this harness root-free.
+NO_AUTOUPDATE_ENV=(HTTPS_PROXY=http://127.0.0.1:1 HTTP_PROXY=http://127.0.0.1:1 NO_PROXY=)
+
 # spawn_setsid <pidfile> <pgidfile> <stdout-log> <env-prefix> <cmd...>
 #
 # Spawns cmd in its own POSIX session via perl, so the entire process
@@ -113,6 +135,7 @@ up() {
     else
         echo "starting gateway on ws://127.0.0.1:$GW_PORT_WS (net :$GW_PORT_NET)"
         HOME="$GW_HOME" spawn_setsid "$GW_PIDFILE" "$GW_PGIDFILE" "$GW_LOGS/stdout.log" \
+            env "${NO_AUTOUPDATE_ENV[@]}" \
             freenet network \
             --network-port "$GW_PORT_NET" \
             --ws-api-port "$GW_PORT_WS" \
@@ -151,6 +174,7 @@ up() {
     else
         echo "starting peer on ws://127.0.0.1:$PEER_PORT_WS (net :$PEER_PORT_NET) → gateway 127.0.0.1:$GW_PORT_NET"
         HOME="$PEER_HOME" spawn_setsid "$PEER_PIDFILE" "$PEER_PGIDFILE" "$PEER_LOGS/stdout.log" \
+            env "${NO_AUTOUPDATE_ENV[@]}" \
             freenet network \
             --network-port "$PEER_PORT_NET" \
             --ws-api-port "$PEER_PORT_WS" \
