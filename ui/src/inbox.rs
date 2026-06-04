@@ -212,22 +212,33 @@ thread_local! {
     /// drained FIFO when an `UpdateResponse` arrives for that inbox key
     /// (api.rs flips the corresponding row to `Delivered`).
     ///
-    /// FIFO is "good enough" — the network does not promise that responses
-    /// for sequential sends to the same inbox land in submission order, but
-    /// every successful send will get acked, and a wrong pairing only
-    /// affects the timing of the UI flip, not the correctness of which rows
-    /// end up Delivered.
+    /// FIFO pairing is approximate — the network doesn't promise responses
+    /// for sequential sends to the same inbox land in submission order, and
+    /// the stale-send sweep (#288) can drain an entry that NEVER gets a
+    /// response, so the old "#responses == #entries" invariant no longer
+    /// holds. A mis-paired or post-sweep-late `UpdateResponse` could pop a
+    /// sibling entry and try to flip the wrong row to `Delivered`; that is
+    /// made safe by the terminal-state guard in
+    /// `local_state::local_set_sent_delivery_state` — once a row is
+    /// `Delivered`/`Failed` it never flips again, so the worst case is a
+    /// dropped (no-op) flip, not a wrong terminal state.
     pub(crate) static PENDING_SENT_ACK: RefCell<HashMap<InboxContract, std::collections::VecDeque<PendingSentEntry>>> =
         RefCell::new(HashMap::new());
 }
 
-/// A Sent row whose recipient-inbox `UpdateResponse` hasn't arrived
-/// within this many seconds of enqueue is failed by the stale-send sweep
-/// (#288, "no terminal reply at all" case). Deliberately more generous
-/// than the AFT-assignment timeout (`PENDING_ASSIGNMENT_TIMEOUT_SECS` =
-/// 30s): a send's UPDATE is the full recipient-side round trip, which can
-/// legitimately run longer than a local token confirmation, so 60s avoids
-/// false-failing slow-but-healthy sends.
+/// A Sent row whose `UpdateResponse` hasn't arrived within this many
+/// seconds of enqueue is failed by the stale-send sweep (#288, "no
+/// terminal reply at all" case).
+///
+/// The clock starts at row construction (`sent_at_ms`), i.e. BEFORE the
+/// async AFT assignment round trip, so this budget is shared: up to
+/// `PENDING_ASSIGNMENT_TIMEOUT_SECS` (30s) can be spent minting the token
+/// before the recipient-inbox UPDATE is even dispatched. 60s therefore
+/// leaves the UPDATE round trip a worst-case ~30s window — chosen to be
+/// generous enough to avoid false-failing a slow-but-healthy send while
+/// still bounding the stuck-Pending UX. (An AFT-phase stall is normally
+/// surfaced earlier by the AFT sweep / `Failure` arm; this is the
+/// backstop for the case where nothing else fires at all.)
 #[cfg(feature = "use-node")]
 pub(crate) const PENDING_SENT_TIMEOUT_SECS: i64 = 60;
 
@@ -313,11 +324,16 @@ async fn fail_one_sent(
     sender_alias: &str,
     sent_id: &str,
 ) {
-    crate::local_state::local_set_sent_delivery_state(
+    // Skip the delegate write when the row was already terminal — the local
+    // guard suppressed the in-memory flip, and persisting again would let a
+    // stale value clobber the true terminal state on reload (#288).
+    if !crate::local_state::local_set_sent_delivery_state(
         sender_alias,
         sent_id,
         mail_local_state::DeliveryState::Failed,
-    );
+    ) {
+        return;
+    }
     if let Err(e) = crate::local_state::set_sent_delivery_state(
         client,
         sender_alias.to_string(),
@@ -333,18 +349,11 @@ async fn fail_one_sent(
     }
 }
 
-/// Sweep every pending Sent row across all inboxes and fail those whose
-/// `UpdateResponse` never arrived within `timeout_secs` of enqueue — the
-/// "no terminal reply at all" case (no error, no `UpdateResponse`), the
-/// last uncovered send-failure mode of #288. `now_ms` is the current wall
-/// clock (`chrono::Utc::now().timestamp_millis()`), injected for testability.
-/// Returns the `(sender_alias, sent_id)` pairs that were expired so the
-/// caller can toast the user.
 /// Pure step of the stale-send sweep: remove every pending entry older
 /// than `timeout_secs` from `PENDING_SENT_ACK` and return the drained
-/// `(sender_alias, sent_id)` pairs, newest-handling aside. No I/O, no
-/// client — `now_ms` is injected so the age logic is unit-testable.
-/// Empty per-inbox queues are pruned so the map doesn't accumulate keys.
+/// `(sender_alias, sent_id)` pairs. No I/O, no client — `now_ms` is
+/// injected so the age logic is unit-testable. Empty per-inbox queues are
+/// pruned so the map doesn't accumulate keys.
 fn drain_stale_pending_sent(timeout_secs: i64, now_ms: i64) -> Vec<(String, String)> {
     let cutoff_ms = timeout_secs.saturating_mul(1000);
     PENDING_SENT_ACK.with(|m| {
@@ -366,6 +375,13 @@ fn drain_stale_pending_sent(timeout_secs: i64, now_ms: i64) -> Vec<(String, Stri
     })
 }
 
+/// Sweep every pending Sent row across all inboxes and fail those whose
+/// `UpdateResponse` never arrived within `timeout_secs` of enqueue — the
+/// "no terminal reply at all" case (no error, no `UpdateResponse`), the
+/// last uncovered send-failure mode of #288. `now_ms` is the current wall
+/// clock (`chrono::Utc::now().timestamp_millis()`), injected for testability.
+/// Returns the `(sender_alias, sent_id)` pairs that were expired so the
+/// caller can toast the user.
 #[cfg(feature = "use-node")]
 pub(crate) async fn expire_stale_pending_sent(
     client: &mut crate::api::WebApiRequestClient,

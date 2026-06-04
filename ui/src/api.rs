@@ -2646,26 +2646,32 @@ pub(crate) async fn node_comms(
                 if let Some((sender_alias, sent_id)) =
                     crate::inbox::take_next_pending_sent_ack(&key)
                 {
-                    crate::local_state::local_set_sent_delivery_state(
+                    // Only persist the Delivered flip if the row actually
+                    // transitioned from Pending. A late UpdateResponse that
+                    // arrives after the stale-send sweep already failed this
+                    // (or mis-pairs onto a sibling already terminal) must not
+                    // resurrect a Failed row to Delivered (#288).
+                    if crate::local_state::local_set_sent_delivery_state(
                         &sender_alias,
                         &sent_id,
                         mail_local_state::DeliveryState::Delivered,
-                    );
-                    let mut client_clone = client.clone();
-                    let alias_async = sender_alias;
-                    let id_async = sent_id;
-                    wasm_bindgen_futures::spawn_local(async move {
-                        if let Err(e) = crate::local_state::set_sent_delivery_state(
-                            &mut client_clone,
-                            alias_async,
-                            id_async,
-                            mail_local_state::DeliveryState::Delivered,
-                        )
-                        .await
-                        {
-                            crate::log::local_state_failure("update delivery state", e);
-                        }
-                    });
+                    ) {
+                        let mut client_clone = client.clone();
+                        let alias_async = sender_alias;
+                        let id_async = sent_id;
+                        wasm_bindgen_futures::spawn_local(async move {
+                            if let Err(e) = crate::local_state::set_sent_delivery_state(
+                                &mut client_clone,
+                                alias_async,
+                                id_async,
+                                mail_local_state::DeliveryState::Delivered,
+                            )
+                            .await
+                            {
+                                crate::log::local_state_failure("update delivery state", e);
+                            }
+                        });
+                    }
                 }
 
                 if let Some(identity) = token_rec_to_id.remove(&key) {

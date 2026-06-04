@@ -453,21 +453,22 @@ impl InboxView {
                     // recipient should be unaffected) and flip the row
                     // to Failed so the user sees the truth.
                     crate::inbox::remove_pending_sent_ack(&inbox_key, &sender_alias, &sent_id);
-                    crate::local_state::local_set_sent_delivery_state(
+                    if crate::local_state::local_set_sent_delivery_state(
                         &sender_alias,
                         &sent_id,
                         mail_local_state::DeliveryState::Failed,
-                    );
-                    let mut client_clone = client.clone();
-                    if let Err(e) = crate::local_state::set_sent_delivery_state(
-                        &mut client_clone,
-                        sender_alias,
-                        sent_id,
-                        mail_local_state::DeliveryState::Failed,
-                    )
-                    .await
-                    {
-                        crate::log::local_state_failure("update delivery state", e);
+                    ) {
+                        let mut client_clone = client.clone();
+                        if let Err(e) = crate::local_state::set_sent_delivery_state(
+                            &mut client_clone,
+                            sender_alias,
+                            sent_id,
+                            mail_local_state::DeliveryState::Failed,
+                        )
+                        .await
+                        {
+                            crate::log::local_state_failure("update delivery state", e);
+                        }
                     }
                 }
             };

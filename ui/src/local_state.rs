@@ -512,16 +512,43 @@ pub(crate) fn local_delete_sent(alias: &str, id: &str) {
     bump();
 }
 
-pub(crate) fn local_set_sent_delivery_state(alias: &str, id: &str, state: DeliveryState) {
-    SNAPSHOT.with(|s| {
+/// Returns whether the row actually transitioned. `false` means the row
+/// was already terminal (or absent) and the caller should NOT issue the
+/// follow-up delegate write — otherwise the persisted state could flap on
+/// reload even though the in-memory render was correctly suppressed (#288).
+#[must_use]
+pub(crate) fn local_set_sent_delivery_state(alias: &str, id: &str, state: DeliveryState) -> bool {
+    let changed = SNAPSHOT.with(|s| {
         let mut snap = s.borrow_mut();
         if let Some(entry) = snap.aliases_mut().get_mut(alias)
             && let Some(sent) = entry.sent.get_mut(id)
         {
+            // Pending is the only non-terminal state. Once a row reaches
+            // Delivered or Failed it must NOT flip again (#288): the
+            // stale-send timeout sweep can drain a Pending entry and flip it
+            // Failed, after which a late `UpdateResponse` would otherwise
+            // mis-pair (FIFO pop) and resurrect the wrong row to Delivered —
+            // or flap a delivered row back to Failed. Terminal states stick.
+            if delivery_state_is_terminal(sent.delivery_state) {
+                return false;
+            }
             sent.delivery_state = state;
+            true
+        } else {
+            false
         }
     });
-    bump();
+    if changed {
+        bump();
+    }
+    changed
+}
+
+/// `Delivered` and `Failed` are terminal; `Pending` is the only state a
+/// later transition may overwrite. Centralised so the local stash and the
+/// delegate writer agree on the guard.
+pub(crate) fn delivery_state_is_terminal(state: DeliveryState) -> bool {
+    matches!(state, DeliveryState::Delivered | DeliveryState::Failed)
 }
 
 pub(crate) fn local_archive_message(alias: &str, msg_id: MessageId, archived: ArchivedMessage) {
@@ -1213,5 +1240,94 @@ mod tests {
         // Sanity: expected order is ids descending (6,5,4,3,2,1) because
         // kept_at is identical for all and we tie-break by id descending.
         assert_eq!(expected, vec![6, 5, 4, 3, 2, 1]);
+    }
+
+    // ----- #288: terminal-state guard on the Sent delivery-state setter -----
+
+    fn sent_row(to: &str) -> SentMessage {
+        SentMessage {
+            to: to.into(),
+            ..Default::default()
+        }
+    }
+
+    fn delivery_state_of(alias: &str, id: &str) -> DeliveryState {
+        sent_for(alias)
+            .into_iter()
+            .find(|(i, _)| i == id)
+            .map(|(_, m)| m.delivery_state)
+            .expect("sent row present")
+    }
+
+    #[test]
+    fn pending_can_transition_to_either_terminal_288() {
+        fresh_snapshot();
+        local_save_sent("alice", "s1", sent_row("bob"));
+        local_save_sent("alice", "s2", sent_row("carol"));
+        assert_eq!(delivery_state_of("alice", "s1"), DeliveryState::Pending);
+
+        assert!(local_set_sent_delivery_state(
+            "alice",
+            "s1",
+            DeliveryState::Delivered
+        ));
+        assert!(local_set_sent_delivery_state(
+            "alice",
+            "s2",
+            DeliveryState::Failed
+        ));
+        assert_eq!(delivery_state_of("alice", "s1"), DeliveryState::Delivered);
+        assert_eq!(delivery_state_of("alice", "s2"), DeliveryState::Failed);
+    }
+
+    #[test]
+    fn failed_row_never_resurrects_to_delivered_288() {
+        // The core race the sweep introduces: timeout flips a row Failed,
+        // then a late mis-paired UpdateResponse tries Delivered. Must no-op.
+        fresh_snapshot();
+        local_save_sent("alice", "s1", sent_row("bob"));
+        assert!(local_set_sent_delivery_state(
+            "alice",
+            "s1",
+            DeliveryState::Failed
+        ));
+
+        let changed = local_set_sent_delivery_state("alice", "s1", DeliveryState::Delivered);
+        assert!(
+            !changed,
+            "terminal Failed must not transition; caller skips delegate write"
+        );
+        assert_eq!(
+            delivery_state_of("alice", "s1"),
+            DeliveryState::Failed,
+            "row stays Failed"
+        );
+    }
+
+    #[test]
+    fn delivered_row_never_flaps_to_failed_288() {
+        // Symmetric: a delivered send must not be flipped Failed by a late
+        // stale-send sweep that mis-targets it.
+        fresh_snapshot();
+        local_save_sent("alice", "s1", sent_row("bob"));
+        assert!(local_set_sent_delivery_state(
+            "alice",
+            "s1",
+            DeliveryState::Delivered
+        ));
+
+        let changed = local_set_sent_delivery_state("alice", "s1", DeliveryState::Failed);
+        assert!(!changed, "terminal Delivered must not transition");
+        assert_eq!(delivery_state_of("alice", "s1"), DeliveryState::Delivered);
+    }
+
+    #[test]
+    fn set_delivery_state_on_absent_row_is_noop_288() {
+        fresh_snapshot();
+        let changed = local_set_sent_delivery_state("ghost", "nope", DeliveryState::Failed);
+        assert!(
+            !changed,
+            "absent row → false, caller must skip delegate write"
+        );
     }
 }
