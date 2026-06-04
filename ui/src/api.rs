@@ -3560,7 +3560,8 @@ pub(crate) async fn node_comms(
                 let expired = AftRecords::expire_stale(
                     crate::aft::PENDING_ASSIGNMENT_TIMEOUT_SECS,
                 );
-                for assignment in expired {
+                let mut aft_failed_inboxes: Vec<ContractKey> = Vec::new();
+                for (assignment, inbox) in expired {
                     crate::log::error(
                         format!(
                             "AFT assignment confirmation timed out (>{}s) for tier={} slot={} hash={}",
@@ -3575,6 +3576,16 @@ pub(crate) async fn node_comms(
                         crate::aft::format_expired_assignment_toast(assignment.tier),
                         crate::toast::ToastLevel::Error,
                     );
+                    if !aft_failed_inboxes.contains(&inbox) {
+                        aft_failed_inboxes.push(inbox);
+                    }
+                }
+                // Flip the Sent rows for AFT-timed-out sends to Failed right
+                // away rather than waiting out the longer send-sweep window
+                // (#288 review): an AFT stall is terminal for that send.
+                for inbox in aft_failed_inboxes {
+                    let mut aft_client = WEB_API_SENDER.get().unwrap().clone();
+                    crate::inbox::fail_pending_sent_for_inbox(&mut aft_client, inbox).await;
                 }
 
                 // #288 "no terminal reply at all": a send whose recipient

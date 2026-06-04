@@ -231,16 +231,22 @@ thread_local! {
 /// terminal reply at all" case).
 ///
 /// The clock starts at row construction (`sent_at_ms`), i.e. BEFORE the
-/// async AFT assignment round trip, so this budget is shared: up to
+/// async AFT assignment round trip, so the budget is shared: up to
 /// `PENDING_ASSIGNMENT_TIMEOUT_SECS` (30s) can be spent minting the token
-/// before the recipient-inbox UPDATE is even dispatched. 60s therefore
-/// leaves the UPDATE round trip a worst-case ~30s window — chosen to be
-/// generous enough to avoid false-failing a slow-but-healthy send while
-/// still bounding the stuck-Pending UX. (An AFT-phase stall is normally
-/// surfaced earlier by the AFT sweep / `Failure` arm; this is the
-/// backstop for the case where nothing else fires at all.)
+/// before the recipient-inbox UPDATE is even dispatched. The value is set
+/// to 90s so the UPDATE round trip always gets a full ≥60s window
+/// regardless of how long the AFT phase took — generous enough to avoid
+/// false-failing a slow-but-healthy send while still bounding the
+/// stuck-Pending UX.
+///
+/// This sweep is a backstop. An AFT-phase stall is failed earlier (at
+/// `PENDING_ASSIGNMENT_TIMEOUT_SECS`) by `AftRecords::expire_stale`, which
+/// now flips the Sent row directly; the `Failure` arm (#85) covers
+/// delegate refusals. This 90s sweep only fires when the UPDATE itself got
+/// neither an `UpdateResponse` nor a `ContractError::Update` — the
+/// silent-drop case of freenet-core#4345.
 #[cfg(feature = "use-node")]
-pub(crate) const PENDING_SENT_TIMEOUT_SECS: i64 = 60;
+pub(crate) const PENDING_SENT_TIMEOUT_SECS: i64 = 90;
 
 /// One outgoing Sent row awaiting an `UpdateResponse`. Carries the
 /// `(sender_alias, sent_id)` the UI assigned plus the wall-clock millis
