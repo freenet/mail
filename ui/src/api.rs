@@ -1938,10 +1938,9 @@ pub(crate) async fn node_comms(
                                         m.borrow_mut().insert(
                                             addr,
                                             contact_import::ImportFetched {
-                                                outcome:
-                                                    contact_import::ImportFetchOutcome::Failed(
-                                                        format!("fetch from node failed: {cause}"),
-                                                    ),
+                                                outcome: contact_import::ImportFetchOutcome::Failed(
+                                                    format!("fetch from node failed: {cause}"),
+                                                ),
                                             },
                                         );
                                     });
