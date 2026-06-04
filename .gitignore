@@ -10,8 +10,11 @@ node_modules/
 # Playwright test artifacts
 ui/tests/test-results/
 ui/tests/playwright-report/
-# Stray screenshot from earlier investigation sessions
+# Stray screenshots from earlier investigation / QA sessions
 /makefile.png
+/*.png
+# Ad-hoc Claude workflow scripts (regenerable, per-session scratch).
+/.claude/wf-*.js
 # Local design handoff bundles — kept out of git per scoping decision.
 /design/
 # Per-worktree isolated freenet local node state (run-node task).
