@@ -2051,11 +2051,8 @@ pub(crate) async fn node_comms(
                                         ),
                                         crate::toast::ToastLevel::Error,
                                     );
-                                    crate::inbox::fail_pending_sent_for_inbox(
-                                        &mut client,
-                                        *key,
-                                    )
-                                    .await;
+                                    crate::inbox::fail_pending_sent_for_inbox(&mut client, *key)
+                                        .await;
                                 }
                             }
                             RequestError::ContractError(ContractError::Get { key, cause }) => {
@@ -3570,6 +3567,31 @@ pub(crate) async fn node_comms(
                     );
                     crate::toast::push_toast(
                         crate::aft::format_expired_assignment_toast(assignment.tier),
+                        crate::toast::ToastLevel::Error,
+                    );
+                }
+
+                // #288 "no terminal reply at all": a send whose recipient
+                // inbox UPDATE got neither an `UpdateResponse` nor a
+                // `ContractError::Update` (e.g. the recipient node hung and
+                // the request was silently dropped) would otherwise leave
+                // the Sent row spinning Pending forever. Fail rows older
+                // than `PENDING_SENT_TIMEOUT_SECS` and toast once.
+                let mut sweep_client = WEB_API_SENDER.get().unwrap().clone();
+                let now_ms = chrono::Utc::now().timestamp_millis();
+                let expired_sends = crate::inbox::expire_stale_pending_sent(
+                    &mut sweep_client,
+                    crate::inbox::PENDING_SENT_TIMEOUT_SECS,
+                    now_ms,
+                )
+                .await;
+                if !expired_sends.is_empty() {
+                    crate::toast::push_toast(
+                        format!(
+                            "{} message(s) got no delivery confirmation within {}s and were marked failed. The recipient's node may be unreachable — try sending again.",
+                            expired_sends.len(),
+                            crate::inbox::PENDING_SENT_TIMEOUT_SECS,
+                        ),
                         crate::toast::ToastLevel::Error,
                     );
                 }

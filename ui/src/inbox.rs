@@ -217,22 +217,51 @@ thread_local! {
     /// every successful send will get acked, and a wrong pairing only
     /// affects the timing of the UI flip, not the correctness of which rows
     /// end up Delivered.
-    pub(crate) static PENDING_SENT_ACK: RefCell<HashMap<InboxContract, std::collections::VecDeque<(String, String)>>> =
+    pub(crate) static PENDING_SENT_ACK: RefCell<HashMap<InboxContract, std::collections::VecDeque<PendingSentEntry>>> =
         RefCell::new(HashMap::new());
+}
+
+/// A Sent row whose recipient-inbox `UpdateResponse` hasn't arrived
+/// within this many seconds of enqueue is failed by the stale-send sweep
+/// (#288, "no terminal reply at all" case). Deliberately more generous
+/// than the AFT-assignment timeout (`PENDING_ASSIGNMENT_TIMEOUT_SECS` =
+/// 30s): a send's UPDATE is the full recipient-side round trip, which can
+/// legitimately run longer than a local token confirmation, so 60s avoids
+/// false-failing slow-but-healthy sends.
+#[cfg(feature = "use-node")]
+pub(crate) const PENDING_SENT_TIMEOUT_SECS: i64 = 60;
+
+/// One outgoing Sent row awaiting an `UpdateResponse`. Carries the
+/// `(sender_alias, sent_id)` the UI assigned plus the wall-clock millis
+/// when it was enqueued, so a periodic sweep can fail rows whose ack
+/// never arrives at all — no error, no `UpdateResponse` (#288).
+#[derive(Clone)]
+pub(crate) struct PendingSentEntry {
+    pub sender_alias: String,
+    pub sent_id: String,
+    /// `chrono::Utc::now().timestamp_millis()` at enqueue time.
+    pub enqueued_at_ms: i64,
 }
 
 /// Record that a send to `inbox_key` is awaiting an UpdateResponse to flip
 /// the Sent row identified by `(sender_alias, sent_id)` to Delivered.
+/// `enqueued_at_ms` is the send-time wall clock (same source as the Sent
+/// row's `sent_at`), used by the stale-send sweep.
 pub(crate) fn enqueue_pending_sent_ack(
     inbox_key: InboxContract,
     sender_alias: String,
     sent_id: String,
+    enqueued_at_ms: i64,
 ) {
     PENDING_SENT_ACK.with(|m| {
         m.borrow_mut()
             .entry(inbox_key)
             .or_default()
-            .push_back((sender_alias, sent_id));
+            .push_back(PendingSentEntry {
+                sender_alias,
+                sent_id,
+                enqueued_at_ms,
+            });
     });
 }
 
@@ -245,7 +274,7 @@ pub(crate) fn take_next_pending_sent_ack(inbox_key: &InboxContract) -> Option<(S
         if q.is_empty() {
             map.remove(inbox_key);
         }
-        item
+        item.map(|e| (e.sender_alias, e.sent_id))
     })
 }
 
@@ -263,33 +292,99 @@ pub(crate) async fn fail_pending_sent_for_inbox(
     let entries: Vec<(String, String)> = PENDING_SENT_ACK.with(|m| {
         let mut map = m.borrow_mut();
         match map.remove(&inbox_key) {
-            Some(q) => q.into_iter().collect(),
+            Some(q) => q.into_iter().map(|e| (e.sender_alias, e.sent_id)).collect(),
             None => Vec::new(),
         }
     });
     for (sender_alias, sent_id) in entries {
-        crate::local_state::local_set_sent_delivery_state(
-            &sender_alias,
-            &sent_id,
-            mail_local_state::DeliveryState::Failed,
-        );
-        if let Err(e) = crate::local_state::set_sent_delivery_state(
-            client,
-            sender_alias.clone(),
-            sent_id.clone(),
-            mail_local_state::DeliveryState::Failed,
-        )
-        .await
-        {
-            crate::log::error(
-                format!("set_sent_delivery_state(Failed) for {sender_alias}/{sent_id}: {e}"),
-                None,
-            );
-        }
+        fail_one_sent(client, &sender_alias, &sent_id).await;
     }
     PENDING_INBOXES_UPDATE.with(|m| {
         m.borrow_mut().remove(&inbox_key);
     });
+}
+
+/// Flip a single Sent row to `Failed`, both in the in-memory local stash
+/// and via the local-state delegate so the change survives reload. Shared
+/// by `fail_pending_sent_for_inbox` (#85/#288) and `expire_stale_pending_sent`.
+#[cfg(feature = "use-node")]
+async fn fail_one_sent(
+    client: &mut crate::api::WebApiRequestClient,
+    sender_alias: &str,
+    sent_id: &str,
+) {
+    crate::local_state::local_set_sent_delivery_state(
+        sender_alias,
+        sent_id,
+        mail_local_state::DeliveryState::Failed,
+    );
+    if let Err(e) = crate::local_state::set_sent_delivery_state(
+        client,
+        sender_alias.to_string(),
+        sent_id.to_string(),
+        mail_local_state::DeliveryState::Failed,
+    )
+    .await
+    {
+        crate::log::error(
+            format!("set_sent_delivery_state(Failed) for {sender_alias}/{sent_id}: {e}"),
+            None,
+        );
+    }
+}
+
+/// Sweep every pending Sent row across all inboxes and fail those whose
+/// `UpdateResponse` never arrived within `timeout_secs` of enqueue — the
+/// "no terminal reply at all" case (no error, no `UpdateResponse`), the
+/// last uncovered send-failure mode of #288. `now_ms` is the current wall
+/// clock (`chrono::Utc::now().timestamp_millis()`), injected for testability.
+/// Returns the `(sender_alias, sent_id)` pairs that were expired so the
+/// caller can toast the user.
+/// Pure step of the stale-send sweep: remove every pending entry older
+/// than `timeout_secs` from `PENDING_SENT_ACK` and return the drained
+/// `(sender_alias, sent_id)` pairs, newest-handling aside. No I/O, no
+/// client — `now_ms` is injected so the age logic is unit-testable.
+/// Empty per-inbox queues are pruned so the map doesn't accumulate keys.
+fn drain_stale_pending_sent(timeout_secs: i64, now_ms: i64) -> Vec<(String, String)> {
+    let cutoff_ms = timeout_secs.saturating_mul(1000);
+    PENDING_SENT_ACK.with(|m| {
+        let mut map = m.borrow_mut();
+        let mut out = Vec::new();
+        for q in map.values_mut() {
+            q.retain(|e| {
+                let age = now_ms.saturating_sub(e.enqueued_at_ms);
+                if age >= cutoff_ms {
+                    out.push((e.sender_alias.clone(), e.sent_id.clone()));
+                    false
+                } else {
+                    true
+                }
+            });
+        }
+        map.retain(|_, q| !q.is_empty());
+        out
+    })
+}
+
+#[cfg(feature = "use-node")]
+pub(crate) async fn expire_stale_pending_sent(
+    client: &mut crate::api::WebApiRequestClient,
+    timeout_secs: i64,
+    now_ms: i64,
+) -> Vec<(String, String)> {
+    // Drain the stale entries out of the map first (sync borrow), then do
+    // the async delegate writes without holding the RefCell across await.
+    let stale = drain_stale_pending_sent(timeout_secs, now_ms);
+    for (sender_alias, sent_id) in &stale {
+        crate::log::error(
+            format!(
+                "send to {sender_alias} (sent_id {sent_id}) got no UpdateResponse within {timeout_secs}s — marking Failed"
+            ),
+            Some(crate::api::TryNodeAction::SendMessage),
+        );
+        fail_one_sent(client, sender_alias, sent_id).await;
+    }
+    stale
 }
 
 /// Remove a specific pending sent record from the queue (e.g. on
@@ -305,7 +400,7 @@ pub(crate) fn remove_pending_sent_ack(
         let Some(q) = map.get_mut(inbox_key) else {
             return;
         };
-        q.retain(|(a, id)| !(a == sender_alias && id == sent_id));
+        q.retain(|e| !(e.sender_alias == sender_alias && e.sent_id == sent_id));
         if q.is_empty() {
             map.remove(inbox_key);
         }
@@ -1979,5 +2074,65 @@ mod tests {
                 "lowercased bs58 must NOT roundtrip — proves the workaround is load-bearing",
             );
         }
+    }
+
+    // ----- #288: stale-send sweep (drain_stale_pending_sent) -----
+
+    use freenet_stdlib::prelude::Parameters;
+
+    fn pending_sent_key(n: u8) -> InboxContract {
+        ContractKey::from_params_and_code(Parameters::from(vec![n]), ContractCode::from(vec![0u8]))
+    }
+
+    fn clear_pending_sent_ack() {
+        PENDING_SENT_ACK.with(|m| m.borrow_mut().clear());
+    }
+
+    #[test]
+    fn drain_stale_pending_sent_fails_only_aged_entries_288() {
+        clear_pending_sent_ack();
+        let key = pending_sent_key(1);
+        // Two sends to the same inbox: one old (enqueued at t=0), one fresh
+        // (enqueued at t=59_000ms). Sweep at now=60_000ms with a 60s timeout.
+        enqueue_pending_sent_ack(key, "alice".into(), "old".into(), 0);
+        enqueue_pending_sent_ack(key, "alice".into(), "fresh".into(), 59_000);
+
+        let drained = drain_stale_pending_sent(60, 60_000);
+
+        // Old (age 60s == cutoff) expires; fresh (age 1s) survives.
+        assert_eq!(drained, vec![("alice".to_string(), "old".to_string())]);
+        // The fresh entry is still queued (will flip Delivered when its ack lands).
+        let remaining = take_next_pending_sent_ack(&key);
+        assert_eq!(remaining, Some(("alice".to_string(), "fresh".to_string())));
+        clear_pending_sent_ack();
+    }
+
+    #[test]
+    fn drain_stale_pending_sent_prunes_empty_inbox_queues_288() {
+        clear_pending_sent_ack();
+        let key = pending_sent_key(2);
+        enqueue_pending_sent_ack(key, "bob".into(), "s1".into(), 0);
+
+        let drained = drain_stale_pending_sent(60, 1_000_000);
+        assert_eq!(drained.len(), 1);
+        // After draining the only entry, the inbox key must not linger in the map.
+        let count = PENDING_SENT_ACK.with(|m| m.borrow().len());
+        assert_eq!(count, 0, "empty per-inbox queue should be pruned");
+        clear_pending_sent_ack();
+    }
+
+    #[test]
+    fn drain_stale_pending_sent_noop_when_all_fresh_288() {
+        clear_pending_sent_ack();
+        let key = pending_sent_key(3);
+        enqueue_pending_sent_ack(key, "carol".into(), "s1".into(), 90_000);
+        // now only 10s past enqueue → under the 60s cutoff.
+        let drained = drain_stale_pending_sent(60, 100_000);
+        assert!(drained.is_empty(), "no entry past cutoff → nothing failed");
+        assert_eq!(
+            take_next_pending_sent_ack(&key),
+            Some(("carol".into(), "s1".into()))
+        );
+        clear_pending_sent_ack();
     }
 }
