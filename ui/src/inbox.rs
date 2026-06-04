@@ -1073,10 +1073,13 @@ impl InboxModel {
             self.settings.ml_dsa_signing_key.as_ref(),
             settings,
             messages,
-            // TODO: this path is dead-coded (see TODO above); fill ek
-            // properly when `to_state` is wired up. Empty ek would fail
-            // signature verify on the contract host today.
-            Vec::new(),
+            // #256: the model already carries the owner's ML-KEM ek on its
+            // settings (populated by `from_state` / `InboxModel::new`), so
+            // stamp it here. An empty ek produced a state importers/senders
+            // reject — they'd have no key to encapsulate to. No `INBOX_TO_ID`
+            // identity lookup is needed for the ek (only message re-encryption,
+            // still unimplemented above, needs the ML-KEM decapsulation key).
+            self.settings.owner_ek_bytes.clone(),
         );
         let serialized = serde_json::to_vec(&inbox)?;
         Ok(serialized.into())
@@ -1696,6 +1699,35 @@ mod tests {
             seed.into()
         });
         InboxModel::new(ml_dsa_key, ml_kem_dk).unwrap()
+    }
+
+    /// #256: `to_state` must carry the owner's ML-KEM ek so the produced
+    /// state advertises a usable encryption key. The dead-coded path passed
+    /// `Vec::new()`, which produces a state importers/senders reject (they
+    /// have no ek to encapsulate to). Empty inbox so the unimplemented
+    /// message-re-encryption map (which returns Err for any message) doesn't
+    /// short-circuit before the ek is stamped.
+    #[test]
+    fn to_state_carries_owner_ek_256() {
+        let sk = Arc::new(fresh_signing_key());
+        let inbox = make_test_inbox(sk);
+        assert!(
+            inbox.messages.is_empty(),
+            "test precondition: empty inbox reaches the ek-stamping path",
+        );
+        let expected_ek = inbox.settings.owner_ek_bytes.clone();
+        assert!(
+            !expected_ek.is_empty(),
+            "test precondition: the model holds a non-empty owner ek",
+        );
+
+        let state = inbox.to_state().expect("to_state on empty inbox");
+        let decoded: StoredInbox = serde_json::from_slice(state.as_ref())
+            .expect("to_state output must deserialize as StoredInbox");
+        assert_eq!(
+            decoded.owner_ek_bytes, expected_ek,
+            "to_state must advertise the owner's ek, not an empty vec (#256)",
+        );
     }
 
     /// `update_verified_bypass_prepare` with a single verified VK must flip

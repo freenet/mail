@@ -234,6 +234,35 @@ impl Recipient {
 thread_local! {
     /// Single source of truth for alias → entry.  Local aliases are unique.
     static ADDRESS_BOOK: RefCell<HashMap<String, Entry>> = RefCell::new(HashMap::new());
+
+    /// #255: cache of on-chain inbox `ContractInstanceId` → `Recipient`,
+    /// rebuilt lazily from `ADDRESS_BOOK` when stale. `lookup_by_bs58` is on
+    /// the per-keystroke compose-form resolver path; without this it ran an
+    /// ML-DSA-65 decode (~ms-class) + key derivation for every contact on
+    /// every keystroke (O(N) per keystroke). The cache makes lookup O(1).
+    ///
+    /// Keyed by the derived `ContractInstanceId`, which already bakes in each
+    /// contact's per-contact `inbox_wasm_hash` (#251 improvement 4), so the
+    /// cache is hash-aware by construction. It must be REBUILT (not patched)
+    /// on any write, since a contact's hash is a build input to its key.
+    static BS58_LOOKUP_CACHE: RefCell<Option<(
+        u64,
+        HashMap<freenet_stdlib::prelude::ContractInstanceId, Recipient>,
+    )>> = const { RefCell::new(None) };
+
+    /// Generation counter bumped by every `ADDRESS_BOOK` mutator
+    /// (`register_identity`, `insert_contact`, `remove_contact`). The cache
+    /// stores the gen it was built at and rebuilds when it falls behind. Kept
+    /// module-internal rather than piggy-backing on `AddressBookGen` because
+    /// some writers (own-identity register, offline seed) don't bump that
+    /// signal.
+    static ADDRESS_BOOK_GEN: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Bump the address-book generation so the bs58 lookup cache rebuilds on next
+/// access. Called from every `ADDRESS_BOOK` mutator.
+fn bump_address_book_gen() {
+    ADDRESS_BOOK_GEN.with(|g| g.set(g.get().wrapping_add(1)));
 }
 
 /// Ensure an own `Identity` is registered.  Idempotent — a second call for
@@ -245,6 +274,7 @@ pub fn register_identity(identity: &Identity) {
             Entry::Own(Box::new(identity.clone())),
         );
     });
+    bump_address_book_gen();
 }
 
 /// Insert a contact. Errors if:
@@ -255,58 +285,66 @@ pub fn register_identity(identity: &Identity) {
 /// Re-inserting a contact with the same alias and same fingerprint succeeds
 /// (allows overwrite of metadata like description / verified flag).
 pub fn insert_contact(contact: Contact) -> Result<(), String> {
-    ADDRESS_BOOK.with(|ab| {
-        let mut ab = ab.borrow_mut();
-        // Self-import guard: enforced here so any caller path (UI form,
-        // future API, test harness) gets the same protection.
-        for entry in ab.values() {
-            if let Entry::Own(id) = entry
-                && id.ml_dsa_vk_bytes() == contact.ml_dsa_vk_bytes
-                && id.ml_kem_ek_bytes() == contact.ml_kem_ek_bytes
-            {
-                return Err("cannot import your own identity as a contact".into());
-            }
-        }
-        if let Some(existing) = ab.get(contact.local_alias.as_ref()) {
-            match existing {
-                Entry::Own(_) => {
-                    return Err(format!(
-                        "\"{}\" is one of your own identities",
-                        contact.local_alias
-                    ));
+    ADDRESS_BOOK
+        .with(|ab| {
+            let mut ab = ab.borrow_mut();
+            // Self-import guard: enforced here so any caller path (UI form,
+            // future API, test harness) gets the same protection.
+            for entry in ab.values() {
+                if let Entry::Own(id) = entry
+                    && id.ml_dsa_vk_bytes() == contact.ml_dsa_vk_bytes
+                    && id.ml_kem_ek_bytes() == contact.ml_kem_ek_bytes
+                {
+                    return Err("cannot import your own identity as a contact".into());
                 }
-                Entry::Contact(c) => {
-                    // Allow overwrite only when BOTH key halves match;
-                    // otherwise the alias is taken by a different contact
-                    // and the import must be rejected. Comparing only the
-                    // ML-DSA VK would let a card with a substituted ML-KEM
-                    // key silently overwrite the recipient's encryption
-                    // material under an existing trusted alias.
-                    if c.ml_dsa_vk_bytes != contact.ml_dsa_vk_bytes
-                        || c.ml_kem_ek_bytes != contact.ml_kem_ek_bytes
-                    {
+            }
+            if let Some(existing) = ab.get(contact.local_alias.as_ref()) {
+                match existing {
+                    Entry::Own(_) => {
                         return Err(format!(
-                            "alias \"{}\" is already used by a different contact",
+                            "\"{}\" is one of your own identities",
                             contact.local_alias
                         ));
                     }
+                    Entry::Contact(c) => {
+                        // Allow overwrite only when BOTH key halves match;
+                        // otherwise the alias is taken by a different contact
+                        // and the import must be rejected. Comparing only the
+                        // ML-DSA VK would let a card with a substituted ML-KEM
+                        // key silently overwrite the recipient's encryption
+                        // material under an existing trusted alias.
+                        if c.ml_dsa_vk_bytes != contact.ml_dsa_vk_bytes
+                            || c.ml_kem_ek_bytes != contact.ml_kem_ek_bytes
+                        {
+                            return Err(format!(
+                                "alias \"{}\" is already used by a different contact",
+                                contact.local_alias
+                            ));
+                        }
+                    }
                 }
             }
-        }
-        ab.insert(contact.local_alias.to_string(), Entry::Contact(contact));
-        Ok(())
-    })
+            ab.insert(contact.local_alias.to_string(), Entry::Contact(contact));
+            Ok(())
+        })
+        .inspect(|()| bump_address_book_gen())
 }
 
 /// Remove a contact by alias.  No-op if the alias does not exist or is an
 /// own identity (own identities are never removed via this path).
 pub fn remove_contact(alias: &str) {
-    ADDRESS_BOOK.with(|ab| {
+    let removed = ADDRESS_BOOK.with(|ab| {
         let mut ab = ab.borrow_mut();
         if matches!(ab.get(alias), Some(Entry::Contact(_))) {
             ab.remove(alias);
+            true
+        } else {
+            false
         }
     });
+    if removed {
+        bump_address_book_gen();
+    }
 }
 
 /// Resolve an alias to a `Recipient`.  Walks both own identities and contacts.
@@ -376,63 +414,91 @@ pub fn lookup(alias: &str) -> Option<Recipient> {
 /// book — i.e. the user has imported them and (presumably) verified the
 /// fingerprint. Unknown addresses return `None`; the UI surfaces "import
 /// as contact first".
-pub fn lookup_by_bs58(addr: &str) -> Option<Recipient> {
+/// Build the bs58 lookup map from the current `ADDRESS_BOOK` — one ML-DSA
+/// decode + key derivation per entry. Called only on cache miss / staleness.
+fn build_bs58_lookup_map() -> HashMap<freenet_stdlib::prelude::ContractInstanceId, Recipient> {
     use crate::inbox::{INBOX_CODE_HASH, inbox_key_for, inbox_key_for_with_hash};
+    ADDRESS_BOOK.with(|ab| {
+        let mut map = HashMap::new();
+        for entry in ab.borrow().values() {
+            match entry {
+                Entry::Contact(c) => {
+                    let Ok(vk) = vk_from_bytes(&c.ml_dsa_vk_bytes) else {
+                        continue;
+                    };
+                    // #251 improvement 4: derive under the contact's advertised
+                    // hash, not the sender's `INBOX_CODE_HASH`. A cross-version
+                    // contact's id differs from `inbox_key_for(vk)`.
+                    let code_hash = c.inbox_wasm_hash.as_deref().unwrap_or(INBOX_CODE_HASH);
+                    let Ok(key) = inbox_key_for_with_hash(&vk, code_hash) else {
+                        continue;
+                    };
+                    let fingerprint = c.fingerprint();
+                    map.insert(
+                        *key.id(),
+                        Recipient {
+                            local_alias: c.local_alias.clone(),
+                            ml_dsa_vk_bytes: c.ml_dsa_vk_bytes.clone(),
+                            ml_kem_ek_bytes: c.ml_kem_ek_bytes.clone(),
+                            fingerprint,
+                            required_tier: c.required_tier,
+                            max_age_secs: c.max_age_secs,
+                            verified: c.verified,
+                            is_own: false,
+                            inbox_wasm_hash: c.inbox_wasm_hash.clone(),
+                        },
+                    );
+                }
+                Entry::Own(id) => {
+                    let Ok(vk) = vk_from_bytes(&id.ml_dsa_vk_bytes()) else {
+                        continue;
+                    };
+                    let Ok(key) = inbox_key_for(&vk) else {
+                        continue;
+                    };
+                    let ml_dsa_vk_bytes = id.ml_dsa_vk_bytes();
+                    let ml_kem_ek_bytes = id.ml_kem_ek_bytes();
+                    let fingerprint = fingerprint_words(&ml_dsa_vk_bytes, &ml_kem_ek_bytes);
+                    map.insert(
+                        *key.id(),
+                        Recipient {
+                            local_alias: id.alias.clone(),
+                            ml_dsa_vk_bytes,
+                            ml_kem_ek_bytes,
+                            fingerprint,
+                            required_tier: id.required_tier,
+                            max_age_secs: id.max_age_secs,
+                            verified: true,
+                            is_own: true,
+                            inbox_wasm_hash: None,
+                        },
+                    );
+                }
+            }
+        }
+        map
+    })
+}
+
+/// Resolve a bs58 inbox `ContractInstanceId` to a `Recipient`. O(1) after a
+/// one-time per-generation cache build (#255). On the per-keystroke compose
+/// resolver path, so this must not re-decode every contact each call.
+pub fn lookup_by_bs58(addr: &str) -> Option<Recipient> {
     use std::str::FromStr;
     let trimmed = addr.trim();
     let target = freenet_stdlib::prelude::ContractInstanceId::from_str(trimmed).ok()?;
 
-    ADDRESS_BOOK.with(|ab| {
-        ab.borrow().values().find_map(|entry| match entry {
-            Entry::Contact(c) => {
-                let vk = vk_from_bytes(&c.ml_dsa_vk_bytes).ok()?;
-                // #251 improvement 4: address-book lookup must derive the
-                // contact's inbox key under the contact's advertised
-                // hash, not the sender's `INBOX_CODE_HASH`. A
-                // cross-version contact's actual contract id differs
-                // from `inbox_key_for(vk)` once the sender upgrades.
-                let code_hash = c.inbox_wasm_hash.as_deref().unwrap_or(INBOX_CODE_HASH);
-                let key = inbox_key_for_with_hash(&vk, code_hash).ok()?;
-                if *key.id() == target {
-                    let fingerprint = c.fingerprint();
-                    Some(Recipient {
-                        local_alias: c.local_alias.clone(),
-                        ml_dsa_vk_bytes: c.ml_dsa_vk_bytes.clone(),
-                        ml_kem_ek_bytes: c.ml_kem_ek_bytes.clone(),
-                        fingerprint,
-                        required_tier: c.required_tier,
-                        max_age_secs: c.max_age_secs,
-                        verified: c.verified,
-                        is_own: false,
-                        inbox_wasm_hash: c.inbox_wasm_hash.clone(),
-                    })
-                } else {
-                    None
-                }
-            }
-            Entry::Own(id) => {
-                let vk = vk_from_bytes(&id.ml_dsa_vk_bytes()).ok()?;
-                let key = inbox_key_for(&vk).ok()?;
-                if *key.id() == target {
-                    let ml_dsa_vk_bytes = id.ml_dsa_vk_bytes();
-                    let ml_kem_ek_bytes = id.ml_kem_ek_bytes();
-                    let fingerprint = fingerprint_words(&ml_dsa_vk_bytes, &ml_kem_ek_bytes);
-                    Some(Recipient {
-                        local_alias: id.alias.clone(),
-                        ml_dsa_vk_bytes,
-                        ml_kem_ek_bytes,
-                        fingerprint,
-                        required_tier: id.required_tier,
-                        max_age_secs: id.max_age_secs,
-                        verified: true,
-                        is_own: true,
-                        inbox_wasm_hash: None,
-                    })
-                } else {
-                    None
-                }
-            }
-        })
+    let cur_gen = ADDRESS_BOOK_GEN.with(|g| g.get());
+    BS58_LOOKUP_CACHE.with(|cell| {
+        let mut cell = cell.borrow_mut();
+        let needs_rebuild = match cell.as_ref() {
+            Some((cached_gen, _)) => *cached_gen != cur_gen,
+            None => true,
+        };
+        if needs_rebuild {
+            *cell = Some((cur_gen, build_bs58_lookup_map()));
+        }
+        cell.as_ref().and_then(|(_, map)| map.get(&target).cloned())
     })
 }
 
@@ -674,6 +740,16 @@ pub fn migrate_legacy_identities() {
 mod tests {
     use super::*;
 
+    /// Reset the address book between tests. Bumps the generation so the
+    /// bs58 lookup cache (#255) can't carry a prior test's contacts into
+    /// this one — the test runner reuses threads, so the thread-local cache
+    /// would otherwise persist across tests. A bare `ADDRESS_BOOK.clear()`
+    /// alone leaves the cache stale.
+    fn reset_address_book() {
+        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+        bump_address_book_gen();
+    }
+
     #[test]
     fn fingerprint_is_six_bip39_words() {
         let vk = vec![0u8; 1952];
@@ -811,7 +887,7 @@ mod tests {
     #[test]
     fn insert_contact_rejects_alias_with_different_vk() {
         // Use a thread-local scope by clearing first.
-        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+        reset_address_book();
         insert_contact(make_contact("bob", 1, 2)).unwrap();
         let err =
             insert_contact(make_contact("bob", 3, 2)).expect_err("different VK should be rejected");
@@ -827,7 +903,7 @@ mod tests {
 
     #[test]
     fn lookup_resolves_by_local_alias() {
-        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+        reset_address_book();
         insert_contact(make_contact_suggested("7511", Some("test7511"), 1, 2)).unwrap();
         let r = lookup("7511").expect("exact local alias resolves");
         assert_eq!(&*r.local_alias, "7511");
@@ -838,7 +914,7 @@ mod tests {
     fn lookup_falls_back_to_suggested_alias() {
         // The user relabelled the contact "7511" but types the name the
         // sender advertised ("test7511"). The fallback must still resolve.
-        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+        reset_address_book();
         insert_contact(make_contact_suggested("7511", Some("test7511"), 1, 2)).unwrap();
         let r = lookup("test7511").expect("suggested alias resolves on local-alias miss");
         assert_eq!(
@@ -851,7 +927,7 @@ mod tests {
     fn lookup_exact_local_alias_wins_over_suggested() {
         // If one contact's local_alias equals another contact's
         // suggested_alias, the exact local-alias match must win.
-        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+        reset_address_book();
         insert_contact(make_contact_suggested("shared", Some("other"), 1, 2)).unwrap();
         insert_contact(make_contact_suggested("real", Some("shared"), 3, 4)).unwrap();
         let r = lookup("shared").expect("resolves");
@@ -863,14 +939,14 @@ mod tests {
 
     #[test]
     fn lookup_unknown_alias_returns_none() {
-        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+        reset_address_book();
         insert_contact(make_contact_suggested("7511", Some("test7511"), 1, 2)).unwrap();
         assert!(lookup("nobody").is_none());
     }
 
     #[test]
     fn lookup_no_suggested_alias_is_local_only() {
-        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+        reset_address_book();
         insert_contact(make_contact_suggested("7511", None, 1, 2)).unwrap();
         assert!(lookup("7511").is_some());
         assert!(lookup("anything-else").is_none());
@@ -881,7 +957,7 @@ mod tests {
         // Same VK but a substituted EK must also be rejected, otherwise an
         // attacker who knows the recipient's signing pubkey could swap in
         // their own encryption key under a trusted alias.
-        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+        reset_address_book();
         insert_contact(make_contact("alice", 4, 5)).unwrap();
         let err = insert_contact(make_contact("alice", 4, 9))
             .expect_err("different EK should be rejected");
@@ -890,7 +966,7 @@ mod tests {
 
     #[test]
     fn insert_contact_overwrites_when_keys_match() {
-        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+        reset_address_book();
         let mut c = make_contact("carol", 7, 8);
         insert_contact(c.clone()).unwrap();
         c.description = "updated".into();
@@ -906,7 +982,7 @@ mod tests {
 
     #[test]
     fn lookup_finds_inserted_contact() {
-        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+        reset_address_book();
         insert_contact(make_contact("dave", 11, 12)).unwrap();
         let r = lookup("dave").expect("contact should resolve");
         assert!(!r.is_own);
@@ -921,13 +997,13 @@ mod tests {
 
     #[test]
     fn lookup_misses_for_unknown_alias() {
-        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+        reset_address_book();
         assert!(lookup("nobody").is_none());
     }
 
     #[test]
     fn remove_contact_clears_lookup() {
-        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+        reset_address_book();
         insert_contact(make_contact("eve", 13, 14)).unwrap();
         assert!(lookup("eve").is_some());
         remove_contact("eve");
@@ -936,7 +1012,7 @@ mod tests {
 
     #[test]
     fn filter_contacts_empty_needle_returns_nothing() {
-        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+        reset_address_book();
         insert_contact(make_contact("alice", 1, 2)).unwrap();
         assert!(
             filter_contacts("", 8).is_empty(),
@@ -946,7 +1022,7 @@ mod tests {
 
     #[test]
     fn filter_contacts_case_insensitive_alias_substring() {
-        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+        reset_address_book();
         insert_contact(make_contact("Alice", 1, 2)).unwrap();
         insert_contact(make_contact("bob", 3, 4)).unwrap();
         insert_contact(make_contact("alice-work", 5, 6)).unwrap();
@@ -968,7 +1044,7 @@ mod tests {
     /// fix). A contact whose description contains the needle must not appear.
     #[test]
     fn filter_contacts_does_not_match_description() {
-        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+        reset_address_book();
         let mut c = make_contact("carol", 7, 8);
         c.description = "work colleague".into();
         insert_contact(c).unwrap();
@@ -986,7 +1062,7 @@ mod tests {
     /// contacts sort before unverified within the same tier.
     #[test]
     fn filter_contacts_tier_and_verified_sort() {
-        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+        reset_address_book();
         // "alice" is a prefix match for "ali" — tier 0.
         let mut alice = make_contact("alice", 1, 2);
         alice.verified = true;
@@ -1008,7 +1084,7 @@ mod tests {
 
     #[test]
     fn filter_contacts_respects_limit() {
-        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+        reset_address_book();
         for i in 0..10u8 {
             insert_contact(make_contact(&format!("user{i}"), i, i.wrapping_add(1))).unwrap();
         }
@@ -1053,7 +1129,7 @@ mod tests {
     #[test]
     fn is_contact_inbox_key_recognises_imported_contact() {
         use ml_dsa::{KeyGen, MlDsa65, signature::Keypair as MlDsaKeypair};
-        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+        reset_address_book();
 
         // Real ML-DSA-65 keypair so vk_from_bytes succeeds.
         let sk = MlDsa65::from_seed(&[7u8; 32].into());
@@ -1083,7 +1159,7 @@ mod tests {
     #[test]
     fn is_contact_inbox_key_returns_false_for_unrelated_key() {
         use ml_dsa::{KeyGen, MlDsa65, signature::Keypair as MlDsaKeypair};
-        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+        reset_address_book();
 
         // Insert one contact.
         let sk_a = MlDsa65::from_seed(&[1u8; 32].into());
@@ -1116,7 +1192,7 @@ mod tests {
     #[test]
     fn lookup_by_bs58_finds_imported_contact() {
         use ml_dsa::{KeyGen, MlDsa65, signature::Keypair as MlDsaKeypair};
-        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+        reset_address_book();
 
         let sk = MlDsa65::from_seed(&[9u8; 32].into());
         let vk = MlDsaKeypair::verifying_key(&sk);
@@ -1145,9 +1221,51 @@ mod tests {
         assert!(by_bs58.verified);
     }
 
+    /// #255: the lookup cache must rebuild when the address book changes —
+    /// a contact removed after a prior lookup must no longer resolve.
+    #[test]
+    fn lookup_by_bs58_cache_invalidates_on_remove_255() {
+        use ml_dsa::{KeyGen, MlDsa65, signature::Keypair as MlDsaKeypair};
+        reset_address_book();
+
+        let sk = MlDsa65::from_seed(&[11u8; 32].into());
+        let vk = MlDsaKeypair::verifying_key(&sk);
+        let vk_bytes = vk.encode().to_vec();
+        let addr = crate::inbox::inbox_key_for(&vk)
+            .expect("inbox_key_for")
+            .id()
+            .encode();
+
+        insert_contact(Contact {
+            local_alias: "bob".into(),
+            suggested_alias: None,
+            description: String::new(),
+            ml_dsa_vk_bytes: vk_bytes,
+            ml_kem_ek_bytes: vec![0xCC; 1184],
+            required_tier: Tier::Day1,
+            max_age_secs: DEFAULT_MAX_AGE_SECS,
+            verified: true,
+            inbox_wasm_hash: None,
+        })
+        .unwrap();
+
+        // Prime the cache.
+        assert!(
+            lookup_by_bs58(&addr).is_some(),
+            "contact resolves before removal",
+        );
+
+        // Removal must invalidate — a stale cache would still return bob.
+        remove_contact("bob");
+        assert!(
+            lookup_by_bs58(&addr).is_none(),
+            "removed contact must not resolve (cache rebuilt) (#255)",
+        );
+    }
+
     #[test]
     fn lookup_by_bs58_returns_none_for_unknown_address() {
-        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+        reset_address_book();
         // Valid bs58 32-byte string but no matching contact.
         let id = freenet_stdlib::prelude::ContractInstanceId::new([7u8; 32]);
         assert!(lookup_by_bs58(&id.encode()).is_none());
@@ -1155,14 +1273,14 @@ mod tests {
 
     #[test]
     fn lookup_by_bs58_returns_none_for_invalid_address() {
-        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+        reset_address_book();
         assert!(lookup_by_bs58("not bs58 at all").is_none());
     }
 
     #[test]
     fn is_contact_inbox_key_empty_book_returns_false() {
         use ml_dsa::{KeyGen, MlDsa65, signature::Keypair as MlDsaKeypair};
-        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+        reset_address_book();
 
         let sk = MlDsa65::from_seed(&[3u8; 32].into());
         let vk = MlDsaKeypair::verifying_key(&sk);
@@ -1188,7 +1306,7 @@ mod tests {
     #[test]
     fn lookup_misses_when_contact_imported_under_different_nickname_289() {
         use ml_dsa::{KeyGen, MlDsa65, signature::Keypair as MlDsaKeypair};
-        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+        reset_address_book();
 
         // Alice sends under her own alias "alice-from-work". The recipient
         // imports her contact card but labels it locally as "ally".
@@ -1225,7 +1343,7 @@ mod tests {
     #[test]
     fn lookup_resolves_by_sender_alias_when_suggested_preserved_289() {
         use ml_dsa::{KeyGen, MlDsa65, signature::Keypair as MlDsaKeypair};
-        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+        reset_address_book();
 
         // Same scenario as the miss test above, but the import preserved
         // the sender's advertised alias ("alice-from-work") as

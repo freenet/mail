@@ -176,6 +176,20 @@ impl From<WebApiRequestClient> for NodeResponses {
     }
 }
 
+/// #260: pop the awaiting-ack entry whose key matches `acked`, returning its
+/// alias. Shared by the inbox and AFT `PutResponse` handlers — when a
+/// migration re-PUT is acknowledged, this is how the handler finds which
+/// alias's pending-migration marker to clear. Returns `None` if the acked key
+/// isn't a migration we're tracking (the common case: ordinary create PUTs).
+#[cfg(feature = "use-node")]
+fn take_awaiting_ack(
+    awaiting: &mut Vec<(std::rc::Rc<str>, freenet_stdlib::prelude::ContractKey)>,
+    acked: &freenet_stdlib::prelude::ContractKey,
+) -> Option<std::rc::Rc<str>> {
+    let pos = awaiting.iter().position(|(_, k)| k == acked)?;
+    Some(awaiting.remove(pos).0)
+}
+
 #[cfg(feature = "use-node")]
 mod contract_api {
     use freenet_stdlib::{client_api::ContractRequest, prelude::*};
@@ -387,6 +401,18 @@ mod inbox_management {
     thread_local! {
         pub(super) static CREATED_INBOX: RefCell<Vec<(Rc<str>, ContractKey)>> = const { RefCell::new(Vec::new()) };
 
+        /// #260: migration PUTs whose network ACK we are still awaiting.
+        /// `put_migrated_inbox` enqueues the re-PUT and returns immediately
+        /// (the PUT is NOT yet acknowledged). The pending-migration marker
+        /// on the delegate must survive until the `PutResponse` for the new
+        /// key actually lands — otherwise a PUT that enqueues then never
+        /// reaches the network leaves the marker cleared, the hash stamped,
+        /// and the migration silently abandoned forever. Entries are
+        /// `(alias, new_inbox_key)`; the `PutResponse` arm matches on the
+        /// key, clears the pending marker, and removes the entry.
+        pub(super) static AWAITING_MIGRATION_ACK: RefCell<Vec<(Rc<str>, ContractKey)>> =
+            const { RefCell::new(Vec::new()) };
+
         /// #213 inbox migration: maps an OLD inbox `ContractKey` (derived
         /// with a prior `INBOX_CODE_HASH`) to the identity that owns it.
         /// On the corresponding `GetResponse`, the api.rs handler decodes
@@ -415,25 +441,81 @@ mod inbox_management {
     /// state — the signature is over a fixed `STATE_UPDATE` salt and
     /// the identity key is unchanged, so the re-signed state validates
     /// identically.
+    /// #254: decide which ML-KEM ek a migration re-PUT should advertise.
+    ///
+    /// The migration writer re-PUTs a prior inbox state under the current
+    /// code hash. It must NOT silently overwrite an ek already published on
+    /// chain — a user who re-keyed from backup between the original PUT and
+    /// the migration would otherwise have the migration clobber the
+    /// chain-advertised ek with a stale/new local one, breaking senders who
+    /// imported the on-chain ek.
+    ///
+    /// - on-chain ek empty (pre-#249 legacy state) → stamp the local ek
+    ///   (the migration's whole point).
+    /// - on-chain ek present and equal to local → use it (no surprise).
+    /// - on-chain ek present and DIFFERENT from local → preserve the
+    ///   on-chain ek and surface the divergence so the user can confirm an
+    ///   intended rotation (re-keying is a separate explicit action).
+    #[derive(Debug, PartialEq, Eq)]
+    pub(super) enum OwnerEkChoice {
+        /// Legacy state had no ek; stamp the local identity ek.
+        StampLocal,
+        /// On-chain ek matches local; reuse it.
+        UseOnChain,
+        /// On-chain ek diverges from local; preserve on-chain and warn.
+        PreserveOnChainDiverged,
+    }
+
+    pub(super) fn select_owner_ek(on_chain_ek: &[u8], local_ek: &[u8]) -> OwnerEkChoice {
+        if on_chain_ek.is_empty() {
+            OwnerEkChoice::StampLocal
+        } else if on_chain_ek == local_ek {
+            OwnerEkChoice::UseOnChain
+        } else {
+            OwnerEkChoice::PreserveOnChainDiverged
+        }
+    }
+
     pub(super) async fn put_migrated_inbox(
         client: &mut WebApiRequestClient,
         identity: &crate::app::Identity,
         parsed: freenet_email_inbox::Inbox,
-    ) -> Result<(), DynError> {
+    ) -> Result<ContractKey, DynError> {
         use ml_dsa::signature::Keypair;
         let vk = Keypair::verifying_key(identity.ml_dsa_signing_key.as_ref());
         let params: Parameters = InboxParams {
             pub_key: crate::inbox::inbox_params_pub_key_bytes(&vk),
         }
         .try_into()?;
-        // Use the parsed state's `owner_ek_bytes` if non-empty (already
-        // populated by a prior migration); otherwise stamp the local
-        // identity's ek so the re-PUT under the new code hash carries
-        // it. This is the migration writer's responsibility (#199).
-        let owner_ek_bytes = if parsed.owner_ek_bytes.is_empty() {
-            identity.ml_kem_ek_bytes()
-        } else {
-            parsed.owner_ek_bytes
+        // #254: never silently overwrite an ek already on chain. Prefer the
+        // on-chain ek when present; only stamp the local ek for legacy
+        // (pre-#249) states that carry none. Surface a divergence so a
+        // re-key is a deliberate, user-confirmed action.
+        let local_ek = identity.ml_kem_ek_bytes();
+        let owner_ek_bytes = match select_owner_ek(&parsed.owner_ek_bytes, &local_ek) {
+            OwnerEkChoice::StampLocal => local_ek,
+            OwnerEkChoice::UseOnChain => parsed.owner_ek_bytes,
+            OwnerEkChoice::PreserveOnChainDiverged => {
+                crate::log::error(
+                    format!(
+                        "inbox migration: on-chain ek differs from local for \
+                         identity=`{}` — preserving the on-chain ek. If you \
+                         intended to rotate keys, use Re-key inbox (#254).",
+                        identity.alias()
+                    ),
+                    None,
+                );
+                crate::toast::push_toast(
+                    format!(
+                        "Inbox `{}` advertises a different encryption key than \
+                         this device. Keeping the published key. Re-key the \
+                         inbox if you meant to rotate.",
+                        identity.alias()
+                    ),
+                    crate::toast::ToastLevel::Warning,
+                );
+                parsed.owner_ek_bytes
+            }
         };
         let rebuilt = freenet_email_inbox::Inbox::new(
             identity.ml_dsa_signing_key.as_ref(),
@@ -443,11 +525,14 @@ mod inbox_management {
         );
         let state = rebuilt.serialize()?;
         let new_key = contract_api::create_contract(client, INBOX_CODE, state, &params).await?;
+        // #260: this PUT is only ENQUEUED, not yet acked. The caller records
+        // `(alias, new_key)` in AWAITING_MIGRATION_ACK and defers clearing the
+        // pending-migration marker until the matching `PutResponse` lands.
         crate::log::info(format!(
-            "inbox migration: PUT succeeded new_key={new_key} identity=`{}` (#213)",
+            "inbox migration: PUT enqueued new_key={new_key} identity=`{}` (#213)",
             identity.alias()
         ));
-        Ok(())
+        Ok(new_key)
     }
 
     /// Dispatch a `Get` for `identity`'s inbox under the prior contract
@@ -542,6 +627,36 @@ mod inbox_management {
         });
         Ok(contract_key)
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{OwnerEkChoice, select_owner_ek};
+
+        #[test]
+        fn select_owner_ek_stamps_local_for_legacy_empty_254() {
+            // Pre-#249 state carries no ek → migration stamps the local one.
+            assert_eq!(select_owner_ek(&[], &[1, 2, 3]), OwnerEkChoice::StampLocal,);
+        }
+
+        #[test]
+        fn select_owner_ek_reuses_matching_on_chain_254() {
+            assert_eq!(
+                select_owner_ek(&[9, 9, 9], &[9, 9, 9]),
+                OwnerEkChoice::UseOnChain,
+            );
+        }
+
+        #[test]
+        fn select_owner_ek_preserves_diverged_on_chain_254() {
+            // The bug: previously the migration silently used whichever ek
+            // without flagging that the on-chain ek diverges from local.
+            // A diverged on-chain ek must be preserved AND surfaced.
+            assert_eq!(
+                select_owner_ek(&[1, 2, 3], &[4, 5, 6]),
+                OwnerEkChoice::PreserveOnChainDiverged,
+            );
+        }
+    }
 }
 
 #[cfg(feature = "use-node")]
@@ -560,6 +675,13 @@ mod token_record_management {
 
     thread_local! {
         pub(super) static CREATED_AFT_RECORD: RefCell<Vec<(Rc<str>, ContractKey)>> = const { RefCell::new(Vec::new()) };
+
+        /// #260: AFT-record migration PUTs awaiting their network ACK.
+        /// Mirror of `inbox_management::AWAITING_MIGRATION_ACK` — the pending
+        /// AFT-migration marker is cleared only when the `PutResponse` for
+        /// the new token-record key lands, not when the PUT is enqueued.
+        pub(super) static AWAITING_AFT_MIGRATION_ACK: RefCell<Vec<(Rc<str>, ContractKey)>> =
+            const { RefCell::new(Vec::new()) };
 
         /// #251 improvement 3 AFT migration: maps an OLD AFT-record
         /// `ContractKey` (derived with a prior `TOKEN_RECORD_CODE_HASH`)
@@ -622,17 +744,19 @@ mod token_record_management {
         client: &mut WebApiRequestClient,
         identity: &crate::app::Identity,
         parsed: TokenAllocationRecord,
-    ) -> Result<(), DynError> {
+    ) -> Result<ContractKey, DynError> {
         let vk = Keypair::verifying_key(identity.ml_dsa_signing_key.as_ref());
         let params: Parameters = TokenDelegateParameters::new(&vk).try_into()?;
         let state = parsed.serialized()?;
         let new_key =
             contract_api::create_contract(client, TOKEN_RECORD_CODE, state, &params).await?;
+        // #260: enqueued, not acked — caller records the key and defers the
+        // pending-marker clear to the matching `PutResponse`.
         crate::log::info(format!(
-            "AFT migration: PUT succeeded new_key={new_key} identity=`{}` (#251)",
+            "AFT migration: PUT enqueued new_key={new_key} identity=`{}` (#251)",
             identity.alias()
         ));
-        Ok(())
+        Ok(new_key)
     }
 
     /// Dispatch a `Get` for `identity`'s AFT record under each prior
@@ -2142,53 +2266,47 @@ pub(crate) async fn node_comms(
                                         match serde_json::from_slice::<StoredInbox>(state.as_ref())
                                         {
                                             Ok(parsed) => {
-                                                if let Err(e) =
-                                                    inbox_management::put_migrated_inbox(
-                                                        &mut client,
-                                                        &identity,
-                                                        parsed,
-                                                    )
-                                                    .await
+                                                match inbox_management::put_migrated_inbox(
+                                                    &mut client,
+                                                    &identity,
+                                                    parsed,
+                                                )
+                                                .await
                                                 {
-                                                    crate::log::error(
-                                                        format!(
-                                                            "inbox migration: PUT failed for `{alias_str}`: {e} (#213)"
-                                                        ),
-                                                        None,
-                                                    );
-                                                    inbox_management::MIGRATED_IDENTITIES.with(
-                                                        |s| {
-                                                            s.borrow_mut().remove(&vk_key);
-                                                        },
-                                                    );
-                                                } else {
-                                                    // #251 improvement 5:
-                                                    // clear the persistent
-                                                    // pending-migration marker
-                                                    // now that the PUT
-                                                    // succeeded. Until this
-                                                    // clear lands, subsequent
-                                                    // session restarts would
-                                                    // re-attempt the GET.
-                                                    if let Err(e) = identity_management::clear_pending_migration_api_call(
-                                                        &mut client,
-                                                        &alias_str,
-                                                    )
-                                                    .await
-                                                    {
+                                                    Err(e) => {
                                                         crate::log::error(
                                                             format!(
-                                                                "inbox migration: clear pending marker for `{alias_str}` failed: {e} (#251)"
+                                                                "inbox migration: PUT failed for `{alias_str}`: {e} (#213)"
                                                             ),
                                                             None,
                                                         );
+                                                        inbox_management::MIGRATED_IDENTITIES.with(
+                                                            |s| {
+                                                                s.borrow_mut().remove(&vk_key);
+                                                            },
+                                                        );
                                                     }
-                                                    crate::toast::push_toast(
-                                                        format!(
-                                                            "Inbox `{alias_str}` migrated to the new contract id after webapp upgrade."
-                                                        ),
-                                                        crate::toast::ToastLevel::Info,
-                                                    );
+                                                    Ok(new_key) => {
+                                                        // #260: the PUT is only
+                                                        // ENQUEUED here. Do NOT
+                                                        // clear the pending
+                                                        // marker yet — record
+                                                        // the awaited key and
+                                                        // defer the clear to the
+                                                        // `PutResponse` arm so a
+                                                        // PUT that never lands on
+                                                        // the network re-attempts
+                                                        // next session instead of
+                                                        // being silently
+                                                        // abandoned.
+                                                        inbox_management::AWAITING_MIGRATION_ACK
+                                                            .with(|a| {
+                                                                a.borrow_mut().push((
+                                                                    alias_str.clone().into(),
+                                                                    new_key,
+                                                                ));
+                                                            });
+                                                    }
                                                 }
                                             }
                                             Err(e) => {
@@ -2245,44 +2363,38 @@ pub(crate) async fn node_comms(
                                             state.as_ref()
                                         ) {
                                             Ok(parsed) => {
-                                                if let Err(e) =
-                                                    token_record_management::put_migrated_aft_record(
-                                                        &mut client,
-                                                        &identity,
-                                                        parsed,
-                                                    )
-                                                    .await
+                                                match token_record_management::put_migrated_aft_record(
+                                                    &mut client,
+                                                    &identity,
+                                                    parsed,
+                                                )
+                                                .await
                                                 {
-                                                    crate::log::error(
-                                                        format!(
-                                                            "AFT migration: PUT failed for `{alias_str}`: {e} (#251)"
-                                                        ),
-                                                        None,
-                                                    );
-                                                    token_record_management::MIGRATED_AFT_IDENTITIES
-                                                        .with(|s| {
-                                                            s.borrow_mut().remove(&vk_key);
-                                                        });
-                                                } else {
-                                                    if let Err(e) = identity_management::clear_pending_aft_migration_api_call(
-                                                        &mut client,
-                                                        &alias_str,
-                                                    )
-                                                    .await
-                                                    {
+                                                    Err(e) => {
                                                         crate::log::error(
                                                             format!(
-                                                                "AFT migration: clear pending marker for `{alias_str}` failed: {e} (#251)"
+                                                                "AFT migration: PUT failed for `{alias_str}`: {e} (#251)"
                                                             ),
                                                             None,
                                                         );
+                                                        token_record_management::MIGRATED_AFT_IDENTITIES
+                                                            .with(|s| {
+                                                                s.borrow_mut().remove(&vk_key);
+                                                            });
                                                     }
-                                                    crate::toast::push_toast(
-                                                        format!(
-                                                            "AFT token ledger for `{alias_str}` migrated to the new contract id after webapp upgrade."
-                                                        ),
-                                                        crate::toast::ToastLevel::Info,
-                                                    );
+                                                    Ok(new_key) => {
+                                                        // #260: enqueued only —
+                                                        // defer the pending-marker
+                                                        // clear to the matching
+                                                        // `PutResponse`.
+                                                        token_record_management::AWAITING_AFT_MIGRATION_ACK
+                                                            .with(|a| {
+                                                                a.borrow_mut().push((
+                                                                    alias_str.clone().into(),
+                                                                    new_key,
+                                                                ));
+                                                            });
+                                                    }
                                                 }
                                             }
                                             Err(e) => {
@@ -2614,6 +2726,72 @@ pub(crate) async fn node_comms(
                             login_controller,
                         )
                         .await;
+                    }
+                    return;
+                }
+
+                // #260: a migration re-PUT's ACK has landed. Only now is it
+                // safe to clear the persistent pending-migration marker — the
+                // new state is durably on the network. Until this point the
+                // marker survived so a never-acked PUT re-attempts next
+                // session instead of being silently abandoned.
+                let awaiting_inbox = inbox_management::AWAITING_MIGRATION_ACK
+                    .with(|a| take_awaiting_ack(&mut a.borrow_mut(), &contract_key));
+                if let Some(alias) = awaiting_inbox {
+                    // #260: the migration PUT is durably on the network now —
+                    // clear the persistent marker. Only surface the success
+                    // toast if the clear lands; if it fails the marker stays
+                    // set (re-attempted next session), so a "migrated"
+                    // toast would over-promise.
+                    match identity_management::clear_pending_migration_api_call(&mut client, &alias)
+                        .await
+                    {
+                        Ok(()) => {
+                            crate::toast::push_toast(
+                                format!(
+                                    "Inbox `{alias}` migrated to the new contract id after webapp upgrade."
+                                ),
+                                crate::toast::ToastLevel::Info,
+                            );
+                        }
+                        Err(e) => {
+                            crate::log::error(
+                                format!(
+                                    "inbox migration: clear pending marker for `{alias}` failed: {e} — will retry next session (#260)"
+                                ),
+                                None,
+                            );
+                        }
+                    }
+                    return;
+                }
+
+                let awaiting_aft = token_record_management::AWAITING_AFT_MIGRATION_ACK
+                    .with(|a| take_awaiting_ack(&mut a.borrow_mut(), &contract_key));
+                if let Some(alias) = awaiting_aft {
+                    // #260: same deferred-clear discipline as the inbox branch.
+                    match identity_management::clear_pending_aft_migration_api_call(
+                        &mut client,
+                        &alias,
+                    )
+                    .await
+                    {
+                        Ok(()) => {
+                            crate::toast::push_toast(
+                                format!(
+                                    "Token ledger `{alias}` migrated to the new contract id after webapp upgrade."
+                                ),
+                                crate::toast::ToastLevel::Info,
+                            );
+                        }
+                        Err(e) => {
+                            crate::log::error(
+                                format!(
+                                    "AFT migration: clear pending marker for `{alias}` failed: {e} — will retry next session (#260)"
+                                ),
+                                None,
+                            );
+                        }
                     }
                 }
             }
@@ -3848,5 +4026,51 @@ impl std::fmt::Display for TryNodeAction {
                 write!(f, "creating AFT delegate")
             }
         }
+    }
+}
+
+#[cfg(all(test, feature = "use-node"))]
+mod awaiting_ack_tests {
+    use std::rc::Rc;
+
+    use freenet_stdlib::prelude::{ContractCode, ContractKey, Parameters};
+
+    use super::take_awaiting_ack;
+
+    fn key(n: u8) -> ContractKey {
+        // Distinct params per n → distinct contract id, so each key is unique.
+        ContractKey::from_params_and_code(Parameters::from(vec![n]), ContractCode::from(vec![0u8]))
+    }
+
+    /// #260: the pending-migration marker must NOT be cleared on PUT enqueue.
+    /// The clear is keyed off the migration PUT's `PutResponse`; until the
+    /// acked key matches an awaiting entry, `take_awaiting_ack` returns None
+    /// and the marker survives — so a never-acked PUT re-attempts next session.
+    #[test]
+    fn awaiting_ack_only_clears_on_matching_key_260() {
+        let mut awaiting: Vec<(Rc<str>, ContractKey)> =
+            vec![(Rc::from("alice"), key(1)), (Rc::from("bob"), key(2))];
+
+        // A PutResponse for an unrelated key (e.g. an ordinary create) must
+        // not consume any awaiting entry — the markers stay pending.
+        assert!(
+            take_awaiting_ack(&mut awaiting, &key(9)).is_none(),
+            "unrelated ack must not clear a pending migration",
+        );
+        assert_eq!(awaiting.len(), 2, "no entry consumed on non-match");
+
+        // The ack for alice's new key clears exactly alice's entry.
+        assert_eq!(
+            take_awaiting_ack(&mut awaiting, &key(1)).as_deref(),
+            Some("alice"),
+        );
+        assert_eq!(awaiting.len(), 1, "exactly one entry consumed");
+        assert_eq!(awaiting[0].0.as_ref(), "bob", "bob still awaits its ack");
+
+        // A duplicate ack for the same (now-removed) key is a no-op.
+        assert!(
+            take_awaiting_ack(&mut awaiting, &key(1)).is_none(),
+            "duplicate ack must not double-clear",
+        );
     }
 }
