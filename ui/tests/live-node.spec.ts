@@ -726,15 +726,21 @@ test.describe("Live node E2E", () => {
       // threads correctly as far as the data model allows — not a fabricated
       // multi-message grouping that does not occur. Sender-side sent-folding
       // is tracked as the #270 sent↔received data-model gap.
+      // #270/#287 are CLOSED: when two messages share an inbox AND a
+      // subject, they fold into one group (subject-only key). This test
+      // simply doesn't construct that case — a fresh-compose alice→bob
+      // exchange puts exactly one half in each side's inbox and mints a new
+      // thread_id per message, so the per-side standalone-group below is the
+      // genuine, correct rendering, not a fold regression. Not blocked on
+      // any open issue.
       test.info().annotations.push({
         type: "known-limitation",
         description:
-          "#270: a real-node alice↔bob exchange does NOT render as one " +
-          "multi-message thread — sent messages are not folded into the " +
-          "sender's inbox view, and fresh-compose mints a new thread_id per " +
-          "message. Cross-version/cross-node threading requires the Reply " +
-          "button (shared thread_id) AND both halves in one inbox; neither " +
-          "holds here. Asserting the per-side standalone-group reality only.",
+          "Not blocked on any open issue (#270/#287 closed): a fresh-compose " +
+          "real-node alice↔bob exchange puts one half in each inbox with a " +
+          "distinct thread_id, so it renders as per-side standalone groups by " +
+          "design. Multi-message fold requires both halves in one inbox under a " +
+          "shared subject (covered elsewhere); asserting the per-side reality.",
       });
       const bobRoundOneGroup = bobApp
         .locator('[data-testid="fm-thread-group"]')

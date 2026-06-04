@@ -545,12 +545,23 @@ test.describe("Cross-identity threaded back-and-forth (#270)", () => {
     // group" path is exercised by the seeded thread + the unit test
     // `chronological_interleave_of_sent_and_received`, not here. Real-node
     // multi-arrival grouping is deferred to live-node.spec.ts / CI.
+    // #287 (one-sided thread render) and #270 (back-and-forth grouping)
+    // are both CLOSED — the grouping key is normalized to subject-only
+    // (guarded by threads.spec.ts) so both halves fold into one group when
+    // they share an inbox. What remains is an offline-harness limitation,
+    // not a product bug: the mock mailbox drains per-alias on load and a
+    // sender's own sent message never enters that sender's inbox Vec, so no
+    // single identity's inbox accumulates BOTH halves in one offline load.
+    // The ">=2 messages fold into one group" path is therefore exercised by
+    // the seeded thread + unit tests here, and the real multi-arrival fold
+    // by live-node.spec.ts — neither blocked on any open issue.
     testInfo.annotations.push({
       type: "known-limitation",
       description:
-        "Offline mock mailbox drains per-alias on load and sender-side sent " +
-        "messages don't enter the sender's own inbox; multi-arrival fold is " +
-        "covered by the seeded thread + unit tests, not this cross-identity spec.",
+        "Offline-harness only (not a product bug; #270/#287 closed): the mock " +
+        "mailbox drains per-alias on load and sender-side sent messages don't " +
+        "enter the sender's own inbox, so multi-arrival fold is covered by the " +
+        "seeded thread + unit tests here and by live-node.spec.ts, not this spec.",
     });
 
     await page.goto("/");
@@ -876,6 +887,56 @@ test.describe("Drafts folder (#47a)", () => {
 
     await page.locator('[data-testid="fm-folder-drafts"]').click();
     await expect(page.locator('[data-testid="fm-draft-card"]')).toHaveCount(0);
+  });
+
+  // In-session folder-routing guard (#291): send → message lands in Sent,
+  // NOT Drafts. The "Send removes the draft" test above only asserts the
+  // Drafts side (the row vanishes); this asserts the positive half — Sent
+  // gains exactly the message we just sent — so a regression that drops a
+  // sent message on the floor (no Sent card) is caught, not just a leak
+  // back into Drafts. No reload: offline mode has no persistence layer
+  // (#291 §"Persistence is iso-only"), so this is an in-session routing
+  // assert by design. The across-reload variant lives in
+  // live-node.spec.ts ("sent message stays in Sent ... across reload").
+  test("send routes the message into Sent, not Drafts (#291)", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await waitForApp(page);
+    await selectIdentity(page, "address1");
+
+    await openCompose(page);
+    await fillCompose(page, "address2", "routing subj", "routing body");
+
+    await Promise.all([
+      page
+        .locator('[data-testid="fm-compose-sheet"]')
+        .waitFor({ state: "detached", timeout: 10_000 }),
+      clickSend(page),
+    ]);
+
+    // Positive side: the message is in Sent.
+    await page.locator('[data-testid="fm-folder-sent"]').click();
+    const sentCards = page.locator('[data-testid="fm-sent-card"]');
+    await expect(
+      sentCards,
+      "sent message lands in Sent (#291 routing guard)",
+    ).toHaveCount(1);
+    await expect(
+      sentCards.first(),
+      "the Sent card is the message we just sent",
+    ).toContainText("routing subj");
+
+    // Negative side: Drafts holds nothing (no leak, count badge empty).
+    await page.locator('[data-testid="fm-folder-drafts"]').click();
+    await expect(
+      page.locator('[data-testid="fm-draft-card"]'),
+      "no draft left behind after send (#291)",
+    ).toHaveCount(0);
+    await expect(
+      page.locator('[data-testid="fm-folder-drafts"] .count'),
+      "Drafts count badge empty after send (#291)",
+    ).toHaveText("");
   });
 
   test("draft folder count badge reflects pending drafts", async ({ page }) => {
