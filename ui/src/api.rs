@@ -2039,6 +2039,42 @@ pub(crate) async fn node_comms(
                                     );
                                 }
                             }
+                            RequestError::ContractError(ContractError::Get { key, cause }) => {
+                                // A failed inbox GET is the terminal signal for
+                                // an in-flight contact import (the modal issued
+                                // `FetchContactKeys` → Get). Core surfaces a
+                                // stream-assembly timeout / not-found as
+                                // `ContractError::Get`; without resolving the
+                                // pending entry here the import modal's poll loop
+                                // (login.rs) spins on "Fetching keys…" forever.
+                                // Drain PENDING by instance id and publish a
+                                // Failed outcome under the address string the
+                                // modal polls on.
+                                let inbox_id = *key.id();
+                                let import_addr = contact_import::PENDING
+                                    .with(|m| m.borrow_mut().remove(&inbox_id));
+                                if let Some(addr) = import_addr {
+                                    crate::log::error(
+                                        format!("inbox GET failed for {key}: {cause}"),
+                                        None,
+                                    );
+                                    contact_import::RESULTS.with(|m| {
+                                        m.borrow_mut().insert(
+                                            addr,
+                                            contact_import::ImportFetched {
+                                                outcome: contact_import::ImportFetchOutcome::Failed(
+                                                    format!("fetch from node failed: {cause}"),
+                                                ),
+                                            },
+                                        );
+                                    });
+                                } else {
+                                    crate::log::error(
+                                        format!("GET error for contract {key}: {cause}"),
+                                        None,
+                                    );
+                                }
+                            }
                             RequestError::ContractError(err) => {
                                 crate::log::error(format!("FIXME: {err}"), None)
                             }

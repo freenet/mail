@@ -2008,6 +2008,13 @@ pub(super) fn ImportContactForm() -> Element {
     let mut fetching = use_signal(|| false);
     let mut pending_address: Signal<Option<String>> = use_signal(|| None);
     let mut verify_phrase: Signal<Option<String>> = use_signal(|| None);
+    // Count of 150ms poll ticks since the current fetch began. Drives the
+    // escalating "taking longer than expected" copy and a client-side
+    // timeout, so a node that never replies at all (not even an error —
+    // distinct from the core stream-assembly failure that does surface a
+    // `ContractError::Get`) still releases the modal instead of spinning
+    // forever. 0 while idle.
+    let mut fetch_ticks = use_signal(|| 0u32);
 
     // Poll the api.rs result table for the address we asked about. Runs
     // while the modal is mounted; the fetch completes in well under a
@@ -2052,6 +2059,29 @@ pub(super) fn ImportContactForm() -> Element {
                         }
                         fetching.set(false);
                         pending_address.set(None);
+                        fetch_ticks.set(0);
+                    } else {
+                        // No result yet — advance the elapsed clock. At
+                        // ~30s (200 × 150ms) give up client-side; the node
+                        // is unreachable or silently dropping the GET.
+                        let t = fetch_ticks.read().saturating_add(1);
+                        fetch_ticks.set(t);
+                        if t >= 200 {
+                            crate::api::contact_import::RESULTS
+                                .with(|m| m.borrow_mut().remove(&addr));
+                            error_msg.set(
+                                "Could not fetch inbox: timed out after 30s. \
+                                 The recipient's node may be offline, or their \
+                                 inbox hasn't propagated to the network yet. \
+                                 Ask them to open their inbox, then retry."
+                                    .into(),
+                            );
+                            fingerprint_words.set(None);
+                            fetched_keys.set(None);
+                            fetching.set(false);
+                            pending_address.set(None);
+                            fetch_ticks.set(0);
+                        }
                     }
                 }
             }
@@ -2264,8 +2294,29 @@ pub(super) fn ImportContactForm() -> Element {
                         }
                     }
                     if *fetching.read() {
-                        div { class: "field-help",
-                            "Fetching keys from the recipient's inbox…"
+                        {
+                            // ~150ms per tick. Escalate the copy so the user
+                            // sees the fetch is alive and how far along it is,
+                            // rather than a static line that looks hung.
+                            let ticks = *fetch_ticks.read();
+                            let secs = (ticks as f32 * 0.15) as u32;
+                            let msg = if ticks < 33 {
+                                "Fetching keys from the recipient's inbox…".to_string()
+                            } else if ticks < 100 {
+                                format!("Still fetching from the network… ({secs}s)")
+                            } else {
+                                format!(
+                                    "Taking longer than usual ({secs}s). The recipient's \
+                                     node may be slow to respond — will time out at 30s."
+                                )
+                            };
+                            rsx! {
+                                div { class: "field-help",
+                                    style: "display:flex; align-items:center; gap:8px;",
+                                    span { class: "pulse-dot" }
+                                    span { "{msg}" }
+                                }
+                            }
                         }
                     }
                     if let Some(ref words) = *fingerprint_words.read() {
