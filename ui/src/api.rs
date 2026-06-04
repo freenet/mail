@@ -2028,15 +2028,34 @@ pub(crate) async fn node_comms(
                                         None,
                                     );
                                 } else if let Some(id) = InboxModel::contract_identity(key) {
-                                    // FIXME: in case this is for an inbox contract we were trying to update, this means that
-                                    // the message wasn't sent and should propgate that to the UI
+                                    // A failed UPDATE to a recipient inbox is the
+                                    // terminal signal that the send didn't land
+                                    // (e.g. the recipient-node hang / GET-starvation
+                                    // of freenet-core#4345, or any other UPDATE
+                                    // rejection). Mirror the AFT-`Failure` path
+                                    // (#85) and the import-`Get` path (#302): flip
+                                    // every Sent row queued against this inbox from
+                                    // Pending → Failed and toast the user, instead
+                                    // of leaving the row spinning Pending forever
+                                    // (#288).
                                     let alias = id.alias();
                                     crate::log::error(
                                         format!(
-                                            "the message for {alias} (inbox contract: {key}) wasn't delievered succesffully, so may need to try again and/or notify the user"
+                                            "message for {alias} (inbox contract: {key}) wasn't delivered — flipping queued sends to Failed"
                                         ),
-                                        None,
+                                        Some(TryNodeAction::SendMessage),
                                     );
+                                    crate::toast::push_toast(
+                                        format!(
+                                            "Message to {alias} wasn't delivered. The recipient's node may be temporarily unreachable — try sending again."
+                                        ),
+                                        crate::toast::ToastLevel::Error,
+                                    );
+                                    crate::inbox::fail_pending_sent_for_inbox(
+                                        &mut client,
+                                        *key,
+                                    )
+                                    .await;
                                 }
                             }
                             RequestError::ContractError(ContractError::Get { key, cause }) => {
