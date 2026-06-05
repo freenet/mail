@@ -39,6 +39,19 @@
       /* Card / popover surface (sheet, dropdown, modal backgrounds). */
       --bg-card: #ffffff;
 
+      /* Solid/inverted button (New message, Reply, primary actions). Light
+         theme: near-black surface with light ink. Must NOT be driven by
+         --ink0 directly — that flips to near-white in dark mode, producing
+         an invisible white-on-white button. Dark theme remaps below. */
+      --btn-solid-bg: var(--ink0);
+      --btn-solid-bg-hover: #000;
+      --btn-solid-ink: #f8fafc;
+
+      /* Tinted surface wash (active rows, soft gradients). Light theme uses
+         the accent-blue tint; dark theme remaps to a dark wash so it doesn't
+         render as a white patch. */
+      --tint-bg: rgba(239, 246, 255, 0.85);
+
       /* Hover film over a surface — light theme: white wash; dark: light wash. */
       --hover: rgba(255, 255, 255, 0.6);
 
@@ -102,6 +115,10 @@
     --unread: #fbbf24;
     --bg-card: #111a2e;
     --hover: rgba(148, 163, 184, 0.12);
+    --btn-solid-bg: var(--accent);
+    --btn-solid-bg-hover: #2563eb;
+    --btn-solid-ink: #f8fafc;
+    --tint-bg: rgba(59, 130, 246, 0.14);
     --amber-bg: rgba(217, 119, 6, 0.12);
     --amber-border: rgba(251, 191, 36, 0.3);
     --amber-ink: #fbbf24;
@@ -130,6 +147,10 @@
       --unread: #fbbf24;
       --bg-card: #111a2e;
       --hover: rgba(148, 163, 184, 0.12);
+      --btn-solid-bg: var(--accent);
+      --btn-solid-bg-hover: #2563eb;
+      --btn-solid-ink: #f8fafc;
+      --tint-bg: rgba(59, 130, 246, 0.14);
       --amber-bg: rgba(217, 119, 6, 0.12);
       --amber-border: rgba(251, 191, 36, 0.3);
       --amber-ink: #fbbf24;

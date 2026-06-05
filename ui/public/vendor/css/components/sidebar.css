@@ -14,7 +14,7 @@
     }
     .compose-btn {
       appearance: none; border: 0;
-      background: var(--ink0); color: #f8fafc;
+      background: var(--btn-solid-bg); color: var(--btn-solid-ink);
       border-radius: 8px; height: 36px;
       display: flex; align-items: center; justify-content: center; gap: 7px;
       font-family: "Fraunces", serif; font-style: italic; font-weight: 400;
@@ -22,7 +22,7 @@
       box-shadow: var(--sh-sm);
       transition: transform .08s ease, background .15s ease;
     }
-    .compose-btn:hover { background: #000; }
+    .compose-btn:hover { background: var(--btn-solid-bg-hover); }
     .compose-btn:active { transform: translateY(1px); }
     .compose-btn .pen { font-size: 13px; opacity: .85; }
 
@@ -60,7 +60,7 @@
 
     .sidebar-bottom { margin-top: auto; display: flex; flex-direction: column; gap: 6px; }
     .conn-card {
-      background: rgba(239, 246, 255, 0.85);
+      background: var(--tint-bg);
       border: 1px solid var(--line2);
       border-radius: 7px;
       padding: 9px 11px;

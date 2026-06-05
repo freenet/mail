@@ -15,7 +15,7 @@
 
     /* TOAST */
     .toast {
-      background: var(--ink0); color: #f8fafc;
+      background: var(--btn-solid-bg); color: var(--btn-solid-ink);
       padding: 10px 14px; border-radius: 8px;
       font-size: 13.5px; letter-spacing: -0.005em;
       box-shadow: var(--sh-lg);

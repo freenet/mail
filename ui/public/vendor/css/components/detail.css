@@ -62,8 +62,8 @@
       transition: background .12s ease, color .12s ease, border-color .12s ease;
       cursor: default;
     }
-    .btn-primary { background: var(--ink0); color: #f8fafc; }
-    .btn-primary:hover { background: #000; }
+    .btn-primary { background: var(--btn-solid-bg); color: var(--btn-solid-ink); }
+    .btn-primary:hover { background: var(--btn-solid-bg-hover); }
     .btn-secondary { background: transparent; color: var(--ink2); border: 1px solid var(--line); }
     .btn-secondary:hover { background: var(--hover); border-color: var(--c3); }
     .btn-ghost { background: transparent; color: var(--ink3); border: 0; padding: 6px 12px; }
