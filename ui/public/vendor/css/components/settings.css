@@ -236,12 +236,12 @@
     /* Buttons */
     .fm-btn-primary {
       height: 30px; padding: 0 14px; border-radius: 7px;
-      background: var(--ink0); color: #fff;
+      background: var(--btn-solid-bg); color: var(--btn-solid-ink);
       font-size: 13px; font-weight: 500; letter-spacing: -0.005em;
       border: 0;
       transition: background 0.15s ease;
     }
-    .fm-btn-primary:hover { background: var(--ink1); }
+    .fm-btn-primary:hover { background: var(--btn-solid-bg-hover); }
     .fm-btn-secondary {
       height: 30px; padding: 0 12px; border-radius: 7px;
       background: var(--bg-card); color: var(--ink1);
@@ -338,7 +338,7 @@
     .fm-tier.is-active {
       border-color: var(--accent);
       box-shadow: var(--sh-sm), inset 0 -2px 0 var(--accent);
-      background: linear-gradient(180deg, var(--bg-card) 0%, rgba(239, 246, 255, 0.5) 100%);
+      background: linear-gradient(180deg, var(--bg-card) 0%, var(--tint-bg) 100%);
     }
     .fm-tier-name {
       font-family: "Geist Mono", monospace; font-size: 12px;
@@ -552,7 +552,7 @@
       transition: background 0.15s ease;
     }
     .fm-id-pop-row:hover { background: var(--hover); }
-    .fm-id-pop-row.is-active { background: rgba(239, 246, 255, 0.7); }
+    .fm-id-pop-row.is-active { background: var(--tint-bg); }
     .fm-id-pop-row.add { color: var(--accent); font-size: 13.5px; }
 
     /* Diagnostics terminal */
@@ -687,7 +687,7 @@
     }
 
     .verify-words {
-      background: linear-gradient(180deg, rgba(239, 246, 255, 0.6), rgba(220, 252, 231, 0.4));
+      background: linear-gradient(180deg, var(--tint-bg), var(--trust-bg));
       border: 1px solid var(--line2);
       border-radius: 10px; padding: 18px 20px;
       margin: 6px 0 18px;
@@ -732,7 +732,7 @@
     .verify-check:hover { border-color: var(--c3); }
     .verify-check.checked {
       border-color: var(--trust);
-      background: linear-gradient(180deg, rgba(220, 252, 231, 0.4), rgba(220, 252, 231, 0.15));
+      background: var(--trust-bg);
     }
     .verify-check input { appearance: none; display: none; }
     .verify-box {
