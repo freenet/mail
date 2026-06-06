@@ -1781,6 +1781,24 @@ mod thread_grouping_tests {
         tid: Option<&str>,
         irt: Option<&str>,
     ) -> Message {
+        m_vk(id, from, title, secs, read, tid, irt, Vec::new(), false)
+    }
+
+    /// Like `m`, but with a caller-supplied `sender_vk` + `signature_valid`
+    /// so tests can exercise the VK-based reply resolution (#289), including
+    /// the security gate that only trusts a VK on a verified signature.
+    #[allow(clippy::too_many_arguments)]
+    fn m_vk(
+        id: u64,
+        from: &'static str,
+        title: &'static str,
+        secs: i64,
+        read: bool,
+        tid: Option<&str>,
+        irt: Option<&str>,
+        sender_vk: Vec<u8>,
+        signature_valid: bool,
+    ) -> Message {
         Message {
             id,
             from: Cow::Borrowed(from),
@@ -1788,8 +1806,8 @@ mod thread_grouping_tests {
             content: Cow::Borrowed("body"),
             read,
             time: Utc.timestamp_opt(1_700_000_000 + secs, 0).unwrap(),
-            sender_vk: Vec::new(),
-            signature_valid: false,
+            sender_vk,
+            signature_valid,
             assignment_hash: [0u8; 32],
             thread_id: tid.map(str::to_string),
             in_reply_to: irt.map(str::to_string),
@@ -2163,23 +2181,46 @@ mod thread_grouping_tests {
         );
     }
 
-    /// #289 root cause (unit-level): the reply prefill addresses the To field
-    /// by the incoming message's *display sender* (`m.from`) — the alias the
-    /// SENDER chose — not by the sender's VK / inbox key. So when the
-    /// recipient imported that sender under a DIFFERENT local nickname, the
-    /// reply's To carries a string that won't resolve against their address
-    /// book, and the send is blocked until they hand-edit it.
+    /// #289 fixed: the reply prefill addresses the To field by the
+    /// recipient's OWN local label for the sender, resolved via the
+    /// sender's stable ML-DSA VK (`Message.sender_vk` →
+    /// `address_book::contact_by_vk`) — not by the sender's chosen
+    /// display name. Three testers hit the old behavior: a recipient who
+    /// imported the sender under a different nickname (or via a bare-bs58
+    /// path that dropped `suggested_alias`) got a To string that wouldn't
+    /// resolve, blocking the send. Resolving by VK is stable across
+    /// relabels and import paths.
     ///
     /// This pins the load-bearing claim. The full UI reply round-trip is
-    /// covered by the deferred iso test tracked in #291. Once #289 is fixed
-    /// (reply resolves by VK / inbox key, and/or the contact-add modal
-    /// pre-fills the nickname from the incoming sender), the prefill should
-    /// carry a stable handle rather than the raw sender alias and this
-    /// assertion will need to move to the new contract.
+    /// covered by the deferred iso test tracked in #291.
     #[test]
-    fn reply_prefill_addresses_by_display_sender_not_vk_289() {
-        // A received message whose sender called themselves "alice-from-work".
-        let received = m(
+    fn reply_prefill_resolves_to_local_label_by_vk_289() {
+        use crate::app::address_book::{self, Contact};
+        use freenet_aft_interface::Tier;
+        use freenet_email_inbox::DEFAULT_MAX_AGE_SECS;
+
+        address_book::clear_for_test();
+
+        // Recipient imported the sender under their own local label "ally",
+        // even though the sender advertises themselves as "alice-from-work".
+        let sender_vk = vec![42u8; 1952];
+        address_book::insert_contact(Contact {
+            local_alias: "ally".into(),
+            suggested_alias: Some("alice-from-work".into()),
+            description: String::new(),
+            ml_dsa_vk_bytes: sender_vk.clone(),
+            ml_kem_ek_bytes: vec![7u8; 1184],
+            required_tier: Tier::Day1,
+            max_age_secs: DEFAULT_MAX_AGE_SECS,
+            verified: false,
+            inbox_wasm_hash: None,
+        })
+        .expect("seed contact");
+
+        // A received message whose sender called themselves "alice-from-work"
+        // and carries the sender's VK (the real inbox-decode flow populates
+        // `sender_vk`; see `From<MessageModel> for Message`).
+        let received = m_vk(
             7,
             "alice-from-work",
             "Project kickoff",
@@ -2187,23 +2228,116 @@ mod thread_grouping_tests {
             true,
             Some("thread-x"),
             None,
+            sender_vk,
+            true, // signature verified — VK is trustworthy for addressing
         );
 
         let prefill = super::thread_reply_prefill(&received);
 
-        // The reply is addressed to the raw display-sender string. If the
-        // recipient imported alice under a different local label (e.g.
-        // "ally"), `address_book::lookup("alice-from-work")` misses and the
-        // reply can't be sent — exactly #289.
+        // The reply addresses the recipient's local label, which resolves in
+        // the compose send path — the send is no longer blocked.
         assert_eq!(
-            prefill.to, "alice-from-work",
-            "reply To is the incoming sender's display alias (#289 root cause); \
-             a recipient who imported them under a different nickname can't resolve it",
+            prefill.to, "ally",
+            "reply To resolves to the recipient's local label via the sender VK (#289 fixed)",
         );
-        // Sanity: the prefill keeps the conversation in-thread and quotes the
-        // parent — only the recipient resolution is broken, not the threading.
+        // Threading metadata unchanged.
         assert_eq!(prefill.thread_id.as_deref(), Some("thread-x"));
         assert_eq!(prefill.in_reply_to.as_deref(), Some("7"));
+    }
+
+    /// #289 SECURITY: an UNSIGNED (or forgery-failed) message must NOT have its
+    /// `sender_vk` trusted for addressing, even if that VK matches a trusted
+    /// contact. Otherwise a forged `sender_vk` stamped with a contact's VK
+    /// would prefill that contact's local alias and misdirect the reply.
+    #[test]
+    fn reply_prefill_ignores_unverified_sender_vk_289() {
+        use crate::app::address_book::{self, Contact};
+        use freenet_aft_interface::Tier;
+        use freenet_email_inbox::DEFAULT_MAX_AGE_SECS;
+
+        address_book::clear_for_test();
+
+        // A trusted contact "bob" with a known VK.
+        let bob_vk = vec![9u8; 1952];
+        address_book::insert_contact(Contact {
+            local_alias: "bob".into(),
+            suggested_alias: None,
+            description: String::new(),
+            ml_dsa_vk_bytes: bob_vk.clone(),
+            ml_kem_ek_bytes: vec![3u8; 1184],
+            required_tier: Tier::Day1,
+            max_age_secs: DEFAULT_MAX_AGE_SECS,
+            verified: true,
+            inbox_wasm_hash: None,
+        })
+        .expect("seed contact");
+
+        // Mallory's message FORGES Bob's VK but the signature does not validate.
+        let forged = m_vk(
+            7,
+            "Bob",
+            "Hi",
+            0,
+            true,
+            Some("thread-z"),
+            None,
+            bob_vk,
+            false, // signature INVALID — VK must not be trusted
+        );
+
+        let prefill = super::thread_reply_prefill(&forged);
+
+        assert_eq!(
+            prefill.to, "Bob",
+            "unverified sender_vk must NOT resolve to the trusted contact's local alias \
+             — fall back to the display name (no silent reply misdirection)",
+        );
+    }
+
+    /// #289 fallback: a SIGNED message whose `sender_vk` matches no contact
+    /// (e.g. a verified-unknown sender the user never imported) falls back to
+    /// the display name — exercises the `contact_by_vk -> None` flatten branch,
+    /// distinct from the empty-VK branch.
+    #[test]
+    fn reply_prefill_falls_back_when_vk_not_a_contact_289() {
+        use crate::app::address_book;
+        address_book::clear_for_test();
+
+        let received = m_vk(
+            7,
+            "stranger-signed",
+            "Hi",
+            0,
+            true,
+            Some("thread-w"),
+            None,
+            vec![5u8; 1952], // signed VK, but not in the address book
+            true,
+        );
+        let prefill = super::thread_reply_prefill(&received);
+
+        assert_eq!(
+            prefill.to, "stranger-signed",
+            "signed but unknown sender_vk → contact_by_vk None → fall back to display name",
+        );
+    }
+
+    /// #289 fallback: a legacy/unsigned message with no `sender_vk` (and
+    /// any sender not in the address book) still prefills the raw display
+    /// name — there's no VK to resolve and the user can hand-edit / import.
+    #[test]
+    fn reply_prefill_falls_back_to_display_name_without_vk_289() {
+        use crate::app::address_book;
+        address_book::clear_for_test();
+
+        let received = m(7, "stranger", "Hi", 0, true, Some("thread-y"), None);
+        let prefill = super::thread_reply_prefill(&received);
+
+        assert_eq!(
+            prefill.to, "stranger",
+            "no sender_vk → fall back to the display name",
+        );
+        assert_eq!(prefill.thread_id.as_deref(), Some("thread-y"));
     }
 }
 
@@ -3608,8 +3742,29 @@ fn thread_pill(m: &Message) -> (&'static str, &'static str) {
 /// parent lacks one (legacy), links `in_reply_to` to the parent, and carries
 /// the parent's first body line as the structured `quoted_excerpt`.
 fn thread_reply_prefill(m: &Message) -> menu::ComposePrefill {
+    // #289: address the reply by the recipient's LOCAL label for the
+    // sender (resolved via the sender's stable VK), not the sender's
+    // chosen display name. The display name doesn't resolve in the
+    // compose send path when the recipient relabelled the contact or
+    // imported via a path that dropped `suggested_alias` — that's the
+    // bug three testers hit. Fall back to the display name for
+    // legacy/unsigned messages and for senders not in the address book
+    // (e.g. own-identity sends, which resolve via the Tier-1
+    // own-identity branch in `address_book::lookup`).
+    //
+    // SECURITY: `sender_vk` is attacker-controlled wire data — only trust
+    // it for addressing once `signature_valid` proves the sender holds the
+    // matching private key. Without this gate a forged `sender_vk` stamped
+    // with a trusted contact's VK would prefill that contact's local alias,
+    // silently misdirecting the reply to them (reply-misdirection). Mirrors
+    // the same gate in `Message::verification_state`.
+    let to = (m.signature_valid && !m.sender_vk.is_empty())
+        .then(|| address_book::contact_by_vk(&m.sender_vk))
+        .flatten()
+        .map(|c| c.local_alias.to_string())
+        .unwrap_or_else(|| m.from.to_string());
     menu::ComposePrefill {
-        to: m.from.to_string(),
+        to,
         subject: format!("Re: {}", m.title),
         body: String::new(),
         draft_id: None,
@@ -3819,7 +3974,17 @@ fn ThreadRowActions(msg: Message, root_id: u64, thread_total: usize) -> Element 
     // Such rows offer Reply only; deletion of sent mail lives in the Sent
     // folder's detail toolbar.
     let is_folded_sent = id >= SENT_FOLD_ID_BASE;
-    let reply_prefill = thread_reply_prefill(&msg);
+    // #289: compute the reply prefill LAZILY in the onclick closure, not
+    // eagerly here. `ThreadRowActions` takes `msg` as a prop and `Message`'s
+    // PartialEq compares only `id`, so after an address-book change (e.g. the
+    // user just added/relabelled this sender via "Add to address book") Dioxus
+    // sees equal props and skips re-rendering this component — an eagerly-
+    // computed prefill would keep its pre-import value (sender display name)
+    // and the reply would address the unresolvable name again. Resolving at
+    // click time reads the current address book. (Sibling reply docks in
+    // ThreadDetail/OpenMessage subscribe to AddressBookGen and recompute; this
+    // component does not, so it must defer.)
+    let reply_msg = msg.clone();
     let show_add_to_ab = !is_folded_sent
         && matches!(
             msg.verification_state(),
@@ -3852,7 +4017,9 @@ fn ThreadRowActions(msg: Message, root_id: u64, thread_total: usize) -> Element 
             "data-testid": testid::FM_REPLY,
             title: "Reply",
             onclick: move |_| {
-                menu_for_reply.write().open_draft(reply_prefill.clone());
+                menu_for_reply
+                    .write()
+                    .open_draft(thread_reply_prefill(&reply_msg));
             },
             "Reply"
         }
