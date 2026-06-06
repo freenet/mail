@@ -174,14 +174,16 @@ impl AftRecords {
             .map_err(|e| format!("{e}"))?;
         let contract_key =
             ContractKey::from_params(TOKEN_RECORD_CODE_HASH, params).map_err(|e| format!("{e}"))?;
+        // `get_state` is a GET-with-subscribe, so it both fetches state and
+        // registers this node as a subscriber/holder. A separate Subscribe is
+        // unnecessary and would be rejected when the contract isn't cached
+        // locally (issue #288).
+        let _ = contract_to_id;
         Self::get_state(client, contract_key).await?;
         let _alias = identity.alias();
         crate::log::debug!(
-            "subscribing to AFT updates for `{contract_key}`, belonging to alias `{_alias}`"
+            "loading + subscribing to AFT record for `{contract_key}`, belonging to alias `{_alias}`"
         );
-        if !contract_to_id.contains_key(&contract_key) {
-            Self::subscribe(client, contract_key).await?;
-        }
         Ok(contract_key)
     }
 
@@ -638,24 +640,14 @@ impl AftRecords {
         client: &mut WebApiRequestClient,
         key: AftRecord,
     ) -> Result<(), DynError> {
+        // GET-with-subscribe: fetch state and register as subscriber/holder
+        // atomically. A standalone Subscribe is rejected when the node doesn't
+        // already hold the AFT record contract locally (issue #288).
         let request = ContractRequest::Get {
             key: key.into(),
             return_contract_code: false,
-            subscribe: false,
+            subscribe: true,
             blocking_subscribe: false,
-        };
-        client.send(request.into()).await?;
-        Ok(())
-    }
-
-    pub async fn subscribe(
-        client: &mut WebApiRequestClient,
-        key: AftRecord,
-    ) -> Result<(), DynError> {
-        // todo: send the proper summary from the current state
-        let request = ContractRequest::Subscribe {
-            key: key.into(),
-            summary: None,
         };
         client.send(request.into()).await?;
         Ok(())

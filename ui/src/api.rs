@@ -206,11 +206,16 @@ mod contract_api {
         let key = contract.key();
         crate::log::debug!("putting contract {key}");
         let state = contract_state.into().into();
+        // `subscribe: true` so the creating node becomes a durable
+        // subscriber/holder of the contract it just PUT. Without this the PUT
+        // seeds the contract at topologically-responsible peers but the
+        // creator keeps no local copy, so once those peers churn the contract
+        // falls off the network and every GET returns NotFound (issue #288).
         let request = ContractRequest::Put {
             contract,
             state,
             related_contracts: Default::default(),
-            subscribe: false,
+            subscribe: true,
             blocking_subscribe: false,
         };
         client.send(request.into()).await?;
@@ -955,30 +960,19 @@ mod identity_management {
             login_controller.write().updated = true;
         }
 
-        // Send contract subscriptions after identity creation.
-        InboxModel::subscribe(&mut client.clone(), inbox_key)
-            .await
-            .unwrap();
-        AftRecords::subscribe(&mut client.clone(), aft_rec.unwrap())
-            .await
-            .unwrap();
-        // Subscriptions only deliver future updates. If state changed
-        // between identity restoration and subscribe (e.g. another node
-        // already pushed a message into our inbox), the UI would silently
-        // miss it until the next state change. Issue an explicit Get for
-        // current state right after subscribe so any pre-existing
-        // messages surface as a one-shot UpdateNotification(State).
+        // Bootstrap the inbox + AFT-record subscriptions via GET-with-subscribe
+        // (`get_state` sets `subscribe: true`). This fetches current state AND
+        // registers this node as a subscriber/holder in one op. The previous
+        // scheme issued a standalone Subscribe first, which the node rejects
+        // when the contract isn't already cached locally ("contract WASM not
+        // cached locally") — so the inbox never loaded and the owner never
+        // held its own inbox (issue #288). The GET also surfaces any
+        // pre-existing messages as a one-shot UpdateNotification(State).
         if let Err(e) = InboxModel::get_state(&mut client.clone(), inbox_key).await {
-            crate::log::error(
-                format!("inbox catch-up Get after subscribe failed: {e}"),
-                None,
-            );
+            crate::log::error(format!("inbox get-with-subscribe failed: {e}"), None);
         }
         if let Err(e) = AftRecords::get_state(&mut client.clone(), aft_rec.unwrap()).await {
-            crate::log::error(
-                format!("aft record catch-up Get after subscribe failed: {e}"),
-                None,
-            );
+            crate::log::error(format!("aft record get-with-subscribe failed: {e}"), None);
         }
 
         match identity_management::create_alias_api_call(

@@ -7,7 +7,6 @@ use std::{
 use chacha20poly1305::{XChaCha20Poly1305, aead::Aead};
 use chrono::{DateTime, Utc};
 use freenet_aft_interface::{Tier, TokenAssignment, TokenAssignmentHash};
-use freenet_stdlib::prelude::StateSummary;
 use freenet_stdlib::{
     client_api::ContractRequest,
     prelude::{
@@ -1032,20 +1031,20 @@ pub(crate) struct InboxModel {
 
 impl InboxModel {
     pub async fn load_all(client: &mut WebApiRequestClient, contracts: &[Identity]) {
-        async fn subscribe(
-            client: &mut WebApiRequestClient,
-            contract_key: &ContractKey,
-            identity: &Identity,
-        ) -> Result<(), DynError> {
+        // Register the inbox → identity routing entry. The actual network
+        // subscription happens via the GET-with-subscribe in `load`
+        // (`get_state`); a standalone `Subscribe` here is rejected when the
+        // node doesn't already hold the contract (issue #288), so we only
+        // populate the routing map synchronously and let the GET bootstrap
+        // both the local copy and the subscription.
+        fn register_routing(contract_key: &ContractKey, identity: &Identity) {
             let alias = identity.alias();
             INBOX_TO_ID.with(|map| {
                 map.borrow_mut().insert(*contract_key, identity.clone());
             });
             crate::log::debug!(
-                "subscribing to inbox updates for `{contract_key}`, belonging to alias `{alias}`"
+                "registering inbox routing for `{contract_key}`, belonging to alias `{alias}`"
             );
-            InboxModel::subscribe(client, *contract_key).await?;
-            Ok(())
         }
 
         fn get_key(identity: &Identity) -> Result<ContractKey, DynError> {
@@ -1073,15 +1072,14 @@ impl InboxModel {
                 }
             };
             // INBOX_TO_ID is the single source of truth for routing
-            // inbox UpdateNotifications back to an Identity. Subscribe
-            // populates it synchronously before the network round trip
-            // so peer-side state pushes that race the GetResponse can
-            // still find their owner.
+            // inbox UpdateNotifications back to an Identity. Populate it
+            // synchronously before the network round trip so peer-side
+            // state pushes that race the GetResponse can still find their
+            // owner. The network subscription is established by the
+            // GET-with-subscribe inside `load` below (issue #288).
             let already = INBOX_TO_ID.with(|map| map.borrow().contains_key(&contract_key));
             if !already {
-                let res = subscribe(&mut client, &contract_key, identity).await;
-                node_response_error_handling(client.clone().into(), res, TryNodeAction::LoadInbox)
-                    .await;
+                register_routing(&contract_key, identity);
             }
             let res = InboxModel::load(&mut client, identity).await;
             node_response_error_handling(client.into(), res.map(|_| ()), TryNodeAction::LoadInbox)
@@ -1380,25 +1378,17 @@ impl InboxModel {
         client: &mut WebApiRequestClient,
         key: ContractKey,
     ) -> Result<(), DynError> {
+        // `subscribe: true` fetches current state AND registers this node as
+        // a subscriber/holder in a single op. A standalone `Subscribe` is
+        // rejected by the node when the contract isn't already cached locally
+        // ("contract WASM not cached locally") — it never fetch-on-subscribes.
+        // GET-with-subscribe bootstraps the local copy regardless, so the
+        // inbox loads and the owner durably holds it (issue #288).
         let request = ContractRequest::Get {
             key: key.into(),
             return_contract_code: false,
-            subscribe: false,
+            subscribe: true,
             blocking_subscribe: false,
-        };
-        client.send(request.into()).await?;
-        Ok(())
-    }
-
-    pub async fn subscribe(
-        client: &mut WebApiRequestClient,
-        key: ContractKey,
-    ) -> Result<(), DynError> {
-        // todo: send the proper summary from the current state
-        let summary: StateSummary = serde_json::to_vec(&InboxSummary::new(HashSet::new()))?.into();
-        let request = ContractRequest::Subscribe {
-            key: key.into(),
-            summary: Some(summary),
         };
         client.send(request.into()).await?;
         Ok(())

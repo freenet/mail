@@ -82,6 +82,10 @@ const ALIAS_T9_BOB = "bob9";
 // pre-existing identity boots the app into the mailbox with no create button.
 const ALIAS_T10_ALICE = "alice10";
 const ALIAS_T10_BOB = "bob10";
+// #288 own-inbox holding regression: distinct alias so the node hasn't
+// already cached this inbox from an earlier test (which would mask the
+// subscribe-before-get bug — the contract would already be locally held).
+const ALIAS_T11_BOB = "bob11";
 test.describe("Live node E2E", () => {
   test.skip(
     !process.env.FREENET_EMAIL_BASE_URL?.includes("/v1/contract/web/"),
@@ -469,6 +473,92 @@ test.describe("Live node E2E", () => {
       await aliceCtx.close().catch(() => {});
       await bobCtx.close().catch(() => {});
       stopGwPump();
+      stopPeerPump();
+    }
+  });
+
+  // Regression for #288: a node must hold (subscribe to) its OWN inbox.
+  //
+  // The bug: identity load issued a bare `ContractRequest::Subscribe` for
+  // the inbox before any GET. The node rejects a Subscribe for a contract
+  // it doesn't already hold ("contract WASM not cached locally"), so the
+  // owner never cached its own inbox — it rendered empty and, because no
+  // peer held it either, every cross-node GET returned NotFound (recipients
+  // couldn't fetch the inbox at all). Fix: load via GET-with-subscribe so
+  // the node fetches state AND registers as a holder/subscriber in one op.
+  //
+  // The signal is node-local and precedes any send, so this test only
+  // creates an identity on the peer and inspects the peer log. The gate:
+  //   - NEGATIVE: peer log must NOT contain a `Rejecting SUBSCRIBE … not
+  //     cached locally` for bob's inbox (the exact broken symptom).
+  //   - POSITIVE: bob opens his own inbox and the app does not surface a
+  //     `ContractResponse(NotFound)` for it in the console.
+  test("node holds its own inbox — no subscribe-before-get reject (#288)", async ({
+    browser,
+  }) => {
+    test.skip(
+      !PEER_BASE_URL,
+      "requires FREENET_EMAIL_BASE_URL to include the contract id",
+    );
+    const stopPeerPump = startPermissionPump(ISO_PEER_ORIGIN);
+    const bobCtx = await browser.newContext();
+    const bobPage = await bobCtx.newPage();
+    // Capture console so a NotFound for bob's own inbox is observable
+    // (the exact error the live browser repro showed under the bug).
+    const consoleErrors: string[] = [];
+    bobPage.on("console", (msg) => {
+      if (msg.type() === "error") consoleErrors.push(msg.text());
+    });
+
+    try {
+      await bobPage.goto(PEER_BASE_URL);
+      await createIdentity(bobPage, ALIAS_T11_BOB);
+
+      // The load path must NOT bare-Subscribe before GET. On regression the
+      // peer logs `Rejecting SUBSCRIBE: contract WASM not cached locally`.
+      // Poll a little — load is async after the identity row appears.
+      const sawReject = await (async () => {
+        const deadline = Date.now() + 20_000;
+        const re =
+          /Rejecting SUBSCRIBE: contract WASM not cached locally|Cannot subscribe to contract .*: contract WASM\/parameters not cached locally/;
+        while (Date.now() < deadline) {
+          if (grepPeerLog(re)) return true;
+          await new Promise((r) => setTimeout(r, 1_000));
+        }
+        return grepPeerLog(re);
+      })();
+      expect(
+        sawReject,
+        "peer must NOT reject a subscribe-before-get for the inbox (regression for #288)",
+      ).toBe(false);
+
+      // Bob opens his own inbox. The shell renders regardless (identity is
+      // local); the gate is that no NotFound for his inbox fires — i.e. the
+      // GET-with-subscribe actually resolved against a held contract.
+      const bobApp = bobPage.frameLocator("iframe#app");
+      await bobApp
+        .locator(
+          `[data-testid="fm-id-row"][data-alias="${ALIAS_T11_BOB}"] [data-testid="fm-id-open"]`,
+        )
+        .first()
+        .click();
+      await expect(
+        bobApp.locator('[data-testid="fm-compose-btn"]'),
+        "bob's mailbox mounts (compose button visible)",
+      ).toBeVisible({ timeout: 30_000 });
+
+      // Allow the inbox GET round trip to settle, then assert no NotFound
+      // for the inbox surfaced in the console.
+      await bobPage.waitForTimeout(5_000);
+      const notFound = consoleErrors.filter((t) =>
+        /ContractResponse\(NotFound/.test(t),
+      );
+      expect(
+        notFound,
+        `bob's own inbox must not GET NotFound (regression for #288). errors: ${notFound.join(" | ")}`,
+      ).toEqual([]);
+    } finally {
+      await bobCtx.close().catch(() => {});
       stopPeerPump();
     }
   });
