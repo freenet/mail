@@ -3974,7 +3974,17 @@ fn ThreadRowActions(msg: Message, root_id: u64, thread_total: usize) -> Element 
     // Such rows offer Reply only; deletion of sent mail lives in the Sent
     // folder's detail toolbar.
     let is_folded_sent = id >= SENT_FOLD_ID_BASE;
-    let reply_prefill = thread_reply_prefill(&msg);
+    // #289: compute the reply prefill LAZILY in the onclick closure, not
+    // eagerly here. `ThreadRowActions` takes `msg` as a prop and `Message`'s
+    // PartialEq compares only `id`, so after an address-book change (e.g. the
+    // user just added/relabelled this sender via "Add to address book") Dioxus
+    // sees equal props and skips re-rendering this component — an eagerly-
+    // computed prefill would keep its pre-import value (sender display name)
+    // and the reply would address the unresolvable name again. Resolving at
+    // click time reads the current address book. (Sibling reply docks in
+    // ThreadDetail/OpenMessage subscribe to AddressBookGen and recompute; this
+    // component does not, so it must defer.)
+    let reply_msg = msg.clone();
     let show_add_to_ab = !is_folded_sent
         && matches!(
             msg.verification_state(),
@@ -4007,7 +4017,9 @@ fn ThreadRowActions(msg: Message, root_id: u64, thread_total: usize) -> Element 
             "data-testid": testid::FM_REPLY,
             title: "Reply",
             onclick: move |_| {
-                menu_for_reply.write().open_draft(reply_prefill.clone());
+                menu_for_reply
+                    .write()
+                    .open_draft(thread_reply_prefill(&reply_msg));
             },
             "Reply"
         }
