@@ -1088,12 +1088,19 @@ test.describe("Live node E2E", () => {
       // relabeled contact), resolved via Alice's verified sender VK (#289
       // fix). Pre-fix the prefill carried Alice's send-alias, the address-book
       // lookup missed, and the fingerprint badge never appeared, blocking the
-      // send. This assertion only checks that the reply resolves (badge
-      // visible) — it is agnostic to WHICH string lands in To, so it stays
-      // green under the VK-resolution mechanism.
+      // send.
       await bobApp.locator('[data-testid="fm-reply"]').first().click();
       const replySheet = bobApp.locator('[data-testid="fm-compose-sheet"]');
       await replySheet.waitFor({ timeout: 10_000 });
+      // Pin the mechanism (#289 VK fix): the To field must carry Bob's LOCAL
+      // relabeled nickname — NOT Alice's send-alias. This guards against a
+      // regression that swaps the resolution back to the display name; the
+      // fingerprint badge alone is mechanism-agnostic and wouldn't catch it.
+      const replyTo = replySheet.locator('input.field-input[placeholder="alias or address"]');
+      await expect(
+        replyTo,
+        "reply To prefills Bob's relabeled local nickname via VK resolution (#289)",
+      ).toHaveValue(ALIAS_T289_RELABEL, { timeout: 20_000 });
       await expect(
         bobApp.getByTestId("compose-recipient-fingerprint"),
         "reply To resolves the relabeled contact by the sender's verified VK (#289 fix)",
