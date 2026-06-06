@@ -220,6 +220,8 @@ add/remove protocol.
 |---|---|---|
 | Peer down mid-send | manual | iso harness up, kill peer, alice sends, expect graceful failure (toast / Sent Failed) |
 | WebSocket reconnect | manual | Drop ws (devtools or kill node), reconnect, confirm UI recovers |
+| Own inbox durably held + fetchable cross-node (#288) | auto (iso) | `live-node.spec.ts` → `node holds its own inbox — no subscribe-before-get reject (#288)` (node-local: no NotFound for own inbox) + `alice → bob across nodes: send + receive end-to-end (#81)` / `reply resolves after add-from-message under a different nickname (#289)` (cross-node import resolves `fm-verify-check` ⇒ recipient inbox fetchable from the other node). |
+| Own inbox **self-heal re-PUT** after it fell off the network (NotFound → reconstruct + PUT-with-subscribe) | blocked (iso) | The re-PUT arm (`ui/src/api.rs` `ContractResponse::NotFound`) only fires when an own inbox/AFT key GETs NotFound. The iso 2-node net has **no churn**, so a freshly-PUT inbox never falls off — the NotFound branch cannot be naturally triggered. Reproducing needs a churn/expiry hook or a debug "drop my inbox from the network" affordance. Routing logic covered by the `notfound_routing` host unit tests in `ui/src/api.rs`. Manual recipe: identity created on an old build (pre-`subscribe:true`) → upgrade → open inbox → telemetry shows a fresh `put_request` for the inbox key + recipients can import. |
 | AFT slot exhaustion (day-1 cap, #85) | blocked | Issue #85 — needs tier configurability |
 | Concurrent same-alias sends from 2 devices | manual | Restore backup on second browser, both compose-and-send simultaneously, observe Sent rows |
 
