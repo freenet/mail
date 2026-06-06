@@ -209,6 +209,94 @@ fn is_own_aft_record_key(key: &freenet_stdlib::prelude::ContractKey) -> bool {
             .any(|h| *h == key_hash)
 }
 
+/// How a `ContractResponse::NotFound` should be handled, decided purely from
+/// which routing table the not-found key belongs to. Kept separate from the
+/// (async, thread-local-touching) arm so the priority ordering is unit
+/// testable without a live node — see `notfound_routing` tests.
+#[derive(Debug, PartialEq, Eq)]
+#[cfg_attr(not(feature = "use-node"), allow(dead_code))]
+enum NotFoundRoute {
+    /// Key is a pending contact-import fetch: resolve the modal with a
+    /// failure immediately instead of waiting out the 30s GET timeout.
+    ContactImport,
+    /// Key is this client's own inbox: reconstruct + re-PUT to self-heal an
+    /// inbox that fell off the network (#288).
+    OwnInbox,
+    /// Key is this client's own AFT token-allocation-record: same self-heal.
+    OwnAftRecord,
+    /// Not attributable to any of the above — log quietly, do not re-PUT.
+    Unattributed,
+}
+
+/// Pure routing decision for a NotFound. The three sources are mutually
+/// exclusive in practice, so the order encodes priority: import first
+/// (cheapest, definitive), then own-inbox, then own-AFT, else unattributed.
+#[cfg_attr(not(feature = "use-node"), allow(dead_code))]
+fn classify_notfound(
+    in_import_pending: bool,
+    is_own_inbox: bool,
+    is_own_aft: bool,
+) -> NotFoundRoute {
+    if in_import_pending {
+        NotFoundRoute::ContactImport
+    } else if is_own_inbox {
+        NotFoundRoute::OwnInbox
+    } else if is_own_aft {
+        NotFoundRoute::OwnAftRecord
+    } else {
+        NotFoundRoute::Unattributed
+    }
+}
+
+#[cfg(test)]
+mod notfound_routing {
+    use super::{classify_notfound, NotFoundRoute};
+
+    #[test]
+    fn import_pending_wins_over_everything() {
+        // A pending import key can never collide with an own key in
+        // practice, but priority must still favour resolving the modal.
+        assert_eq!(
+            classify_notfound(true, true, true),
+            NotFoundRoute::ContactImport
+        );
+        assert_eq!(
+            classify_notfound(true, false, false),
+            NotFoundRoute::ContactImport
+        );
+    }
+
+    #[test]
+    fn own_inbox_when_not_import() {
+        assert_eq!(
+            classify_notfound(false, true, false),
+            NotFoundRoute::OwnInbox
+        );
+        // Inbox takes priority over AFT if both somehow matched.
+        assert_eq!(
+            classify_notfound(false, true, true),
+            NotFoundRoute::OwnInbox
+        );
+    }
+
+    #[test]
+    fn own_aft_when_only_aft() {
+        assert_eq!(
+            classify_notfound(false, false, true),
+            NotFoundRoute::OwnAftRecord
+        );
+    }
+
+    #[test]
+    fn unattributed_when_no_table_owns_it() {
+        // The case that previously fell through to "message not handled".
+        assert_eq!(
+            classify_notfound(false, false, false),
+            NotFoundRoute::Unattributed
+        );
+    }
+}
+
 #[cfg(feature = "use-node")]
 mod contract_api {
     use freenet_stdlib::{client_api::ContractRequest, prelude::*};
@@ -3512,6 +3600,106 @@ pub(crate) async fn node_comms(
                 // Confirms a subscription bookkeeping ack; nothing to drive
                 // off it on the UI side. Logging produces a noisy "message
                 // not handled" line every time we subscribe to inbox/AFT.
+            }
+            HostResponse::ContractResponse(ContractResponse::NotFound { instance_id }) => {
+                // A GET resolved to NotFound: the contract isn't on the
+                // network. Three distinct sources land here, handled in
+                // priority order. They're mutually exclusive in practice
+                // (an own-inbox/own-AFT key is never in the import PENDING
+                // map, and an import key is never in INBOX_TO_ID /
+                // token_rec_to_id), so the first match wins.
+                //
+                // `ContractKey`'s `PartialEq`/`Hash` are keyed only on the
+                // instance id (the code hash is ignored), so a key built
+                // with a placeholder code hash matches the real key in the
+                // INBOX_TO_ID / token_rec_to_id maps.
+                let key = ContractKey::from_id_and_code(instance_id, CodeHash::new([0u8; 32]));
+
+                // Resolve which routing table owns this key, then act. The
+                // import-PENDING removal is also the side effect for the
+                // ContactImport branch, so take it here and feed the boolean
+                // into the pure classifier (see `notfound_routing` tests).
+                let import_addr =
+                    contact_import::PENDING.with(|m| m.borrow_mut().remove(&instance_id));
+                let own_identity = InboxModel::contract_identity(&key);
+                let own_aft_identity = token_rec_to_id.get(&key).cloned();
+                let route = classify_notfound(
+                    import_addr.is_some(),
+                    own_identity.is_some(),
+                    own_aft_identity.is_some(),
+                );
+                match route {
+                    NotFoundRoute::ContactImport => {
+                        // Resolve the import modal immediately with a failure
+                        // instead of letting it spin for the full 30s GET
+                        // timeout (#302).
+                        let inbox_address = import_addr.expect("classified ContactImport");
+                        contact_import::RESULTS.with(|m| {
+                            m.borrow_mut().insert(
+                                inbox_address,
+                                contact_import::ImportFetched {
+                                    outcome: contact_import::ImportFetchOutcome::Failed(
+                                        "inbox not found on the network — the recipient may be \
+                                         offline or their inbox has not propagated yet"
+                                            .into(),
+                                    ),
+                                },
+                            );
+                        });
+                    }
+                    NotFoundRoute::OwnInbox => {
+                        // Own-inbox NotFound -> reconstruct + re-PUT (#288
+                        // self-heal). An identity that loads via GET-with-
+                        // subscribe never durably PUT its inbox, so the
+                        // contract fell off the network. Reconstruct
+                        // `Inbox::new` state and PUT with subscribe:true.
+                        let identity = own_identity.expect("classified OwnInbox");
+                        crate::log::info(format!(
+                            "own inbox not found on the network (key={key}, alias=`{}`) — re-PUTting to self-heal (#288)",
+                            identity.alias()
+                        ));
+                        if let Err(e) = inbox_management::create_contract(
+                            &mut client.clone(),
+                            identity.ml_dsa_signing_key.clone(),
+                            identity.ml_kem_ek_bytes(),
+                            identity.required_tier,
+                            identity.max_age_secs,
+                        )
+                        .await
+                        {
+                            crate::log::error(
+                                format!("own-inbox re-PUT failed for `{}`: {e} (#288)", identity.alias()),
+                                None,
+                            );
+                        }
+                    }
+                    NotFoundRoute::OwnAftRecord => {
+                        // Same self-heal shape for the identity's
+                        // token-allocation-record contract.
+                        let identity = own_aft_identity.expect("classified OwnAftRecord");
+                        crate::log::info(format!(
+                            "own AFT record not found on the network (key={key}, alias=`{}`) — re-PUTting to self-heal (#288)",
+                            identity.alias()
+                        ));
+                        if let Err(e) = token_record_management::create_contract(
+                            &mut client.clone(),
+                            identity.ml_dsa_signing_key.clone(),
+                        )
+                        .await
+                        {
+                            crate::log::error(
+                                format!("own-AFT-record re-PUT failed for `{}`: {e} (#288)", identity.alias()),
+                                None,
+                            );
+                        }
+                    }
+                    NotFoundRoute::Unattributed => {
+                        // Not an import, own inbox, or own AFT record. Log
+                        // quietly so we stop misreporting it as "message not
+                        // handled" via the catch-all (#288).
+                        crate::log::debug!("GET NotFound for unattributed key {instance_id}");
+                    }
+                }
             }
             other => {
                 crate::log::error(format!("message not handled: {other:?}"), None);
