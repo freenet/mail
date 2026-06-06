@@ -618,6 +618,19 @@ pub fn contact_by_vk(vk_bytes: &[u8]) -> Option<Contact> {
     })
 }
 
+/// Test-only: clear the address book and bump the generation so the
+/// bs58 lookup cache can't carry a prior test's contacts forward. The
+/// test runner reuses threads, so the thread-local state persists across
+/// tests in the same thread — every test that touches `ADDRESS_BOOK`
+/// must reset first. Exposed (rather than the private
+/// `tests::reset_address_book`) so sibling modules' tests (e.g. the
+/// `crate::app` reply-prefill tests) can seed contacts deterministically.
+#[cfg(test)]
+pub fn clear_for_test() {
+    ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+    bump_address_book_gen();
+}
+
 /// Check whether a fingerprint matches one of the user's own identities
 /// (used to reject self-import during contact import).
 pub fn is_own_fingerprint(vk_bytes: &[u8], ek_bytes: &[u8]) -> bool {
