@@ -250,7 +250,7 @@ fn classify_notfound(
 
 #[cfg(test)]
 mod notfound_routing {
-    use super::{classify_notfound, NotFoundRoute};
+    use super::{NotFoundRoute, classify_notfound};
 
     #[test]
     fn import_pending_wins_over_everything() {
@@ -3668,7 +3668,10 @@ pub(crate) async fn node_comms(
                         .await
                         {
                             crate::log::error(
-                                format!("own-inbox re-PUT failed for `{}`: {e} (#288)", identity.alias()),
+                                format!(
+                                    "own-inbox re-PUT failed for `{}`: {e} (#288)",
+                                    identity.alias()
+                                ),
                                 None,
                             );
                         }
@@ -3688,7 +3691,10 @@ pub(crate) async fn node_comms(
                         .await
                         {
                             crate::log::error(
-                                format!("own-AFT-record re-PUT failed for `{}`: {e} (#288)", identity.alias()),
+                                format!(
+                                    "own-AFT-record re-PUT failed for `{}`: {e} (#288)",
+                                    identity.alias()
+                                ),
                                 None,
                             );
                         }
