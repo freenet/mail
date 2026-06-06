@@ -29,7 +29,20 @@ async function selectIdentity(page: Page, alias: string) {
   await page.locator(`[data-testid="${TID.fmApp}"]`).waitFor({ timeout: 10_000 });
 }
 
+// Opens the off-canvas sidebar drawer when running on a mobile viewport
+// (<=768px). On desktop the hamburger is display:none, so this is a no-op.
+async function openNav(page: Page) {
+  const burger = page.locator(`[data-testid="${TID.fmHamburger}"]`);
+  if (await burger.isVisible().catch(() => false)) {
+    await burger.click();
+    await page
+      .locator(`[data-testid="${TID.fmComposeBtn}"]`)
+      .waitFor({ state: "visible" });
+  }
+}
+
 async function openCompose(page: Page) {
+  await openNav(page);
   await page.locator(`[data-testid="${TID.fmComposeBtn}"]`).click();
   await page
     .locator(`[data-testid="${TID.fmComposeSheet}"]`)
@@ -211,6 +224,7 @@ test.describe("Compose autocomplete — touch long-press (Pixel 5)", () => {
       )
       .click();
     await page.locator(`[data-testid="${TID.fmApp}"]`).waitFor({ timeout: 10_000 });
+    await openNav(page);
     await page.locator(`[data-testid="${TID.fmComposeBtn}"]`).click();
     await page
       .locator(`[data-testid="${TID.fmComposeSheet}"]`)

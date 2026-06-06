@@ -22,6 +22,12 @@ pub(crate) const FM_SEARCH: &str = "fm-search";
 
 // Sidebar / folders
 pub(crate) const FM_COMPOSE_BTN: &str = "fm-compose-btn";
+// Mobile-only topbar control that opens the off-canvas sidebar drawer
+// (<=768px). Hidden on desktop. Playwright's mobile-chrome profile must
+// click this before any sidebar interaction.
+pub(crate) const FM_HAMBURGER: &str = "fm-hamburger";
+// Mobile-only "back to list" control in the detail toolbars (<=768px).
+pub(crate) const FM_BACK: &str = "fm-back";
 
 // Message list
 pub(crate) const FM_LIST: &str = "fm-list";
@@ -160,6 +166,8 @@ mod tests {
             ("fmLogout", super::FM_LOGOUT),
             ("fmSearch", super::FM_SEARCH),
             ("fmComposeBtn", super::FM_COMPOSE_BTN),
+            ("fmHamburger", super::FM_HAMBURGER),
+            ("fmBack", super::FM_BACK),
             ("fmList", super::FM_LIST),
             ("fmMsgCard", super::FM_MSG_CARD),
             ("fmMsgTime", super::FM_MSG_TIME),

@@ -31,6 +31,9 @@
     <link rel="stylesheet" href="vendor/css/components/toast.css" />
     <link rel="stylesheet" href="vendor/css/components/login.css" />
     <link rel="stylesheet" href="vendor/css/components/settings.css" />
+    <!-- Loaded LAST so its width/flex overrides win the @layer components
+         source-order tie-break. Mobile-only; desktop (>768px) unchanged. -->
+    <link rel="stylesheet" href="vendor/css/components/responsive.css" />
   </head>
   <body>
     <div id="main"></div>

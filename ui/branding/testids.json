@@ -4,6 +4,8 @@
   "fmLogout": "fm-logout",
   "fmSearch": "fm-search",
   "fmComposeBtn": "fm-compose-btn",
+  "fmHamburger": "fm-hamburger",
+  "fmBack": "fm-back",
   "fmList": "fm-list",
   "fmMsgCard": "fm-msg-card",
   "fmMsgTime": "fm-msg-time",

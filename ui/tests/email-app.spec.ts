@@ -17,6 +17,21 @@ async function waitForApp(page: Page) {
   await expect(page.locator(".brand-name").first()).toContainText(APP_NAME);
 }
 
+// Opens the off-canvas sidebar drawer when running on a mobile viewport
+// (<=768px). On desktop the hamburger is display:none, so this is a no-op.
+// The drawer auto-closes when a nav item is tapped, so call this before
+// EACH sidebar interaction.
+async function openNav(page: Page) {
+  const burger = page.locator('[data-testid="fm-hamburger"]');
+  if (await burger.isVisible().catch(() => false)) {
+    await burger.click();
+    // wait for the drawer to be on-screen (sidebar transform settled)
+    await page
+      .locator('[data-testid="fm-compose-btn"]')
+      .waitFor({ state: "visible" });
+  }
+}
+
 // Helper: select an identity by clicking its row's "Open inbox"
 // button. Identity rows are now structural (id-row), so clicking the
 // alias text alone no longer logs in.
@@ -32,11 +47,13 @@ async function selectIdentity(page: Page, alias: string) {
 
 // Helper: click the redesigned sidebar logout.
 async function logout(page: Page) {
+  await openNav(page);
   await page.locator('[data-testid="fm-logout"]').click();
 }
 
 // Helper: open the compose sheet via the sidebar's "New message" button.
 async function openCompose(page: Page) {
+  await openNav(page);
   await page.locator('[data-testid="fm-compose-btn"]').click();
   await page
     .locator('[data-testid="fm-compose-sheet"]')
@@ -145,6 +162,7 @@ test.describe("Inbox view", () => {
     await waitForApp(page);
     await selectIdentity(page, "address1");
 
+    await openNav(page);
     await page.locator('[data-testid="fm-folder-sent"]').click();
     // 47b changed the empty Sent detail-panel hint to "Select a sent message"
     // because Sent now backs a real list. The list-col still says "Sent is
@@ -152,11 +170,13 @@ test.describe("Inbox view", () => {
     // assert against here.
     await expect(page.locator(".empty-hint")).toContainText("Select a sent message");
 
+    await openNav(page);
     await page.locator('[data-testid="fm-folder-drafts"]').click();
     await expect(page.locator(".empty-hint")).toContainText(
       "Drafts is empty",
     );
 
+    await openNav(page);
     await page.locator('[data-testid="fm-folder-archive"]').click();
     // 47c: Archive backs a real list; empty detail prompt mirrors Sent.
     await expect(page.locator(".empty-hint")).toContainText(
@@ -208,6 +228,7 @@ test.describe("Quarantine folder", () => {
     await expect(quarantineBtn.locator(".count")).toHaveText("2");
 
     // Inbox is now empty — every example sender is unknown.
+    await openNav(page);
     await page.locator('[data-testid="fm-folder-inbox"]').click();
     await expect(page.getByText("Lunch tomorrow?")).toHaveCount(0);
 
@@ -216,6 +237,7 @@ test.describe("Quarantine folder", () => {
     // testid is now only carried as the `data-msg-card-testid` ATTRIBUTE, not a
     // real testid). The 5 unverified messages group into 3 rows: the seeded
     // "Lunch tomorrow?" conversation + the 2 standalone messages.
+    await openNav(page);
     await quarantineBtn.click();
     const rows = page.locator('[data-testid="fm-thread-group"]');
     await expect(rows).toHaveCount(3);
@@ -826,6 +848,7 @@ test.describe("Drafts folder (#47a)", () => {
     await expect(sheet).toHaveCount(0);
 
     // Switch to Drafts. The card carries the typed To/subject/body.
+    await openNav(page);
     await page.locator('[data-testid="fm-folder-drafts"]').click();
     const draftCard = page
       .locator('[data-testid="fm-draft-card"]')
@@ -868,6 +891,7 @@ test.describe("Drafts folder (#47a)", () => {
     await expect(sheet).toHaveCount(0);
 
     // Drafts folder is empty again.
+    await openNav(page);
     await page.locator('[data-testid="fm-folder-drafts"]').click();
     await expect(page.locator('[data-testid="fm-draft-card"]')).toHaveCount(0);
   });
@@ -885,6 +909,7 @@ test.describe("Drafts folder (#47a)", () => {
       clickSend(page),
     ]);
 
+    await openNav(page);
     await page.locator('[data-testid="fm-folder-drafts"]').click();
     await expect(page.locator('[data-testid="fm-draft-card"]')).toHaveCount(0);
   });
@@ -916,6 +941,7 @@ test.describe("Drafts folder (#47a)", () => {
     ]);
 
     // Positive side: the message is in Sent.
+    await openNav(page);
     await page.locator('[data-testid="fm-folder-sent"]').click();
     const sentCards = page.locator('[data-testid="fm-sent-card"]');
     await expect(
@@ -928,6 +954,7 @@ test.describe("Drafts folder (#47a)", () => {
     ).toContainText("routing subj");
 
     // Negative side: Drafts holds nothing (no leak, count badge empty).
+    await openNav(page);
     await page.locator('[data-testid="fm-folder-drafts"]').click();
     await expect(
       page.locator('[data-testid="fm-draft-card"]'),
@@ -1211,6 +1238,7 @@ test.describe("Sent folder (#47b)", () => {
       clickSend(page),
     ]);
 
+    await openNav(page);
     await page.locator('[data-testid="fm-folder-sent"]').click();
     const card = page.locator('[data-testid="fm-sent-card"]').first();
     await expect(card).toBeVisible();
@@ -1261,6 +1289,7 @@ test.describe("Sent folder (#47b)", () => {
       clickSend(page),
     ]);
 
+    await openNav(page);
     await page.locator('[data-testid="fm-folder-sent"]').click();
     await page.locator('[data-testid="fm-sent-card"]').first().click();
     // Mobile viewports stack columns and the message list overlays the
@@ -1302,6 +1331,7 @@ test.describe("Sent folder (#47b)", () => {
       clickSend(page),
     ]);
 
+    await openNav(page);
     await page.locator('[data-testid="fm-folder-sent"]').click();
     await page.locator('[data-testid="fm-sent-card"]').first().click();
     await page.locator('[data-testid="fm-sent-forward"]').dispatchEvent("click");
@@ -1334,6 +1364,7 @@ test.describe("Sent folder (#47b)", () => {
       clickSend(page),
     ]);
 
+    await openNav(page);
     await page.locator('[data-testid="fm-folder-sent"]').click();
     await page.locator('[data-testid="fm-sent-card"]').first().click();
     await page.locator('[data-testid="fm-sent-resend"]').dispatchEvent("click");
@@ -1493,6 +1524,7 @@ test.describe("Archive folder (#47c)", () => {
     await expect(page.locator("#email-inbox-accessor-3")).toHaveCount(0);
 
     // Archive folder shows the row.
+    await openNav(page);
     await page.locator('[data-testid="fm-folder-archive"]').click();
     const card = page.locator('[data-testid="fm-archive-card"]').first();
     await expect(card).toBeVisible();
@@ -1529,6 +1561,7 @@ test.describe("Archive folder (#47c)", () => {
 
     await expect(page.locator("#email-inbox-accessor-4")).toHaveCount(0);
 
+    await openNav(page);
     await page.locator('[data-testid="fm-folder-archive"]').click();
     await expect(page.locator('[data-testid="fm-archive-card"]')).toHaveCount(0);
   });
@@ -1588,6 +1621,7 @@ test.describe("Archive folder (#47c)", () => {
     await expect(group.locator(".ft-count")).toHaveText("2");
 
     // The archived reply landed in Archive.
+    await openNav(page);
     await page.locator('[data-testid="fm-folder-archive"]').click();
     await expect(
       page.locator('[data-testid="fm-archive-card"]'),
@@ -1621,6 +1655,7 @@ test.describe("Archive folder (#47c)", () => {
     await expect(group.locator(".ft-count")).toHaveText("2");
 
     // Delete leaves no Archive trace.
+    await openNav(page);
     await page.locator('[data-testid="fm-folder-archive"]').click();
     await expect(
       page.locator('[data-testid="fm-archive-card"]'),
@@ -1643,6 +1678,7 @@ test.describe("Archive folder (#47c)", () => {
       .locator('[data-testid="fm-archive"]')
       .dispatchEvent("click");
 
+    await openNav(page);
     await page.locator('[data-testid="fm-folder-archive"]').click();
     await page.locator('[data-testid="fm-archive-card"]').first().click();
     await page.locator('[data-testid="fm-archive-delete"]').dispatchEvent("click");
@@ -1726,6 +1762,7 @@ test.describe("Sender trust badge (#51)", () => {
     await page.goto("/");
     await waitForApp(page);
     await selectIdentity(page, "address1");
+    await openNav(page);
     await page.locator('[data-testid="fm-compose-btn"]').click();
 
     const label = page.locator('[data-testid="fm-compose-sending-as"]');
@@ -1765,6 +1802,7 @@ test.describe("Sidebar fingerprint (#48)", () => {
     const fp = page.locator('[data-testid="fm-sidebar-fingerprint"]');
     const fpA = await fp.textContent();
 
+    await openNav(page);
     await page.locator('[data-testid="fm-logout"]').click();
     await selectIdentity(page, "address2");
 
@@ -1794,6 +1832,7 @@ test.describe("Sent delivery state (#58)", () => {
       clickSend(page),
     ]);
 
+    await openNav(page);
     await page.locator('[data-testid="fm-folder-sent"]').click();
     const card = page.locator('[data-testid="fm-sent-card"]').first();
     await expect(card).toBeVisible();
@@ -1894,6 +1933,7 @@ test.describe("Regression #158: contact modals mount inside inbox", () => {
     await selectIdentity(page, "address1");
 
     // Open Settings → Contacts via the sidebar button.
+    await openNav(page);
     await page.locator('[data-testid="fm-sidebar-contacts"]').click();
     await page
       .locator('[data-testid="fm-settings-shell"]')
@@ -1915,6 +1955,7 @@ test.describe("Regression #158: contact modals mount inside inbox", () => {
     await selectIdentity(page, "address1");
 
     // Open Settings → Contacts via the sidebar button.
+    await openNav(page);
     await page.locator('[data-testid="fm-sidebar-contacts"]').click();
     await page
       .locator('[data-testid="fm-settings-shell"]')
