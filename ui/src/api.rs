@@ -190,6 +190,25 @@ fn take_awaiting_ack(
     Some(awaiting.remove(pos).0)
 }
 
+/// True if `key` addresses an AFT token-allocation-record contract under
+/// the current or any legacy code hash. Used as a race-safe backstop in the
+/// UpdateNotification arm: own-AFT-record echoes (enabled by the #288
+/// GET-with-subscribe) are normally recognized via the `token_rec_to_id`
+/// routing map, but an echo that arrives before `AftRecords::load_all`
+/// inserts the key would otherwise be misclassified as an unknown contract
+/// (#204). The record's `code_hash` is shared by every identity's AFT
+/// record, so this can't distinguish own from foreign — but the only AFT
+/// records this client subscribes to are its own, so a code-hash match is a
+/// sufficient and safe drop condition.
+#[cfg(feature = "use-node")]
+fn is_own_aft_record_key(key: &freenet_stdlib::prelude::ContractKey) -> bool {
+    let key_hash = bs58::encode(key.code_hash().as_ref()).into_string();
+    key_hash == crate::aft::TOKEN_RECORD_CODE_HASH
+        || crate::aft::LEGACY_TOKEN_RECORD_CODE_HASHES
+            .iter()
+            .any(|h| *h == key_hash)
+}
+
 #[cfg(feature = "use-node")]
 mod contract_api {
     use freenet_stdlib::{client_api::ContractRequest, prelude::*};
@@ -206,11 +225,16 @@ mod contract_api {
         let key = contract.key();
         crate::log::debug!("putting contract {key}");
         let state = contract_state.into().into();
+        // `subscribe: true` so the creating node becomes a durable
+        // subscriber/holder of the contract it just PUT. Without this the PUT
+        // seeds the contract at topologically-responsible peers but the
+        // creator keeps no local copy, so once those peers churn the contract
+        // falls off the network and every GET returns NotFound (issue #288).
         let request = ContractRequest::Put {
             contract,
             state,
             related_contracts: Default::default(),
-            subscribe: false,
+            subscribe: true,
             blocking_subscribe: false,
         };
         client.send(request.into()).await?;
@@ -955,30 +979,19 @@ mod identity_management {
             login_controller.write().updated = true;
         }
 
-        // Send contract subscriptions after identity creation.
-        InboxModel::subscribe(&mut client.clone(), inbox_key)
-            .await
-            .unwrap();
-        AftRecords::subscribe(&mut client.clone(), aft_rec.unwrap())
-            .await
-            .unwrap();
-        // Subscriptions only deliver future updates. If state changed
-        // between identity restoration and subscribe (e.g. another node
-        // already pushed a message into our inbox), the UI would silently
-        // miss it until the next state change. Issue an explicit Get for
-        // current state right after subscribe so any pre-existing
-        // messages surface as a one-shot UpdateNotification(State).
+        // Bootstrap the inbox + AFT-record subscriptions via GET-with-subscribe
+        // (`get_state` sets `subscribe: true`). This fetches current state AND
+        // registers this node as a subscriber/holder in one op. The previous
+        // scheme issued a standalone Subscribe first, which the node rejects
+        // when the contract isn't already cached locally ("contract WASM not
+        // cached locally") — so the inbox never loaded and the owner never
+        // held its own inbox (issue #288). The GET also surfaces any
+        // pre-existing messages as a one-shot UpdateNotification(State).
         if let Err(e) = InboxModel::get_state(&mut client.clone(), inbox_key).await {
-            crate::log::error(
-                format!("inbox catch-up Get after subscribe failed: {e}"),
-                None,
-            );
+            crate::log::error(format!("inbox get-with-subscribe failed: {e}"), None);
         }
         if let Err(e) = AftRecords::get_state(&mut client.clone(), aft_rec.unwrap()).await {
-            crate::log::error(
-                format!("aft record catch-up Get after subscribe failed: {e}"),
-                None,
-            );
+            crate::log::error(format!("aft record get-with-subscribe failed: {e}"), None);
         }
 
         match identity_management::create_alias_api_call(
@@ -2625,6 +2638,21 @@ pub(crate) async fn node_comms(
                                     crate::log::debug!(
                                         "UpdateNotification: contact inbox \
                                         {key} (#198) — drop"
+                                    );
+                                } else if is_own_aft_record_key(&key) {
+                                    // Own AFT-record echo that raced ahead of
+                                    // the `token_rec_to_id` insert (the GET-
+                                    // with-subscribe from #288 means the node
+                                    // echoes our own token-burn UPDATEs). The
+                                    // synchronous registration in
+                                    // `AftRecords::load_all` normally has the
+                                    // key in the map by now; this code-hash
+                                    // check is the race-safe backstop so a
+                                    // pre-load echo is dropped quietly instead
+                                    // of logging "unknown contract key" (#204).
+                                    crate::log::debug!(
+                                        "UpdateNotification: own AFT record {key} \
+                                        before routing insert (#204) — drop"
                                     );
                                 } else {
                                     crate::log::error(
