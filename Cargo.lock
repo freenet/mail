@@ -1571,7 +1571,7 @@ dependencies = [
 
 [[package]]
 name = "freenet-email-core"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "ed25519-dalek",
  "freenet-email-facade-types",
@@ -1614,7 +1614,7 @@ dependencies = [
 
 [[package]]
 name = "freenet-email-ui"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "arc-swap",
  "base64",
@@ -4490,7 +4490,7 @@ dependencies = [
 
 [[package]]
 name = "web-container-sign"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "bs58",
