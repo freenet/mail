@@ -392,7 +392,6 @@ mod wire {
         send_msg(client, &LocalStateMsg::SaveSent { alias, id, sent }).await
     }
 
-    #[allow(dead_code)] // Wired for 47c (Archive); unused until then.
     pub(crate) async fn delete_sent(
         client: &mut WebApiRequestClient,
         alias: String,
@@ -435,15 +434,16 @@ mod wire {
 }
 
 #[cfg(feature = "use-node")]
+pub(crate) use wire::delete_sent;
+#[cfg(feature = "use-node")]
 pub(crate) use wire::{
     LOCAL_STATE_KEY, archive_message, delete_draft, delete_message, fetch_all, mark_read,
     register_and_init, save_draft, save_sent, set_sent_delivery_state,
 };
-// `delete_sent`, `local_delete_sent`, and `unarchive_message` are wired but
-// unused until later phases.
+// `unarchive_message` is wired but unused until later phases.
 #[cfg(feature = "use-node")]
 #[allow(unused_imports)]
-pub(crate) use wire::{delete_sent, unarchive_message};
+pub(crate) use wire::unarchive_message;
 
 // Optimistic local mutations: patch `SNAPSHOT` immediately so the UI
 // re-renders without waiting for the delegate roundtrip.
@@ -496,7 +496,6 @@ pub(crate) fn local_save_sent(alias: &str, id: &str, sent: SentMessage) {
     bump();
 }
 
-#[allow(dead_code)] // Wired for 47c (Archive); unused until then.
 pub(crate) fn local_delete_sent(alias: &str, id: &str) {
     SNAPSHOT.with(|s| {
         let mut state = s.borrow_mut();

@@ -57,6 +57,7 @@ pub(crate) const FM_ARCHIVE: &str = "fm-archive";
 
 // Sent message detail
 pub(crate) const FM_SENT_BODY: &str = "fm-sent-body";
+pub(crate) const FM_SENT_DELETE: &str = "fm-sent-delete";
 pub(crate) const FM_SENT_DELIVERY: &str = "fm-sent-delivery";
 pub(crate) const FM_SENT_FINGERPRINT: &str = "fm-sent-fingerprint";
 pub(crate) const FM_SENT_FORWARD: &str = "fm-sent-forward";
@@ -187,6 +188,7 @@ mod tests {
             ("fmDelete", super::FM_DELETE),
             ("fmArchive", super::FM_ARCHIVE),
             ("fmSentBody", super::FM_SENT_BODY),
+            ("fmSentDelete", super::FM_SENT_DELETE),
             ("fmSentDelivery", super::FM_SENT_DELIVERY),
             ("fmSentFingerprint", super::FM_SENT_FINGERPRINT),
             ("fmSentForward", super::FM_SENT_FORWARD),
