@@ -718,20 +718,13 @@ impl InboxView {
                     in_reply_to: None,
                     quoted_excerpt: None,
                 },
-                Message {
-                    id: 3,
-                    from: "address2".into(),
-                    title: "Re: Picnic this weekend?".into(),
-                    content: "Sounds great — what should I bring?".into(),
-                    read: true,
-                    time: t(60 * 19),
-                    sender_vk: Vec::new(),
-                    signature_valid: false,
-                    assignment_hash: [0u8; 32],
-                    thread_id: None,
-                    in_reply_to: None,
-                    quoted_excerpt: None,
-                },
+                // NOTE (#310): address2's own reply ("Sounds great — what
+                // should I bring?") is NOT an inbox Message — it lives only in
+                // the Sent folder (seeded via local_save_sent below) and is
+                // folded back into this legacy thread by `folded_sent_rows`.
+                // This mirrors production (a reply persists in Sent, not in the
+                // received-inbox vec) and is the offline guard for the #310
+                // "threaded view shows only one side after refresh" report.
                 Message {
                     id: 4,
                     from: "Carol".into(),
@@ -773,6 +766,29 @@ impl InboxView {
                 }
             }
         });
+
+        // #310: seed address2 (UserId(1))'s own reply into the Sent folder so
+        // `folded_sent_rows` folds it back into the legacy "Picnic this
+        // weekend?" conversation as an `is-me` row. This exercises the
+        // two-sided-thread fold offline / in Playwright (subject-match fold
+        // path, since the legacy thread carries no thread_id) WITHOUT seeding a
+        // Sent row on address1 (UserId(0)) — several email-app.spec tests
+        // assume address1's Sent folder starts empty. Idempotent with the
+        // active_id guard at the top of this fn. The matching inbox copy of
+        // this reply was removed from the address2 seed below.
+        if id.id == UserId(1) {
+            crate::local_state::local_save_sent(
+                &alias,
+                "example-sent-0001",
+                mail_local_state::SentMessage {
+                    to: "Carol".into(),
+                    subject: "Re: Picnic this weekend?".into(),
+                    body: "Sounds great — what should I bring?".into(),
+                    sent_at: (now - chrono::Duration::minutes(60 * 19)).timestamp_millis(),
+                    ..Default::default()
+                },
+            );
+        }
 
         self.messages.replace(emails);
         Ok(())
@@ -2579,8 +2595,94 @@ fn visible_inbox_messages(
         })
         .cloned()
         .collect();
-    v.sort_by(sort_cmp_inbox);
+    // #310 fix (two-sided threads): fold the user's own Sent messages that
+    // belong to a visible conversation back into the inbox population as
+    // `is-me` rows. Without this the threaded detail shows only the received
+    // half of a back-and-forth — after a refresh the in-memory interleave the
+    // compose path produced is lost and the user sees one side only.
+    //
+    // Only Inbox folds (Quarantine stays received-only). A sent row joins the
+    // population only when it matches an already-visible received conversation
+    // — by `thread_id` when both carry one, else by normalized subject for
+    // legacy mail. This keeps the inbox a view of *received* conversations
+    // (now showing replies inline) rather than duplicating the Sent folder.
+    if matches!(folder, menu::Folder::Inbox) {
+        v.extend(folded_sent_rows(&v, alias, search));
+        v.sort_by(sort_cmp_inbox);
+    } else {
+        v.sort_by(sort_cmp_inbox);
+    }
     v
+}
+
+/// Build synthetic `is-me` `Message` rows from the logged-in identity's Sent
+/// folder for conversations already present in `received` (#310).
+///
+/// A sent row is folded when it shares a `thread_id` with a received message,
+/// or (legacy, thread-id-less) shares a normalized subject. Search filtering
+/// mirrors `matches_search` so a filtered list folds consistently.
+///
+/// Synthetic ids are offset by `SENT_FOLD_ID_BASE` so they never collide with
+/// inbox enumerate-index ids (small u64s). The id is derived from the sent
+/// UUID so it's stable across renders (the thread detail resolves the open
+/// group by `root_id`, which must not flap).
+fn folded_sent_rows(received: &[Message], alias: &str, search: &str) -> Vec<Message> {
+    if alias.is_empty() {
+        return Vec::new();
+    }
+    // Conversations the received half already shows: thread ids + normalized
+    // subjects. A sent row matching either is part of a visible conversation.
+    let mut thread_ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut subjects: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for m in received {
+        if let Some(t) = &m.thread_id {
+            thread_ids.insert(t.as_str());
+        }
+        subjects.insert(threads::normalize_subject(&m.title));
+    }
+
+    crate::local_state::sent_for(alias)
+        .into_iter()
+        .filter(|(_, s)| match &s.thread_id {
+            Some(t) => thread_ids.contains(t.as_str()),
+            None => subjects.contains(&threads::normalize_subject(&s.subject)),
+        })
+        .map(|(id, s)| sent_message_to_row(&id, &s, alias))
+        .filter(|m| matches_search(m, search))
+        .collect()
+}
+
+/// Offset for synthetic folded-sent `Message.id`s (#310). Far above any real
+/// inbox enumerate index so a folded row can never shadow a received one.
+const SENT_FOLD_ID_BASE: u64 = 1 << 48;
+
+/// Convert a `SentMessage` into an `is-me` `Message` row for thread folding
+/// (#310). `from = alias` lights up `.is-me` styling; `read = true` (own mail
+/// is never unread); `id` is stable per sent UUID and offset out of the
+/// inbox id space.
+fn sent_message_to_row(id: &str, s: &mail_local_state::SentMessage, alias: &str) -> Message {
+    // Stable, collision-resistant synthetic id from the sent UUID.
+    let mut hash: u64 = 1469598103934665603; // FNV-1a offset basis
+    for b in id.as_bytes() {
+        hash ^= u64::from(*b);
+        hash = hash.wrapping_mul(1099511628211);
+    }
+    let synthetic_id = SENT_FOLD_ID_BASE | (hash & ((1 << 48) - 1));
+    let time = chrono::DateTime::from_timestamp_millis(s.sent_at).unwrap_or_else(Utc::now);
+    Message {
+        id: synthetic_id,
+        from: Cow::Owned(alias.to_string()),
+        title: Cow::Owned(s.subject.clone()),
+        content: Cow::Owned(s.body.clone()),
+        read: true,
+        time,
+        sender_vk: Vec::new(),
+        signature_valid: false,
+        assignment_hash: [0u8; 32],
+        thread_id: s.thread_id.clone(),
+        in_reply_to: s.in_reply_to.clone(),
+        quoted_excerpt: s.quoted_excerpt.clone(),
+    }
 }
 
 fn matches_search(m: &Message, q: &str) -> bool {
@@ -3051,8 +3153,16 @@ fn MessageList() -> Element {
         menu::Folder::Drafts => drafts.len(),
         menu::Folder::Sent => sent_msgs.len(),
         menu::Folder::Archive => archived_msgs.len(),
-        menu::Folder::Inbox if inbox_settings.drafts_in_inbox => visible.len() + drafts.len(),
-        _ => visible.len(),
+        // #310: folded own-Sent rows (synthetic id ≥ SENT_FOLD_ID_BASE) are
+        // shown inline in threads but don't count toward the folder's message
+        // total — that count tracks received mail, so it doesn't jump when the
+        // user sends a reply.
+        menu::Folder::Inbox if inbox_settings.drafts_in_inbox => {
+            visible.iter().filter(|m| m.id < SENT_FOLD_ID_BASE).count() + drafts.len()
+        }
+        menu::Folder::Inbox | menu::Folder::Quarantine => {
+            visible.iter().filter(|m| m.id < SENT_FOLD_ID_BASE).count()
+        }
     };
     let selected_sent_id = menu_selection.read().sent_id().map(str::to_string);
     let selected_archived_id = menu_selection.read().archived_id();
@@ -3443,10 +3553,9 @@ fn DetailPanel() -> Element {
             crate::local_state::sent_for(&alias)
                 .into_iter()
                 .find(|(sid, _)| sid == id)
-                .map(|(_, m)| m)
         });
-        if let Some(msg) = sent {
-            rsx! { OpenSentMessage { msg } }
+        if let Some((sent_id, msg)) = sent {
+            rsx! { OpenSentMessage { sent_id, msg } }
         } else {
             rsx! {
                 section { class: "detail-col",
@@ -3705,11 +3814,17 @@ fn ThreadRowActions(msg: Message, root_id: u64, thread_total: usize) -> Element 
         .unwrap_or_default();
 
     let id = msg.id;
+    // #310: a folded own-Sent row (synthetic id ≥ SENT_FOLD_ID_BASE) isn't an
+    // inbox message — Archive/Delete here would target a nonexistent inbox id.
+    // Such rows offer Reply only; deletion of sent mail lives in the Sent
+    // folder's detail toolbar.
+    let is_folded_sent = id >= SENT_FOLD_ID_BASE;
     let reply_prefill = thread_reply_prefill(&msg);
-    let show_add_to_ab = matches!(
-        msg.verification_state(),
-        crate::inbox::VerificationState::VerifiedUnknown
-    );
+    let show_add_to_ab = !is_folded_sent
+        && matches!(
+            msg.verification_state(),
+            crate::inbox::VerificationState::VerifiedUnknown
+        );
     let add_to_ab_vk = msg.sender_vk.clone();
     let add_to_ab_from = msg.from.to_string(); // #289: sender display name → modal nickname default
     // After removing this row the thread keeps `thread_total - 1` members.
@@ -3752,39 +3867,41 @@ fn ThreadRowActions(msg: Message, root_id: u64, thread_total: usize) -> Element 
                 "Add to address book"
             }
         }
-        button {
-            class: "ft-act",
-            "data-testid": testid::FM_ARCHIVE,
-            title: "Archive",
-            onclick: move |_| {
-                archive_message(
-                    inbox,
-                    menu_selection,
-                    archive_client.clone(),
-                    inbox_data,
-                    &archive_alias,
-                    &archive_msg,
-                    post,
-                );
-            },
-            "Archive"
-        }
-        button {
-            class: "ft-act",
-            "data-testid": testid::FM_DELETE,
-            title: "Delete",
-            onclick: move |_| {
-                delete_message(
-                    inbox,
-                    menu_selection,
-                    delete_client.clone(),
-                    inbox_data,
-                    &delete_alias,
-                    id,
-                    post,
-                );
-            },
-            "Delete"
+        if !is_folded_sent {
+            button {
+                class: "ft-act",
+                "data-testid": testid::FM_ARCHIVE,
+                title: "Archive",
+                onclick: move |_| {
+                    archive_message(
+                        inbox,
+                        menu_selection,
+                        archive_client.clone(),
+                        inbox_data,
+                        &archive_alias,
+                        &archive_msg,
+                        post,
+                    );
+                },
+                "Archive"
+            }
+            button {
+                class: "ft-act",
+                "data-testid": testid::FM_DELETE,
+                title: "Delete",
+                onclick: move |_| {
+                    delete_message(
+                        inbox,
+                        menu_selection,
+                        delete_client.clone(),
+                        inbox_data,
+                        &delete_alias,
+                        id,
+                        post,
+                    );
+                },
+                "Delete"
+            }
         }
     }
 }
@@ -4129,8 +4246,16 @@ fn OpenArchivedMessage(msg_id: u64, msg: mail_local_state::ArchivedMessage) -> E
 }
 
 #[component]
-fn OpenSentMessage(msg: mail_local_state::SentMessage) -> Element {
+fn OpenSentMessage(sent_id: String, msg: mail_local_state::SentMessage) -> Element {
     let mut menu_selection = use_context::<Signal<menu::MenuSelection>>();
+    let user = use_context::<Signal<User>>();
+    #[cfg(feature = "use-node")]
+    let client = crate::api::WEB_API_SENDER.get().unwrap();
+    let delete_alias = user
+        .read()
+        .logged_id()
+        .map(|id| id.alias.to_string())
+        .unwrap_or_default();
     let to = msg.to.clone();
     let to_initial = to.chars().next().unwrap_or('·').to_string();
     let subject = msg.subject.clone();
@@ -4252,6 +4377,38 @@ fn OpenSentMessage(msg: mail_local_state::SentMessage) -> Element {
                         menu_selection.write().open_draft(resend_prefill.clone());
                     },
                     "Resend"
+                }
+                button {
+                    class: "btn btn-secondary",
+                    "data-testid": testid::FM_SENT_DELETE,
+                    onclick: move |_| {
+                        if !delete_alias.is_empty() {
+                            crate::local_state::local_delete_sent(&delete_alias, &sent_id);
+                            #[cfg(feature = "use-node")]
+                            {
+                                let mut c = client.clone();
+                                let a = delete_alias.clone();
+                                let id = sent_id.clone();
+                                // spawn_forever: at_inbox_list() below unmounts
+                                // this view; a bare spawn() would cancel before
+                                // the DeleteSent delegate write committed, so the
+                                // row would return after reload (mirrors #286).
+                                let _task = dioxus_core::spawn_forever(async move {
+                                    if let Err(e) =
+                                        crate::local_state::delete_sent(&mut c, a, id).await
+                                    {
+                                        crate::log::error(
+                                            format!("delete_sent failed: {e}"),
+                                            None,
+                                        );
+                                    }
+                                });
+                            }
+                        }
+                        menu_selection.write().at_inbox_list();
+                        crate::toast::push_toast("Deleted", crate::toast::ToastLevel::Success);
+                    },
+                    "Delete"
                 }
                 div { class: "spacer" }
             }
@@ -5706,6 +5863,175 @@ mod quarantine_tests {
     #[test]
     fn unknown_vk_is_unverified() {
         assert!(!is_sender_verified(&msg_with_vk(vec![1, 2, 3, 4])));
+    }
+}
+
+#[cfg(test)]
+mod sent_fold_tests {
+    use super::{SENT_FOLD_ID_BASE, sent_message_to_row};
+
+    fn sent(
+        subject: &str,
+        body: &str,
+        sent_at: i64,
+        thread_id: Option<&str>,
+    ) -> mail_local_state::SentMessage {
+        mail_local_state::SentMessage {
+            subject: subject.to_string(),
+            body: body.to_string(),
+            sent_at,
+            thread_id: thread_id.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    /// A folded Sent row must look like an `is-me` inbox message: `from` is the
+    /// logged-in alias (lights up `.is-me`), it's read, and the threading
+    /// metadata carries through so it groups with the received half (#310).
+    #[test]
+    fn folded_row_is_me_and_carries_thread() {
+        let s = sent("Re: Lunch", "on my way", 1_000, Some("tid-7"));
+        let row = sent_message_to_row("uuid-abc", &s, "alice");
+        assert_eq!(row.from.as_ref(), "alice", "from = alias → .is-me styling");
+        assert!(row.read, "own sent mail is never unread");
+        assert_eq!(row.thread_id.as_deref(), Some("tid-7"));
+        assert_eq!(row.title.as_ref(), "Re: Lunch");
+        assert_eq!(row.content.as_ref(), "on my way");
+    }
+
+    /// The synthetic id must sit above `SENT_FOLD_ID_BASE` so `ThreadRowActions`
+    /// can detect a folded row (id ≥ base) and hide Archive/Delete — those
+    /// would otherwise target a nonexistent inbox enumerate-index id (#310).
+    #[test]
+    fn folded_row_id_is_offset_out_of_inbox_space() {
+        let s = sent("Hi", "body", 1, None);
+        let row = sent_message_to_row("uuid-1", &s, "alice");
+        assert!(
+            row.id >= SENT_FOLD_ID_BASE,
+            "id offset above inbox id space"
+        );
+    }
+
+    /// The id is derived from the sent UUID, so it's stable across renders
+    /// (the thread detail resolves the open group by `root_id` and must not
+    /// flap) and distinct UUIDs don't collide.
+    #[test]
+    fn folded_row_id_is_stable_and_distinct() {
+        let s = sent("Hi", "body", 1, None);
+        let a1 = sent_message_to_row("uuid-1", &s, "alice").id;
+        let a2 = sent_message_to_row("uuid-1", &s, "alice").id;
+        let b = sent_message_to_row("uuid-2", &s, "alice").id;
+        assert_eq!(a1, a2, "same UUID → same id across renders");
+        assert_ne!(a1, b, "distinct UUIDs → distinct ids");
+    }
+
+    // ── `folded_sent_rows` selection logic ──────────────────────────────────
+    //
+    // These exercise the branch selection (`thread_id`-match — the modern
+    // primary path — vs normalized-subject-match for legacy mail vs no-match
+    // exclusion) by seeding the thread-local Sent snapshot via
+    // `local_save_sent` and matching against a hand-built `received` slice.
+    // Each test uses a UNIQUE alias so the shared thread-local SNAPSHOT can't
+    // bleed across tests (cargo reuses worker threads).
+
+    use super::{Message, folded_sent_rows};
+    use chrono::{TimeZone, Utc};
+    use std::borrow::Cow;
+
+    fn received(from: &str, title: &str, thread_id: Option<&str>) -> Message {
+        Message {
+            id: 1,
+            from: Cow::Owned(from.to_string()),
+            title: Cow::Owned(title.to_string()),
+            content: Cow::Borrowed("body"),
+            read: true,
+            time: Utc.timestamp_opt(1, 0).unwrap(),
+            sender_vk: Vec::new(),
+            signature_valid: false,
+            assignment_hash: [0u8; 32],
+            thread_id: thread_id.map(str::to_string),
+            in_reply_to: None,
+            quoted_excerpt: None,
+        }
+    }
+
+    /// The thread_id-match path (the modern primary path): a Sent row sharing a
+    /// `thread_id` with a received message folds, even if its subject differs.
+    #[test]
+    fn folds_sent_row_matching_received_thread_id() {
+        let alias = "fold-tid-alias";
+        crate::local_state::local_save_sent(
+            alias,
+            "s-tid",
+            sent("anything at all", "my reply", 2_000, Some("tid-match")),
+        );
+        let recv = vec![received("Mary", "Lunch?", Some("tid-match"))];
+        let folded = folded_sent_rows(&recv, alias, "");
+        assert_eq!(folded.len(), 1, "thread_id match folds");
+        assert_eq!(folded[0].content.as_ref(), "my reply");
+        assert_eq!(folded[0].from.as_ref(), alias, "folded row is is-me");
+    }
+
+    /// The legacy subject-match path: a thread-id-less Sent row folds when its
+    /// normalized subject matches a received message's (Re:/Fwd: stripped).
+    #[test]
+    fn folds_legacy_sent_row_matching_normalized_subject() {
+        let alias = "fold-subj-alias";
+        crate::local_state::local_save_sent(
+            alias,
+            "s-subj",
+            sent("Re: Picnic this weekend?", "I'll bring drinks", 2_000, None),
+        );
+        let recv = vec![received("Carol", "Picnic this weekend?", None)];
+        let folded = folded_sent_rows(&recv, alias, "");
+        assert_eq!(
+            folded.len(),
+            1,
+            "normalized-subject match folds legacy mail"
+        );
+        assert_eq!(folded[0].content.as_ref(), "I'll bring drinks");
+    }
+
+    /// A Sent row that matches NO visible conversation (neither thread_id nor
+    /// subject) must NOT fold — the inbox stays a view of received
+    /// conversations, not a duplicate of the Sent folder.
+    #[test]
+    fn does_not_fold_unrelated_sent_row() {
+        let alias = "fold-none-alias";
+        crate::local_state::local_save_sent(
+            alias,
+            "s-none",
+            sent("Totally unrelated subject", "hi", 2_000, Some("other-tid")),
+        );
+        let recv = vec![received("Mary", "Lunch?", Some("tid-match"))];
+        let folded = folded_sent_rows(&recv, alias, "");
+        assert!(folded.is_empty(), "unrelated sent row must not fold");
+    }
+
+    /// An empty alias yields no folded rows (defensive guard — no logged-in
+    /// identity means no own-Sent folder to fold).
+    #[test]
+    fn empty_alias_folds_nothing() {
+        let recv = vec![received("Mary", "Lunch?", Some("tid-x"))];
+        assert!(folded_sent_rows(&recv, "", "").is_empty());
+    }
+
+    /// The search filter applies to folded rows: a folded Sent row whose
+    /// subject/body don't match the active query is dropped, mirroring
+    /// `matches_search` over received mail.
+    #[test]
+    fn search_filters_folded_rows() {
+        let alias = "fold-search-alias";
+        crate::local_state::local_save_sent(
+            alias,
+            "s-search",
+            sent("Re: Lunch?", "see you at noon", 2_000, Some("tid-s")),
+        );
+        let recv = vec![received("Mary", "Lunch?", Some("tid-s"))];
+        // Query matches the body → folds.
+        assert_eq!(folded_sent_rows(&recv, alias, "noon").len(), 1);
+        // Query matches nothing in the folded row → dropped.
+        assert!(folded_sent_rows(&recv, alias, "zzzznomatch").is_empty());
     }
 }
 

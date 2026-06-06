@@ -25,6 +25,7 @@
   "fmDelete": "fm-delete",
   "fmArchive": "fm-archive",
   "fmSentBody": "fm-sent-body",
+  "fmSentDelete": "fm-sent-delete",
   "fmSentDelivery": "fm-sent-delivery",
   "fmSentFingerprint": "fm-sent-fingerprint",
   "fmSentForward": "fm-sent-forward",

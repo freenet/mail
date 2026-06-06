@@ -444,3 +444,103 @@ test.describe("Legacy two-party thread shows both sides (#287)", () => {
     ).toContainText(CAROL_BODY_2);
   });
 });
+
+// ─── Sent fold: two-sided thread (#310) ──────────────────────────────────────
+//
+// User report: after a page refresh the threaded view showed only ONE side of
+// a conversation. Cause — the user's own reply lives in the Sent folder, and
+// the inbox thread view rendered received `Message`s only (the in-memory
+// interleave the compose path produced was lost on reload). Fix: fold matching
+// Sent rows back into the inbox thread as `is-me` rows (ui/src/app.rs
+// `folded_sent_rows`).
+//
+// The offline seed mirrors production on address2 (UserId 1): its reply to the
+// legacy "Picnic this weekend?" thread is seeded into the Sent folder
+// (example-sent-0001), NOT as an inbox Message — so the only way SELF_BODY
+// ("Sounds great — what should I bring?") appears in the thread is via the
+// fold. address2's legacy thread has no thread_id, so this exercises the
+// subject-match fold path. (address1's Sent folder is left empty because
+// several email-app.spec tests assume that.)
+test.describe("Sent fold — two-sided thread (#310)", () => {
+  test("the user's own Sent reply folds into the inbox thread as an is-me row", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await waitForApp(page);
+    await selectIdentity(page, "address2");
+
+    const group = page
+      .locator(`[data-testid="${TID.fmThreadGroup}"]`)
+      .filter({ hasText: LEGACY_THREAD_SUBJECT });
+    await expect(group).toHaveCount(1, { timeout: 10_000 });
+    await group.first().click();
+
+    const container = page.locator(`[data-testid="${TID.fmThreadContainer}"]`);
+    await container.waitFor({ state: "attached", timeout: 10_000 });
+
+    // SELF_BODY comes ONLY from the folded Sent row — if the fold regressed it
+    // would be absent (the inbox vec no longer carries this reply).
+    await expect(
+      container,
+      "own Sent reply folded into the received thread (#310)",
+    ).toContainText(SELF_BODY);
+
+    // Exactly one row is styled `.is-me` — the folded own-Sent row. (Carol's
+    // two messages are the other side and never carry `.is-me`.)
+    await expect(
+      container.locator(".ft-nest-msg.is-me, .ft-cz-row.is-me"),
+      "the folded Sent reply renders as an is-me row (#310)",
+    ).toHaveCount(1);
+
+    // The thread total reflects both sides: 3 rows (Carol, own reply, Carol).
+    await expect(
+      container.locator(`[data-testid="${TID.fmThreadRow}"]`),
+    ).toHaveCount(3);
+  });
+});
+
+// ─── Sent folder delete (#310) ───────────────────────────────────────────────
+//
+// Sent messages were undeletable — no affordance existed (Inbox + Archive had
+// Delete, Sent had only Reply/Forward/Resend). A Delete button now lives in the
+// Sent detail toolbar wired to local_delete_sent + the DeleteSent delegate.
+test.describe("Sent folder delete (#310)", () => {
+  test("a Sent message can be deleted from its detail toolbar", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await waitForApp(page);
+    await selectIdentity(page, "address2");
+
+    // Open the Sent folder. On mobile the folder nav is behind the hamburger
+    // drawer (display:none on desktop, so this is a no-op there).
+    const burger = page.locator(`[data-testid="${TID.fmHamburger}"]`);
+    if (await burger.isVisible().catch(() => false)) {
+      await burger.click();
+      await page
+        .locator(`[data-testid="${TID.fmComposeBtn}"]`)
+        .waitFor({ state: "visible" });
+    }
+    // The seeded example-sent-0001 ("Re: Picnic this weekend?") is address2's
+    // one Sent row.
+    await page.locator('[data-testid="fm-folder-sent"]').click();
+
+    const sentCard = page
+      .locator(`[data-testid="${TID.fmSentCard}"]`)
+      .filter({ hasText: "Picnic this weekend?" });
+    await expect(sentCard).toHaveCount(1, { timeout: 10_000 });
+    await sentCard.first().click();
+
+    // The detail toolbar exposes a Delete button (the #310 addition).
+    const del = page.locator(`[data-testid="${TID.fmSentDelete}"]`);
+    await expect(del).toHaveCount(1);
+    await del.click();
+
+    // After delete the Sent row is gone.
+    await expect(
+      page
+        .locator(`[data-testid="${TID.fmSentCard}"]`)
+        .filter({ hasText: "Picnic this weekend?" }),
+    ).toHaveCount(0, { timeout: 10_000 });
+  });
+});

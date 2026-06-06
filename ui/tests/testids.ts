@@ -26,6 +26,7 @@ interface TestIds {
   fmDelete: string;
   fmArchive: string;
   fmSentBody: string;
+  fmSentDelete: string;
   fmSentDelivery: string;
   fmSentFingerprint: string;
   fmSentForward: string;
