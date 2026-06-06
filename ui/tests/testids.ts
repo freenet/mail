@@ -15,6 +15,8 @@ interface TestIds {
   fmLogout: string;
   fmSearch: string;
   fmComposeBtn: string;
+  fmHamburger: string;
+  fmBack: string;
   fmList: string;
   fmMsgCard: string;
   fmDraftCard: string;

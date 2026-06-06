@@ -2626,7 +2626,32 @@ fn UserInbox() -> Element {
     } else {
         ""
     };
-    let app_class = format!("fm-app{serif_class}");
+
+    // Mobile off-canvas drawer state. Single source of truth, shared with
+    // Topbar (hamburger toggle) and Sidebar (auto-close on nav) via context.
+    // Inert on desktop: the `drawer-open` class only drives rules inside the
+    // max-width:768px media query.
+    let mut drawer_open = use_signal(|| false);
+    use_context_provider(|| drawer_open);
+    let drawer_class = if drawer_open() { " drawer-open" } else { "" };
+    let app_class = format!("fm-app{serif_class}{drawer_class}");
+
+    // Single-pane mobile swap: which of list/detail is showing. Pure derive
+    // from the selection model — no extra signal. Inert on desktop (no
+    // desktop rule keys off data-view). Settings/new-msg overlay everything
+    // as siblings of .main, so they're intentionally excluded here.
+    let data_view = {
+        let sel = menu_selection.read();
+        if sel.email().is_some()
+            || sel.thread_root().is_some()
+            || sel.sent_id().is_some()
+            || sel.archived_id().is_some()
+        {
+            "detail"
+        } else {
+            "list"
+        }
+    };
 
     let import_contact = use_context::<Signal<crate::app::login::ImportContact>>();
     let share_contact = use_context::<Signal<crate::app::login::ShareContact>>();
@@ -2638,11 +2663,13 @@ fn UserInbox() -> Element {
             "data-theme": theme_attr,
             "data-density": density_attr,
             "data-font-size": font_size_attr,
+            "data-view": data_view,
             Topbar {}
             div { class: "main",
                 Sidebar {}
                 MessageList {}
                 DetailPanel {}
+                div { class: "sidebar-scrim", onclick: move |_| drawer_open.set(false) }
             }
             if settings_open {
                 { settings::SettingsShell() }
@@ -2704,8 +2731,19 @@ fn Topbar() -> Element {
         .unwrap_or_else(|| "·".to_string());
     let search = menu_selection.read().search().to_string();
     let app_name = crate::app_name();
+    let mut drawer_open = use_context::<Signal<bool>>();
     rsx! {
         div { class: "topbar",
+            button {
+                class: "fm-hamburger",
+                "data-testid": testid::FM_HAMBURGER,
+                "aria-label": "Menu",
+                onclick: move |_| {
+                    let v = drawer_open();
+                    drawer_open.set(!v);
+                },
+                "\u{2630}"
+            }
             div { class: "brand",
                 {brand_logo()}
                 div { class: "brand-text",
@@ -2751,6 +2789,7 @@ fn Topbar() -> Element {
 fn Sidebar() -> Element {
     let mut user = use_context::<Signal<User>>();
     let mut menu_selection = use_context::<Signal<menu::MenuSelection>>();
+    let mut drawer_open = use_context::<Signal<bool>>();
     let inbox = use_context::<Signal<InboxView>>();
     let emails_snapshot: Vec<Message> = inbox.read().messages.borrow().clone();
     let active = menu_selection.read().folder();
@@ -2778,10 +2817,13 @@ fn Sidebar() -> Element {
                 class: "compose-btn",
                 "data-testid": testid::FM_COMPOSE_BTN,
                 onclick: move |_| {
-                    let mut sel = menu_selection.write();
-                    if !sel.is_new_msg() {
-                        sel.at_new_msg();
+                    {
+                        let mut sel = menu_selection.write();
+                        if !sel.is_new_msg() {
+                            sel.at_new_msg();
+                        }
                     }
+                    drawer_open.set(false);
                 },
                 span { class: "pen", "✎" }
                 "New message"
@@ -2820,7 +2862,10 @@ fn Sidebar() -> Element {
                                 button {
                                     class: "{cls}",
                                     "data-testid": "{testid}",
-                                    onclick: move |_| { menu_selection.write().set_folder(f); },
+                                    onclick: move |_| {
+                                        menu_selection.write().set_folder(f);
+                                        drawer_open.set(false);
+                                    },
                                     span { class: "icon", "{f.icon()}" }
                                     span { class: "label", "{f.label()}" }
                                     span { class: "count", "{count_text}" }
@@ -2836,6 +2881,7 @@ fn Sidebar() -> Element {
                     "data-testid": testid::FM_SIDEBAR_CONTACTS,
                     onclick: move |_| {
                         menu_selection.write().open_settings(menu::SettingsScreen::Contacts);
+                        drawer_open.set(false);
                     },
                     span { class: "icon", "☺" }
                     span { class: "label", "Contacts" }
@@ -2876,13 +2922,16 @@ fn Sidebar() -> Element {
                     class: "nav-item",
                     "data-testid": testid::FM_LOGOUT,
                     onclick: move |_| {
-                        let mut state = user.write();
-                        state.logged = false;
-                        state.active_id = None;
-                        // Clear the per-identity message cache so the next
-                        // login re-runs `load_example_messages` instead of
-                        // hitting the idempotency guard with stale rows.
-                        inbox.read().messages.borrow_mut().clear();
+                        {
+                            let mut state = user.write();
+                            state.logged = false;
+                            state.active_id = None;
+                            // Clear the per-identity message cache so the next
+                            // login re-runs `load_example_messages` instead of
+                            // hitting the idempotency guard with stale rows.
+                            inbox.read().messages.borrow_mut().clear();
+                        }
+                        drawer_open.set(false);
                     },
                     span { class: "icon", "⏏" }
                     span { class: "label", "Log out" }
@@ -3602,6 +3651,13 @@ fn ThreadDetail(group: crate::app::threads::ThreadGroup) -> Element {
                     }
                 }
                 div { class: "toolbar",
+                    button {
+                        class: "fm-back-btn",
+                        "data-testid": testid::FM_BACK,
+                        "aria-label": "Back",
+                        onclick: move |_| { menu_selection.write().at_inbox_list(); },
+                        "\u{2039} Back"
+                    }
                     div { class: "spacer" }
                     button {
                         class: "btn btn-primary",
@@ -3996,6 +4052,13 @@ fn OpenArchivedMessage(msg_id: u64, msg: mail_local_state::ArchivedMessage) -> E
             }
             div { class: "toolbar",
                 button {
+                    class: "fm-back-btn",
+                    "data-testid": testid::FM_BACK,
+                    "aria-label": "Back",
+                    onclick: move |_| { menu_selection.write().at_inbox_list(); },
+                    "\u{2039} Back"
+                }
+                button {
                     class: "btn btn-primary",
                     "data-testid": testid::FM_ARCHIVE_REPLY,
                     onclick: move |_| {
@@ -4159,6 +4222,13 @@ fn OpenSentMessage(msg: mail_local_state::SentMessage) -> Element {
                 }
             }
             div { class: "toolbar",
+                button {
+                    class: "fm-back-btn",
+                    "data-testid": testid::FM_BACK,
+                    "aria-label": "Back",
+                    onclick: move |_| { menu_selection.write().at_inbox_list(); },
+                    "\u{2039} Back"
+                }
                 button {
                     class: "btn btn-primary",
                     "data-testid": testid::FM_SENT_REPLY,
@@ -4546,6 +4616,13 @@ fn OpenMessage(msg: Message) -> Element {
                 }
             }
             div { class: "toolbar",
+                button {
+                    class: "fm-back-btn",
+                    "data-testid": testid::FM_BACK,
+                    "aria-label": "Back",
+                    onclick: move |_| { menu_selection.write().at_inbox_list(); },
+                    "\u{2039} Back"
+                }
                 if show_add_to_ab {
                     button {
                         class: "btn btn-secondary",

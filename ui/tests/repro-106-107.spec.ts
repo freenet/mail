@@ -118,12 +118,25 @@ async function openIdentity(app: FrameLocator, alias: string) {
     .click();
 }
 
+// Opens the off-canvas sidebar drawer when running on a mobile viewport
+// (<=768px). On desktop the hamburger is display:none, so this is a no-op.
+async function openNav(app: FrameLocator) {
+  const burger = app.locator('[data-testid="fm-hamburger"]');
+  if (await burger.isVisible().catch(() => false)) {
+    await burger.click();
+    await app
+      .locator('[data-testid="fm-compose-btn"]')
+      .waitFor({ state: "visible" });
+  }
+}
+
 async function compose(
   app: FrameLocator,
   to: string,
   subject: string,
   body: string,
 ) {
+  await openNav(app);
   await app.locator('[data-testid="fm-compose-btn"]').click();
   const sheet = app.locator('[data-testid="fm-compose-sheet"]');
   await sheet.locator('input[placeholder="alias or address"]').fill(to);

@@ -1,0 +1,88 @@
+/* Responsive / mobile layout overrides (#mobile-layout).
+ *
+ * Loaded LAST among the component partials so its width/flex overrides win
+ * the @layer components source-order tie-break (see ui/index.html).
+ *
+ * Desktop (>768px) is byte-for-byte unchanged: every layout rule lives
+ * inside @media (max-width: 768px). The only rules outside the query are
+ * three display:none declarations that hide mobile-only elements
+ * (.fm-hamburger / .sidebar-scrim / .fm-back-btn) on desktop — those
+ * elements do not exist in the desktop layout, so hiding them is inert.
+ *
+ * The .fm-app[data-view=...] attribute is always emitted by app.rs but is
+ * inert on desktop because no desktop rule keys off it.
+ */
+
+@layer components {
+  @scope (.fm-app) {
+
+    /* Desktop default: mobile-only affordances hidden. */
+    .fm-hamburger { display: none; }
+    .sidebar-scrim { display: none; }
+    .fm-back-btn { display: none; }
+
+    @media (max-width: 768px) {
+      /* --- TOPBAR --- */
+      .brand { width: auto; flex: 0 0 auto; padding: 0 10px; gap: 6px; }
+      .brand-tag { display: none; }            /* keep logo + name only */
+      .topbar-mid { padding: 0 8px; min-width: 0; }
+      .search { max-width: none; }             /* let search shrink to fill */
+      .topbar-right { padding: 0 10px; gap: 8px; }
+      .fm-hamburger {
+        display: flex; align-items: center; justify-content: center;
+        width: 34px; height: 34px; border: 0; background: transparent;
+        color: var(--ink2); font-size: 18px; flex: 0 0 34px;
+        cursor: pointer;
+      }
+
+      /* --- SIDEBAR off-canvas drawer --- */
+      .sidebar {
+        position: fixed; top: 50px; left: 0; bottom: 0; width: 264px; z-index: 40;
+        transform: translateX(-100%);
+        transition: transform .22s ease;
+        box-shadow: var(--sh-lg);
+      }
+      /* Inside @scope (.fm-app) the scope root is .fm-app itself, so a
+         selector that re-names `.fm-app` matches only a NESTED .fm-app
+         (a descendant of the root) — which never exists. Reference the
+         scope root with :scope so the drawer/view-swap rules actually
+         match the single .fm-app element. */
+      :scope.drawer-open .sidebar { transform: translateX(0); }
+      .sidebar-scrim {
+        display: block; position: fixed; inset: 50px 0 0 0; z-index: 39;
+        background: rgba(0,0,0,0.4); opacity: 0; pointer-events: none;
+        transition: opacity .22s ease;
+      }
+      :scope.drawer-open .sidebar-scrim { opacity: 1; pointer-events: auto; }
+
+      /* --- LIST / DETAIL single-pane swap --- */
+      .list-col { width: 100%; flex: 1 1 auto; border-right: 0; }
+      .detail-col { width: 100%; flex: 1 1 auto; min-width: 0; }
+      :scope[data-view="list"]   .detail-col { display: none; }
+      :scope[data-view="detail"] .list-col   { display: none; }
+
+      /* --- detail padding/typography shrink --- */
+      .detail-head   { padding: 16px 16px 12px; }
+      .toolbar       { padding: 10px 16px; }
+      .detail-scroll { padding: 16px 16px 48px; }
+      .detail-subj   { font-size: 20px; }
+      .ft-head       { padding-left: 16px; padding-right: 16px; }
+
+      /* --- mobile back button in detail --- */
+      .fm-back-btn {
+        display: inline-flex; align-items: center; gap: 4px;
+        background: transparent; border: 0; color: var(--ink2);
+        font-size: 14px; padding: 6px 8px; margin-right: 4px;
+        cursor: pointer;
+      }
+    }
+  }
+
+  @scope (.fm-pre) {
+    @media (max-width: 768px) {
+      .id-row { flex-wrap: wrap; gap: 12px; }
+      .id-meta { flex: 1 1 100%; min-width: 0; }
+      .id-actions { flex: 0 0 auto; margin-left: auto; }
+    }
+  }
+}
