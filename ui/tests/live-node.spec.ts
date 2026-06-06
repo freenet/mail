@@ -1084,15 +1084,19 @@ test.describe("Live node E2E", () => {
       await importModal.locator('[data-testid="fm-import-submit"]').click();
 
       // ── Bob replies — the To must resolve WITHOUT hand-editing ───
-      // Reply prefills To with alice's send-alias (ALIAS_T10_ALICE), NOT the
-      // relabeled local nickname. Pre-fix the address-book lookup missed and
-      // the fingerprint badge never appeared, blocking the send.
+      // Reply prefills To with Bob's OWN local nickname for Alice (the
+      // relabeled contact), resolved via Alice's verified sender VK (#289
+      // fix). Pre-fix the prefill carried Alice's send-alias, the address-book
+      // lookup missed, and the fingerprint badge never appeared, blocking the
+      // send. This assertion only checks that the reply resolves (badge
+      // visible) — it is agnostic to WHICH string lands in To, so it stays
+      // green under the VK-resolution mechanism.
       await bobApp.locator('[data-testid="fm-reply"]').first().click();
       const replySheet = bobApp.locator('[data-testid="fm-compose-sheet"]');
       await replySheet.waitFor({ timeout: 10_000 });
       await expect(
         bobApp.getByTestId("compose-recipient-fingerprint"),
-        "reply To resolves the relabeled contact by the sender's alias (#289 fix)",
+        "reply To resolves the relabeled contact by the sender's verified VK (#289 fix)",
       ).toBeVisible({ timeout: 20_000 });
 
       await replySheet

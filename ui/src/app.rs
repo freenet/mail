@@ -1781,11 +1781,12 @@ mod thread_grouping_tests {
         tid: Option<&str>,
         irt: Option<&str>,
     ) -> Message {
-        m_vk(id, from, title, secs, read, tid, irt, Vec::new())
+        m_vk(id, from, title, secs, read, tid, irt, Vec::new(), false)
     }
 
-    /// Like `m`, but with a caller-supplied `sender_vk` so tests can
-    /// exercise the VK-based reply resolution (#289).
+    /// Like `m`, but with a caller-supplied `sender_vk` + `signature_valid`
+    /// so tests can exercise the VK-based reply resolution (#289), including
+    /// the security gate that only trusts a VK on a verified signature.
     #[allow(clippy::too_many_arguments)]
     fn m_vk(
         id: u64,
@@ -1796,6 +1797,7 @@ mod thread_grouping_tests {
         tid: Option<&str>,
         irt: Option<&str>,
         sender_vk: Vec<u8>,
+        signature_valid: bool,
     ) -> Message {
         Message {
             id,
@@ -1805,7 +1807,7 @@ mod thread_grouping_tests {
             read,
             time: Utc.timestamp_opt(1_700_000_000 + secs, 0).unwrap(),
             sender_vk,
-            signature_valid: false,
+            signature_valid,
             assignment_hash: [0u8; 32],
             thread_id: tid.map(str::to_string),
             in_reply_to: irt.map(str::to_string),
@@ -2227,6 +2229,7 @@ mod thread_grouping_tests {
             Some("thread-x"),
             None,
             sender_vk,
+            true, // signature verified — VK is trustworthy for addressing
         );
 
         let prefill = super::thread_reply_prefill(&received);
@@ -2240,6 +2243,83 @@ mod thread_grouping_tests {
         // Threading metadata unchanged.
         assert_eq!(prefill.thread_id.as_deref(), Some("thread-x"));
         assert_eq!(prefill.in_reply_to.as_deref(), Some("7"));
+    }
+
+    /// #289 SECURITY: an UNSIGNED (or forgery-failed) message must NOT have its
+    /// `sender_vk` trusted for addressing, even if that VK matches a trusted
+    /// contact. Otherwise a forged `sender_vk` stamped with a contact's VK
+    /// would prefill that contact's local alias and misdirect the reply.
+    #[test]
+    fn reply_prefill_ignores_unverified_sender_vk_289() {
+        use crate::app::address_book::{self, Contact};
+        use freenet_aft_interface::Tier;
+        use freenet_email_inbox::DEFAULT_MAX_AGE_SECS;
+
+        address_book::clear_for_test();
+
+        // A trusted contact "bob" with a known VK.
+        let bob_vk = vec![9u8; 1952];
+        address_book::insert_contact(Contact {
+            local_alias: "bob".into(),
+            suggested_alias: None,
+            description: String::new(),
+            ml_dsa_vk_bytes: bob_vk.clone(),
+            ml_kem_ek_bytes: vec![3u8; 1184],
+            required_tier: Tier::Day1,
+            max_age_secs: DEFAULT_MAX_AGE_SECS,
+            verified: true,
+            inbox_wasm_hash: None,
+        })
+        .expect("seed contact");
+
+        // Mallory's message FORGES Bob's VK but the signature does not validate.
+        let forged = m_vk(
+            7,
+            "Bob",
+            "Hi",
+            0,
+            true,
+            Some("thread-z"),
+            None,
+            bob_vk,
+            false, // signature INVALID — VK must not be trusted
+        );
+
+        let prefill = super::thread_reply_prefill(&forged);
+
+        assert_eq!(
+            prefill.to, "Bob",
+            "unverified sender_vk must NOT resolve to the trusted contact's local alias \
+             — fall back to the display name (no silent reply misdirection)",
+        );
+    }
+
+    /// #289 fallback: a SIGNED message whose `sender_vk` matches no contact
+    /// (e.g. a verified-unknown sender the user never imported) falls back to
+    /// the display name — exercises the `contact_by_vk -> None` flatten branch,
+    /// distinct from the empty-VK branch.
+    #[test]
+    fn reply_prefill_falls_back_when_vk_not_a_contact_289() {
+        use crate::app::address_book;
+        address_book::clear_for_test();
+
+        let received = m_vk(
+            7,
+            "stranger-signed",
+            "Hi",
+            0,
+            true,
+            Some("thread-w"),
+            None,
+            vec![5u8; 1952], // signed VK, but not in the address book
+            true,
+        );
+        let prefill = super::thread_reply_prefill(&received);
+
+        assert_eq!(
+            prefill.to, "stranger-signed",
+            "signed but unknown sender_vk → contact_by_vk None → fall back to display name",
+        );
     }
 
     /// #289 fallback: a legacy/unsigned message with no `sender_vk` (and
@@ -3668,10 +3748,17 @@ fn thread_reply_prefill(m: &Message) -> menu::ComposePrefill {
     // compose send path when the recipient relabelled the contact or
     // imported via a path that dropped `suggested_alias` — that's the
     // bug three testers hit. Fall back to the display name for
-    // legacy/unsigned messages with no `sender_vk` and for senders not
-    // in the address book (e.g. own-identity sends, which resolve via
-    // the Tier-1 own-identity branch in `address_book::lookup`).
-    let to = (!m.sender_vk.is_empty())
+    // legacy/unsigned messages and for senders not in the address book
+    // (e.g. own-identity sends, which resolve via the Tier-1
+    // own-identity branch in `address_book::lookup`).
+    //
+    // SECURITY: `sender_vk` is attacker-controlled wire data — only trust
+    // it for addressing once `signature_valid` proves the sender holds the
+    // matching private key. Without this gate a forged `sender_vk` stamped
+    // with a trusted contact's VK would prefill that contact's local alias,
+    // silently misdirecting the reply to them (reply-misdirection). Mirrors
+    // the same gate in `Message::verification_state`.
+    let to = (m.signature_valid && !m.sender_vk.is_empty())
         .then(|| address_book::contact_by_vk(&m.sender_vk))
         .flatten()
         .map(|c| c.local_alias.to_string())

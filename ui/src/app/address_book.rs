@@ -1304,18 +1304,18 @@ mod tests {
         );
     }
 
-    /// #289 (resolver half): a contact imported under a local label that
-    /// differs from the sender's own send-alias cannot be resolved by that
-    /// send-alias. The reply path (`thread_reply_prefill`, app.rs) addresses
-    /// the To field by the incoming message's display sender, so the alias-
-    /// keyed `lookup` misses and the reply is blocked — the user must hand-
-    /// edit To to their local label. This is the address-book half of the
-    /// root cause unit-tested by `reply_prefill_addresses_by_display_sender_not_vk_289`.
-    ///
-    /// The fix (resolve by VK / inbox key, and/or pre-fill the contact-add
-    /// nickname from the incoming sender) will make a by-send-alias resolution
-    /// succeed (or make the prefill carry a stable handle); update this test
-    /// to the new contract when #289 lands.
+    /// #289 (resolver-half characterization): a contact imported under a
+    /// local label that differs from the sender's own send-alias cannot be
+    /// resolved by that send-alias through the alias-keyed `lookup` — that's
+    /// the address-book behavior that made the OLD reply path (which addressed
+    /// by the sender's display name) miss. The reply path is now fixed in
+    /// `thread_reply_prefill` (app.rs): it resolves by the sender's verified
+    /// ML-DSA VK and prefills the recipient's LOCAL label, so it no longer
+    /// depends on this `lookup`-by-send-alias path. This test still documents
+    /// the `lookup` semantics it characterizes (exact local-alias keying with
+    /// a suggested-alias fallback); see
+    /// `reply_prefill_resolves_to_local_label_by_vk_289` in app.rs for the
+    /// fix itself.
     #[test]
     fn lookup_misses_when_contact_imported_under_different_nickname_289() {
         use ml_dsa::{KeyGen, MlDsa65, signature::Keypair as MlDsaKeypair};
