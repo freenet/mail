@@ -143,16 +143,37 @@ pub(crate) fn build_recipient_criteria(
 }
 
 impl AftRecords {
+    /// Derive an identity's own AFT token-allocation-record contract key
+    /// from its ML-DSA verifying key. The key is deterministic per identity
+    /// (`TokenDelegateParameters::new(&vk)` is byte-stable), so this is the
+    /// authoritative source of truth for "is this my own AFT record" —
+    /// independent of any routing-map population order.
+    pub fn record_key_for(identity: &Identity) -> Result<AftRecord, DynError> {
+        use ml_dsa::signature::Keypair;
+        let vk = identity.ml_dsa_signing_key.as_ref().verifying_key();
+        let params = TokenDelegateParameters::new(&vk)
+            .try_into()
+            .map_err(|e| format!("{e}"))?;
+        ContractKey::from_params(TOKEN_RECORD_CODE_HASH, params).map_err(|e| format!("{e}").into())
+    }
+
     pub async fn load_all(
         client: &mut WebApiRequestClient,
         contracts: &[Identity],
         contract_to_id: &mut HashMap<AftRecord, Identity>,
     ) {
         for identity in contracts {
-            let r = Self::load_contract(client, identity, contract_to_id).await;
-            if let Ok(key) = &r {
-                contract_to_id.insert(*key, identity.clone());
+            // Register the AFT-record → identity routing entry BEFORE the
+            // GET-with-subscribe goes out. `get_state` subscribes, so the
+            // node now echoes our own token-burn UPDATEs back as
+            // UpdateNotifications; the handler must already recognize the
+            // key or it logs "unknown contract key" (#204 regression after
+            // #288). Mirrors `InboxModel::load_all`'s synchronous
+            // `register_routing` for inbox keys.
+            if let Ok(key) = Self::record_key_for(identity) {
+                contract_to_id.insert(key, identity.clone());
             }
+            let r = Self::load_contract(client, identity).await;
             node_response_error_handling(
                 client.clone().into(),
                 r.map(|_| ()),
@@ -165,20 +186,12 @@ impl AftRecords {
     async fn load_contract(
         client: &mut WebApiRequestClient,
         identity: &Identity,
-        contract_to_id: &HashMap<AftRecord, Identity>,
     ) -> Result<AftRecord, DynError> {
-        use ml_dsa::signature::Keypair;
-        let vk = identity.ml_dsa_signing_key.as_ref().verifying_key();
-        let params = TokenDelegateParameters::new(&vk)
-            .try_into()
-            .map_err(|e| format!("{e}"))?;
-        let contract_key =
-            ContractKey::from_params(TOKEN_RECORD_CODE_HASH, params).map_err(|e| format!("{e}"))?;
+        let contract_key = Self::record_key_for(identity)?;
         // `get_state` is a GET-with-subscribe, so it both fetches state and
         // registers this node as a subscriber/holder. A separate Subscribe is
         // unnecessary and would be rejected when the contract isn't cached
         // locally (issue #288).
-        let _ = contract_to_id;
         Self::get_state(client, contract_key).await?;
         let _alias = identity.alias();
         crate::log::debug!(

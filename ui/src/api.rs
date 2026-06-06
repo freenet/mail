@@ -190,6 +190,25 @@ fn take_awaiting_ack(
     Some(awaiting.remove(pos).0)
 }
 
+/// True if `key` addresses an AFT token-allocation-record contract under
+/// the current or any legacy code hash. Used as a race-safe backstop in the
+/// UpdateNotification arm: own-AFT-record echoes (enabled by the #288
+/// GET-with-subscribe) are normally recognized via the `token_rec_to_id`
+/// routing map, but an echo that arrives before `AftRecords::load_all`
+/// inserts the key would otherwise be misclassified as an unknown contract
+/// (#204). The record's `code_hash` is shared by every identity's AFT
+/// record, so this can't distinguish own from foreign — but the only AFT
+/// records this client subscribes to are its own, so a code-hash match is a
+/// sufficient and safe drop condition.
+#[cfg(feature = "use-node")]
+fn is_own_aft_record_key(key: &freenet_stdlib::prelude::ContractKey) -> bool {
+    let key_hash = bs58::encode(key.code_hash().as_ref()).into_string();
+    key_hash == crate::aft::TOKEN_RECORD_CODE_HASH
+        || crate::aft::LEGACY_TOKEN_RECORD_CODE_HASHES
+            .iter()
+            .any(|h| *h == key_hash)
+}
+
 #[cfg(feature = "use-node")]
 mod contract_api {
     use freenet_stdlib::{client_api::ContractRequest, prelude::*};
@@ -2619,6 +2638,21 @@ pub(crate) async fn node_comms(
                                     crate::log::debug!(
                                         "UpdateNotification: contact inbox \
                                         {key} (#198) — drop"
+                                    );
+                                } else if is_own_aft_record_key(&key) {
+                                    // Own AFT-record echo that raced ahead of
+                                    // the `token_rec_to_id` insert (the GET-
+                                    // with-subscribe from #288 means the node
+                                    // echoes our own token-burn UPDATEs). The
+                                    // synchronous registration in
+                                    // `AftRecords::load_all` normally has the
+                                    // key in the map by now; this code-hash
+                                    // check is the race-safe backstop so a
+                                    // pre-load echo is dropped quietly instead
+                                    // of logging "unknown contract key" (#204).
+                                    crate::log::debug!(
+                                        "UpdateNotification: own AFT record {key} \
+                                        before routing insert (#204) — drop"
                                     );
                                 } else {
                                     crate::log::error(
