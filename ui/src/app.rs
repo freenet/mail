@@ -4274,13 +4274,6 @@ fn ThreadNested(group: crate::app::threads::ThreadGroup) -> Element {
                         "data-testid": testid::FM_THREAD_ROW,
                         "data-msg-id": "{id}",
                         div { class: "ft-nest-inner",
-                            div { class: "ft-nest-actions",
-                                ThreadRowActions {
-                                    msg: actions_msg,
-                                    root_id,
-                                    thread_total,
-                                }
-                            }
                             div { class: "ft-msg-head",
                                 div { class: "ft-face sm", "{from_initial}" }
                                 div { class: "ft-msg-id",
@@ -4322,6 +4315,17 @@ fn ThreadNested(group: crate::app::threads::ThreadGroup) -> Element {
                             if body_open {
                                 div { class: "ft-body-text", style: "margin-top:10px",
                                     {content.split("\n\n").map(|para| rsx! { p { "{para}" } })}
+                                }
+                            }
+                            // #317: actions are LAST in source order. Desktop pins
+                            // them absolute (order-independent); on touch they flow
+                            // statically below the body, so DOM order == visual order
+                            // and tab order reaches them after the message content.
+                            div { class: "ft-nest-actions",
+                                ThreadRowActions {
+                                    msg: actions_msg,
+                                    root_id,
+                                    thread_total,
                                 }
                             }
                         }
