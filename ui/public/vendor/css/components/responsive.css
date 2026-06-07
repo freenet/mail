@@ -86,3 +86,252 @@
     }
   }
 }
+
+/* ============================================================
+ * Settings full-screen takeover — mobile (#mobile-settings).
+ * Pairs with the #310 block above. Desktop (>768px) untouched: every
+ * rule below is inside @media (max-width: 768px), inside @layer
+ * components + @scope (.fm-app). The settings shell CSS (settings.css)
+ * shipped desktop-only (grid-template-columns:240px 1fr with no mobile
+ * override) — on a phone the 240px sidebar crushed the content pane to
+ * ~150px and everything overflowed. This stacks the shell vertically.
+ * ============================================================ */
+@layer components {
+  @scope (.fm-app) {
+    @media (max-width: 768px) {
+
+      /* ---- Settings shell: 2-col grid (240px 1fr) -> vertical stack ----
+         Desktop keeps position:absolute inset:50px 0 0 0 + overflow:hidden
+         from settings.css; we only change the inner flow to flex-column so
+         the body gets full width instead of ~150px. */
+      .fm-settings {
+        display: flex;
+        flex-direction: column;
+      }
+
+      /* Sidebar -> full-width top region; sizes to content, does not scroll. */
+      .fm-set-side {
+        flex: 0 0 auto;
+        width: 100%;
+        border-right: 0;
+        border-bottom: 1px solid var(--line);
+        padding: 10px 12px 12px;
+        gap: 10px;
+      }
+      .fm-set-back {
+        height: 40px;
+        padding: 0 12px;
+        font-size: 15px;
+        border-radius: 8px;
+      }
+      .fm-set-title {
+        font-size: 20px;
+        padding: 0 4px;
+      }
+      .fm-set-ident {
+        margin: 0;
+        width: 100%;
+        min-height: 48px;
+        box-sizing: border-box;
+      }
+      .fm-set-ident-pop {
+        margin: 4px 0 8px;
+      }
+
+      /* Nav: 1px-gap vertical list -> 2-col grid of chunky targets.
+         GLOBAL/IDENTITY headings span both columns. Region grows to fit
+         content; the main pane owns the scroll. */
+      .fm-set-nav {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+        flex: 0 0 auto;
+        min-height: 0;
+        overflow: visible;
+        padding: 0 4px;
+      }
+      .fm-set-nav-group {
+        grid-column: 1 / -1;
+        padding: 10px 6px 2px;
+        font-size: 9.5px;
+      }
+      .fm-set-nav-group:first-child { padding-top: 2px; }
+      .fm-set-nav-item {
+        height: 44px;
+        min-width: 0;
+        padding: 0 12px;
+        border-radius: 9px;
+        font-size: 14.5px;
+        border: 1px solid var(--line2);
+        background: var(--bg-card);
+      }
+      .fm-set-nav-item .label {
+        flex: 1;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .fm-set-nav-item.is-active { border-color: transparent; }
+
+      /* ---- Main pane: fills remaining height, scrolls internally so the
+         sticky .fm-set-bar (height:50px; position:sticky; top:0) stays pinned. */
+      .fm-set-main {
+        flex: 1 1 auto;
+        min-height: 0;
+        overflow: auto;
+        width: 100%;
+      }
+
+      /* Sticky header — trim 28px side padding; drop desktop-only ⌘, hint. */
+      .fm-set-bar {
+        padding: 0 16px;
+        gap: 8px;
+      }
+      .fm-set-bar-title { font-size: 16px; }
+      .fm-set-bar-meta { display: none; }
+
+      /* Body + inner column — shrink generous desktop padding, uncap width. */
+      .fm-set-body {
+        padding: 18px 16px 56px;
+      }
+      .fm-set-inner {
+        max-width: none;
+        margin: 0;
+      }
+
+      /* ---- Shared layout primitives (deduped across all screens) ---- */
+
+      /* Setting rows: 1fr auto -> stacked so controls stop crushing into the
+         right edge. .stacked rows are already 1fr (no-op). Also trims the
+         row's own 14px 20px padding used on Privacy/Advanced rows. */
+      .fm-row-set {
+        grid-template-columns: 1fr;
+        gap: 10px;
+        align-items: flex-start;
+        padding: 12px 16px;
+      }
+      .fm-row-set-label {
+        font-size: 13.5px;
+        word-break: break-word;
+      }
+      .fm-row-set-help {
+        font-size: 12px;
+        margin-top: 4px;
+      }
+      /* Controls go full-width once the row stacks. Neutralize inline
+         width:180px (alias) / width:320px (Advanced) on .fm-input. */
+      .fm-select { width: 100%; }
+      .fm-row-set .fm-input[style] {
+        width: 100% !important;
+        max-width: 100% !important;
+      }
+      .fm-toggle { align-self: flex-start; }
+
+      /* Card chrome — shrink head padding + type. */
+      .fm-card { margin-bottom: 14px; }
+      .fm-card-head { padding: 12px 16px 10px; }
+      .fm-card-title { font-size: 14px; }
+      .fm-card-sub { font-size: 12px; line-height: 1.4; }
+
+      /* Lede paragraph — uncap and shrink. */
+      .fm-set-lede {
+        font-size: 13.5px;
+        max-width: none;
+        margin-bottom: 16px;
+      }
+
+      /* Buttons — slightly smaller in stacked rows. Scoped to .fm-settings
+         so the app-wide compose/detail-toolbar buttons keep their desktop
+         mobile sizing untouched. */
+      .fm-settings .fm-btn-primary,
+      .fm-settings .fm-btn-secondary {
+        height: 30px;
+        padding: 0 12px;
+        font-size: 12.5px;
+      }
+
+      /* Textarea — trim min-height + type. */
+      .fm-textarea {
+        min-height: 60px;
+        font-size: 13.5px;
+      }
+
+      /* ---- Account screen ---- */
+      /* Fingerprint row is an inline-styled `div { style:"display:flex;..." }`
+         inside .fm-key-card (settings.rs:503/512); inline beats stylesheet,
+         so flip to column with !important via the [style] hook. */
+      .fm-key-card > div[style] {
+        flex-direction: column !important;
+        align-items: flex-start !important;
+        gap: 8px !important;
+      }
+      .fm-fp-grid {
+        width: 100%;
+        height: auto;
+        aspect-ratio: 8 / 1;
+        flex: 0 0 auto;
+      }
+      .fm-key-card-fp {
+        font-size: 12px;
+        letter-spacing: 0.02em;
+        word-break: break-all;
+      }
+      /* Banner: stack glyph/text/actions, full-width actions. */
+      .fm-banner {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 8px;
+        padding: 12px;
+      }
+      .fm-banner-actions {
+        flex-direction: column;
+        width: 100%;
+      }
+
+      /* ---- AFT screen ---- */
+      .fm-tier-grid {
+        grid-template-columns: repeat(2, 1fr);
+        gap: 6px;
+      }
+      .fm-spark-row {
+        grid-template-columns: 50px 1fr 40px;
+        gap: 8px;
+      }
+      .fm-quota-head {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 8px;
+      }
+      .fm-quota-num { font-size: 24px; }
+
+      /* ---- Address book screen ---- */
+      /* Card header (search + Import + Share) wraps instead of crushing. */
+      .fm-card > div[style*="display: flex"] {
+        flex-wrap: wrap;
+        gap: 12px;
+      }
+      /* Contact row: 28px 1fr auto auto auto -> single column. */
+      .fm-contact-row {
+        grid-template-columns: 1fr;
+        gap: 6px;
+        padding: 10px 12px;
+      }
+      .fm-contact-name {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        min-width: 0;
+      }
+      .fm-contact-trust {
+        display: inline-block;
+        margin-right: 8px;
+        justify-self: start;
+      }
+      .fm-contact-row button.fm-btn-secondary {
+        width: auto;
+        justify-self: start;
+        margin-top: 2px;
+      }
+    }
+  }
+}
