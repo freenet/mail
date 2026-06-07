@@ -960,6 +960,26 @@ impl Message {
             _ => VerificationState::VerifiedUnknown,
         }
     }
+
+    /// Stable cross-inbox identifier for threading (#270 follow-up).
+    ///
+    /// `Message.id` is the per-inbox enumerate index of the contract-state
+    /// message vec, so it differs between the sender's and recipient's
+    /// copies of the same message and even shifts on reload as the vec
+    /// reorders. `assignment_hash` (the AFT `TokenAssignment.assignment_hash`)
+    /// is derived from content + token + sender, so it is byte-identical in
+    /// every inbox that holds the message. Using it as the reply-parent key
+    /// makes nested-thread depth survive delivery (the "thread breaks back
+    /// to root" bug).
+    ///
+    /// Returns `None` for rows whose hash is all-zero — sender-side
+    /// `KeptMessage` reconstructions that don't persist the assignment hash
+    /// yet (see the `assignment_hash` field doc). Such messages fall back to
+    /// the legacy numeric-id linkage in [`threads::depth_map`].
+    pub(crate) fn stable_ref(&self) -> Option<String> {
+        (self.assignment_hash != [0u8; 32])
+            .then(|| bs58::encode(self.assignment_hash).into_string())
+    }
 }
 
 // ── Sort comparators ────────────────────────────────────────────────────────
@@ -1409,30 +1429,60 @@ pub(crate) mod threads {
     /// Depth is the length of the `in_reply_to` chain from the root, capped at
     /// [`MAX_THREAD_DEPTH`]. Returns a map keyed by `Message.id`. Roots (no
     /// `in_reply_to`, or an `in_reply_to` that doesn't resolve within the
-    /// group) are depth 0. `in_reply_to` is the parent's stringified `id`.
+    /// group) are depth 0.
+    ///
+    /// `in_reply_to` carries the parent's reference string. Since the #270
+    /// follow-up this is the parent's STABLE cross-inbox key
+    /// ([`Message::stable_ref`] = bs58 of `assignment_hash`), which is
+    /// byte-identical in every inbox. Legacy replies (and replies launched
+    /// from Archive/Sent rows that lack a persisted assignment hash) carry
+    /// the parent's per-inbox numeric id instead. Both are resolved here: a
+    /// message registers BOTH its stable_ref and its numeric id as lookup
+    /// keys, so an `in_reply_to` in either form maps to the right parent.
+    ///
+    /// The per-inbox numeric form only resolves when sender and reader share
+    /// the same vec ordering (own Sent replies, single-inbox example data) —
+    /// that is exactly the "thread breaks back to root after delivery /
+    /// reload" failure the stable_ref form fixes for cross-inbox mail.
     pub(crate) fn depth_map(group: &ThreadGroup) -> HashMap<u64, usize> {
-        // id (as string) → parent id (as string), for members of this group.
-        let parent_of: HashMap<String, String> = group
+        // Any reference string a message can be addressed by → its numeric id.
+        // Both the stable_ref (cross-inbox) and the numeric id (legacy /
+        // same-inbox) are registered so an `in_reply_to` in either form
+        // resolves to the parent's canonical id.
+        let id_of_ref: HashMap<String, u64> = group
             .messages
             .iter()
-            .filter_map(|m| m.in_reply_to.clone().map(|p| (m.id.to_string(), p)))
+            .flat_map(|m| {
+                let mut keys = vec![(m.id.to_string(), m.id)];
+                if let Some(sref) = m.stable_ref() {
+                    keys.push((sref, m.id));
+                }
+                keys
+            })
             .collect();
-        let present: std::collections::HashSet<String> =
-            group.messages.iter().map(|m| m.id.to_string()).collect();
+
+        // Resolved parent id for each message, where the parent is present in
+        // this group. None for roots and dangling parents.
+        let parent_id_of: HashMap<u64, u64> = group
+            .messages
+            .iter()
+            .filter_map(|m| {
+                let irt = m.in_reply_to.as_ref()?;
+                let parent = *id_of_ref.get(irt)?;
+                (parent != m.id).then_some((m.id, parent)) // ignore self-links
+            })
+            .collect();
 
         let mut out = HashMap::with_capacity(group.messages.len());
         for m in &group.messages {
             let mut depth = 0usize;
-            let mut cursor = m.id.to_string();
+            let mut cursor = m.id;
             // Walk up the parent chain. Guard against cycles (malformed
             // in_reply_to) with a hop budget == group size.
             let mut budget = group.messages.len();
-            while let Some(parent) = parent_of.get(&cursor) {
-                if !present.contains(parent) {
-                    break; // dangling parent → treat current as a root branch
-                }
+            while let Some(&parent) = parent_id_of.get(&cursor) {
                 depth += 1;
-                cursor = parent.clone();
+                cursor = parent;
                 budget = budget.saturating_sub(1);
                 if budget == 0 {
                     break;
@@ -1815,6 +1865,32 @@ mod thread_grouping_tests {
         }
     }
 
+    /// Like `m`, but stamps a non-zero `assignment_hash` (the byte index in
+    /// every slot) so `Message::stable_ref()` returns `Some(bs58(..))` — the
+    /// stable cross-inbox key the #270-follow-up threading depends on. The
+    /// returned bs58 string of a given `hash_byte` is what a reply's
+    /// `in_reply_to` should carry to nest under that message.
+    #[allow(clippy::too_many_arguments)]
+    fn m_hash(
+        id: u64,
+        from: &'static str,
+        title: &'static str,
+        secs: i64,
+        tid: Option<&str>,
+        irt: Option<&str>,
+        hash_byte: u8,
+    ) -> Message {
+        let mut msg = m(id, from, title, secs, true, tid, irt);
+        msg.assignment_hash = [hash_byte; 32];
+        msg
+    }
+
+    /// The bs58 stable_ref a message with `assignment_hash = [hash_byte; 32]`
+    /// produces — i.e. what a reply's `in_reply_to` must carry to link to it.
+    fn sref(hash_byte: u8) -> String {
+        bs58::encode([hash_byte; 32]).into_string()
+    }
+
     fn group_with_key<'a>(
         groups: &'a [super::threads::ThreadGroup],
         key: &str,
@@ -2109,6 +2185,63 @@ mod thread_grouping_tests {
         let g = group_with_key(&groups, "t");
         let depths = depth_map(g);
         assert_eq!(depths[&1], 0, "dangling parent → depth 0");
+    }
+
+    /// REGRESSION (thread-break bug): `in_reply_to` carrying the parent's
+    /// per-inbox enumerate index is meaningless once the same conversation
+    /// lands in a DIFFERENT inbox — the recipient's vec orders messages
+    /// differently, so the parent sits at another index. This is the
+    /// pre-fix on-screen "thread breaks back to root" symptom and the reason
+    /// we switched `in_reply_to` to the stable `assignment_hash` key. The
+    /// fix is verified in `depth_survives_inbox_index_remap_via_stable_ref`;
+    /// this test pins down that the OLD numeric form genuinely cannot work
+    /// across a remap (so nobody "fixes" it back).
+    #[test]
+    fn depth_legacy_numeric_in_reply_to_breaks_across_index_remap() {
+        // Recipient inbox: same thread, parents referenced by the SENDER's
+        // indices (0,1,2) but stored at recipient indices 7,3,9,5. All-zero
+        // assignment_hash (the m() default) so no stable_ref rescue applies.
+        let msgs = vec![
+            m(7, "lvvor", "Hi", 0, true, Some("t"), None), // root (sender idx 0)
+            m(3, "lvvor", "Re: Hi", 10, true, Some("t"), Some("0")), // sender idx 1
+            m(9, "lvvor", "Re: Hi", 20, true, Some("t"), Some("1")), // sender idx 2
+            m(5, "lvvor", "Re: Hi", 30, true, Some("t"), Some("2")), // sender idx 3
+        ];
+        let groups = group_into_threads(&msgs);
+        let g = group_with_key(&groups, "t");
+        let depths = depth_map(g);
+        // The "0"/"1"/"2" parents don't resolve to THIS thread's members,
+        // so each reply is a dangling root → depth 0. Documents the break.
+        assert_eq!(depths[&7], 0, "root");
+        assert_eq!(depths[&3], 0, "legacy numeric link can't survive remap");
+        assert_eq!(depths[&9], 0, "legacy numeric link can't survive remap");
+        assert_eq!(depths[&5], 0, "legacy numeric link can't survive remap");
+    }
+
+    /// FIX: with `in_reply_to` carrying the parent's STABLE cross-inbox key
+    /// (`stable_ref` = bs58 of `assignment_hash`), nested depth survives the
+    /// recipient-side index remap that broke the legacy numeric form above.
+    /// Same conversation, parents stored at arbitrary recipient indices
+    /// (7,3,9,5), but each reply links by the parent's hash-derived ref —
+    /// which is identical in every inbox — so the chain resolves and depth
+    /// nests 0,1,2,3 as the user expects.
+    #[test]
+    fn depth_survives_inbox_index_remap_via_stable_ref() {
+        // hash bytes 10/11/12/13 → root..third reply. in_reply_to references
+        // the PARENT's hash ref, never the parent's local id.
+        let msgs = vec![
+            m_hash(7, "lvvor", "Hi", 0, Some("t"), None, 10), // root
+            m_hash(3, "lvvor", "Re: Hi", 10, Some("t"), Some(&sref(10)), 11),
+            m_hash(9, "lvvor", "Re: Hi", 20, Some("t"), Some(&sref(11)), 12),
+            m_hash(5, "lvvor", "Re: Hi", 30, Some("t"), Some(&sref(12)), 13),
+        ];
+        let groups = group_into_threads(&msgs);
+        let g = group_with_key(&groups, "t");
+        let depths = depth_map(g);
+        assert_eq!(depths[&7], 0, "root");
+        assert_eq!(depths[&3], 1, "first reply nests under root via stable ref");
+        assert_eq!(depths[&9], 2, "second reply nests two levels");
+        assert_eq!(depths[&5], 3, "third reply nests three levels");
     }
 
     /// (e) A conversation interleaving sent (from "me") and received messages
@@ -3773,7 +3906,14 @@ fn thread_reply_prefill(m: &Message) -> menu::ComposePrefill {
                 .clone()
                 .unwrap_or_else(crate::local_state::new_thread_id),
         ),
-        in_reply_to: Some(m.id.to_string()),
+        // #270 follow-up: link the reply to its parent by the parent's
+        // STABLE cross-inbox key (`assignment_hash`, bs58) rather than the
+        // parent's per-inbox enumerate index. The index is meaningless once
+        // the reply lands in the recipient's inbox (different vec order), so
+        // the old scheme collapsed nested depth to root on the other side.
+        // Fall back to the numeric id only for rows that lack a stable hash
+        // (KeptMessage reconstructions) — those threads stay same-inbox.
+        in_reply_to: Some(m.stable_ref().unwrap_or_else(|| m.id.to_string())),
         quoted_excerpt: reply_excerpt(&m.content),
     }
 }
@@ -4853,7 +4993,11 @@ fn OpenMessage(msg: Message) -> Element {
             .clone()
             .unwrap_or_else(crate::local_state::new_thread_id),
     );
-    let reply_in_reply_to = Some(id.to_string());
+    // #270 follow-up: link by the parent's STABLE cross-inbox key
+    // (`assignment_hash`, bs58), not the per-inbox enumerate index, so
+    // nested depth survives delivery into the recipient's inbox. Fall back
+    // to the numeric id for hash-less rows (KeptMessage reconstructions).
+    let reply_in_reply_to = Some(msg.stable_ref().unwrap_or_else(|| id.to_string()));
     let reply_excerpt = reply_excerpt(&content);
     let time_full = format_time_full(msg.time);
     // Subscribe to address-book mutations so the verification badge
