@@ -78,6 +78,37 @@
     }
   }
 
+  /* Thread per-message actions on touch / no-hover devices (#mobile-thread-actions).
+     thread.css pins .ft-nest-actions absolute to the card's top-right corner at
+     opacity:0, revealing on :hover / :focus-within. Touch devices never hover, so
+     the cluster stays invisible-but-positioned and overlaps the .ft-msg-namerow
+     (sender name) sitting at the same top edge — the faded "Reply Archive Delete"
+     ghost over the sender shown in the bug report. Gating on (hover: none) — not a
+     width breakpoint — because the real discriminator is pointer type, so a
+     touchscreen desktop is covered too. Drop the cluster out of absolute flow and
+     pin it visible below the message body as a normal wrapping row. */
+  @scope (.fm-app) {
+    @media (hover: none) {
+      /* .ft-nest-actions is the FIRST child of .ft-nest-inner; desktop lifts it
+         out of flow (position:absolute) so source order is irrelevant. Once it's
+         static it would render ABOVE the head/body — so make the card a flex
+         column and order the action cluster last, below the message body. */
+      .ft-nest-inner {
+        display: flex;
+        flex-direction: column;
+      }
+      .ft-nest-inner .ft-nest-actions {
+        position: static;
+        order: 10;
+        opacity: 1;
+        transform: none;
+        margin-top: 12px;
+        justify-content: flex-end;
+        flex-wrap: wrap;
+      }
+    }
+  }
+
   @scope (.fm-pre) {
     @media (max-width: 768px) {
       .id-row { flex-wrap: wrap; gap: 12px; }
