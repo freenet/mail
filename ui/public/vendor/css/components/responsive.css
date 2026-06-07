@@ -89,17 +89,12 @@
      pin it visible below the message body as a normal wrapping row. */
   @scope (.fm-app) {
     @media (hover: none) {
-      /* .ft-nest-actions is the FIRST child of .ft-nest-inner; desktop lifts it
-         out of flow (position:absolute) so source order is irrelevant. Once it's
-         static it would render ABOVE the head/body — so make the card a flex
-         column and order the action cluster last, below the message body. */
-      .ft-nest-inner {
-        display: flex;
-        flex-direction: column;
-      }
+      /* .ft-nest-actions is the LAST child of .ft-nest-inner (app.rs), so once
+         it drops out of absolute flow it naturally renders below the message
+         body — no flex/order hack needed, and DOM order == visual order keeps
+         tab order sane. Desktop keeps the absolute hover-reveal untouched. */
       .ft-nest-inner .ft-nest-actions {
         position: static;
-        order: 10;
         opacity: 1;
         transform: none;
         margin-top: 12px;

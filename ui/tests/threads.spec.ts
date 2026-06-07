@@ -256,6 +256,49 @@ test.describe("Nested thread view (#270)", () => {
     await toggle.dispatchEvent("click");
     await expect(quoteText).toHaveCount(0);
   });
+
+  // #317: on touch (no-hover) devices the per-message action cluster
+  // (.ft-nest-actions) must NOT stay absolute-pinned + opacity:0 — that left a
+  // faded ghost of Reply/Archive/Delete overlapping the sender name, since the
+  // hover-reveal never fires. On (hover: none) the cluster goes static + fully
+  // opaque, in normal flow below the message body. This locks the responsive.css
+  // override against future stylesheet-order regressions. The assertion is
+  // pointer-aware: it checks whichever state matches the running profile's
+  // (hover) media — `static`/opaque on mobile-chrome (Pixel 5), absolute/hidden
+  // on the hover-capable chromium (Desktop Chrome) project.
+  test("touch devices show thread actions in flow, not as an absolute hidden overlay", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await waitForApp(page);
+    await selectIdentity(page, "address1");
+
+    await openSeededThread(page);
+    const container = page.locator(`[data-testid="${TID.fmThreadContainer}"]`);
+    await expect(container.locator(".ft-nest")).toHaveCount(1);
+
+    const actions = container.locator(".ft-nest-actions").first();
+    await expect(actions).toHaveCount(1);
+
+    const computed = await actions.evaluate((el) => {
+      const cs = getComputedStyle(el);
+      return {
+        noHover: window.matchMedia("(hover: none)").matches,
+        position: cs.position,
+        opacity: cs.opacity,
+      };
+    });
+
+    if (computed.noHover) {
+      // Touch profile: cluster pulled into flow, always visible.
+      expect(computed.position).toBe("static");
+      expect(Number(computed.opacity)).toBeGreaterThan(0);
+    } else {
+      // Hover-capable profile: untouched desktop hover-reveal.
+      expect(computed.position).toBe("absolute");
+      expect(Number(computed.opacity)).toBe(0);
+    }
+  });
 });
 
 // ─── Compact view ────────────────────────────────────────────────────────────
