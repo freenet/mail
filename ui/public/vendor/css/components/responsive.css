@@ -100,13 +100,22 @@
   @scope (.fm-app) {
     @media (max-width: 768px) {
 
-      /* ---- Settings shell: 2-col grid (240px 1fr) -> vertical stack ----
-         Desktop keeps position:absolute inset:50px 0 0 0 + overflow:hidden
-         from settings.css; we only change the inner flow to flex-column so
-         the body gets full width instead of ~150px. */
+      /* ---- Settings shell: 2-col grid (240px 1fr) -> single scroll column ----
+         Desktop pins the shell to the viewport (position:absolute inset:50px
+         0 0 0 + overflow:hidden) and gives each pane its OWN inner scroll. On
+         a phone that nested scroll trapped the content behind the full-height
+         nav block (#mobile-settings-scroll). The app root (.fm-app) is
+         position:fixed; overflow:hidden, so the document can't scroll — the
+         shell must own the scroll itself. Keep the viewport-pinned box but
+         make the SHELL the single scroll container (overflow-y:auto) and let
+         both panes flow naturally inside it, so nav + content read as one
+         scrollable page. */
       .fm-settings {
         display: flex;
         flex-direction: column;
+        overflow-y: auto;
+        overflow-x: hidden;
+        -webkit-overflow-scrolling: touch;
       }
 
       /* Sidebar -> full-width top region; sizes to content, does not scroll. */
@@ -173,12 +182,13 @@
       }
       .fm-set-nav-item.is-active { border-color: transparent; }
 
-      /* ---- Main pane: fills remaining height, scrolls internally so the
-         sticky .fm-set-bar (height:50px; position:sticky; top:0) stays pinned. */
+      /* ---- Main pane: grows to fit content (no inner scroll); the document
+         owns the scroll now. The sticky .fm-set-bar sticks to the viewport
+         top while you scroll the page rather than to an inner scroll box. */
       .fm-set-main {
-        flex: 1 1 auto;
+        flex: 0 0 auto;
         min-height: 0;
-        overflow: auto;
+        overflow: visible;
         width: 100%;
       }
 
