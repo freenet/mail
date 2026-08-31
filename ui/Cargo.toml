@@ -23,7 +23,7 @@ futures = "0.3"
 ml-dsa = { workspace = true }
 ml-kem = { workspace = true }
 rand_core = { workspace = true }  # rand_core 0.10 for encapsulate_with_rng
-chacha20poly1305 = "0.10"
+chacha20poly1305 = "0.11"
 hkdf = { workspace = true }
 sha2 = { workspace = true }
 serde = { workspace = true }
