@@ -45,7 +45,7 @@ jobs:
         # Pinned (issue #206): facade.wasm bytes are sensitive to rustc
         # version. Stable-channel bumps would silently rotate the facade
         # contract id. Keep in sync with rust-toolchain.toml.
-        uses: dtolnay/rust-toolchain@1.95.0
+        uses: dtolnay/rust-toolchain@1.100.0
         with:
           targets: wasm32-unknown-unknown
 

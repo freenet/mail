@@ -41,7 +41,7 @@ jobs:
 
       - name: Install Rust
         # Pinned (issue #206): keep in sync with rust-toolchain.toml.
-        uses: dtolnay/rust-toolchain@1.95.0
+        uses: dtolnay/rust-toolchain@1.100.0
         with:
           targets: wasm32-unknown-unknown
 
