@@ -185,7 +185,7 @@ jobs:
         run: cargo binstall -y --force --version 0.7.3 dioxus-cli
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: '20'
 
