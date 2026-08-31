@@ -36,7 +36,7 @@ jobs:
     # webapp, same compile-bound profile as build.yml.
     runs-on: ubicloud-standard-8
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
           fetch-depth: 2
