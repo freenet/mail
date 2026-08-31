@@ -161,7 +161,7 @@ jobs:
       # native ubicloud amd64 — only CI bytes are canonical.
       - name: Upload rebuilt facade.wasm on drift
         if: failure() && steps.facade-verify.conclusion == 'failure'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: facade-wasm-rebuilt-${{ github.sha }}
           path: contracts/facade/target/wasm32-unknown-unknown/release/freenet_email_facade.wasm
