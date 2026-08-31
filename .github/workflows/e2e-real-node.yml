@@ -35,7 +35,7 @@ jobs:
     runs-on: ubicloud-standard-8
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
 

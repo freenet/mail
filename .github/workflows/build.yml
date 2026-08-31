@@ -21,7 +21,7 @@ jobs:
     # to parallelise the workspace build).
     runs-on: ubicloud-standard-8
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
 
@@ -137,7 +137,7 @@ jobs:
     runs-on: ubicloud-standard-8
     needs: build-and-test
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
 
