@@ -44,7 +44,7 @@ license = "LGPL-3.0-or-later"
 
 [workspace.dependencies]
 # Freenet
-freenet-stdlib = "0.3.5"
+freenet-stdlib = "0.8.5"
 # Internal
 freenet-email-core = { path = "common" }
 freenet-aft-interface = { path = "modules/antiflood-tokens/interfaces" }

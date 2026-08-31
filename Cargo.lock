@@ -1549,7 +1549,7 @@ dependencies = [
  "bincode",
  "bs58",
  "chrono",
- "freenet-stdlib",
+ "freenet-stdlib 0.3.5",
  "ml-dsa",
  "serde",
  "serde_json",
@@ -1565,7 +1565,7 @@ dependencies = [
  "ciborium",
  "ed25519-dalek",
  "freenet-email-core",
- "freenet-stdlib",
+ "freenet-stdlib 0.8.5",
  "rand 0.8.5",
 ]
 
@@ -1587,7 +1587,7 @@ dependencies = [
  "ciborium",
  "ed25519-dalek",
  "freenet-email-facade-types",
- "freenet-stdlib",
+ "freenet-stdlib 0.3.5",
  "rand 0.8.5",
 ]
 
@@ -1605,7 +1605,7 @@ version = "0.0.1"
 dependencies = [
  "chrono",
  "freenet-aft-interface",
- "freenet-stdlib",
+ "freenet-stdlib 0.3.5",
  "ml-dsa",
  "serde",
  "serde_json",
@@ -1624,7 +1624,7 @@ dependencies = [
  "dioxus",
  "freenet-aft-interface",
  "freenet-email-inbox",
- "freenet-stdlib",
+ "freenet-stdlib 0.8.5",
  "futures",
  "getrandom 0.2.17",
  "gloo-timers",
@@ -1664,6 +1664,30 @@ name = "freenet-stdlib"
 version = "0.3.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c3ac04f50790cc912697afa60d303a9d3efff2a70e5f787192b7cd053ae2fb9"
+dependencies = [
+ "bincode",
+ "blake3",
+ "bs58",
+ "byteorder",
+ "bytes",
+ "chrono",
+ "flatbuffers",
+ "freenet-macros",
+ "futures",
+ "semver",
+ "serde",
+ "serde_json",
+ "serde_with",
+ "thiserror 2.0.18",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "freenet-stdlib"
+version = "0.8.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b62aeba7634d1ae5c2d02f78db33ee40442511858275be5be2099d24a13b2559"
 dependencies = [
  "bincode",
  "blake3",
@@ -2226,7 +2250,7 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "ecdsa",
- "freenet-stdlib",
+ "freenet-stdlib 0.8.5",
  "p384",
  "pico-args",
  "rand 0.8.5",
@@ -2490,7 +2514,7 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "ecdsa",
- "freenet-stdlib",
+ "freenet-stdlib 0.8.5",
  "p384",
  "pico-args",
  "rand 0.8.5",
@@ -4499,7 +4523,7 @@ dependencies = [
  "ed25519-dalek",
  "freenet-email-core",
  "freenet-email-facade",
- "freenet-stdlib",
+ "freenet-stdlib 0.8.5",
  "rand 0.8.5",
  "serde",
  "tempfile",
