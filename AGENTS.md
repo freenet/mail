@@ -43,104 +43,15 @@ scripts/release.sh <version>             # Full release: build → sign → publ
 scripts/smoke-test-production.sh <url>   # Playwright suite against deployed webapp
 ```
 
-### Repository Structure
+`example-data + use-node` is buildable but has no user — the app always
+reaches for the node when `use-node` is set. Use `no-sync` (combined with
+`example-data`) for offline dev builds; see `ui/Cargo.toml` for the full
+feature list.
 
-```
-freenet-email/
-├── common/                  # Shared types (freenet-email-core)
-├── contracts/
-│   ├── inbox/               # Email inbox contract (WASM)
-│   └── web-container/       # Web container contract (WASM)
-├── ui/                      # Dioxus web UI
-│   └── src/
-│       ├── lib.rs           # Entry point, WEB_CONTAINER_CONTRACT_ID embed
-│       ├── app.rs           # Main component, inbox UI
-│       ├── app/login.rs     # Identity management UI
-│       ├── api.rs           # WebSocket communication with Freenet node
-│       ├── aft.rs           # Anti-Flood Token management
-│       ├── inbox.rs         # Inbox state & message encryption
-│       ├── log.rs           # Logging abstraction
-│       └── test_util.rs     # Test helpers
-├── modules/                 # Vendored dependencies
-│   ├── antiflood-tokens/
-│   │   └── interfaces/      # freenet-aft-interface
-│   └── identity-management/ # Identity delegate
-├── tools/
-│   └── web-container-sign/  # ed25519 signer binary (our web-container-tool)
-├── test-contract/           # Committed test keys (identity + web-container)
-├── published-contract/      # Committed signed-webapp snapshot
-├── Cargo.toml               # Workspace root
-└── Makefile.toml            # cargo-make build system
-```
-
-### Key Dependencies
-
-| Dependency | Purpose |
-|-----------|---------|
-| `freenet-stdlib` | Freenet contract/delegate SDK |
-| `dioxus` | Web UI framework (WASM) |
-| `ml-kem` | ML-KEM-768 (NIST FIPS 203) post-quantum key encapsulation for message encryption |
-| `ml-dsa` | ML-DSA-65 (NIST FIPS 204) post-quantum signatures for inbox state deltas and AFT |
-| `chacha20poly1305` | Symmetric encryption for message content (key from ML-KEM) |
-| `freenet-aft-interface` | Anti-Flood Token protocol |
-| `identity-management` | Identity delegate for alias management |
-
-### Architecture
-
-- **Inbox Contract**: Stores encrypted messages on Freenet. ML-DSA-65 signatures
-  verify ownership of state deltas. Messages are gated by AFT tokens to prevent spam.
-- **Web Container**: Minimal contract that hosts the compiled Dioxus UI as a
-  Freenet webapp.
-- **UI**: Dioxus WASM app communicating with a local Freenet node via WebSocket.
-  Handles identity creation, message composition, encryption, and inbox display.
-- **AFT Integration**: Each sent message requires a token from the Anti-Flood
-  Token system, preventing spam while preserving sender privacy.
-
-### Feature flag matrix
-
-The UI crate at `ui/Cargo.toml` exposes four features that compose to
-produce different builds. The cell shows whether that combination is a
-supported build target and what it's used for.
-
-| Flag          | Purpose                                                                                  |
-|---------------|------------------------------------------------------------------------------------------|
-| `use-node`    | Default. Enables the WebSocket bridge to a local Freenet node and all contract calls.    |
-| `example-data`| Seeds the UI with two mock identities (`address1`, `address2`) and mock inboxes.          |
-| `no-sync`     | Disables the WebSocket bridge entirely. Must be combined with `example-data` to be useful.|
-| `contract`    | (inbox crate, not ui) Enables the inbox contract's `ContractInterface` impl.             |
-
-**Supported combinations:**
-
-| Build                                                        | What it's for                                |
-|--------------------------------------------------------------|----------------------------------------------|
-| `cargo make build` (default: `use-node`)                     | Production release, talks to a real node    |
-| `cargo make dev-example` (`example-data,no-sync`)            | Offline dev loop, no node required           |
-| `cargo make build-ui-example-no-sync`                        | CI Playwright builds (same flags as above)   |
-| `cargo test -p freenet-email-inbox --features contract`      | Inbox contract integration tests (host)     |
-
-`example-data + use-node` is technically buildable but has no user —
-the app always reaches for the node when `use-node` is set. Use
-`no-sync` whenever you want offline mode.
-
-### Running a Freenet node
-
-There are two modes depending on what you're doing:
-
-| Mode                 | Command               | When to use                                                   |
-|----------------------|-----------------------|---------------------------------------------------------------|
-| **Local sandbox**    | `freenet local` (or `cargo make run-node`) | Developing contracts, running integration tests, publishing the test contract |
-| **Network-connected**| `freenet network`     | Production publish, smoke-testing the live webapp             |
-
-The local sandbox is entirely self-contained — it spins up a single-node
-network with no peers, so publishing to it doesn't propagate anywhere
-and can't be observed from other machines. It's the right target for
-`publish-email-test`, `publish-all`, and every Phase 3 / Phase 4
-automated test.
-
-The network-connected mode joins the real Freenet network and is the
-target for production publishes: `publish-email`, `publish-production`,
-and `scripts/release.sh`. The first publish takes ~30s to propagate
-before the gateway URL resolves.
+Two node modes: `freenet local` / `cargo make run-node` (local sandbox, no
+peers; used by `publish-email-test`/`publish-all`/tests) vs. `freenet network`
+(joins the real network; used by `publish-email`/`publish-production`/
+`scripts/release.sh`; first publish takes ~30s to propagate).
 
 > **⚠️ Port collision — never test-publish onto a running `freenet network` node.**
 > `freenet local`/`fdev` both default to **port 7509**. If a long-running
@@ -171,34 +82,11 @@ cargo make test-ui-playwright       # Playwright E2E tests (build + serve + test
 cargo make test-ui-playwright-setup # One-time: install Playwright browsers
 ```
 
-### Build Targets
-
-- `wasm32-unknown-unknown`: Contracts (inbox, web-container) and UI
-- Native: Development tools (`identity-management` key generator,
-  `web-container-sign` signer)
-
 ## Publishing
 
 Freenet-email follows `freenet-river`'s signed-and-committed publishing
 pattern: every release is a pair of `(ed25519 signature, webapp bytes)`
 under a contract ID that is deterministic given the committed source.
-
-### Directory layout
-
-```
-freenet-email/
-├── published-contract/          # ← committed snapshot (W4 of #6)
-│   ├── contract-id.txt          # base58 ContractInstanceId
-│   ├── web_container_contract.wasm
-│   ├── webapp.parameters        # 32 bytes: ed25519 verifying key
-│   └── README.md
-├── test-contract/
-│   ├── README.md                # security notes on committed test keys
-│   ├── web-container-keys.toml  # committed ed25519 test keypair
-│   └── identity/                # (pre-existing) P-384 delegate test key
-└── tools/
-    └── web-container-sign/      # the signer binary (our web-container-tool)
-```
 
 ### Sandbox publish (test)
 
@@ -266,15 +154,12 @@ churn shifts the wasm bytes (issue #198). To give users a permanent
 bookmarkable URL, the project ships a **facade** contract whose id is
 designed to stay byte-stable across every release.
 
-```
-contracts/facade/                 stable wasm — never rebuilt for a release
-contracts/facade-loader/          static HTML+JS shell served by the facade
-published-contract/facade.wasm    committed snapshot; CI enforces byte-equality
-published-contract/facade-id.txt  the stable contract id users bookmark
-published-contract/facade.parameters
-                                  32-byte ed25519 verifying key (same prod key
-                                  as web-container; the "publisher identity")
-```
+`contracts/facade/` (stable wasm, never rebuilt for a release) and
+`contracts/facade-loader/` (static HTML+JS shell it serves) are checked
+into `published-contract/facade.{wasm,parameters,id.txt}` — CI enforces
+byte-equality on the wasm; `facade-id.txt` is the stable id users
+bookmark; `facade.parameters` is the same prod ed25519 key used for
+web-container (the "publisher identity").
 
 Per release the facade WASM is unchanged. Only the facade contract's
 state changes — its `current_app_id` pointer is flipped via
@@ -289,17 +174,13 @@ instead of just a webapp signature. Signature payload is canonicalized
 hand-rolled bytes (see `freenet_email_core::facade::signed_payload`) to
 sidestep CBOR map-ordering concerns.
 
-**Phase 1 scope**: facade lives alongside the web-container, not yet
-replacing it. The UI is still served at the rotating web-container id;
-the facade is published once per environment as the new stable entry
-point.
-
-**Phase 3 scope (#200)**: `scripts/release.sh` automatically renders +
-signs + UPDATEs the facade pointer per release (so users hitting the
-facade URL get the new app). UI's `lib.rs` logs both
-`WEB_CONTAINER_CONTRACT_ID` and `FACADE_CONTRACT_ID` on startup so
-devtools shows which facade a build references. Both are conditional
-on `published-contract/facade-id.txt` being committed (one-time facade
+The facade lives alongside the web-container, not replacing it — the UI is
+still served at the rotating web-container id, and the facade is published
+once per environment as the stable entry point. `scripts/release.sh`
+automatically renders + signs + UPDATEs the facade pointer per release
+(#200); UI's `lib.rs` logs both `WEB_CONTAINER_CONTRACT_ID` and
+`FACADE_CONTRACT_ID` on startup. Both are conditional on
+`published-contract/facade-id.txt` being committed (one-time facade
 publish required first; see RELEASING.md §"Facade contract update").
 
 #### Pointer lifecycle — how the facade actually serves a release
