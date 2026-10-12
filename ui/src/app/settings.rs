@@ -141,7 +141,7 @@ pub(crate) fn SettingsShell() -> Element {
                                     .map(|c| c.to_string())
                                     .unwrap_or_else(|| "·".into());
                                 let row_fp = fp.clone();
-                                let bg = if is_active { "var(--bg-soft)" } else { "#fff" };
+                                let bg = if is_active { "var(--bg-soft)" } else { "var(--bg-card)" };
                                 let style = format!(
                                     "all: unset; display: flex; gap: 10px; align-items: center; width: 100%; padding: 8px 12px; cursor: pointer; background: {bg};",
                                 );
@@ -1611,6 +1611,31 @@ mod tests {
     }
 
     const FP: &str = "abandon-ability-able-about-above-absent";
+
+    /// #340: every Settings screen renders inside `.fm-app`, which has a dark
+    /// theme. A hard-coded white inline background ignores the theme and puts
+    /// the light dark-mode ink on a white surface (AFT tier cards, identity
+    /// switcher rows). Use `var(--bg-card)` instead.
+    #[test]
+    fn no_hardcoded_white_backgrounds_340() {
+        let src = include_str!("settings.rs");
+        let body = src.split("#[cfg(test)]").next().unwrap();
+        let offenders: Vec<usize> = body
+            .match_indices('#')
+            .filter(|(i, _)| {
+                let hex: String = body[i + 1..]
+                    .chars()
+                    .take_while(|c| c.is_ascii_hexdigit())
+                    .collect();
+                matches!(hex.to_ascii_lowercase().as_str(), "fff" | "ffffff")
+            })
+            .map(|(i, _)| body[..i].matches('\n').count() + 1)
+            .collect();
+        assert!(
+            offenders.is_empty(),
+            "hard-coded white in settings.rs at line(s) {offenders:?}; use var(--bg-card)"
+        );
+    }
 
     /// No saved decision + auto-accept OFF → `None` (show modal).
     #[test]
