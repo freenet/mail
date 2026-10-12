@@ -129,7 +129,7 @@ pub(crate) fn SettingsShell() -> Element {
                     div {
                         class: "fm-set-ident-pop",
                         role: "listbox",
-                        style: "border: 1px solid var(--line); border-radius: 10px; background: #fff; box-shadow: 0 8px 24px rgba(0,0,0,0.08); margin: 4px 0 12px; overflow: hidden;",
+                        style: "border: 1px solid var(--line); border-radius: 10px; background: var(--bg-card); box-shadow: 0 8px 24px rgba(0,0,0,0.08); margin: 4px 0 12px; overflow: hidden;",
                         for (uid, row_alias, fp) in switcher_rows.iter() {
                             {
                                 let uid = *uid;
@@ -962,7 +962,7 @@ fn ScrAft() -> Element {
                                     div {
                                         key: "{tier_name}",
                                         class: "fm-tier",
-                                        style: "display: flex; flex-direction: column; gap: 4px; border: 1px solid var(--line); border-radius: 11px; padding: 12px 12px 10px; background: #fff; {extra_style}",
+                                        style: "display: flex; flex-direction: column; gap: 4px; border: 1px solid var(--line); border-radius: 11px; padding: 12px 12px 10px; background: var(--bg-card); {extra_style}",
                                         "data-testid": "fm-aft-usage-tier",
                                         "data-tier": "{tier_name}",
                                         "data-used": "{used}",
@@ -1007,7 +1007,7 @@ fn ScrAft() -> Element {
                                     key: "{id}",
                                     class: "{cls}",
                                     r#type: "button",
-                                    style: "all: unset; display: flex; flex-direction: column; gap: 4px; cursor: pointer; border: 1px solid var(--line); border-radius: 11px; padding: 12px 12px 10px; background: #fff;",
+                                    style: "all: unset; display: flex; flex-direction: column; gap: 4px; cursor: pointer; border: 1px solid var(--line); border-radius: 11px; padding: 12px 12px 10px; background: var(--bg-card);",
                                     "data-testid": "fm-aft-tier",
                                     "data-tier": "{id}",
                                     "data-active": "{active}",

@@ -64,6 +64,15 @@
       --caution: #a6731f;
       --warn: #a32f2f;
 
+      /* Error/danger text on a card surface (e.g. the import-contact
+         unverified warning, #340). Dark theme remaps to a light red so it
+         stays readable on the dark card. */
+      --danger-ink: #991b1b;
+
+      /* Ink on a solid --trust surface (verify-box tick). White works on the
+         light-theme green but not on the brighter dark-theme green (#340). */
+      --on-trust: #fff;
+
       position: fixed;
       inset: 0;
       display: flex;
@@ -124,6 +133,8 @@
     --amber-ink: #fbbf24;
     --caution: #d6a44e;
     --warn: #e06c6c;
+    --danger-ink: #f87171;
+    --on-trust: #052e16;
   }
 
   @media (prefers-color-scheme: dark) {
@@ -156,6 +167,8 @@
       --amber-ink: #fbbf24;
       --caution: #d6a44e;
       --warn: #e06c6c;
+      --danger-ink: #f87171;
+      --on-trust: #052e16;
     }
   }
 

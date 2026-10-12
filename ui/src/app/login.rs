@@ -2376,7 +2376,7 @@ pub(super) fn ImportContactForm() -> Element {
                                 }
                                 if has_verify_phrase && !*verified.read() {
                                     span { class: "verify-sub",
-                                        style: "color:#991b1b;",
+                                        style: "color: var(--danger-ink, #991b1b);",
                                         "The sender included a verify phrase. Importing unverified is allowed, but verified-only inboxes will reject your messages until you tick this once you've matched the six words out-of-band."
                                     }
                                 }
