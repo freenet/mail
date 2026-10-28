@@ -26,12 +26,16 @@ jobs:
           submodules: recursive
 
       - name: Install Rust
-        # Pinned (issue #206): keep in sync with rust-toolchain.toml.
-        # See check-contract-wasm.yml for the rationale.
-        uses: dtolnay/rust-toolchain@1.95.0
+        # Keep in sync with rust-toolchain.toml.
+        uses: dtolnay/rust-toolchain@1.99.1
         with:
           targets: wasm32-unknown-unknown
           components: rustfmt, clippy
+
+      - name: Install the container contract's pinned Rust
+        # contracts/facade/rust-toolchain.toml; rustup reads it here.
+        working-directory: contracts/facade
+        run: rustup toolchain install
 
       - name: Rustfmt
         run: cargo fmt --all -- --check
@@ -45,7 +49,7 @@ jobs:
             ~/.cargo/bin/cargo-binstall
             ~/.cargo/bin/fdev
             ~/.cargo/bin/dx
-          key: ${{ runner.os }}-cargo-bins-fnet-v0.2.54-dx-0.7.3-v1
+          key: ${{ runner.os }}-cargo-bins-fnet-v0.2.151-dx-0.7.10-v2
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -77,7 +81,7 @@ jobs:
         # fdev's crates.io versions don't carry binstall metadata; the
         # matching freenet-core release tag is what ships the binary.
         run: |
-          REL="v0.2.54"
+          REL="v0.2.151"
           BASE="https://github.com/freenet/freenet-core/releases/download/${REL}"
           mkdir -p "$HOME/.cargo/bin"
           curl -fsSL "${BASE}/fdev-x86_64-unknown-linux-musl.tar.gz" \
@@ -87,9 +91,9 @@ jobs:
 
       - name: Install Dioxus CLI
         if: steps.cache-bins.outputs.cache-hit != 'true' || steps.verify-bins.outputs.missing == '1'
-        run: cargo binstall -y --force --version 0.7.3 dioxus-cli
+        run: cargo binstall -y --force --version 0.7.10 dioxus-cli
 
-      - name: Build all contracts and UI
+      - name: Build the UI (contract WASM is frozen)
         run: cargo make build
 
       - name: Clippy
@@ -101,11 +105,11 @@ jobs:
       - name: Run inbox integration tests
         run: cargo make test-inbox
 
-      # Issue #198: facade is OUTSIDE the workspace (own Cargo.lock). The
-      # main workspace build/clippy/test commands above don't reach it.
-      # Build, lint, and test it here so PRs that touch facade types or
-      # contract logic are still gated.
-      - name: Build + lint + test facade contract (own workspace)
+      # Issue #198: the container contract is OUTSIDE the workspace (own
+      # Cargo.lock and own toolchain pin). The main workspace
+      # build/clippy/test commands above don't reach it. Build, lint, and
+      # test it here so PRs that touch its types or logic are still gated.
+      - name: Build + lint + test container contract (own workspace)
         run: |
           cd contracts/facade
           cargo fmt -- --check
@@ -142,8 +146,8 @@ jobs:
           submodules: recursive
 
       - name: Install Rust
-        # Pinned (issue #206): keep in sync with rust-toolchain.toml.
-        uses: dtolnay/rust-toolchain@1.95.0
+        # Keep in sync with rust-toolchain.toml.
+        uses: dtolnay/rust-toolchain@1.99.1
         with:
           targets: wasm32-unknown-unknown
 
@@ -155,7 +159,7 @@ jobs:
             ~/.cargo/bin/cargo-make
             ~/.cargo/bin/cargo-binstall
             ~/.cargo/bin/dx
-          key: ${{ runner.os }}-cargo-bins-playwright-dx-0.7.3-v4
+          key: ${{ runner.os }}-cargo-bins-playwright-dx-0.7.10-v5
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -182,7 +186,7 @@ jobs:
 
       - name: Install Dioxus CLI
         if: steps.cache-bins.outputs.cache-hit != 'true' || steps.verify-bins.outputs.missing == '1'
-        run: cargo binstall -y --force --version 0.7.3 dioxus-cli
+        run: cargo binstall -y --force --version 0.7.10 dioxus-cli
 
       - name: Setup Node.js
         uses: actions/setup-node@v7

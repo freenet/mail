@@ -1,0 +1,14 @@
+[toolchain]
+# The container contract's own toolchain, separate from the repo root's
+# (issue #206). container.wasm bytes, and so its contract id, depend on the
+# rustc/LLVM version, and that id is the bookmarkable URL. rustup picks this
+# file up for every cargo command run from this directory, which is how all
+# container builds run (Makefile build-container, scripts/
+# check-container-byte-equal.sh, scripts/build-container-snapshot-linux.sh).
+#
+# Bump only as a deliberate act: rebuild and commit the snapshot
+# (published-contract/container{.wasm,.parameters,-id.txt}) and accept the new
+# URL. CI's check-container-byte-equal fails on any other change.
+channel = "1.95.0"
+targets = ["wasm32-unknown-unknown"]
+components = ["rustfmt", "clippy"]

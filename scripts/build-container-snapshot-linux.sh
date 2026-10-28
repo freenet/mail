@@ -6,7 +6,7 @@
 # WILL NOT match the CI byte-equality gate.
 #
 # Use this when:
-#   • Bumping rustc in rust-toolchain.toml.
+#   • Bumping rustc in contracts/facade/rust-toolchain.toml.
 #   • Bumping a `=x.y.z` pin under contracts/facade/Cargo.toml or
 #     contracts/facade-types/Cargo.toml.
 #   • Editing facade source.
@@ -32,11 +32,11 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-# Read the pinned channel from rust-toolchain.toml so the docker image
+# Read the pinned channel from contracts/facade/rust-toolchain.toml so the docker image
 # tag and the host-native rustup tracker stay in sync.
-PINNED_RUSTC=$(awk -F'"' '/^channel/ {print $2; exit}' rust-toolchain.toml)
+PINNED_RUSTC=$(awk -F'"' '/^channel/ {print $2; exit}' contracts/facade/rust-toolchain.toml)
 if [ -z "$PINNED_RUSTC" ] || [ "$PINNED_RUSTC" = "stable" ]; then
-    echo "error: rust-toolchain.toml has no explicit version pin (channel=$PINNED_RUSTC)." >&2
+    echo "error: contracts/facade/rust-toolchain.toml has no explicit version pin (channel=$PINNED_RUSTC)." >&2
     echo "       Pin to an exact version (e.g. 1.95.0) before regenerating the snapshot." >&2
     exit 1
 fi

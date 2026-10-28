@@ -1,11 +1,14 @@
 [toolchain]
-# Pinned (issue #206): container.wasm bytes — and therefore the container contract
-# contract id — are sensitive to rustc/LLVM version. A stable-channel
-# bump rotates the bytes and breaks every bookmarked URL. Bumping this
-# pin is a deliberate act paired with `cargo make update-published-container`
-# + commit of the new snapshot + a release-notes mention. Bump every
-# `dtolnay/rust-toolchain@<version>` ref in .github/workflows/ with it;
-# Dependabot is told to ignore that action so it cannot do half the job.
-channel = "1.95.0"
+# Latest stable for the workspace and the out-of-workspace contract crates.
+# Nothing published is rebuilt with it: the contract and delegate WASM the UI
+# embeds are frozen under published-contract/wasm/, and a new generation is
+# built deliberately with scripts/build-wasm.sh.
+#
+# The one exception is the container contract, whose bytes are its stable
+# URL: it keeps its own pin in contracts/facade/rust-toolchain.toml.
+#
+# Keep the `dtolnay/rust-toolchain@<version>` refs in .github/workflows/ in
+# step with this file; Dependabot is told to ignore that action.
+channel = "1.99.1"
 targets = ["wasm32-unknown-unknown"]
 components = ["rustfmt", "clippy"]

@@ -87,9 +87,9 @@ updates:
     # Set explicitly: omitting this caps at 5 and silently withholds the rest.
     open-pull-requests-limit: 20
     ignore:
-      # The action's ref IS the pinned rustc (issue #206). container.wasm bytes
-      # depend on the rustc version, so a bump rotates the stable container contract
-      # contract id. Bump it by hand, together with rust-toolchain.toml.
+      # The action's ref IS the root toolchain version; bump it by hand,
+      # together with rust-toolchain.toml. The container contract's rustc
+      # (issue #206) is pinned separately in contracts/facade/rust-toolchain.toml.
       - dependency-name: "dtolnay/rust-toolchain"
     groups:
       github-actions-minor-and-patch:

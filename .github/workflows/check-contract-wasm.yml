@@ -73,12 +73,17 @@ jobs:
           fetch-depth: 2
 
       - name: Install Rust
-        # Pinned (issue #206): container.wasm bytes are sensitive to rustc
-        # version. Stable-channel bumps would silently rotate the container contract
-        # contract id. Keep in sync with rust-toolchain.toml.
-        uses: dtolnay/rust-toolchain@1.95.0
+        # Keep in sync with rust-toolchain.toml.
+        uses: dtolnay/rust-toolchain@1.99.1
         with:
           targets: wasm32-unknown-unknown
+
+      - name: Install the container contract's pinned Rust
+        # Issue #206: container.wasm bytes, and so the container contract
+        # id, depend on the rustc version. contracts/facade/rust-toolchain.toml
+        # pins it; rustup reads that file here and in every container build.
+        working-directory: contracts/facade
+        run: rustup toolchain install
 
       - name: Cache cargo-installed binaries
         id: cache-bins
@@ -93,7 +98,14 @@ jobs:
 
       - name: Install fdev
         if: steps.cache-bins.outputs.cache-hit != 'true'
-        run: cargo install --locked --force --version 0.3.313 fdev
+        # The prebuilt fdev from the matching freenet-core release
+        # (v0.2.151 ships fdev 0.3.313).
+        run: |
+          mkdir -p "$HOME/.cargo/bin"
+          curl -fsSL "https://github.com/freenet/freenet-core/releases/download/v0.2.151/fdev-x86_64-unknown-linux-musl.tar.gz" \
+            | tar -xz -C "$HOME/.cargo/bin/" fdev
+          chmod +x "$HOME/.cargo/bin/fdev"
+          fdev --version
 
       # Issue #214 F1 tripwire. The committed parameters MUST be the
       # production verifying key, never the committed test key from
@@ -125,8 +137,7 @@ jobs:
       # Issue #206 (closes the Phase 1 informational gate). The container
       # contract id is intended to stay byte-stable across releases.
       # Both prerequisites are now in place:
-      #   • rustc pinned in rust-toolchain.toml (and the dtolnay action
-      #     in this workflow uses the same pinned version).
+      #   • rustc pinned in contracts/facade/rust-toolchain.toml.
       #   • Snapshot at published-contract/container{.wasm,.parameters,-id.txt}
       #     produced under linux/amd64 with that pinned rustc.
       # Any drift in the rebuilt wasm is now a release blocker —
