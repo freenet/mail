@@ -25,6 +25,7 @@ use crate::{
 };
 
 pub(crate) mod address_book;
+pub(crate) mod backup_token;
 pub(crate) mod login;
 pub(crate) mod settings;
 
