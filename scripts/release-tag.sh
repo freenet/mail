@@ -80,8 +80,10 @@ if [ "$TAG_HEAD" = "1" ]; then
         || die "local HEAD is not origin/main ($(git rev-parse --short origin/main)); --head tags only what was published"
 else
     # The trailing space keeps v0.2.7 from matching v0.2.70 or v0.2.7-rc1.
+    # awk reads to the end (no `exit`): exiting early would SIGPIPE git log,
+    # which pipefail turns into a failed lookup on a long history.
     SHA=$(git log --format='%H%x09%s' origin/main \
-        | awk -F'\t' -v p="chore(release): $TAG " 'index($2, p) == 1 { print $1; exit }')
+        | awk -F'\t' -v p="chore(release): $TAG " '!found && index($2, p) == 1 { print $1; found = 1 }')
     [ -n "$SHA" ] \
         || die "no \"chore(release): $TAG ...\" commit on origin/main yet. Merge the release/$TAG PR first."
 fi
