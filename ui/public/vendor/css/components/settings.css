@@ -765,7 +765,10 @@
     /* Recovery-key backup panel (BackupKeyPanel) inside .fm-app (Settings).
        Mirrors the .bk-* rules in login.css (@scope .fm-pre), but uses
        tokens throughout so dark mode adapts. */
-    .bk-card-body { padding: 4px 20px 18px; }
+    .bk-card-body { padding: 16px 20px 18px; }
+    /* BackupKeyPanel scrolls itself into view on mount; leave room above it
+       for the sticky settings header and the card title. */
+    .bk-panel { scroll-margin-top: 150px; }
     .bk-lede { font-size: 13.5px; color: var(--ink2); line-height: 1.55; margin: 0 0 16px; }
     .bk-lede strong { font-weight: 500; color: var(--ink0); }
     .bk-entry-title {

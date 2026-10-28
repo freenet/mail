@@ -459,6 +459,8 @@
     /* Recovery-key backup panel (BackupKeyPanel). Same rules live in
        settings.css under @scope (.fm-app), using its dark-mode tokens. */
     .bk-inline { margin-top: 18px; padding-top: 18px; border-top: 1px solid var(--line2); }
+    /* BackupKeyPanel scrolls itself into view on mount. */
+    .bk-panel { scroll-margin-top: 24px; }
     .bk-lede { font-size: 13.5px; color: var(--ink2); line-height: 1.55; margin: 0 0 16px; }
     .bk-lede strong { font-weight: 500; color: var(--ink0); }
     .bk-entry-title {

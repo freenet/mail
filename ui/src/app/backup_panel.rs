@@ -60,6 +60,10 @@ pub(crate) fn BackupKeyPanel(
     let mut revealed = use_signal(|| false);
     let mut copy_status: Signal<Option<CopyOutcome>> = use_signal(|| None);
     let mut download_status: Signal<Option<Result<String, String>>> = use_signal(|| None);
+    // The gateway shell drops a download that arrives within 2s of the
+    // previous one without telling us, so hold the button off for that
+    // long rather than report a download that never happens.
+    let mut download_cooling = use_signal(|| false);
 
     let title = entry_title(&alias, &words);
     let is_revealed = *revealed.read();
@@ -83,12 +87,20 @@ pub(crate) fn BackupKeyPanel(
         let alias = alias.clone();
         let words = words.clone();
         move |_| {
+            if *download_cooling.read() {
+                return;
+            }
             let fname = super::login::backup_filename(&alias, &words);
             let body = format!("{token}\n");
             match super::login::trigger_browser_download(&fname, body.as_bytes(), "text/plain") {
                 Ok(()) => {
                     download_status.set(Some(Ok(fname)));
                     on_exported.call(());
+                    download_cooling.set(true);
+                    spawn(async move {
+                        gloo_timers::future::TimeoutFuture::new(2_100).await;
+                        download_cooling.set(false);
+                    });
                 }
                 Err(e) => download_status.set(Some(Err(e))),
             }
@@ -102,6 +114,12 @@ pub(crate) fn BackupKeyPanel(
 
     rsx! {
         div { class: "bk-panel", "data-testid": testid::FM_BACKUP_PANEL,
+            // The panel can open far from the button that opened it (Settings
+            // renders it at the top of a long, scrolled screen; the create
+            // flow below the fingerprint grid), so bring it into view.
+            onmounted: move |evt| async move {
+                let _ = evt.scroll_to(ScrollBehavior::Smooth).await;
+            },
             p { class: "bk-lede",
                 strong { "Save this recovery key in your password manager." }
                 " Anyone who has it can read your mail and send as you. It is the only way to get this identity back if this browser's storage is lost."
@@ -148,6 +166,7 @@ pub(crate) fn BackupKeyPanel(
                     class: "btn btn-secondary",
                     r#type: "button",
                     "data-testid": testid::FM_BACKUP_DOWNLOAD,
+                    disabled: *download_cooling.read(),
                     onclick: on_download,
                     "Download as .txt"
                 }
