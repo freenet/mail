@@ -1,19 +1,13 @@
 name: Check Published Contract Drift
 
 on:
+  # No path filter on pull_request (issue #339): `check-drift` is a
+  # required status check, and a path-filtered workflow never reports
+  # it on a PR outside these paths, which leaves that PR unmergeable.
+  # Instead the `changes` job lets `check-drift` skip only a PR that
+  # changes nothing but documentation. A job skipped by its `if:`
+  # reports success to required checks.
   pull_request:
-    paths:
-      - 'contracts/web-container/**'
-      - 'contracts/facade/**'
-      - 'contracts/facade-types/**'
-      - 'contracts/facade-loader/**'
-      - 'common/**'
-      - 'ui/**'
-      - 'published-contract/**'
-      - 'test-contract/web-container-keys.toml'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'rust-toolchain.toml'
   push:
     branches: [main]
     paths:
@@ -30,7 +24,45 @@ on:
       - 'rust-toolchain.toml'
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      relevant: ${{ steps.filter.outputs.relevant }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The pull_request checkout is the merge commit, so HEAD^1 is
+          # the base branch and `HEAD^1 HEAD` is exactly the PR's diff.
+          fetch-depth: 2
+
+      - name: Detect drift-relevant changes
+        id: filter
+        run: |
+          # An allowlist of what is safe to skip, not a list of what
+          # matters: many inputs move facade.wasm bytes (.cargo/config.toml
+          # rustflags, Makefile.toml, scripts/), and a missed one must run
+          # the gate, not skip it. No Markdown file feeds the build, except
+          # under ui/public/ (Dioxus asset_dir, shipped in the webapp).
+          # --no-renames so a rename lists its source path too.
+          relevant=true
+          if [ "${{ github.event_name }}" = "pull_request" ] \
+            && changed=$(git diff --no-renames --name-only HEAD^1 HEAD) \
+            && ! printf '%s\n' "$changed" | grep -qE '^ui/public/' \
+            && ! printf '%s\n' "$changed" \
+              | grep -qvE '(\.md$|^(LICENSE|COPYING)(\.(LESSER|txt|md))?$|^$)'; then
+            relevant=false
+            echo "Only documentation changed; check-drift will be skipped."
+          fi
+          echo "relevant=$relevant" >> "$GITHUB_OUTPUT"
+
   check-drift:
+    needs: changes
+    # Run unless `changes` positively said "docs only". If `changes`
+    # failed or was cancelled, its output is empty and the gate runs:
+    # a skipped required check would otherwise pass (fail-open).
+    # `!cancelled()` rather than `always()`: still runs when `changes`
+    # failed, but not on a run that was cancelled outright.
+    if: ${{ !cancelled() && needs.changes.outputs.relevant != 'false' }}
     # ubicloud-standard-8 — rebuilding the published contract from
     # source involves a full wasm32 compile of the web-container +
     # webapp, same compile-bound profile as build.yml.
