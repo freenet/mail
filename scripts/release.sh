@@ -304,11 +304,10 @@ echo ""
 
 # ─── Container pointer flip (issue #200 Phase 3) ──────────────────────────────
 #
-# The web-container contract id rotates per release (#198 root cause).
-# Users hit the container contract instead — a stable bookmarkable URL whose
-# state points at the current release's webapp. Per release we re-render
-# the container loader with the new current_app_id baked in, sign a new
-# container state with bumped version, and UPDATE the container contract.
+# Users bookmark the container contract, a stable URL whose state points at
+# the webapp. The webapp contract is frozen, so the pointer normally names the
+# same app id every release; it is still re-signed with a bumped version and
+# UPDATEd each release.
 #
 # Conditional: only runs when published-contract/container-id.txt exists
 # (i.e. the container contract has been published once and its id committed). Until
@@ -346,7 +345,7 @@ if [ -f published-contract/container-id.txt ]; then
     # `--as-state` flag (freenet-core PR; older fdev silently fails).
     fdev execute update --as-state "$FACADE_ID" "$FACADE_STATE"
 
-    echo "  ✓ facade UPDATEd; bookmarked URL stays stable across releases"
+    echo "  ✓ container contract UPDATEd; bookmarked URL stays stable across releases"
     echo ""
 else
     echo "  ⚠️  published-contract/container-id.txt not committed yet."
@@ -417,7 +416,7 @@ echo ""
 echo "Next steps:"
 echo "  1. Wait ~30s for the contract (and container UPDATE, if applicable)"
 echo "     to propagate"
-echo "  2. Smoke-test against the rotating webapp id:"
+echo "  2. Smoke-test against the webapp id:"
 echo "       scripts/smoke-test-production.sh \\"
 echo "         http://<gw>:<port>/contract/web/$CONTRACT_ID/"
 if [ -f published-contract/container-id.txt ]; then
