@@ -10,9 +10,7 @@ scripts/generate-production-key.sh
 
 # Every release:
 freenet network   # in another terminal (network-connected node)
-scripts/release.sh 0.1.0
-# squash-merge the snapshot PR it opens once CI is green, then:
-scripts/release-tag.sh 0.1.0
+scripts/release.sh 0.3.0      # publishes, flips the container pointer, tags
 scripts/smoke-test-production.sh
 ```
 
@@ -20,23 +18,30 @@ Everything else is automation around those commands.
 
 ## Overview
 
-A release is a tuple of `(git tag, contract id, signed webapp)`:
+A release is a git tag plus a newly signed webapp state, published under
+the fixed webapp contract id `GeQLXXR8sfGe31BNRJoVxkvGUTnBkufJ4gTaoX5NWnU5`.
+The contract and delegate WASM are frozen in `published-contract/` (see
+`published-contract/README.md`); a release builds and signs only the UI.
 
-1. `scripts/release.sh` builds the webapp, signs it with the production
-   key, publishes the contract to the real Freenet network, commits the
-   updated `published-contract/` snapshot on a `release/v<version>`
-   branch, and opens a PR for it. `main` is protected (required checks,
-   squash-only merges), so the snapshot cannot be pushed there directly.
-2. Once that PR is squash-merged, `scripts/release-tag.sh <version>`
-   creates the annotated tag on main's merge commit and pushes it.
-3. `scripts/smoke-test-production.sh` runs the Playwright suite against
+1. `scripts/release.sh` builds the UI, signs it with the production key,
+   checks the key and the committed snapshot agree, publishes the webapp
+   state to the real Freenet network, flips the container contract's
+   pointer, and tags the commit it built from (`scripts/release-tag.sh
+   --sha`). Since nothing under `published-contract/` changes, there is no
+   snapshot commit.
+2. `scripts/smoke-test-production.sh` runs the Playwright suite against
    the deployed webapp via the Freenet gateway to confirm the release
    actually works end to end.
 
-The publish and the facade pointer flip are irreversible and visible to
-every user of the project; the snapshot branch and PR are public. The
-script prompts before each of those, and aborts on failure of any
-preflight check.
+If a release ever does change `published-contract/` (a deliberate new
+generation landed without its snapshot, for example), `release.sh` commits
+it on `release/v<version>`, opens a PR (`main` takes only squash-merged
+PRs), and `scripts/release-tag.sh <version>` tags the merge commit
+afterwards.
+
+The publish and the container pointer flip are irreversible and visible to
+every user of the project. The script prompts before each, and aborts on
+failure of any preflight check.
 
 ## Preconditions
 
@@ -54,8 +59,8 @@ This writes to `~/.config/freenet-email/web-container-keys.toml` with
 `chmod 600`. Override the path with `WEB_CONTAINER_KEY_FILE=...`.
 
 **Back it up immediately** to somewhere offline and durable. Losing
-this key means rotating the production contract id — every user of the
-old deployment will be orphaned. Suggested backup options (pick at
+this key means no further release can be signed for the production
+contract id; every user would have to move to a new URL. Suggested backup options (pick at
 least two):
 
 - Password manager with secure notes
@@ -95,10 +100,8 @@ uncommitted changes.
 `ui/src/lib.rs` bakes `env!("CARGO_PKG_VERSION")` into the wasm, and
 that string is what the sidebar shows. If `Cargo.toml`'s workspace
 `version` doesn't match the tag, the published webapp will display the
-old version forever (and the wasm bytes will be byte-equal to the
-previous release, so the release script reports "unchanged bytes" and
-nothing actually moves between tags — this is how v0.1.9 through
-v0.1.11 all shipped with `v0.1.8` baked in).
+old version forever (this is how v0.1.9 through v0.1.11 all shipped with
+`v0.1.8` baked in).
 
 Bump it BEFORE running `scripts/release.sh`:
 
@@ -119,7 +122,7 @@ All preflight-checked by `scripts/release.sh`. On macOS:
 ```bash
 brew install gnu-tar gh
 cargo install fdev
-cargo binstall --version 0.7.3 dioxus-cli
+cargo binstall --version 0.7.10 dioxus-cli
 cargo binstall cargo-make
 ```
 
@@ -128,7 +131,7 @@ On Linux, tar is already GNU tar; install the rest the same way.
 ## The release
 
 ```bash
-scripts/release.sh 0.1.0
+scripts/release.sh 0.3.0
 ```
 
 What happens, in order:
@@ -137,16 +140,20 @@ What happens, in order:
    present, tools installed, Freenet node reachable.
 2. **Test gate** — `cargo make test`, `test-inbox`, `clippy`. Any
    failure aborts.
-3. **First confirmation prompt** — summarizes the six irreversible
-   steps about to run. Type `y` to proceed.
+3. **First confirmation prompt** — summarizes the steps about to run.
+   Type `y` to proceed.
 4. **Build + sign + publish** — `cargo make publish-production` chains
-   `build` → `update-published-contract-prod` → `publish-email`. This
-   pushes the signed contract to the live Freenet network via fdev.
-5. **Facade pointer flip** — re-signs the facade state for the new
+   `build` → `sign-webapp` → `verify-published-contract` →
+   `publish-email`. The verify step refuses to publish unless the signing
+   key matches `published-contract/webapp.parameters` and the committed
+   WASM and parameters still derive `contract-id.txt`. The publish pushes
+   the signed webapp state to the live Freenet network via fdev.
+5. **Container pointer flip** — re-signs the container state for the
    webapp id and UPDATEs it (prompted).
 6. **Diff verification** — checks whether `published-contract/`
-   changed. If it didn't, there is nothing to commit and the script tags
-   the published commit directly (step 10 with `--sha`).
+   changed. Normally it didn't: there is nothing to commit and the script
+   tags the published commit directly (step 10 with `--sha`), and the
+   release is done. Steps 7-10 run only when something there changed.
 7. **Commit** `published-contract/` on a new `release/v$VERSION`
    branch (prompted), with `Published-From: <sha>` naming the main
    commit the webapp was built from. Local `main` is not touched.
@@ -166,7 +173,7 @@ To auto-confirm all prompts (useful for CI or scripting), pass
 `--yes`:
 
 ```bash
-scripts/release.sh 0.1.0 --yes
+scripts/release.sh 0.3.0 --yes
 ```
 
 ## Post-release smoke test
@@ -228,49 +235,48 @@ There are two ways to cover the real round trip:
 Post the liveness result and whichever of (1) or (2) you ran as a
 comment on the release tracking issue.
 
-## Facade contract update (issue #200, Phases 1 + 3)
+## Container contract update (issue #200)
 
-The web-container contract id rotates per release (issue #198). The
-facade contract gives users a stable bookmarkable URL across releases.
-See AGENTS.md §"Facade contract" for the architecture.
+The container contract (id `122f6AR7PyF8d8mhczuNQM4xrLtBf5t8g2iB7PEVT7KC`)
+is the stable bookmarkable entry point; its state points at the webapp.
+See AGENTS.md §"Container contract" for the architecture. The webapp
+contract id no longer changes between releases either, so the pointer
+normally names the same app id; it is re-signed with a newer version on
+every release regardless.
 
-**Phase 3 (#200) — automatic per-release flip**: `scripts/release.sh`
-now does this for you. After the contract publish + before the commit,
-the script:
+`scripts/release.sh` does this for you. After the webapp publish, the
+script:
 
-1. Re-renders the loader with the new `current_app_id` baked in
+1. Re-renders the loader with the `current_app_id` baked in
    (`cargo make build-container-loader` with `FACADE_CURRENT_APP_ID` set).
-2. Signs a new facade state with the production key (`cargo make
+2. Signs a new container state with the production key (`cargo make
    sign-container-state`).
-3. Prompts to push the facade UPDATE to the network (`fdev execute
-   update <FACADE_ID> target/container/container.state network`).
+3. Prompts to push the container UPDATE to the network (`fdev execute
+   update --as-state <container id> target/container/container.state`).
 
-The facade-flip block is **conditional on
-`published-contract/container-id.txt` being committed** — i.e. the facade
-must have been published once and its id committed first. Until then,
-the script warns and skips the flip; the rest of the release still goes
-through.
+The flip is **conditional on `published-contract/container-id.txt` being
+committed**; without it the script warns and skips the flip.
 
 ### Verifying the pointer flip worked
 
-After release.sh exits, sanity-check that the facade actually points
-at the new webapp:
+After release.sh exits, sanity-check that the container contract points
+at the webapp:
 
 ```bash
 NEW_APP_ID=$(cat published-contract/contract-id.txt)
 FACADE_ID=$(cat published-contract/container-id.txt)
 
-# 1. Facade serves the loader, and the loader bakes in the new app id.
+# 1. The container contract serves the loader, which bakes in the app id.
 curl -s "http://127.0.0.1:7509/v1/contract/web/${FACADE_ID}/?__sandbox=1" \
   | grep -F "${NEW_APP_ID}"
-# expect: var CURRENT_APP_ID = "<new app id>";
+# expect: var CURRENT_APP_ID = "<app id>";
 
 # 2. The new webapp itself serves.
 curl -sI "http://127.0.0.1:7509/v1/contract/web/${NEW_APP_ID}/" | head -1
 # expect: HTTP/1.1 200 OK
 
-# 3. Browser smoke: open the facade URL in a real browser. The loader
-# postMessages the gateway shell, which navigates to the new app.
+# 3. Browser smoke: open the container URL in a real browser. The loader
+# postMessages the gateway shell, which navigates to the app.
 echo "open http://127.0.0.1:7509/v1/contract/web/${FACADE_ID}/"
 ```
 
@@ -278,43 +284,21 @@ echo "open http://127.0.0.1:7509/v1/contract/web/${FACADE_ID}/"
 
 If the script aborts after step 4 (publish webapp) — most commonly
 because `fdev publish` returns a 300s client timeout despite the
-server-side publish succeeding (freenet-core#4102) — the webapp WAS
-published but the facade pointer was not flipped. Resume manually:
+server-side publish succeeding (freenet-core#4102) — the webapp may have
+been published while the container pointer was not flipped. Re-running
+`scripts/release.sh` is safe (it signs a newer version), or resume by hand:
 
 ```bash
-# Confirm the webapp landed despite fdev's complaint.
-NEW_APP_ID=$(cat published-contract/contract-id.txt)
-curl -sI "http://127.0.0.1:7509/v1/contract/web/${NEW_APP_ID}/" | head -1
-# expect HTTP/1.1 200 — if you get a 4xx/5xx, the publish actually failed
-# and you need to re-run the publish step.
-
-# Re-sign facade state with the new app id and push the pointer update.
+# Re-sign the container state and push the pointer update.
 cargo make sign-container-state
 fdev execute update --as-state \
     "$(cat published-contract/container-id.txt)" \
     target/container/container.state
 # expect: "Contract updated successfully" + StateSummary blob
 
-# Verify (same as §"Verifying the pointer flip worked" above).
-
-# Then land the snapshot the way release.sh would have (main only takes
-# squash-merged PRs):
-git checkout -b release/v<version>
-git add published-contract/
-# release-tag.sh refuses a snapshot commit without these two lines:
-#   Contract ID     the published id (published-contract/contract-id.txt)
-#   Published-From  the main commit the webapp was built from (release.sh
-#                   prints it; it is origin/main at the time you ran it)
-git commit -m "chore(release): v<version> — production publish" \
-    -m "Contract ID: $(cat published-contract/contract-id.txt)
-Published-From: <full 40-char sha>"
-git push -u origin release/v<version>
-gh pr create --base main --head release/v<version> \
-    --title "chore(release): v<version> — production publish" \
-    --body "Release snapshot. Published-From: <full 40-char sha>"
-git checkout main
-# After the PR is squash-merged:
-scripts/release-tag.sh <version>
+# Verify (same as §"Verifying the pointer flip worked" above), then tag
+# the commit the webapp was built from (release.sh printed it):
+scripts/release-tag.sh <version> --sha <full 40-char sha>
 ```
 
 **Important**: `--as-state` is required on the `fdev execute update`
@@ -324,7 +308,7 @@ and the contract silently rejects the update as `InvalidUpdate`.
 
 ### Loader template (`contracts/facade-loader/src/index.html.tmpl`)
 
-The loader is a static HTML+JS shell that the facade serves. It
+The loader is a static HTML+JS shell that the container contract serves. It
 embeds the current app id via `__CURRENT_APP_ID__` placeholder and
 hands the user off to the new webapp via a shell postMessage:
 
@@ -354,19 +338,13 @@ If you ever need to hand-edit the loader, edit the `.tmpl` file —
 **not** the rendered `dist/index.html`, which is overwritten on every
 build.
 
-**One-time facade publish (per environment)**: before Phase 3 runs for
-the first time on a network, publish the facade contract once and
-commit its id. Manual steps:
+**One-time container publish (per environment)**: the production
+container contract is already published and its snapshot committed. For a
+new environment (e.g. a local sandbox), publish it once:
 
 ```bash
-# Build the facade and produce the snapshot.
-cargo make update-published-container
-git add published-contract/container.{wasm,parameters} published-contract/container-id.txt
-git commit -m "chore(facade): commit production facade snapshot"
-
-# Publish (PUT) the facade with initial state pointing at the current
-# web-container id. After this, every subsequent release.sh run flips
-# its state via UPDATE.
+# Publish (PUT) the container contract with initial state pointing at the
+# webapp id. After this, every release.sh run updates its state.
 cargo make publish-container-test    # for the local sandbox
 # OR for production (one-shot, requires WEB_CONTAINER_KEY_FILE or
 # the default ~/.config/freenet-email/web-container-keys.toml):
@@ -375,14 +353,14 @@ cargo make publish-container
 
 `publish-container` mirrors `publish-container-test` but drops the
 `--port` override so fdev publishes to the live-network node. It is a
-one-time-per-environment operation — every subsequent release flips
-the facade pointer via UPDATE, not PUT.
+one-time-per-environment operation — every subsequent release updates
+the container pointer via UPDATE, not PUT.
 
 **Snapshot stability (#206)**: the committed
 `published-contract/container{.wasm,.parameters,-id.txt}` snapshot is the
 canonical artifact. CI rebuilds it under linux/amd64 with the rustc
-version pinned in `rust-toolchain.toml` and fails the PR on any
-byte-level drift. **If `scripts/check-container-byte-equal.sh` fails on
+version pinned in `contracts/facade/rust-toolchain.toml` and fails the PR
+on any byte-level drift. **If `scripts/check-container-byte-equal.sh` fails on
 CI, treat it as a release blocker** — either revert the change that
 rotated the bytes or regenerate the snapshot deliberately:
 
@@ -394,58 +372,48 @@ git add published-contract/container{.wasm,.parameters,-id.txt}
 Bumping the rustc pin or any `=x.y.z` dep pin under
 `contracts/facade/Cargo.toml` rotates the bytes and requires a paired
 snapshot regeneration in the same PR. Rotating the snapshot also
-rotates the facade contract id, which breaks every existing bookmark —
+rotates the container contract id, which breaks every existing bookmark —
 treat it as a deliberate, announced action.
 
 ## Recovery
 
 ### Publish failed halfway
 
-If the build or publish fails, re-run `scripts/release.sh 0.1.0`: nothing
-is committed or pushed before the publish succeeds.
+Re-run `scripts/release.sh <version>`. The webapp contract id is fixed, so
+a re-run publishes the same contract with a newly signed state whose
+version (the signing timestamp) is higher than anything an earlier
+attempt may have landed; the newer state wins. Nothing is committed or
+tagged before the publish and pointer flip complete.
 
-Once the publish has succeeded, do **not** re-run `release.sh`: it would
-publish again. If anything after that point fails (facade flip, commit,
-push, `gh pr create`, or a declined prompt), the script prints the steps
-to finish by hand. In short:
-
-1. If the facade was not UPDATEd, follow §"Manual pointer flip" above.
-2. Commit `published-contract/` on `release/v0.1.0` (create the branch if
-   the script didn't get that far) with `Contract ID: <id>` and
-   `Published-From: <sha>` lines (the script prints both),
-   `git push -u origin release/v0.1.0`, and open a PR against `main`.
-3. After the squash merge, `scripts/release-tag.sh 0.1.0`.
-
-`release-tag.sh` only tags the `chore(release): v0.1.0 ...` commit it
-finds on `origin/main`, so running it before the PR merges is refused
-rather than tagging the wrong commit.
+If the script stops after publishing but before tagging, it prints how to
+finish by hand: check the container pointer (§"Manual pointer flip"), then
+`scripts/release-tag.sh <version> --sha <sha>`.
 
 ### Production key lost
 
 Generate a new one with `scripts/generate-production-key.sh`. The new
-contract id will differ; every existing user will have to re-point
-their client at the new webapp URL. Announce the rotation loudly.
+key gives new webapp and container contract ids; every existing user will
+have to move to the new URL. Announce the rotation loudly.
 
 ### Smoke test fails post-publish
 
 The webapp is live but broken for users. Options:
 
 1. **Roll forward** — fix the bug, bump the version, release again.
-   The new contract id replaces the old one for new users; old users
-   keep the broken version until they visit the new URL.
-2. **Temporary rollback** — there is no formal rollback. Publishing an
-   older commit will produce an older contract id, not overwrite the
-   current one. Point users at the older id in the meantime.
+   The new signed state replaces the broken one under the same id.
+2. **Roll back** — release an older commit. It is signed with a newer
+   version than the broken state, so it replaces it under the same id.
 
 ## Release cadence and versioning
 
 Semver per `Cargo.toml`. Bump minor for new features, patch for fixes,
 major once the protocol stabilizes (we're not there yet).
 
-The `chore(release): vX.Y.Z` commit (the squash-merged snapshot PR) is
-the annotated tag's anchor. When merging, keep the title (`release-tag.sh`
-finds the commit by it) and keep the `Contract ID:` / `Published-From:`
-lines in the squash message body (it checks them, and the only way past
-a missing one is `--allow-base-drift`, which waives every check). Its
-diff is always exactly
+Normally the tag sits on the main commit the release was built from
+(`release-tag.sh --sha`). When a release does produce a snapshot PR, the
+`chore(release): vX.Y.Z` squash commit is the tag's anchor instead: keep
+its title (`release-tag.sh` finds the commit by it) and the
+`Contract ID:` / `Published-From:` lines in the squash message body (it
+checks them, and the only way past a missing one is `--allow-base-drift`,
+which waives every check). Its diff is always exactly
 `published-contract/` — any release that touches other files is a bug.

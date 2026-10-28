@@ -12,15 +12,51 @@ git config core.hooksPath .githooks   # Enable repo-local git hooks
 ```
 
 The pre-commit hook blocks stray `.wasm` commits outside
-`published-contract/` and requires `contract-id.txt` to be staged
-alongside any WASM change.
+`published-contract/`, refuses any change to a frozen artifact under
+`published-contract/wasm/`, and requires each committed contract WASM to be
+staged with its id file.
+
+## Frozen artifacts (read before touching contract or delegate code)
+
+A contract's id is `hash(wasm, parameters)` and a delegate's key is
+`blake3(blake3(wasm) ‖ params)`. Every user's inbox, token record, identity
+and local state lives under one of those keys, so the shipped WASM bytes are
+the keys. They are committed under `published-contract/` and never rebuilt:
+a rebuild embeds the build machine's absolute paths and gives different
+bytes on every machine (#348). `published-contract/README.md` lists the
+files and the procedure for adding a generation.
+
+- The UI embeds `published-contract/wasm/v1/*`; `cargo make build` builds
+  only the UI.
+- The webapp contract (`web_container_contract.wasm`, id
+  `GeQLXXR8sfGe31BNRJoVxkvGUTnBkufJ4gTaoX5NWnU5`) and the container contract
+  (`container.wasm`, id `122f6AR7PyF8d8mhczuNQM4xrLtBf5t8g2iB7PEVT7KC`) are
+  published from the committed WASM. A release changes only the webapp's
+  signed state.
+- `scripts/check-frozen-artifacts.sh` (CI `check-drift`) pins every byte,
+  checks each WASM's code hash, and re-derives both contract ids.
+- A change that must alter a contract or delegate WASM is a new
+  generation: record the outgoing one in the registry
+  (`legacy_inbox.toml`, `legacy_identity_delegate.toml`,
+  `legacy_local_state_delegate.toml`), build with `scripts/build-wasm.sh`
+  (path-remapped, reproducible), commit it as `published-contract/wasm/v<N>/`,
+  and ship the data migration with it.
+- Changing anything under `contracts/`, `modules/` or `common/` does not
+  change what ships until the UI's includes point at a new generation.
+  Clippy and tests still cover that source.
+
+The `legacy_*.toml` registries are validated by `ui/build.rs`
+(`freenet-migrate-build`; an empty registry fails the build) and pinned by
+`ui/src/legacy_registry.rs`. They are not read at runtime yet: the inbox and
+AFT migrations still walk the in-source `LEGACY_*_CODE_HASHES` slices
+described below.
 
 ## Quick Reference
 
 ### Commands
 
 ```bash
-cargo make build                 # Full release build (UI + contracts)
+cargo make build                 # Release build of the UI (contract WASM is frozen)
 cargo make dev                   # Local Dioxus dev server
 cargo make dev-example           # Offline dev server (mock data, no node)
 cargo make test                  # Run all tests
@@ -31,23 +67,41 @@ cargo make run-node              # Start local Freenet node
 # Publishing pipeline (see "Publishing" section below)
 cargo make publish-email-test    # Sandbox publish with committed test key
 cargo make publish-email         # Production publish with uncommitted key
-cargo make update-published-contract       # Refresh test snapshot
-cargo make update-published-contract-prod  # Refresh production snapshot
+cargo make derive-test-contract-id    # Test id → target/webapp/contract-id.txt
+cargo make verify-published-contract  # Prod key + committed snapshot agree
 cargo make publish-all           # End-to-end test publish (build → sign → publish)
 cargo make publish-production    # End-to-end production publish
 cargo make publish               # Alias for publish-email-test
 
+# Frozen artifacts
+scripts/check-frozen-artifacts.sh        # Byte pins, code hashes, derived ids
+scripts/build-wasm.sh <crate> <kind> <features> <out>  # Reproducible WASM for a new generation
+
 # Release automation (see RELEASING.md)
 scripts/generate-production-key.sh       # One-time: generate prod ed25519 key
-scripts/release.sh <version>             # Release: build → sign → publish → facade flip → snapshot PR
-scripts/release-tag.sh <version>         # After the snapshot PR merges: tag the merge commit, push tag
+scripts/release.sh <version>             # Release: build → sign → publish → container pointer flip
+scripts/release-tag.sh <version>         # Tag the release commit, push tag
 scripts/smoke-test-production.sh <url>   # Playwright suite against deployed webapp
 ```
+
+`update-published-contract` and `update-published-contract-prod` remain as
+aliases of `derive-test-contract-id` and `verify-published-contract`; neither
+writes `published-contract/` any more.
 
 `example-data + use-node` is buildable but has no user — the app always
 reaches for the node when `use-node` is set. For offline dev builds use
 `cargo make dev-example` (`--no-default-features --features
 example-data,no-sync`); see `ui/Cargo.toml` for the full feature list.
+
+### Toolchains
+
+The repo root pins the latest stable rustc in `rust-toolchain.toml`. The
+container contract keeps its own pin in `contracts/facade/rust-toolchain.toml`
+(rustc 1.95.0), because its bytes are its stable URL and they depend on the
+compiler; rustup applies it to every cargo command run in that directory.
+Bump the root pin and the `dtolnay/rust-toolchain@` refs in
+`.github/workflows/` together. Bump the container pin only to deliberately
+re-key the container contract.
 
 ### Running a Freenet node
 
@@ -64,17 +118,12 @@ peers; used by `publish-email-test`/`publish-all`/tests) vs. `freenet network`
 > against the wrong node. Before any test publish:
 > 1. `ps aux | grep "[f]reenet network"` — if one is up, 7509 is the real net.
 > 2. Start a dedicated sandbox on a free port and target it, e.g.
->    `freenet local --ws-api-port 7600`, then publish/QA against 7600.
-> 3. `publish-email-test`/`publish-all` run `update-published-contract`, which
->    **overwrites** `published-contract/contract-id.txt` + `webapp.parameters`
->    with the TEST id, clobbering the committed **prod** snapshot. After QA:
->    `git checkout -- published-contract/contract-id.txt published-contract/webapp.parameters`.
->    **Never commit that diff** — the committed snapshot is the prod-key id.
+>    `freenet local --ws-api-port 7600`, then publish/QA against 7600
+>    (`FREENET_LOCAL_PORT=7600 cargo make publish-email-test`).
 >
 > (`WEB_CONTAINER_CONTRACT_ID` is embedded from `contract-id.txt` at build
 > time but is **diagnostic-only** — logged in `ui/src/lib.rs`, never used for a
-> contract op — so a wrong embedded id is cosmetic console noise, not a
-> functional break.)
+> contract op — so a test build logging the production id is expected.)
 
 ### Testing
 
@@ -87,9 +136,9 @@ cargo make test-ui-playwright-setup # One-time: install Playwright browsers
 
 ## Publishing
 
-Freenet-email follows `freenet-river`'s signed-and-committed publishing
-pattern: every release is a pair of `(ed25519 signature, webapp bytes)`
-under a contract ID that is deterministic given the committed source.
+Every release publishes the same webapp contract (frozen WASM + the
+production verifying key as parameters) with a new state: the UI archive and
+its ed25519-signed metadata. The contract id never changes.
 
 ### Sandbox publish (test)
 
@@ -101,18 +150,12 @@ under a contract ID that is deterministic given the committed source.
    ```bash
    cargo make publish-all
    ```
-   This chains `build` → `update-published-contract` →
+   This chains `build` → `sign-webapp-test` → `derive-test-contract-id` →
    `publish-email-test`. The committed test key at
-   `test-contract/web-container-keys.toml` is used for signing, and the
-   derived contract ID must match
-   `published-contract/contract-id.txt` — if it doesn't, the
-   committed snapshot has drifted and you should commit the diff.
-
-3. To refresh the committed snapshot without publishing:
-   ```bash
-   cargo make update-published-contract
-   git add published-contract/ && git commit -m "chore: refresh published-contract snapshot"
-   ```
+   `test-contract/web-container-keys.toml` signs the webapp, and the test
+   contract id (the frozen WASM with the test key's parameters) is written to
+   `target/webapp/contract-id.txt`. Nothing under `published-contract/`
+   changes.
 
 ### Production publish
 
@@ -127,94 +170,86 @@ scripts/generate-production-key.sh
 ```
 
 This writes the keypair with `chmod 600` and prints a reminder to back
-it up offline. **Never commit this file.** Losing it means rotating the
-production contract ID and every user losing access to the previous
-deployment.
+it up offline. **Never commit this file.** Losing it means no further
+release can be signed for the production contract id, and every user would
+have to move to a new URL.
 
 **End-to-end release** — use the release driver:
 
 ```bash
-scripts/release.sh 0.1.0
+scripts/release.sh 0.3.0
 ```
 
 See `RELEASING.md` for the full runbook, preconditions, and recovery
 procedures. Under the hood this runs `cargo make publish-production`,
-which chains `build` → `update-published-contract-prod` →
-`publish-email`.
+which chains `build` → `sign-webapp` → `verify-published-contract` →
+`publish-email`. The verify step refuses to publish unless the signing key's
+parameters equal `published-contract/webapp.parameters` and the committed
+WASM and parameters still derive `published-contract/contract-id.txt`.
 
-The production key produces a **different** contract ID than the test
-key, because the ID is `hash(wasm, parameters)` and the 32-byte
-`webapp.parameters` blob is the verifying key itself. The committed
-`published-contract/contract-id.txt` is the one signed by the
-*production* key; the test snapshot lives in git history but gets
-overwritten by `cargo make update-published-contract-prod` on every
-real release.
+The production key and the test key give **different** contract ids,
+because the id is `hash(wasm, parameters)` and the 32-byte parameters are
+the verifying key itself. Only the production id is committed.
 
-### Facade contract — stable URL across releases (issue #200, Phase 1)
+### Container contract — the stable entry point (issue #200)
 
-The web-container contract id rotates whenever workspace `Cargo.lock`
-churn shifts the wasm bytes (issue #198). To give users a permanent
-bookmarkable URL, the project ships a **facade** contract whose id is
-designed to stay byte-stable across every release.
+The container contract is a small contract whose state points at the current
+webapp. Its id, `published-contract/container-id.txt`
+(`122f6AR7PyF8d8mhczuNQM4xrLtBf5t8g2iB7PEVT7KC`), is the bookmarkable URL.
+Its source is `contracts/facade/` (the crate keeps its original name) and the
+static HTML+JS loader it serves is `contracts/facade-loader/`. The committed
+snapshot is `published-contract/container{.wasm,.parameters,-id.txt}`; CI
+enforces byte-equality on the wasm, and `container.parameters` is the same
+production ed25519 key the webapp contract uses (the "publisher identity").
 
-`contracts/facade/` (stable wasm, never rebuilt for a release) and
-`contracts/facade-loader/` (static HTML+JS shell it serves) are checked
-into `published-contract/container{.wasm,.parameters,-id.txt}` — CI enforces
-byte-equality on the wasm; `container-id.txt` is the stable id users
-bookmark; `container.parameters` is the same prod ed25519 key used for
-web-container (the "publisher identity").
+Since the webapp contract's WASM is frozen too, the webapp id no longer
+moves between releases either, so the pointer normally names the same app
+id release after release. The container contract stays the documented entry
+point: it is what lets the app move to a new webapp contract, should one ever
+be needed, without breaking a bookmark.
 
-Per release the facade WASM is unchanged. Only the facade contract's
-state changes — its `current_app_id` pointer is flipped via
-`fdev execute update`, signing with the same production key. The loader
-HTML is rendered with the new app id baked in by
-`scripts/build-loader.sh` and embedded in the new state. `prev_app_ids`
-keeps a small ring of previous pointers for client-side rollback.
+Per release the container WASM is unchanged. Only the container contract's
+state changes — its `current_app_id` pointer is re-signed and pushed via
+`fdev execute update`, with the same production key. The loader HTML is
+rendered with the app id baked in by `scripts/build-loader.sh` and embedded
+in the new state. `prev_app_ids` keeps a small ring of previous pointers for
+client-side rollback.
 
-State framing matches the web-container's `[meta_len][meta][web_len][web]`,
+State framing matches the webapp contract's `[meta_len][meta][web_len][web]`,
 but `meta` carries `FacadePointer { version, current_app_id, prev_app_ids }`
 instead of just a webapp signature. Signature payload is canonicalized
 hand-rolled bytes (see `freenet_email_core::facade::signed_payload`) to
 sidestep CBOR map-ordering concerns.
 
-The facade lives alongside the web-container, not replacing it — the UI is
-still served at the rotating web-container id, and the facade is published
-once per environment as the stable entry point. `scripts/release.sh`
-automatically renders + signs + UPDATEs the facade pointer per release
-(#200); UI's `lib.rs` logs both `WEB_CONTAINER_CONTRACT_ID` and
-`FACADE_CONTRACT_ID` on startup. Both are conditional on
-`published-contract/container-id.txt` being committed (one-time facade
-publish required first; see RELEASING.md §"Facade contract update").
+`scripts/release.sh` renders, signs and UPDATEs the container pointer on
+every release (#200); the UI's `lib.rs` logs both `WEB_CONTAINER_CONTRACT_ID`
+and `FACADE_CONTRACT_ID` on startup.
 
-#### Pointer lifecycle — how the facade actually serves a release
+#### Pointer lifecycle — how the container contract serves a release
 
-Each release rotates the web-container contract id but leaves the
-facade contract id fixed. The full chain on every release:
-
-1. `cargo make build` rebuilds the UI webapp. Workspace `Cargo.lock`
-   churn shifts wasm bytes, producing a new `published-contract/contract-id.txt`.
-2. `scripts/build-loader.sh <new_app_id>` substitutes the new id into
+1. `cargo make build` builds the UI. The webapp contract id stays
+   `published-contract/contract-id.txt`.
+2. `scripts/build-loader.sh <app_id>` substitutes the app id into
    `contracts/facade-loader/src/index.html.tmpl` → writes
    `contracts/facade-loader/dist/index.html`. This loader is the file
-   the facade actually serves; it's a static HTML+JS page that
-   redirects the browser to the new web-container url.
+   the container contract serves; it's a static HTML+JS page that
+   redirects the browser to the webapp url.
 3. `cargo make pack-container-loader` tars + xzs the loader into
    `target/container/loader.tar.xz`. The gateway's `WebApp::try_from`
-   pipeline (XzDecoder → tar.unpack) requires this exact framing, see
-   memory `facade_state_framing.md`.
-4. `cargo make sign-container-state` signs a fresh `FacadePointer { version=now, current_app_id=<new>, prev_app_ids=[<old>] }`
+   pipeline (XzDecoder → tar.unpack) requires this exact framing.
+4. `cargo make sign-container-state` signs a fresh `FacadePointer { version=now, current_app_id=<app>, prev_app_ids=[...] }`
    with the production key from `~/.config/freenet-email/web-container-keys.toml`.
    Output: `target/container/container.state` (signed `[meta_len][meta][web_len][web]`).
-5. `fdev execute update --as-state <facade_id> target/container/container.state`
+5. `fdev execute update --as-state <container_id> target/container/container.state`
    pushes the new state to the network. **`--as-state` is required** —
-   default is `UpdateData::Delta` which a facade-style contract rejects
-   silently as `InvalidUpdate` (memory `fdev_update_needs_as_state.md`).
-6. `scripts/release.sh` commits the new web-container snapshot on
-   `release/v<version>` and opens a PR; `scripts/release-tag.sh` tags
-   the squash-merge commit afterwards.
+   default is `UpdateData::Delta`, which the container contract rejects
+   silently as `InvalidUpdate`.
+6. `scripts/release.sh` commits a `published-contract/` change on
+   `release/v<version>` and opens a PR only if something there changed
+   (normally nothing does); `scripts/release-tag.sh` tags the release commit.
 
-The facade contract id never changes across any of this. Users
-bookmark `/v1/contract/web/<facade_id>/` once and that URL keeps
+The container contract id never changes across any of this. Users
+bookmark `/v1/contract/web/<container_id>/` once and that URL keeps
 working release after release.
 
 #### Loader must postMessage, not location.replace (v0.1.8)
@@ -257,13 +292,13 @@ fdev execute update --as-state \
   target/container/container.state
 # expect "Contract updated successfully" + StateSummary
 
-# 4. Verify the facade now serves the new loader.
+# 4. Verify the container contract now serves the new loader.
 curl -s "http://127.0.0.1:7509/v1/contract/web/$(cat published-contract/container-id.txt)/?__sandbox=1" \
   | grep CURRENT_APP_ID
 # expect the new app id baked in
 
-# 5. Open the facade URL in a browser. The loader should postMessage
-# the shell and the shell should navigate to the new web-container url.
+# 5. Open the container URL in a browser. The loader should postMessage
+# the shell and the shell should navigate to the webapp url.
 ```
 
 If step 4 returns the old app id, the gateway likely served a stale
@@ -295,9 +330,9 @@ issue when you next encounter it.
 
 - `target/container/container.state` is signed with the production key and
   carries a per-build timestamp version. **Do not commit it** — every
-  release re-signs. Only the WASM/parameters/id snapshot under
-  `published-contract/facade.*` is checked into git, and that triplet
-  stays byte-stable across releases by design.
+  release re-signs. Only the WASM/parameters/id snapshot
+  `published-contract/container{.wasm,.parameters,-id.txt}` is checked into
+  git, and it stays byte-stable across releases by design.
 - `contracts/facade-loader/dist/index.html` is regenerated from
   `src/index.html.tmpl` at every release. Don't hand-edit dist; edit
   the tmpl and let `build-loader.sh` re-render.
@@ -320,12 +355,13 @@ All four are listed in `[workspace.exclude]`. Each has its own
 `[workspace]` stanza so `fdev`'s `get_workspace_target_dir()` walk
 doesn't panic.
 
-Net effect: bumping any workspace dep (dioxus, ml-kem) cannot rotate
-inbox.wasm or AFT contract wasms, so users' stored messages and AFT
-token ledgers stay accessible across releases. To deliberately rotate
-(e.g. for a contract bugfix that requires data migration), edit the
-=x.y.z pin in the relevant Cargo.toml and pair the change with the
-per-identity migration story.
+Net effect: bumping a workspace dep (dioxus, ml-kem) cannot reach the
+inbox or AFT build graphs. That does not make a rebuild reproducible
+(embedded build paths, #348), which is why the shipped bytes are frozen
+under `published-contract/wasm/v1/` and the UI embeds those, never a fresh
+build. A deliberate rotation (e.g. a contract bugfix that needs a data
+migration) is a new generation: see "Frozen artifacts" above and
+`published-contract/README.md`.
 
 **Inbox migration (#213/#223, shipped; #251 hardening)**: on UI
 startup the `set_aliases` callback in `ui/src/api.rs` compares the
@@ -361,11 +397,11 @@ enforces the same append-only invariant as the inbox slice.
 load-bearing claim that `TokenDelegateParameters::new(&vk)` encodes
 byte-identically across calls.
 
-Deliberate AFT-record rotation recipe: edit a `=x.y.z` pin in
-`modules/antiflood-tokens/contracts/token-allocation-record/Cargo.toml`
-(or the contract source), `cargo make build-token-allocation-record`,
-append the prior `TOKEN_RECORD_CODE_HASH` to
-`LEGACY_TOKEN_RECORD_CODE_HASHES` in `ui/src/aft.rs`, ship. Schema
+Deliberate AFT-record rotation recipe: change the contract source (or
+a `=x.y.z` pin in its `Cargo.toml`), build the new generation with
+`scripts/build-wasm.sh` into `published-contract/wasm/v<N>/`, append the
+prior `TOKEN_RECORD_CODE_HASH` to `LEGACY_TOKEN_RECORD_CODE_HASHES` in
+`ui/src/aft.rs`, point the UI's includes at the new generation, ship. Schema
 of `TokenAllocationRecord` itself must stay compatible — appending
 to the legacy slice migrates state byte-for-byte; a JSON-schema
 change in the same release would silently fail `validate_state`
@@ -378,9 +414,9 @@ prior `INBOX_CODE_HASH`. `build_migration_candidates` walks from the
 recorded hash forward and `migrate_inbox` dispatches a GET per
 candidate; the first GetResponse to resolve wins, suppressed by
 `MIGRATED_IDENTITIES` (keyed by ML-DSA verifying-key bytes, not the
-mutable alias). Append the previous hash to the slice as part of any
-deliberate inbox-contract bump so users skipping releases still
-recover. The current `INBOX_CODE_HASH` must never appear in the slice
+mutable alias). Append the previous hash to the slice (and to
+`legacy_inbox.toml`) as part of any deliberate inbox-contract bump so users
+skipping releases still recover. The current `INBOX_CODE_HASH` must never appear in the slice
 — enforced by the `current_hash_not_in_legacy` test.
 
 **Sender-side recipient hash (#251 improvement 4)**: the inbox WASM
@@ -424,8 +460,8 @@ resolved (node offline, contract expired) re-attempts on the next
 session. Stale markers (`prior == current` with a leftover pending
 value) are cleared in the no-drift branch.
 
-**Facade lockfile isolation (issue #198)**: the facade contract and its
-shared types crate live OUTSIDE the freenet-email workspace:
+**Container contract lockfile isolation (issue #198)**: the container
+contract and its shared types crate live OUTSIDE the freenet-email workspace:
 
 - `contracts/facade-types/` — tiny crate with `FacadePointer`,
   `FacadeMetadata`, `signed_payload()`, `FACADE_MAX_PREV_APP_IDS`. Its
@@ -441,38 +477,40 @@ so signer + UI keep their existing imports unchanged.
 
 Net effect: bumping `dioxus`, `chrono`, `ml-dsa`, or any other
 workspace dep cannot rotate `container.wasm`, because cargo resolves the
-facade build against `contracts/facade/Cargo.lock` — not the workspace
-lockfile. To deliberately bump a facade dep, edit the `=x.y.z` pin in
-`contracts/facade/Cargo.toml` (and pair with a snapshot regeneration +
-release-id update; see #200).
+container build against `contracts/facade/Cargo.lock` — not the workspace
+lockfile — with the rustc pinned in `contracts/facade/rust-toolchain.toml`.
+A deliberate bump of either re-keys the container contract, i.e. changes
+the bookmarkable URL.
 
 **Build hygiene**: `scripts/check-container-byte-equal.sh` rebuilds the
-facade (using the facade-local manifest at `contracts/facade/`) and
+container contract (from `contracts/facade/`, with its own manifest and
+toolchain) and
 `cmp`s against `published-contract/container.wasm`. CI runs this step in
 `check-contract-wasm.yml`. The main `build.yml` workflow also runs
 `cargo fmt`, `cargo clippy`, `cargo test`, and a wasm32 release build
-inside `contracts/facade/` so PRs that touch facade are still gated.
+inside `contracts/facade/` so PRs that touch it are still gated.
 
 **Status (#206 closed)**: the committed snapshot at
 `published-contract/container{.wasm,.parameters,-id.txt}` is the canonical
-artifact. It was produced under linux/amd64 with the rustc version
-pinned in `rust-toolchain.toml` (currently 1.95.0). The CI byte-equality
+artifact. It was produced by CI under linux/amd64 with the rustc version
+pinned in `contracts/facade/rust-toolchain.toml` (1.95.0). Container builds
+embed the build path, so only a build in CI's checkout path reproduces the
+committed bytes; a local build elsewhere differs. The CI byte-equality
 step in `check-contract-wasm.yml` is now a **release blocker**: any
 rebuild that doesn't match the committed bytes fails the PR.
 `check-drift` is required and runs on every PR except docs-only ones
 (#339).
 
 To regenerate the snapshot deliberately (e.g. after bumping the rustc
-pin or a `=x.y.z` dep pin in `contracts/facade/Cargo.toml`). Bumping
-the rustc pin also means bumping every `dtolnay/rust-toolchain@` ref in
-`.github/workflows/`; Dependabot ignores that action on purpose:
+pin in `contracts/facade/rust-toolchain.toml` or a `=x.y.z` dep pin in
+`contracts/facade/Cargo.toml`), knowing it moves the stable URL:
 
 **On native linux/amd64**:
 
 ```bash
 scripts/build-container-snapshot-linux.sh
 git add published-contract/container{.wasm,.parameters,-id.txt}
-git commit -m "chore(facade): regenerate snapshot — <reason>"
+git commit -m "chore(container): regenerate snapshot — <reason>"
 ```
 
 **On macOS / arm64 / anything else**: qemu emulation produces wasm
@@ -495,30 +533,28 @@ non-canonical hosts so dev rebuilds aren't blocked.
 
 ### Reproducibility caveats
 
-The signed-payload version is the **unix timestamp at signing time**
-(see `sign-webapp` / `sign-webapp-test` in `Makefile.toml`). Two
-developers signing at different moments produce different payloads
-and therefore different contract IDs, so
-`published-contract/contract-id.txt` is **not** reproducible from
-source. The committed snapshot is the authoritative ID for the
-deployed contract; `cargo make update-published-contract*` rewrites
-it on every refresh.
+The webapp contract id is `hash(frozen wasm, production verifying key)`,
+so it is fixed: `published-contract/contract-id.txt` never changes. What
+differs per release is the contract's state, whose signed metadata carries
+a version: the **unix timestamp at signing time** (see `sign-webapp` /
+`sign-webapp-test` in `Makefile.toml`).
 
 Why timestamp instead of a deterministic-from-source value: the
-on-chain web-container update check requires strictly monotonic
+on-chain webapp contract update check requires strictly monotonic
 versions. The previous scheme (commit-hash hex truncated to u32) was
 not monotonic — newer commits could hash lower than the deployed
 state — and broke the v0.1.1 publish. Commit count
 (`git rev-list --count HEAD`) is monotonic per branch but starts at
 ~22, far below the version (~1.6e9) the chain already accepted under
 the broken scheme. Timestamp is the simplest source that's always
-above the deployed value.
+above the deployed value, and a re-run after a failed publish always
+signs a newer version than any attempt before it.
 
 GNU tar is still required by `compress-webapp` for the
 `--sort=name --mtime=… --owner=0 --group=0` flags; the resulting
-archive is byte-identical across machines (rustc pin and release
-profile are also pinned), but the per-build timestamp injected at
-signing time means the final signed bytes differ. Install GNU tar:
+archive is reproducible given the same UI build, but the per-build
+timestamp injected at signing time means the final signed bytes differ.
+Install GNU tar:
 
 ```bash
 brew install gnu-tar   # provides `gtar`
@@ -542,31 +578,32 @@ any user data and must never be reused for production. See
 Two committed test keys live under `test-contract/`:
 
 1. **Web container signer** (`test-contract/web-container-keys.toml`) —
-   ed25519, used to sign test webapps. Produces the test
-   `published-contract/contract-id.txt`.
+   ed25519, used to sign test webapps. Gives the test contract id, which
+   `derive-test-contract-id` writes to `target/webapp/contract-id.txt`.
 2. **Identity delegate** (`test-contract/identity/identity-manager-key.*.pem`) —
-   P-384, used by the `identity-management` delegate. Stable across
-   test runs so generated `identity-manager-params` is reproducible.
+   P-384, used by the `identity-management` delegate. The shipped delegate
+   parameters derived from it are frozen as
+   `published-contract/wasm/v1/identity-manager-params`.
 
 **To rotate the web-container test key:**
 
 ```bash
 rm test-contract/web-container-keys.toml
 cargo make generate-web-container-keys
-cargo make update-published-contract   # regenerates contract-id.txt
-git add test-contract/web-container-keys.toml published-contract/
+cargo make derive-test-contract-id   # the new test id, under target/
+git add test-contract/web-container-keys.toml
 git commit -m "chore: rotate committed web-container test key"
 ```
 
-The test contract ID will change. CI `check-contract-wasm.yml` and any
-Phase 3 Playwright tests that embed the contract ID will pick up the
-new value automatically on next run.
+The test contract id changes; the production snapshot in
+`published-contract/` does not.
 
-**To rotate the identity delegate key:** delete the files under
-`test-contract/identity/` and `modules/identity-management/build/identity-manager-params`,
-then re-run `cargo make generate-identity-params`. This changes the
-identity delegate's on-chain key, which is usually not what you want
-unless you're reproducing a specific upstream change.
+**Do not rotate the identity delegate key.** The delegate's key is
+`blake3(code_hash ‖ params)`, so new parameters mean a new delegate key, and
+every identity stored under the shipped one would need a migration. The UI
+embeds the frozen parameters, so regenerating them under
+`modules/identity-management/build/` (`cargo make generate-identity-params`)
+changes nothing that ships until a new generation adopts them.
 
 ## End-to-end testing
 

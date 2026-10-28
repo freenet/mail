@@ -68,14 +68,14 @@ pub(crate) fn app_version() -> &'static str {
     concat!("v", env!("CARGO_PKG_VERSION"))
 }
 
-/// The base58-encoded `ContractInstanceId` of the signed webapp contract
-/// produced by `cargo make update-published-contract`.
+/// The base58-encoded `ContractInstanceId` of the production webapp
+/// contract, committed in `published-contract/contract-id.txt`.
 ///
-/// This is the source of truth for "which web-container contract does the
-/// UI target" at compile time. Any change to the web-container WASM or to
-/// `test-contract/web-container-keys.toml` shifts this ID, and
-/// `update-published-contract` must be re-run and the resulting diff
-/// committed.
+/// The webapp contract's WASM and parameters are frozen, so this id never
+/// changes between releases (see `published-contract/README.md`). Logged at
+/// startup only; no contract operation reads it. A test publish runs under
+/// a different id (`target/webapp/contract-id.txt`), so a test build logs
+/// the production id.
 ///
 /// Under `--no-default-features --features example-data,no-sync` the
 /// committed snapshot may be stale or absent, so we fall back to an empty
@@ -123,11 +123,9 @@ pub fn main() {
         }));
     }
 
-    // Log which committed contract ID this UI was built against so that
-    // a developer looking at devtools can instantly tell whether
-    // `published-contract/contract-id.txt` is up to date relative to the
-    // source they're staring at. Only meaningful under `use-node`; the
-    // offline build's constant is an empty string, see lib.rs:25-33.
+    // Log which committed contract ids this UI was built against. Only
+    // meaningful under `use-node`; the offline build's constants are empty
+    // strings (see WEB_CONTAINER_CONTRACT_ID above).
     #[cfg(feature = "use-node")]
     {
         let id = WEB_CONTAINER_CONTRACT_ID.trim();

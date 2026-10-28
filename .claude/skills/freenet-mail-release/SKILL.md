@@ -13,8 +13,8 @@ description: Production release runbook for freenet-email. Use when the user ask
   ship it.
 - A new feature merged with user-facing behavior that warrants a tag.
 
-Do NOT invoke for: facade-only pointer updates without webapp changes
-(those are a separate flow; see `RELEASING.md` §"Facade contract
+Do NOT invoke for: container-only pointer updates without webapp changes
+(those are a separate flow; see `RELEASING.md` §"Container contract
 update"), test/CI-only commits, doc-only commits.
 
 ## What you can do vs. what only the user can do
@@ -29,14 +29,14 @@ You **CAN**:
   (or whatever `FREENET_PORT` overrides to).
 - Draft release notes from the commit log.
 - Run the post-release smoke test (`scripts/smoke-test-production.sh`).
-- Verify the facade pointer flip post-publish (curl probes).
+- Verify the container pointer flip post-publish (curl probes).
 
 You **CANNOT**:
 
 - Run `scripts/release.sh` itself unsupervised. It signs with the
-  production key, pushes to the live network, then commits the snapshot
-  on `release/v<VERSION>` and opens a PR. The publish and facade flip
-  are irreversible. The user must drive
+  production key, pushes to the live network, flips the container
+  pointer and tags the release. The publish and pointer flip are
+  irreversible. The user must drive
   this, or explicitly authorize each confirmation.
 - Start `freenet network`. The node is a long-running interactive
   process whose output the user should be watching during publish.
@@ -97,25 +97,23 @@ The user runs:
 
 ```bash
 freenet network                          # other terminal — wait for peers
-scripts/release.sh <VERSION>             # interactive, confirms each public step
-# squash-merge the release/v<VERSION> snapshot PR once CI is green
-scripts/release-tag.sh <VERSION>         # tag main's merge commit, push tag
+scripts/release.sh <VERSION>             # interactive; publishes, flips, tags
 scripts/smoke-test-production.sh         # post-publish liveness check
 ```
 
 `release.sh` prompts at:
 
 1. Before publish (irreversible step starts).
-2. Before the facade UPDATE.
-3. After publish, before committing the snapshot on `release/v<VERSION>`
-   (or, with no snapshot change, before tagging the published commit).
-4. Before pushing that branch and opening the snapshot PR.
+2. Before the container UPDATE.
+3. After publish, before tagging the published commit.
 
-`main` only takes squash merges through PRs with green required checks,
-which is why the snapshot goes through a PR and the tag is created
-afterwards. Merge the snapshot PR before anything else lands on main:
-`release-tag.sh` refuses to tag a snapshot merged onto a different base
-than the one published (`Published-From:`).
+The contract WASM is frozen, so a release normally leaves
+`published-contract/` untouched and `release.sh` tags the commit it
+built from (`release-tag.sh --sha`). Only if something there did change
+does it commit it on `release/v<VERSION>` and open a PR; then merge that
+PR before anything else lands on main and run
+`scripts/release-tag.sh <VERSION>` (it refuses a snapshot merged onto a
+different base than the one published, `Published-From:`).
 
 If the user wants you to type "y" at each prompt, they should pass
 `--yes` to `release.sh` and confirm authorization explicitly. Don't
@@ -134,7 +132,7 @@ scripts/smoke-test-production.sh
 # "Create new identity" link renders. Does NOT exercise identity
 # creation / messaging — that needs the manual checklist in AGENTS.md.
 
-# 2. Facade pointer flipped to new app id.
+# 2. Container pointer names the app id.
 NEW_APP_ID=$(cat published-contract/contract-id.txt)
 FACADE_ID=$(cat published-contract/container-id.txt)
 curl -s "http://127.0.0.1:7509/v1/contract/web/${FACADE_ID}/?__sandbox=1" \
@@ -146,7 +144,7 @@ curl -sI "http://127.0.0.1:7509/v1/contract/web/${NEW_APP_ID}/" | head -1
 # expect: HTTP/1.1 200 OK
 ```
 
-If facade `?__sandbox=1` shows the OLD app id, the gateway is serving
+If the container's `?__sandbox=1` shows the OLD loader, the gateway is serving
 a stale extracted webapp from its on-disk cache. See AGENTS.md
 §"Manual pointer flip / recovery" for the cache-bust recipe.
 
@@ -156,13 +154,13 @@ a stale extracted webapp from its on-disk cache. See AGENTS.md
 
 freenet-core#4102: `fdev publish` returns a 300s client timeout despite
 the server-side publish having succeeded. The webapp landed; the
-facade pointer didn't flip. Recipe lives in RELEASING.md §"Manual
+container pointer didn't flip. Recipe lives in RELEASING.md §"Manual
 pointer flip"; the key facts:
 
 - `fdev execute update` needs `--as-state`, not the default
-  `UpdateData::Delta` (the facade contract silently rejects Delta as
+  `UpdateData::Delta` (the container contract silently rejects Delta as
   `InvalidUpdate`). See memory `fdev_update_needs_as_state.md`.
-- The facade `web` slot must be an xz-tar containing index.html, not
+- The container `web` slot must be an xz-tar containing index.html, not
   raw HTML. `cargo make sign-container-state` (which chains
   `pack-container-loader`) gets this right; do not skip it. See memory
   `facade_state_framing.md`.
@@ -172,19 +170,17 @@ pointer flip"; the key facts:
 The webapp is live but broken. Options:
 
 1. **Roll forward**: fix the bug, bump the version, release again.
-2. **Temporary mitigation**: point users at the previous contract id
-   (which is still served by the network). There is no formal
-   rollback.
+2. **Roll back**: release an older commit. Its state is signed with a
+   newer version, so it replaces the broken one under the same id.
 
-Do not attempt to delete or overwrite the bad contract — Freenet
-contracts are immutable; only the facade pointer can be flipped, and
-only forward.
+Contract WASM is immutable; only the signed state (the UI, the container
+pointer) changes, and only forward.
 
 ### Production key lost
 
 Generate a new one with `scripts/generate-production-key.sh`. The new
-contract id will differ; every existing user must re-point their
-client. Announce the rotation. Treat this as a last-resort recovery
+key gives new webapp and container ids; every existing user must move to
+the new URL. Announce the rotation. Treat this as a last-resort recovery
 path, not a routine action.
 
 ## Anti-patterns
@@ -195,23 +191,23 @@ path, not a routine action.
 - **Don't** skip the smoke test. The publish pipeline has multiple
   silent-failure modes (corrupted tar, wrong signature, stale id);
   the smoke test is the only thing that catches them before users do.
-- **Don't** push a release that only contains test or CI changes. The
-  contract id rotates anyway because workspace `Cargo.lock` churn
-  shifts wasm bytes (#198) — burning a version on a no-op release
-  wastes a bookmark migration for users.
-- **Don't** edit `published-contract/` by hand. Every committed file
-  there is produced by `update-published-contract-prod` (or the facade
-  equivalent) and signed with the production key.
+- **Don't** push a release that only contains test or CI changes; it
+  ships nothing users can see.
+- **Don't** edit `published-contract/`. Those files are the frozen bytes
+  that shipped; the release flow only verifies them
+  (`verify-published-contract`, `scripts/check-frozen-artifacts.sh`).
+  A new contract/delegate generation goes through
+  `published-contract/README.md`, never through a release.
 - **Don't** commit `target/container/container.state`. Per-release signed
-  artifact; only the WASM/parameters/id snapshot under
-  `published-contract/facade.*` is tracked.
+  artifact; only the snapshot
+  `published-contract/container{.wasm,.parameters,-id.txt}` is tracked.
 
 ## Cross-references
 
-- `RELEASING.md` — full runbook with recovery and facade details.
-- `AGENTS.md` §"Publishing" — facade architecture, framing, lockfile
-  isolation.
-- Memory `fdev_update_needs_as_state.md` — flag required for facade
+- `RELEASING.md` — full runbook with recovery and container details.
+- `AGENTS.md` §"Publishing" — container architecture, framing, lockfile
+  isolation; §"Frozen artifacts".
+- Memory `fdev_update_needs_as_state.md` — flag required for container
   UPDATEs.
 - Memory `facade_state_framing.md` — `web` slot framing requirement.
 - Memory `test_vs_prod_snapshot.md` — why the test snapshot drifts

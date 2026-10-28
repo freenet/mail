@@ -74,18 +74,16 @@ pipeline.**
 ### Rotating
 
 ```bash
-rm test-contract/web-container-keys.toml \
-   published-contract/contract-id.txt \
-   published-contract/webapp.parameters \
-   published-contract/web_container_contract.wasm
+rm test-contract/web-container-keys.toml
 cargo make generate-web-container-keys
-cargo make update-published-contract
-git add test-contract/web-container-keys.toml published-contract/
+cargo make derive-test-contract-id   # writes target/webapp/contract-id.txt
+git add test-contract/web-container-keys.toml
 git commit -m "chore: rotate web-container test keypair"
 ```
 
-Rotating the key **changes the test contract ID**. Any user with a
-bookmark to the old ID will see it as a dead contract.
+Rotating the key **changes the test contract ID** (the frozen webapp
+contract WASM with the new key's parameters). The production snapshot in
+`published-contract/` is unaffected and must not be touched.
 
 ---
 

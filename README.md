@@ -8,7 +8,7 @@ Messages live in per-user inbox contracts on the Freenet network,
 encrypted with post-quantum ML-KEM-768 (NIST FIPS 203) and
 authenticated with ML-DSA-65 (NIST FIPS 204). The UI is a Dioxus
 web app served from a signed web-container contract, fronted by a
-stable **facade contract** so the bookmarkable URL never changes
+stable **container contract** so the bookmarkable URL never changes
 between releases.
 
 > **Status**: pre-alpha. The protocol may still change. Don't store
@@ -26,10 +26,9 @@ between releases.
    http://127.0.0.1:7509/v1/contract/web/122f6AR7PyF8d8mhczuNQM4xrLtBf5t8g2iB7PEVT7KC/
    ```
 
-   That contract id is the **facade** — a thin pointer contract that
-   serves a tiny HTML+JS loader. The loader forwards the browser to
-   whichever web-container release is current. The facade id is
-   byte-stable across every release (see [#198](https://github.com/iduartgomez/freenet-email/issues/198),
+   That contract id is the **container contract**: a thin pointer
+   contract that serves a tiny HTML+JS loader, which forwards the browser
+   to the webapp. Its id is byte-stable across every release (see [#198](https://github.com/iduartgomez/freenet-email/issues/198),
    [#200](https://github.com/iduartgomez/freenet-email/issues/200),
    [#206](https://github.com/iduartgomez/freenet-email/issues/206)),
    so once you bookmark it, future releases land automatically without
@@ -49,25 +48,25 @@ between releases.
 
 Three on-chain contracts and one delegate make up the system:
 
-- **Facade contract** ([`contracts/facade/`](contracts/facade/)) —
+- **Container contract** ([`contracts/facade/`](contracts/facade/)) —
   stable bookmarkable entry point. Its state is a signed
   `FacadePointer { current_app_id, prev_app_ids }`; the served
   payload is a static HTML+JS shell that `postMessage`s the gateway
-  shell to navigate to the current web-container. Per release the
-  facade wasm is unchanged — only the pointer state is updated, via
-  `fdev execute update --as-state` signed with the production key.
-- **Web container contract** ([`contracts/web-container/`](contracts/web-container/)) —
+  shell to navigate to the webapp. Per release its wasm is unchanged —
+  only the pointer state is updated, via `fdev execute update --as-state`
+  signed with the production key.
+- **Webapp contract** ([`contracts/web-container/`](contracts/web-container/)) —
   hosts the compiled Dioxus UI. Its contract id is
-  `hash(wasm, ed25519_pubkey)` and rotates whenever the wasm bytes
-  change. The facade pointer absorbs the rotation so users never see
-  it.
+  `hash(wasm, ed25519_pubkey)`; the wasm is frozen, so the id stays
+  `GeQLXXR8sfGe31BNRJoVxkvGUTnBkufJ4gTaoX5NWnU5` and each release only
+  publishes a newly signed UI as its state.
 - **Inbox contract** ([`contracts/inbox/`](contracts/inbox/)) —
   one per user. Stores ML-KEM-encapsulated, ChaCha20-Poly1305
   encrypted messages, with ML-DSA-65 signatures on every state delta
-  for ownership verification. Lockfile-isolated
-  ([#199](https://github.com/iduartgomez/freenet-email/issues/199))
-  so workspace dep bumps can't rotate the contract id and orphan
-  stored mail; a per-identity migration path
+  for ownership verification. Its wasm is frozen in
+  [`published-contract/`](published-contract/README.md), so a rebuild
+  can't rotate the contract id and orphan stored mail; a per-identity
+  migration path
   ([#213](https://github.com/iduartgomez/freenet-email/issues/213),
   [#223](https://github.com/iduartgomez/freenet-email/issues/223))
   re-signs and re-PUTs when deliberate rotation is needed.
@@ -82,14 +81,14 @@ Three on-chain contracts and one delegate make up the system:
 
 ### Why two contracts in front of the UI?
 
-A Freenet contract id is `hash(wasm, parameters)`. Any change to the
-UI rebuilds the wasm and rotates the id. Without a stable pointer,
-every release would orphan every bookmark. The facade is a tiny
-wasm contract that's deliberately frozen — its lockfile is isolated
-from the workspace, its rustc version is pinned in
-`rust-toolchain.toml`, and CI byte-checks every PR against the
-committed `published-contract/container.wasm`. Releases flip the
-pointer state inside the facade rather than re-deploying it.
+A Freenet contract id is `hash(wasm, parameters)`. The webapp contract's
+wasm is frozen, so its id no longer moves between releases, but the
+container contract keeps a stable entry point that can follow the app if
+it ever has to move. It is a tiny wasm contract that's deliberately
+frozen — its lockfile is isolated from the workspace, its rustc version is
+pinned in `contracts/facade/rust-toolchain.toml`, and CI byte-checks every
+PR against the committed `published-contract/container.wasm`. Releases
+update the pointer state inside it rather than re-deploying it.
 
 ## Contributing
 
@@ -98,7 +97,7 @@ feature-flag matrix, publishing pipeline, Playwright tests, and the
 manual E2E checklist.
 
 See [`RELEASING.md`](RELEASING.md) for the production release
-runbook, including facade pointer flips and recovery.
+runbook, including container pointer flips and recovery.
 
 ## License
 
