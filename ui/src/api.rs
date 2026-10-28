@@ -333,6 +333,41 @@ mod contract_api {
     }
 }
 
+/// Checks for the embedded artifacts: the WASM a module uploads and the
+/// code hash it derives keys from must be the same artifact. Each module
+/// that embeds one calls these on its own consts.
+#[cfg(all(test, feature = "use-node"))]
+pub(crate) mod embedded_artifact {
+    use freenet_stdlib::prelude::*;
+
+    /// A container built from `code` (as `contract_api::create_contract`
+    /// builds it) has the key `code_hash` derives (as every lookup does).
+    pub(crate) fn assert_contract(code: &[u8], code_hash: &str) {
+        let params = Parameters::from(vec![1u8, 2, 3]);
+        let container = ContractContainer::try_from((code.to_vec(), &params))
+            .expect("embedded contract WASM loads");
+        let key = ContractKey::from_params(code_hash, params).expect("embedded code hash decodes");
+        assert_eq!(
+            container.key(),
+            key,
+            "the embedded contract WASM does not have the embedded code hash"
+        );
+    }
+
+    /// The same for a delegate (as `delegate_api::create_delegate` builds it).
+    pub(crate) fn assert_delegate(code: &[u8], code_hash: &str) {
+        let params = Parameters::from(vec![1u8, 2, 3]);
+        let container = DelegateContainer::try_from((code.to_vec(), &params))
+            .expect("embedded delegate WASM loads");
+        let key = DelegateKey::from_params(code_hash, &params).expect("embedded code hash decodes");
+        assert_eq!(
+            *container.key(),
+            key,
+            "the embedded delegate WASM does not have the embedded code hash"
+        );
+    }
+}
+
 #[cfg(feature = "use-node")]
 pub(crate) use delegate_api::create_delegate;
 
@@ -512,6 +547,11 @@ mod inbox_management {
 
     const INBOX_CODE: &[u8] =
         include_bytes!("../../published-contract/wasm/v1/freenet_email_inbox");
+
+    #[test]
+    fn embedded_inbox_wasm_has_the_embedded_code_hash() {
+        crate::api::embedded_artifact::assert_contract(INBOX_CODE, crate::inbox::INBOX_CODE_HASH);
+    }
 
     thread_local! {
         pub(super) static CREATED_INBOX: RefCell<Vec<(Rc<str>, ContractKey)>> = const { RefCell::new(Vec::new()) };
@@ -787,6 +827,14 @@ mod token_record_management {
     const TOKEN_RECORD_CODE: &[u8] =
         include_bytes!("../../published-contract/wasm/v1/freenet_token_allocation_record");
 
+    #[test]
+    fn embedded_token_record_wasm_has_the_embedded_code_hash() {
+        crate::api::embedded_artifact::assert_contract(
+            TOKEN_RECORD_CODE,
+            crate::aft::TOKEN_RECORD_CODE_HASH,
+        );
+    }
+
     thread_local! {
         pub(super) static CREATED_AFT_RECORD: RefCell<Vec<(Rc<str>, ContractKey)>> = const { RefCell::new(Vec::new()) };
 
@@ -926,6 +974,15 @@ mod token_generator_management {
     const TOKEN_GEN_CODE: &[u8] =
         include_bytes!("../../published-contract/wasm/v1/freenet_token_generator");
 
+    #[test]
+    fn embedded_token_generator_wasm_has_the_embedded_code_hash() {
+        crate::api::embedded_artifact::assert_delegate(TOKEN_GEN_CODE, TOKEN_GEN_CODE_HASH);
+        assert_eq!(
+            TOKEN_GEN_CODE_HASH,
+            crate::aft::TOKEN_GENERATOR_DELEGATE_CODE_HASH
+        );
+    }
+
     thread_local! {
         pub(super) static CREATED_AFT_GEN: RefCell<Vec<(Rc<str>, DelegateKey)>> = const { RefCell::new(Vec::new()) };
     }
@@ -981,6 +1038,11 @@ mod identity_management {
         include_bytes!("../../published-contract/wasm/v1/identity_management");
     const ID_MANAGER_KEY: &[u8] =
         include_bytes!("../../published-contract/wasm/v1/identity-manager-params");
+
+    #[test]
+    fn embedded_identity_wasm_has_the_embedded_code_hash() {
+        crate::api::embedded_artifact::assert_delegate(ID_MANAGER_CODE, ID_MANAGER_CODE_HASH);
+    }
 
     pub(super) async fn create_delegate(
         client: &mut WebApiRequestClient,

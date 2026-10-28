@@ -251,6 +251,11 @@ mod wire {
     const PARAMS: &[u8] =
         include_bytes!("../../published-contract/wasm/v1/mail-local-state-params");
 
+    #[test]
+    fn embedded_local_state_wasm_has_the_embedded_code_hash() {
+        crate::api::embedded_artifact::assert_delegate(CODE, CODE_HASH);
+    }
+
     /// Set after the delegate is registered + its initial `GetAll` is issued.
     /// Used by the response handler in `api::node_comms` to recognise replies
     /// destined for this delegate.
