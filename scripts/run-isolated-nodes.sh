@@ -35,10 +35,12 @@ PEER_DATA="$ROOT/peer/data"
 PEER_LOGS="$ROOT/peer/logs"
 PEER_CONFIG="$ROOT/peer/config"
 
-GW_PORT_NET=31338
-GW_PORT_WS=7510
-PEER_PORT_NET=31339
-PEER_PORT_WS=7511
+# Overridable so the harness can run beside another node using the defaults
+# (live-node.spec.ts and publish-email-iso read the same WS port variables).
+GW_PORT_NET="${FREENET_ISO_GW_NET_PORT:-31338}"
+GW_PORT_WS="${FREENET_ISO_GW_PORT:-7510}"
+PEER_PORT_NET="${FREENET_ISO_PEER_NET_PORT:-31339}"
+PEER_PORT_WS="${FREENET_ISO_PEER_PORT:-7511}"
 
 GW_PIDFILE="$ROOT/gw.pid"
 PEER_PIDFILE="$ROOT/peer.pid"
