@@ -111,6 +111,24 @@ pub(crate) const FM_VERIFY_CHECK: &str = "fm-verify-check";
 pub(crate) const FM_RESTORE_FILE: &str = "fm-restore-file";
 pub(crate) const FM_RESTORE_SUBMIT: &str = "fm-restore-submit";
 
+// Recovery key backup / restore (BackupKeyPanel, ImportForm, Settings)
+pub(crate) const FM_RESTORE_PASTE: &str = "fm-restore-paste";
+pub(crate) const FM_RESTORE_ERROR: &str = "fm-restore-error";
+pub(crate) const FM_RESTORE_ALIAS: &str = "fm-restore-alias";
+pub(crate) const FM_BACKUP_MODAL: &str = "fm-backup-modal";
+pub(crate) const FM_BACKUP_PANEL: &str = "fm-backup-panel";
+pub(crate) const FM_BACKUP_ENTRY_TITLE: &str = "fm-backup-entry-title";
+pub(crate) const FM_BACKUP_KEY: &str = "fm-backup-key";
+pub(crate) const FM_BACKUP_KEY_MASKED: &str = "fm-backup-key-masked";
+pub(crate) const FM_BACKUP_REVEAL: &str = "fm-backup-reveal";
+pub(crate) const FM_BACKUP_COPY: &str = "fm-backup-copy";
+pub(crate) const FM_BACKUP_DOWNLOAD: &str = "fm-backup-download";
+pub(crate) const FM_BACKUP_STATUS: &str = "fm-backup-status";
+pub(crate) const FM_BACKUP_SAVED: &str = "fm-backup-saved";
+pub(crate) const FM_BACKUP_SAVED_NOTE: &str = "fm-backup-saved-note";
+pub(crate) const FM_SETTINGS_BACKUP: &str = "fm-settings-backup";
+pub(crate) const FM_SETTINGS_BACKUP_BANNER: &str = "fm-settings-backup-banner";
+
 // Identity rows
 pub(crate) const FM_ID_ROW: &str = "fm-id-row";
 pub(crate) const FM_ID_OPEN: &str = "fm-id-open";
@@ -225,6 +243,22 @@ mod tests {
             ("fmVerifyCheck", super::FM_VERIFY_CHECK),
             ("fmRestoreFile", super::FM_RESTORE_FILE),
             ("fmRestoreSubmit", super::FM_RESTORE_SUBMIT),
+            ("fmRestorePaste", super::FM_RESTORE_PASTE),
+            ("fmRestoreError", super::FM_RESTORE_ERROR),
+            ("fmRestoreAlias", super::FM_RESTORE_ALIAS),
+            ("fmBackupModal", super::FM_BACKUP_MODAL),
+            ("fmBackupPanel", super::FM_BACKUP_PANEL),
+            ("fmBackupEntryTitle", super::FM_BACKUP_ENTRY_TITLE),
+            ("fmBackupKey", super::FM_BACKUP_KEY),
+            ("fmBackupKeyMasked", super::FM_BACKUP_KEY_MASKED),
+            ("fmBackupReveal", super::FM_BACKUP_REVEAL),
+            ("fmBackupCopy", super::FM_BACKUP_COPY),
+            ("fmBackupDownload", super::FM_BACKUP_DOWNLOAD),
+            ("fmBackupStatus", super::FM_BACKUP_STATUS),
+            ("fmBackupSaved", super::FM_BACKUP_SAVED),
+            ("fmBackupSavedNote", super::FM_BACKUP_SAVED_NOTE),
+            ("fmSettingsBackup", super::FM_SETTINGS_BACKUP),
+            ("fmSettingsBackupBanner", super::FM_SETTINGS_BACKUP_BANNER),
             ("fmIdRow", super::FM_ID_ROW),
             ("fmIdOpen", super::FM_ID_OPEN),
             ("fmIdCreate", super::FM_ID_CREATE),

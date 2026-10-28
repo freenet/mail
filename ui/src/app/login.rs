@@ -14,6 +14,7 @@ use ml_kem::{DecapsulationKey, EncapsulationKey, MlKem768};
 
 use crate::DynError;
 use crate::app::{ContractType, User, UserId};
+use crate::clipboard::{CopyOutcome, copy_text};
 use crate::testid;
 
 use super::{InboxView, NodeAction};
@@ -544,10 +545,13 @@ impl StoredIdentityKeys {
 /// restorable; users on pre-release builds must re-create their identities.
 pub(crate) const IDENTITY_BACKUP_VERSION: u32 = 2;
 
-/// On-disk backup format for a single identity.
+/// Legacy on-disk backup format for a single identity, and the in-memory
+/// result of parsing any restore input (see `backup_token::parse_backup`).
 ///
-/// The file is plaintext JSON — the user must store it securely, as it
-/// contains raw private key material.
+/// New exports are recovery keys (`backup_token`), not this JSON. The
+/// JSON shape stays readable forever because users hold files exported by
+/// earlier builds. The file is plaintext JSON containing raw private key
+/// material.
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct IdentityBackup {
     pub version: u32,
@@ -556,29 +560,30 @@ pub(crate) struct IdentityBackup {
     pub keys: StoredIdentityKeys,
 }
 
-impl IdentityBackup {
-    pub(crate) fn from_identity(identity: &Identity) -> Self {
-        Self {
-            version: IDENTITY_BACKUP_VERSION,
-            alias: identity.alias.to_string(),
-            description: identity.description.clone(),
-            keys: StoredIdentityKeys::new(&identity.ml_dsa_signing_key, &identity.ml_kem_dk),
-        }
-    }
+/// Recovery key (`fmail-key-1:...`) for an identity's private keys.
+pub(crate) fn recovery_key_for(identity: &Identity) -> Result<String, String> {
+    let keys = StoredIdentityKeys::new(&identity.ml_dsa_signing_key, &identity.ml_kem_dk);
+    super::backup_token::encode(&keys).map_err(|e| e.to_string())
+}
 
-    /// Returns `Ok(())` if this backup is the current version, otherwise an
-    /// explanatory error. Call before using `self.keys`.
-    pub(crate) fn check_version(&self) -> Result<(), String> {
-        if self.version == IDENTITY_BACKUP_VERSION {
-            Ok(())
-        } else {
-            Err(format!(
-                "backup format v{} is from a pre-release version and is no longer supported \
-                 (expected v{}); please re-create the identity",
-                self.version, IDENTITY_BACKUP_VERSION
-            ))
-        }
-    }
+/// Fingerprint words of an identity as owned strings (the shape
+/// `BackupKeyPanel` takes).
+pub(crate) fn fingerprint_word_vec(identity: &Identity) -> Vec<String> {
+    crate::app::address_book::fingerprint_words(
+        &identity.ml_dsa_vk_bytes(),
+        &identity.ml_kem_ek_bytes(),
+    )
+    .iter()
+    .map(|w| w.to_string())
+    .collect()
+}
+
+/// Stamp `last_backup_at` for `alias`. Called only when the user confirms
+/// "I've saved it" in `BackupKeyPanel`, never on copy or download alone.
+pub(crate) fn mark_backed_up(alias: &str) {
+    let mut settings = crate::local_state::identity_settings_for(alias);
+    settings.last_backup_at = Some(chrono::Utc::now().timestamp_millis());
+    crate::local_state::persist_identity_settings(alias.to_string(), settings);
 }
 
 /// Sanitize an alias string into a safe download filename stem.
@@ -619,19 +624,24 @@ pub(crate) fn sanitize_filename_stem(alias: &str) -> Option<String> {
     }
 }
 
-/// Build a safe download filename for an identity backup.
+/// Build a safe download filename for a recovery-key `.txt` file.
 ///
 /// Uses the sanitized alias when possible; falls back to
-/// `freenet-identity-<first-two-fingerprint-words>.json` when the alias
+/// `freenet-identity-<first-two-fingerprint-words>.txt` when the alias
 /// produces an empty stem after sanitization.
-pub(crate) fn backup_filename(alias: &str, words: &[&str; 6]) -> String {
+pub(crate) fn backup_filename<S: AsRef<str>>(alias: &str, words: &[S]) -> String {
     match sanitize_filename_stem(alias) {
-        Some(stem) => format!("freenet-identity-{stem}.json"),
-        None => format!("freenet-identity-{}-{}.json", words[0], words[1]),
+        Some(stem) => format!("freenet-identity-{stem}.txt"),
+        None => match words {
+            [a, b, ..] => format!("freenet-identity-{}-{}.txt", a.as_ref(), b.as_ref()),
+            _ => "freenet-identity.txt".to_string(),
+        },
     }
 }
 
-/// Trigger a browser file-download of `json_bytes` as `filename`.
+/// Trigger a browser file-download of `bytes` as `filename` with MIME type
+/// `mime` (the gateway shell only accepts a small allowlist, which
+/// includes `text/plain` and `application/json`).
 ///
 /// Two paths:
 ///   * **Inside the gateway's sandboxed iframe** (the production case):
@@ -648,7 +658,11 @@ pub(crate) fn backup_filename(alias: &str, words: &[&str; 6]) -> String {
 ///
 /// Returns `Ok(())` on success or an error string describing the failure.
 #[cfg(target_family = "wasm")]
-pub(crate) fn trigger_browser_download(filename: &str, json_bytes: &[u8]) -> Result<(), String> {
+pub(crate) fn trigger_browser_download(
+    filename: &str,
+    bytes: &[u8],
+    mime: &str,
+) -> Result<(), String> {
     let window = web_sys::window().ok_or_else(|| "no browser window context".to_string())?;
     // `window.parent` always returns a window. Compare against `window`
     // itself: when they are the same object we're at the top level
@@ -661,7 +675,7 @@ pub(crate) fn trigger_browser_download(filename: &str, json_bytes: &[u8]) -> Res
         .unwrap_or(false);
 
     if in_iframe {
-        match shell_proxy_download(parent.as_ref(), filename, json_bytes) {
+        match shell_proxy_download(parent.as_ref(), filename, bytes, mime) {
             Ok(()) => return Ok(()),
             Err(e) => {
                 // Don't fall through to the local `<a download>` path —
@@ -673,7 +687,7 @@ pub(crate) fn trigger_browser_download(filename: &str, json_bytes: &[u8]) -> Res
         }
     }
 
-    local_anchor_download(filename, json_bytes)
+    local_anchor_download(filename, bytes, mime)
 }
 
 /// Shell-proxied download: postMessage the payload to the parent
@@ -683,13 +697,14 @@ pub(crate) fn trigger_browser_download(filename: &str, json_bytes: &[u8]) -> Res
 fn shell_proxy_download(
     parent: Option<&web_sys::Window>,
     filename: &str,
-    json_bytes: &[u8],
+    bytes: &[u8],
+    mime: &str,
 ) -> Result<(), String> {
     use base64::Engine;
     use web_sys::js_sys;
 
     let parent = parent.ok_or_else(|| "no parent window".to_string())?;
-    let payload = base64::engine::general_purpose::STANDARD.encode(json_bytes);
+    let payload = base64::engine::general_purpose::STANDARD.encode(bytes);
 
     let msg = js_sys::Object::new();
     js_sys::Reflect::set(&msg, &"__freenet_shell__".into(), &true.into())
@@ -698,7 +713,7 @@ fn shell_proxy_download(
         .map_err(|e| format!("set type: {e:?}"))?;
     js_sys::Reflect::set(&msg, &"filename".into(), &filename.into())
         .map_err(|e| format!("set filename: {e:?}"))?;
-    js_sys::Reflect::set(&msg, &"mimeType".into(), &"application/json".into())
+    js_sys::Reflect::set(&msg, &"mimeType".into(), &mime.into())
         .map_err(|e| format!("set mimeType: {e:?}"))?;
     js_sys::Reflect::set(&msg, &"base64".into(), &payload.into())
         .map_err(|e| format!("set base64: {e:?}"))?;
@@ -711,7 +726,7 @@ fn shell_proxy_download(
 /// Local `<a download>` path. Used when the webapp is served outside
 /// the gateway shell (dev / Playwright / `dx serve`).
 #[cfg(target_family = "wasm")]
-fn local_anchor_download(filename: &str, json_bytes: &[u8]) -> Result<(), String> {
+fn local_anchor_download(filename: &str, bytes: &[u8], mime: &str) -> Result<(), String> {
     use wasm_bindgen::JsCast;
     use web_sys::{Blob, BlobPropertyBag, HtmlAnchorElement, Url, js_sys};
 
@@ -720,11 +735,11 @@ fn local_anchor_download(filename: &str, json_bytes: &[u8]) -> Result<(), String
         .document()
         .ok_or_else(|| "no document on window".to_string())?;
 
-    let uint8 = js_sys::Uint8Array::from(json_bytes);
+    let uint8 = js_sys::Uint8Array::from(bytes);
     let array = js_sys::Array::new();
     array.push(&uint8);
     let opts = BlobPropertyBag::new();
-    opts.set_type("application/json");
+    opts.set_type(mime);
     let blob = Blob::new_with_u8_array_sequence_and_options(&array, &opts)
         .map_err(|e| format!("Blob creation failed: {e:?}"))?;
     let url = Url::create_object_url_with_blob(&blob)
@@ -749,7 +764,11 @@ fn local_anchor_download(filename: &str, json_bytes: &[u8]) -> Result<(), String
 }
 
 #[cfg(not(target_family = "wasm"))]
-pub(crate) fn trigger_browser_download(_filename: &str, _json_bytes: &[u8]) -> Result<(), String> {
+pub(crate) fn trigger_browser_download(
+    _filename: &str,
+    _bytes: &[u8],
+    _mime: &str,
+) -> Result<(), String> {
     Ok(())
 }
 
@@ -957,6 +976,10 @@ pub(super) fn Identities() -> Element {
         let mut delete_open = use_signal(|| false);
         let mut delete_input = use_signal(String::new);
         let mut delete_error = use_signal(String::new);
+        // Per-row backup modal (recovery key panel). `backup_saved` mirrors
+        // the user's "I've saved it" for this modal session.
+        let mut backup_open = use_signal(|| false);
+        let mut backup_saved = use_signal(|| false);
 
         let submit_rename = move |_| {
             let next = rename_draft
@@ -1070,25 +1093,11 @@ pub(super) fn Identities() -> Element {
                         }
                         button {
                             class: "icon-btn",
-                            title: "Export / backup this identity",
+                            title: "Back up this identity's recovery key",
                             "data-testid": testid::FM_ID_BACKUP,
                             onclick: move |_| {
-                                let backup = IdentityBackup::from_identity(&backup_alias);
-                                match serde_json::to_vec_pretty(&backup) {
-                                    Ok(json) => {
-                                        let words = crate::app::address_book::fingerprint_words(
-                                            &backup_alias.ml_dsa_vk_bytes(),
-                                            &backup_alias.ml_kem_ek_bytes(),
-                                        );
-                                        let fname = backup_filename(&backup_alias.alias, &words);
-                                        if let Err(e) = trigger_browser_download(&fname, &json) {
-                                            crate::log::info(format!("Backup download failed: {e}"));
-                                        }
-                                    }
-                                    Err(e) => {
-                                        crate::log::info(format!("Backup serialize failed: {e}"));
-                                    }
-                                }
+                                backup_saved.set(false);
+                                backup_open.set(true);
                             },
                             "↓"
                         }
@@ -1154,7 +1163,7 @@ pub(super) fn Identities() -> Element {
                             "but without the keypair they can't be reached again."
                         }
                         p { style: "color:#b91c1c; font-weight:600;",
-                            "Restore the backup file to recover. Without it, this is irreversible."
+                            "Only your recovery key (or an older backup file) can bring it back. Without one, this is irreversible."
                         }
                         p {
                             "Type "
@@ -1193,6 +1202,15 @@ pub(super) fn Identities() -> Element {
                     }
                 }
             }
+            if *backup_open.read() {
+                BackupKeyModal {
+                    identity: backup_alias.clone(),
+                    alias_str: backup_alias.alias.to_string(),
+                    saved: *backup_saved.read(),
+                    on_saved: move |_| backup_saved.set(true),
+                    on_close: move |_| backup_open.set(false),
+                }
+            }
         }
     }
 
@@ -1226,7 +1244,68 @@ pub(super) fn Identities() -> Element {
             }
         }
         p { class: "field-help", style: "margin-top:14px;",
-            "Backup files contain raw private keys — store them securely."
+            "Recovery keys are private keys. Keep them in a password manager."
+        }
+    }
+}
+
+/// Modal wrapping `BackupKeyPanel` for an existing identity (the identity
+/// row's "↓" button). Rendered inside `div.fm-pre`, so it uses the
+/// login.css `.veil` / `.modal` rules.
+#[component]
+fn BackupKeyModal(
+    identity: Identity,
+    // Identity::PartialEq ignores the alias; pass it so a rename re-renders.
+    alias_str: String,
+    saved: bool,
+    on_saved: EventHandler<()>,
+    on_close: EventHandler<()>,
+) -> Element {
+    let token = recovery_key_for(&identity);
+    let words = fingerprint_word_vec(&identity);
+    rsx! {
+        div { class: "veil",
+            onclick: move |_| on_close.call(()),
+            div { class: "modal",
+                "data-testid": testid::FM_BACKUP_MODAL,
+                onclick: move |evt| { evt.stop_propagation(); },
+                div { class: "modal-head",
+                    span { class: "modal-title", "Back up {alias_str}" }
+                    button { class: "modal-x", onclick: move |_| on_close.call(()), "✕" }
+                }
+                div { class: "modal-body",
+                    match token {
+                        Ok(token) => rsx! {
+                            crate::app::backup_panel::BackupKeyPanel {
+                                token,
+                                alias: alias_str.clone(),
+                                words,
+                                saved,
+                                on_exported: move |_| {},
+                                on_saved: {
+                                    let alias = alias_str.clone();
+                                    move |_| {
+                                        mark_backed_up(&alias);
+                                        on_saved.call(());
+                                    }
+                                },
+                            }
+                        },
+                        Err(e) => rsx! {
+                            div { class: "info", style: "background:#fef2f2; border-color:#fecaca; color:#991b1b;",
+                                "Couldn't build a recovery key for this identity: {e}"
+                            }
+                        },
+                    }
+                }
+                div { class: "modal-foot",
+                    button {
+                        class: "btn btn-secondary",
+                        onclick: move |_| on_close.call(()),
+                        "Close"
+                    }
+                }
+            }
         }
     }
 }
@@ -1253,13 +1332,17 @@ pub(super) fn CreateAliasForm() -> Element {
         [&'static str; 6],
     );
     let mut pending: Signal<Option<PendingIdentity>> = use_signal(|| None);
-    // Tracks whether the user has triggered at least one backup download
-    // during this creation flow, so we can warn them before discarding.
+    // True once the recovery key has left the browser (copied, downloaded
+    // or confirmed saved) during this creation flow, so we can warn before
+    // discarding.
     let mut backup_taken = use_signal(|| false);
+    // True only after the user clicked "I've saved it". Drives the
+    // `last_backup_at` stamp when the identity is created.
+    let mut backup_confirmed = use_signal(|| false);
+    // Whether the recovery-key panel is expanded in the reveal card.
+    let mut backup_panel_open = use_signal(|| false);
     // When true, show the orphan-keyfile confirmation dialog.
     let mut discard_confirm_open = use_signal(|| false);
-    // Double-click guard: true while the backup button is cooling down.
-    let mut backup_busy = use_signal(|| false);
 
     let submit = move |_| {
         let alias_str = alias_input.read().trim().to_string();
@@ -1283,6 +1366,8 @@ pub(super) fn CreateAliasForm() -> Element {
                 pending.set(Some((ml_dsa, ml_kem, words)));
                 login_error.set(String::new());
                 backup_taken.set(false);
+                backup_confirmed.set(false);
+                backup_panel_open.set(false);
             }
             Err(e) => {
                 login_error.set(format!("Failed to generate keys: {e:?}"));
@@ -1296,6 +1381,9 @@ pub(super) fn CreateAliasForm() -> Element {
         let Some((ml_dsa, ml_kem, _words)) = pending.write().take() else {
             return;
         };
+        if *backup_confirmed.read() {
+            mark_backed_up(&alias_str);
+        }
         let alias: Rc<str> = alias_str.into();
         let ek_bytes = {
             use ml_kem::kem::KeyExport;
@@ -1342,6 +1430,8 @@ pub(super) fn CreateAliasForm() -> Element {
     let do_discard = move |_| {
         pending.set(None);
         backup_taken.set(false);
+        backup_confirmed.set(false);
+        backup_panel_open.set(false);
         discard_confirm_open.set(false);
         alias_input.set(String::new());
         description.set(String::new());
@@ -1362,6 +1452,16 @@ pub(super) fn CreateAliasForm() -> Element {
     };
 
     let words_opt = pending.read().as_ref().map(|(_, _, w)| *w);
+    // Recovery key for the pending keypair, built only while the panel is
+    // open so the secret isn't rendered into the DOM unless asked for.
+    let pending_token: Option<Result<String, String>> = if *backup_panel_open.read() {
+        pending.read().as_ref().map(|(ml_dsa, ml_kem, _)| {
+            super::backup_token::encode(&StoredIdentityKeys::new(ml_dsa, ml_kem))
+                .map_err(|e| e.to_string())
+        })
+    } else {
+        None
+    };
 
     rsx! {
         if *discard_confirm_open.read() {
@@ -1370,7 +1470,7 @@ pub(super) fn CreateAliasForm() -> Element {
                 div { class: "card",
                     h2 { class: "display md italic", "Discard backed-up identity?" }
                     p { class: "lede",
-                        "You backed up this identity but have not saved it yet. Discarding now will leave the backup file orphaned — the key in it cannot be restored because it was never registered."
+                        "You already copied or downloaded this identity's recovery key. If you discard it now, delete that copy too, so you don't mistake it for an identity you use."
                     }
                     div { class: "modal-foot", style: "background:transparent; border:0; padding:18px 0 0;",
                         button {
@@ -1413,7 +1513,31 @@ pub(super) fn CreateAliasForm() -> Element {
                     span { class: "nudge-icon", "⚠" }
                     div { class: "nudge-text",
                         strong { "Back up the key before you continue." }
-                        " Keys are stored in your local Freenet node's delegate — losing the node's data dir destroys them. Export a backup file to migrate or recover."
+                        " Keys are stored in your local Freenet node's delegate — losing the node's data dir destroys them. Save the recovery key in a password manager to migrate or recover."
+                    }
+                }
+                if let Some(token) = pending_token {
+                    div { class: "bk-inline",
+                        match token {
+                            Ok(token) => rsx! {
+                                crate::app::backup_panel::BackupKeyPanel {
+                                    token,
+                                    alias: alias_input.read().trim().to_string(),
+                                    words: words.iter().map(|w| w.to_string()).collect::<Vec<_>>(),
+                                    saved: *backup_confirmed.read(),
+                                    on_exported: move |_| backup_taken.set(true),
+                                    on_saved: move |_| {
+                                        backup_taken.set(true);
+                                        backup_confirmed.set(true);
+                                    },
+                                }
+                            },
+                            Err(e) => rsx! {
+                                div { class: "info", style: "background:#fef2f2; border-color:#fecaca; color:#991b1b;",
+                                    "Couldn't build a recovery key: {e}"
+                                }
+                            },
+                        }
                     }
                 }
                 if !login_error.read().is_empty() {
@@ -1427,58 +1551,14 @@ pub(super) fn CreateAliasForm() -> Element {
                         onclick: on_discard_click,
                         "Discard"
                     }
-                    button {
-                        class: "btn btn-secondary",
-                        disabled: *backup_busy.read(),
-                        "data-testid": testid::FM_CREATE_BACKUP_NOW,
-                        title: "Download a backup of this identity's private keys",
-                        onclick: move |_| {
-                            if *backup_busy.read() {
-                                return;
-                            }
-                            // Clone keys out so the read guard is dropped before download.
-                            let entry = {
-                                let guard = pending.read();
-                                guard.as_ref().map(|(ml_dsa, ml_kem, words)| {
-                                    let keys = StoredIdentityKeys::new(ml_dsa, ml_kem);
-                                    let alias_str = alias_input.read().trim().to_string();
-                                    let desc = description.read().clone();
-                                    (*words, keys, alias_str, desc)
-                                })
-                            };
-                            if let Some((words, keys, alias_str, desc)) = entry {
-                                let backup = IdentityBackup {
-                                    version: IDENTITY_BACKUP_VERSION,
-                                    alias: alias_str.clone(),
-                                    description: desc,
-                                    keys,
-                                };
-                                match serde_json::to_vec_pretty(&backup) {
-                                    Ok(json) => {
-                                        let fname = backup_filename(&alias_str, &words);
-                                        match trigger_browser_download(&fname, &json) {
-                                            Ok(()) => {
-                                                backup_taken.set(true);
-                                                login_error.set(String::new());
-                                                // Double-click guard: disable button briefly.
-                                                backup_busy.set(true);
-                                                spawn(async move {
-                                                    gloo_timers::future::TimeoutFuture::new(1_000).await;
-                                                    backup_busy.set(false);
-                                                });
-                                            }
-                                            Err(e) => {
-                                                login_error.set(format!("Backup failed: {e}"));
-                                            }
-                                        }
-                                    }
-                                    Err(e) => {
-                                        login_error.set(format!("Backup failed: could not serialize identity: {e}"));
-                                    }
-                                }
-                            }
-                        },
-                        "Back up now ↓"
+                    if !*backup_panel_open.read() {
+                        button {
+                            class: "btn btn-secondary",
+                            "data-testid": testid::FM_CREATE_BACKUP_NOW,
+                            title: "Show this identity's recovery key so you can save it",
+                            onclick: move |_| backup_panel_open.set(true),
+                            "Back up now"
+                        }
                     }
                     button {
                         class: "btn btn-primary btn-lg",
@@ -1622,7 +1702,7 @@ fn FirstRunCards() -> Element {
                 span { class: "action-icon", "↥" }
                 span { class: "action-title", "Restore from backup" }
                 span { class: "action-desc",
-                    "Paste or upload a previously exported identity backup file."
+                    "Paste your recovery key, or upload a backup file you exported earlier."
                 }
             }
         }
@@ -1630,16 +1710,53 @@ fn FirstRunCards() -> Element {
     }
 }
 
+/// Restore an identity from a pasted recovery key or an uploaded backup
+/// file (`.txt` recovery key or legacy v2 `.json`). Both inputs go through
+/// `backup_token::parse_backup`; any rejection is shown inline.
 #[allow(non_snake_case)]
 fn ImportForm() -> Element {
     let mut import_id_form = use_context::<Signal<ImportId>>();
     let mut import_backup_form = use_context::<Signal<ImportBackup>>();
     let actions = use_coroutine_handle::<NodeAction>();
-    let parsed_backup: Signal<Option<IdentityBackup>> = use_signal(|| None);
+    let mut parsed_backup: Signal<Option<IdentityBackup>> = use_signal(|| None);
+    let mut paste_text = use_signal(String::new);
+    // Name of the uploaded file the current input came from, if any.
+    let mut loaded_file: Signal<Option<String>> = use_signal(|| None);
+    let mut parse_error = use_signal(String::new);
     let mut address = use_signal(String::new);
     let mut description = use_signal(String::new);
     let mut restore_error = use_signal(String::new);
 
+    // Parse restore input (from either the paste box or a file) and update
+    // the form. JSON backups carry an alias/description; recovery keys
+    // don't, so those fields keep whatever the user has typed.
+    let mut apply_input = move |text: String| {
+        restore_error.set(String::new());
+        if text.trim().is_empty() {
+            parsed_backup.set(None);
+            parse_error.set(String::new());
+            return;
+        }
+        match super::backup_token::parse_backup(&text) {
+            Ok(b) => {
+                if !b.alias.is_empty() {
+                    address.set(b.alias.clone());
+                }
+                if !b.description.is_empty() {
+                    description.set(b.description.clone());
+                }
+                parse_error.set(String::new());
+                parsed_backup.set(Some(b));
+            }
+            Err(e) => {
+                parsed_backup.set(None);
+                parse_error.set(e.to_string());
+            }
+        }
+    };
+
+    // `parse_backup` guarantees correct seed lengths, so deriving the keys
+    // here cannot panic.
     let preview_words: Option<[&'static str; 6]> = parsed_backup.read().as_ref().map(|b| {
         let ml_dsa = b.keys.ml_dsa_signing_key();
         let ml_kem = b.keys.ml_kem_dk();
@@ -1649,6 +1766,10 @@ fn ImportForm() -> Element {
         let ek_bytes: Vec<u8> = ml_kem.encapsulation_key().to_bytes().to_vec();
         crate::app::address_book::fingerprint_words(&vk_bytes, &ek_bytes)
     });
+    let needs_alias = parsed_backup
+        .read()
+        .as_ref()
+        .is_some_and(|b| b.alias.is_empty());
 
     let cancel = move |_| {
         // Both flows share this form: hub mode toggles ImportBackup;
@@ -1661,14 +1782,34 @@ fn ImportForm() -> Element {
         div { class: "card",
             h2 { class: "display md italic", "Restore identity" }
             p { class: "lede",
-                "Pick the backup file you exported earlier. The keys never leave this browser."
+                "Paste the recovery key from your password manager, or upload a backup file you exported earlier. The keys never leave this browser."
             }
             div { class: "field", style: "margin-top:24px;",
-                label { class: "field-label", "Backup file" }
+                label { class: "field-label", r#for: "restore-paste-input", "Recovery key" }
+                textarea {
+                    class: "textarea",
+                    id: "restore-paste-input",
+                    rows: "3",
+                    placeholder: "fmail-key-1:…",
+                    spellcheck: "false",
+                    autocomplete: "off",
+                    autocapitalize: "off",
+                    "data-testid": testid::FM_RESTORE_PASTE,
+                    value: "{paste_text}",
+                    oninput: move |evt| {
+                        let v = evt.value();
+                        paste_text.set(v.clone());
+                        loaded_file.set(None);
+                        apply_input(v);
+                    },
+                }
+            }
+            div { class: "field",
+                label { class: "field-label", r#for: "restore-file-input", "or upload a file" }
                 input {
                     class: "input",
                     r#type: "file",
-                    accept: ".json",
+                    accept: ".json,.txt",
                     id: "restore-file-input",
                     "data-testid": testid::FM_RESTORE_FILE,
                     onchange: move |_| {
@@ -1676,51 +1817,56 @@ fn ImportForm() -> Element {
                         {
                             use wasm_bindgen::{JsCast, closure::Closure};
                             use web_sys::{FileReader, HtmlInputElement};
-                            let document = match web_sys::window()
+                            let Some(file) = web_sys::window()
                                 .and_then(|w| w.document())
-                            {
-                                Some(d) => d,
-                                None => return,
-                            };
-                            let input = match document
-                                .get_element_by_id("restore-file-input")
+                                .and_then(|d| d.get_element_by_id("restore-file-input"))
                                 .and_then(|el| el.dyn_into::<HtmlInputElement>().ok())
-                            {
-                                Some(el) => el,
-                                None => return,
+                                .and_then(|input| input.files())
+                                .and_then(|files| files.item(0))
+                            else {
+                                return;
                             };
-                            let files = match input.files() {
-                                Some(f) => f,
-                                None => return,
+                            let Ok(reader) = FileReader::new() else {
+                                parse_error.set("Couldn't read that file in this browser.".into());
+                                return;
                             };
-                            let file = match files.item(0) {
-                                Some(f) => f,
-                                None => return,
-                            };
-                            let reader = match FileReader::new() {
-                                Ok(r) => r,
-                                Err(_) => return,
-                            };
+                            let file_name = file.name();
                             let reader_c = reader.clone();
-                            let mut pb = parsed_backup;
-                            let mut addr = address;
-                            let mut desc = description;
                             let cb = Closure::once(Box::new(move || {
-                                let result = reader_c.result().ok()
-                                    .and_then(|v| v.as_string());
-                                if let Some(text) = result
-                                    && let Ok(b) = serde_json::from_str::<IdentityBackup>(&text)
-                                {
-                                    addr.set(b.alias.clone());
-                                    desc.set(b.description.clone());
-                                    pb.set(Some(b));
+                                paste_text.set(String::new());
+                                match reader_c.result().ok().and_then(|v| v.as_string()) {
+                                    Some(text) => {
+                                        loaded_file.set(Some(file_name));
+                                        apply_input(text);
+                                    }
+                                    None => {
+                                        loaded_file.set(None);
+                                        parsed_backup.set(None);
+                                        parse_error.set(format!(
+                                            "Couldn't read {file_name}. Pick the .txt or .json file you exported."
+                                        ));
+                                    }
                                 }
                             }) as Box<dyn FnOnce()>);
                             reader.set_onloadend(Some(cb.as_ref().unchecked_ref()));
-                            let _ = reader.read_as_text(&file);
+                            if reader.read_as_text(&file).is_err() {
+                                parse_error.set("Couldn't read that file in this browser.".into());
+                            }
                             cb.forget();
                         }
                     },
+                }
+                if let Some(name) = &*loaded_file.read() {
+                    span { class: "field-help", "Loaded from {name}." }
+                }
+            }
+            if !parse_error.read().is_empty() {
+                div {
+                    class: "info",
+                    role: "alert",
+                    "data-testid": testid::FM_RESTORE_ERROR,
+                    style: "background:#fef2f2; border-color:#fecaca; color:#991b1b; margin:0 0 18px;",
+                    "{parse_error.read()}"
                 }
             }
             if let Some(words) = preview_words {
@@ -1745,16 +1891,22 @@ fn ImportForm() -> Element {
                 label { class: "field-label", "Alias" }
                 input {
                     class: "input",
-                    placeholder: "pre-filled from backup file",
+                    placeholder: "e.g. mira",
+                    "data-testid": testid::FM_RESTORE_ALIAS,
                     value: "{address}",
                     oninput: move |evt| address.set(evt.value()),
                 }
+                if needs_alias {
+                    span { class: "field-help",
+                        "Recovery keys don't include a name. Choose the alias to use on this device."
+                    }
+                }
             }
             div { class: "field",
-                label { class: "field-label", "Description" }
+                label { class: "field-label", "Description (optional)" }
                 input {
                     class: "input",
-                    placeholder: "pre-filled from backup file",
+                    placeholder: "e.g. work",
                     value: "{description}",
                     oninput: move |evt| description.set(evt.value()),
                 }
@@ -1762,8 +1914,8 @@ fn ImportForm() -> Element {
             div { class: "nudge",
                 span { class: "nudge-icon", "⚠" }
                 div { class: "nudge-text",
-                    strong { "Backup files contain raw private keys." }
-                    " Once restored, treat the original file like a password — store it offline or delete it."
+                    strong { "Recovery keys and backup files are private keys." }
+                    " Keep yours in a password manager, and delete loose copies such as downloads once it's safely stored."
                 }
             }
             if !restore_error.read().is_empty() {
@@ -1783,13 +1935,9 @@ fn ImportForm() -> Element {
                     disabled: parsed_backup.read().is_none(),
                     onclick: move |_| {
                         if let Some(backup) = parsed_backup.read().clone() {
-                            if let Err(_msg) = backup.check_version() {
-                                crate::log::debug!("Rejected backup: {_msg}");
-                                return;
-                            }
                             let alias_str = address.read().trim().to_string();
                             if alias_str.is_empty() {
-                                restore_error.set("Alias is required.".into());
+                                restore_error.set("Choose an alias for this identity.".into());
                                 return;
                             }
                             if Identity::get_alias(&alias_str).is_some() {
@@ -1844,22 +1992,6 @@ fn ImportForm() -> Element {
     }
 }
 
-/// Copy `text` to the system clipboard via the async Clipboard API.
-/// No-op on non-WASM or when the API is unavailable (e.g. non-HTTPS).
-#[cfg(target_family = "wasm")]
-fn copy_to_clipboard(text: String) {
-    use wasm_bindgen_futures::spawn_local;
-    spawn_local(async move {
-        if let Some(window) = web_sys::window() {
-            let clipboard = window.navigator().clipboard();
-            let _ = wasm_bindgen_futures::JsFuture::from(clipboard.write_text(&text)).await;
-        }
-    });
-}
-
-#[cfg(not(target_family = "wasm"))]
-fn copy_to_clipboard(_text: String) {}
-
 /// Modal that displays the shareable ContactCard text and offers a copy button.
 #[allow(non_snake_case)]
 pub(super) fn ShareContactModal() -> Element {
@@ -1871,7 +2003,7 @@ pub(super) fn ShareContactModal() -> Element {
         .as_ref()
         .map(|d| (d.alias.clone(), d.share_text.clone()))
         .unwrap_or_default();
-    let mut copied = use_signal(|| false);
+    let mut copied: Signal<Option<CopyOutcome>> = use_signal(|| None);
 
     // Pull the verify line ("verify: w-w-w-w-w-w") out of the share
     // text — line order is bs58-address then `verify:` (see `on_share`
@@ -1893,14 +2025,14 @@ pub(super) fn ShareContactModal() -> Element {
     };
     let close = move |_| {
         share_contact_form.write().0 = false;
-        copied.set(false);
+        copied.set(None);
     };
 
     rsx! {
         div { class: "veil",
             onclick: move |_| {
                 share_contact_form.write().0 = false;
-                copied.set(false);
+                copied.set(None);
             },
             div { class: "modal",
                 "data-testid": testid::FM_SHARE_MODAL,
@@ -1934,6 +2066,19 @@ pub(super) fn ShareContactModal() -> Element {
                     }
                     label { class: "field-label", "Token" }
                     div { class: "token-block", "{contact_token}" }
+                    match &*copied.read() {
+                        Some(CopyOutcome::SentToShell) => rsx! {
+                            p { class: "field-help", style: "margin-top:10px;",
+                                "Sent to your clipboard through Freenet, which can't confirm it worked. Paste it to check."
+                            }
+                        },
+                        Some(CopyOutcome::Failed(why)) => rsx! {
+                            p { class: "field-help", style: "margin-top:10px; color:#b91c1c;",
+                                "Couldn't copy: {why}. Select the token above and copy it by hand."
+                            }
+                        },
+                        _ => rsx! {},
+                    }
                 }
                 div { class: "modal-foot",
                     button {
@@ -1942,11 +2087,13 @@ pub(super) fn ShareContactModal() -> Element {
                         onclick: {
                             let share_text = share_text.clone();
                             move |_| {
-                                copy_to_clipboard(share_text.clone());
-                                copied.set(true);
+                                copied.set(None);
+                                copy_text(share_text.clone(), move |outcome| {
+                                    copied.set(Some(outcome));
+                                });
                             }
                         },
-                        if *copied.read() { "Copied" } else { "Copy" }
+                        if *copied.read() == Some(CopyOutcome::Copied) { "Copied" } else { "Copy" }
                     }
                     button {
                         class: "btn btn-primary",
@@ -2778,11 +2925,11 @@ mod tests {
         let words = &["alpha", "bravo", "charlie", "delta", "echo", "foxtrot"];
         assert_eq!(
             backup_filename("alice", words),
-            "freenet-identity-alice.json"
+            "freenet-identity-alice.txt"
         );
         assert_eq!(
             backup_filename("my alias", words),
-            "freenet-identity-my_alias.json"
+            "freenet-identity-my_alias.txt"
         );
     }
 
@@ -2792,11 +2939,11 @@ mod tests {
         // All-unicode alias → empty stem after sanitization → fingerprint fallback.
         assert_eq!(
             backup_filename("💌💌", words),
-            "freenet-identity-alpha-bravo.json"
+            "freenet-identity-alpha-bravo.txt"
         );
         assert_eq!(
             backup_filename("///", words),
-            "freenet-identity-alpha-bravo.json"
+            "freenet-identity-alpha-bravo.txt"
         );
     }
 }

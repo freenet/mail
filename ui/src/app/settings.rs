@@ -408,33 +408,23 @@ fn ScrAccount() -> Element {
         local_state::persist_identity_settings(alias_key_as.clone(), next);
     };
 
-    // Back-up: serialise the active identity to JSON, trigger a browser
-    // download, then stamp `last_backup_at` so the amber banner stops
-    // showing and the "Last backup" row updates.
-    let user_for_backup = user;
-    let alias_key_bk = alias_key.clone();
-    let ident_bk = ident.clone();
-    let on_backup = move |_| {
-        let Some(active) = user_for_backup.read().logged_id().cloned() else {
-            return;
-        };
-        let backup = crate::app::login::IdentityBackup::from_identity(&active);
-        let Ok(json) = serde_json::to_vec_pretty(&backup) else {
-            return;
-        };
-        let words = crate::app::address_book::fingerprint_words(
-            &active.ml_dsa_vk_bytes(),
-            &active.ml_kem_ek_bytes(),
-        );
-        let fname = crate::app::login::backup_filename(&active.alias, &words);
-        if let Err(e) = crate::app::login::trigger_browser_download(&fname, &json) {
-            crate::log::info(format!("Backup download failed: {e}"));
-            return;
-        }
-        let mut next = ident_bk.clone();
-        next.last_backup_at = Some(chrono::Utc::now().timestamp_millis());
-        local_state::persist_identity_settings(alias_key_bk.clone(), next);
+    // Back-up: open the recovery-key panel at the top of this screen.
+    // `last_backup_at` is stamped only when the user confirms "I've saved
+    // it" in the panel (see `login::mark_backed_up`), so the amber banner
+    // and the "Last backup" row reflect a confirmed backup, not a click.
+    let mut backup_open = use_signal(|| false);
+    let on_backup = move |_| backup_open.set(true);
+    let backup_panel: Option<(Result<String, String>, Vec<String>)> = if *backup_open.read() {
+        user.read().logged_id().map(|active| {
+            (
+                crate::app::login::recovery_key_for(active),
+                crate::app::login::fingerprint_word_vec(active),
+            )
+        })
+    } else {
+        None
     };
+    let alias_for_panel = alias.clone();
 
     // Restore: route through the existing import-backup modal; close
     // settings so the modal is visible over the login pane.
@@ -450,7 +440,43 @@ fn ScrAccount() -> Element {
             p { class: "fm-set-lede",
                 "Identity-scoped settings. These follow this identity across devices once sync lands. Switch the active identity in the sidebar to edit a different one."
             }
-            if !backed_up {
+            if let Some((token, words)) = backup_panel {
+                Card {
+                    title: "Recovery key",
+                    sub: "Both private keys for this identity, as one line of text.",
+                    div { class: "bk-card-body",
+                        match token {
+                            Ok(token) => rsx! {
+                                crate::app::backup_panel::BackupKeyPanel {
+                                    token,
+                                    alias: alias_for_panel.clone(),
+                                    words,
+                                    saved: false,
+                                    on_exported: move |_| {},
+                                    on_saved: {
+                                        let alias = alias_for_panel.clone();
+                                        move |_| {
+                                            crate::app::login::mark_backed_up(&alias);
+                                            backup_open.set(false);
+                                        }
+                                    },
+                                }
+                            },
+                            Err(e) => rsx! {
+                                p { class: "bk-status err", "Couldn't build a recovery key for this identity: {e}" }
+                            },
+                        }
+                        div { class: "bk-actions",
+                            button {
+                                class: "fm-btn-secondary",
+                                r#type: "button",
+                                onclick: move |_| backup_open.set(false),
+                                "Close"
+                            }
+                        }
+                    }
+                }
+            } else if !backed_up {
                 div { class: "fm-banner amber",
                     span { class: "fm-banner-glyph", "!" }
                     div { class: "fm-banner-text",
@@ -460,7 +486,8 @@ fn ScrAccount() -> Element {
                     div { class: "fm-banner-actions",
                         button {
                             class: "fm-btn-primary",
-                            onclick: on_backup.clone(),
+                            "data-testid": testid::FM_SETTINGS_BACKUP_BANNER,
+                            onclick: on_backup,
                             "Back up now"
                         }
                     }
@@ -518,13 +545,14 @@ fn ScrAccount() -> Element {
             }
             Card {
                 title: "Backup & restore",
-                sub: "Backups are an encrypted bundle of both keys. There's no server-side recovery; lose this and the alias is gone.",
+                sub: "Your recovery key holds both private keys. Keep it in a password manager: there's no server-side recovery, so if you lose it the alias is gone.",
                 SettingRow {
                     label: "Last backup",
                     help: last_backup_label.clone(),
                     control: rsx! {
                         button {
                             class: "fm-btn-primary",
+                            "data-testid": testid::FM_SETTINGS_BACKUP,
                             onclick: on_backup,
                             "Back up now"
                         }
@@ -532,7 +560,7 @@ fn ScrAccount() -> Element {
                 }
                 SettingRow {
                     label: "Restore from backup",
-                    help: "Replaces the active identity's keys. The current keys will be unrecoverable after this.",
+                    help: "Adds an identity from a recovery key or backup file. Existing identities are not changed.",
                     control: rsx! {
                         button {
                             class: "fm-btn-secondary",
