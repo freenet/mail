@@ -372,7 +372,7 @@ echo "production container state signed at version $version pointing at $APP_ID"
 '''
 
 [tasks.update-published-container]
-description = "Refresh published-contract/container{.wasm,.parameters,-id.txt} from a fresh container build"
+description = "Build the container contract and derive its TEST id (test-key parameters) into target/container/; never writes published-contract/"
 dependencies = ["build-container", "sign-container-state-test"]
 script_runner = "bash"
 script = '''
@@ -394,18 +394,16 @@ if [ -z "$contract_id" ]; then
     echo "error: fdev get-contract-id returned empty id" >&2
     exit 1
 fi
-mkdir -p "$ROOT/published-contract"
-cp "$WASM"   "$ROOT/published-contract/container.wasm"
-cp "$PARAMS" "$ROOT/published-contract/container.parameters"
-printf '%s\n' "$contract_id" > "$ROOT/published-contract/container-id.txt"
-echo "published-contract/ container snapshot refreshed:"
-echo "  container-id.txt    = $contract_id"
-echo "  container.wasm      = $(wc -c < "$ROOT/published-contract/container.wasm") bytes"
-echo "  container.parameters= $(wc -c < "$ROOT/published-contract/container.parameters") bytes"
-echo ""
-echo "NOTE: container-id.txt is the bookmarkable URL. If this id differs from"
-echo "      the committed one, the container wasm or parameters drifted:"
-echo "      restore with git checkout -- published-contract/ and investigate."
+# The published container contract is frozen (published-contract/README.md),
+# so a fresh build with the committed test key goes under target/ only.
+mkdir -p "$ROOT/target/container"
+cp "$WASM" "$ROOT/target/container/container.wasm"
+printf '%s\n' "$contract_id" > "$ROOT/target/container/container-id.txt"
+echo "test container contract in target/container/:"
+echo "  container-id.txt     = $contract_id"
+echo "  container.wasm       = $(wc -c < "$ROOT/target/container/container.wasm") bytes"
+echo "  container.parameters = test key"
+echo "published-contract/ is untouched."
 '''
 
 [tasks.publish-container-test]
@@ -415,11 +413,17 @@ script_runner = "bash"
 script = '''
 set -euo pipefail
 ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
+# The frozen container wasm with the test key's parameters, which signed
+# the state (the committed parameters are the production key's).
 WASM="$ROOT/published-contract/container.wasm"
-PARAMS="$ROOT/published-contract/container.parameters"
+PARAMS="$ROOT/target/container/container.parameters"
 STATE="$ROOT/target/container/container.state"
-if [ ! -f "$WASM" ] || [ ! -f "$PARAMS" ]; then
-    echo "error: container wasm/parameters missing; restore them with git checkout -- published-contract/" >&2
+if [ ! -f "$WASM" ]; then
+    echo "error: $WASM missing; restore it with git checkout -- published-contract/" >&2
+    exit 1
+fi
+if [ ! -f "$PARAMS" ]; then
+    echo "error: $PARAMS missing (did sign-container-state-test run?)" >&2
     exit 1
 fi
 PORT="${FREENET_LOCAL_PORT:-7509}"

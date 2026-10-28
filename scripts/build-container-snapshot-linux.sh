@@ -65,17 +65,11 @@ if [ ! -f "$WASM_OUT" ]; then
     exit 1
 fi
 
-# Reuse the existing parameters file. The 32-byte verifying key is
-# orthogonal to the container contract source — it's the publisher identity, not
-# something the build produces. If parameters are missing (first-ever
-# bootstrap), defer to `cargo make update-published-container` to mint them
-# from the committed test key.
+# Reuse the committed parameters: the production verifying key, the
+# publisher identity. The build does not produce them.
 PARAMS="$ROOT/published-contract/container.parameters"
 if [ ! -f "$PARAMS" ]; then
-    echo "error: $PARAMS not found." >&2
-    echo "       For a first-ever bootstrap, run \`cargo make update-published-container\`" >&2
-    echo "       once natively to mint parameters, then re-run this script to overwrite" >&2
-    echo "       the wasm with the canonical Linux-built bytes." >&2
+    echo "error: $PARAMS not found; restore it with git checkout -- published-contract/" >&2
     exit 1
 fi
 
