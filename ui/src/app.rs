@@ -4971,7 +4971,9 @@ struct Confirmation {
     pending: &'static str,
     /// The node stored it.
     done: &'static str,
-    /// The write failed or the node answered with an error.
+    /// The write failed, or a local-state request was answered with an error
+    /// while waiting (not necessarily this one's, so this does not claim the
+    /// write was lost).
     failed: &'static str,
     /// No answer in time, or one that could not be attributed.
     unconfirmed: &'static str,
@@ -4980,14 +4982,14 @@ struct Confirmation {
 const CONFIRM_DELETE: Confirmation = Confirmation {
     pending: "Deleting…",
     done: "Deleted",
-    failed: "Your node didn't save the delete; the message may reappear after a reload",
+    failed: "Couldn't confirm the delete was saved; it may reappear after a reload",
     unconfirmed: "Couldn't confirm the delete was saved; it may reappear after a reload",
 };
 
 const CONFIRM_ARCHIVE: Confirmation = Confirmation {
     pending: "Archiving…",
     done: "Archived",
-    failed: "Your node didn't save the archive; the message may be lost after a reload",
+    failed: "Couldn't confirm the archive was saved; the message may be lost after a reload",
     unconfirmed: "Couldn't confirm the archive was saved; the message may be lost after a reload",
 };
 

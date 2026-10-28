@@ -10,7 +10,9 @@
 //! An error that names no delegate cannot be attributed. If one arrives while
 //! requests are unanswered, the count can no longer be trusted, and from then
 //! on a wait reports [`Stored::Unknown`] rather than risk reporting a write
-//! done when it is not.
+//! done when it is not. Known limitation: that lasts for the rest of the page
+//! session (nothing re-establishes the count); PR B replaces this count with
+//! per-request acks.
 
 use futures::channel::oneshot;
 
@@ -45,22 +47,19 @@ impl WriteTracker {
     /// nothing will answer it.
     pub(crate) fn unsent(&mut self) {
         self.take_answer();
+        self.settle_if_idle();
     }
 
     /// The node answered a request: successfully, or with an error that names
     /// this delegate.
     pub(crate) fn answered(&mut self, ok: bool) -> usize {
         self.take_answer();
-        if !ok {
-            // Its write may be the one a waiter is waiting for.
+        if ok {
+            self.settle_if_idle();
+        } else {
+            // Its write may be the one a waiter is waiting for. Conservative:
+            // every pending waiter is told its write may not have been saved.
             self.resolve(Stored::Failed);
-        } else if self.unanswered == 0 {
-            let outcome = if self.untrusted {
-                Stored::Unknown
-            } else {
-                Stored::Yes
-            };
-            self.resolve(outcome);
         }
         self.unanswered
     }
@@ -90,15 +89,23 @@ impl WriteTracker {
         Ok(rx)
     }
 
-    fn take_answer(&mut self) {
-        // Every request is counted, so an answer with none unanswered means
-        // one was not.
-        debug_assert!(
-            self.unanswered > 0,
-            "local-state answer with none unanswered"
-        );
+    /// Nothing unanswered: every waiter's writes are settled.
+    fn settle_if_idle(&mut self) {
         if self.unanswered == 0 {
-            // Distrust the count rather than wrap it.
+            let outcome = if self.untrusted {
+                Stored::Unknown
+            } else {
+                Stored::Yes
+            };
+            self.resolve(outcome);
+        }
+    }
+
+    fn take_answer(&mut self) {
+        if self.unanswered == 0 {
+            // Every request is counted, so this means one was not. Logged, not
+            // asserted (the tracker is borrowed here): the count is distrusted
+            // rather than wrapped, and the e2e test fails on the log line.
             crate::log::info("local-state answer with none unanswered");
             self.untrusted = true;
             self.resolve(Stored::Unknown);
@@ -193,6 +200,19 @@ mod tests {
         let mut t = WriteTracker::default();
         t.unattributed_error();
         assert_eq!(t.wait().unwrap_err(), Stored::Yes);
+    }
+
+    /// A send that fails while a waiter is pending can be the last thing it
+    /// was waiting for: the waiter settles then, not at its timeout.
+    #[test]
+    fn a_failed_send_that_leaves_nothing_unanswered_settles_waiters() {
+        let mut t = WriteTracker::default();
+        t.sent();
+        t.sent();
+        let mut rx = waiting(&mut t);
+        t.answered(true);
+        t.unsent();
+        assert_eq!(rx.try_recv().unwrap(), Some(Stored::Yes));
     }
 
     #[test]
