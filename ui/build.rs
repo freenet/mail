@@ -41,7 +41,7 @@ fn main() {
     // Optional artifact — present once the container contract was published.
     // Missing is fine; we emit an empty id. Listing it here makes cargo
     // rebuild when the file appears/changes.
-    let container_id_path = root.join("published-contract/facade-id.txt");
+    let container_id_path = root.join("published-contract/container-id.txt");
     println!("cargo:rerun-if-changed={}", container_id_path.display());
     let container_id = std::fs::read_to_string(&container_id_path)
         .map(|s| s.trim().to_string())

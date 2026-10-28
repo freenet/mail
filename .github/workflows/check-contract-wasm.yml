@@ -39,7 +39,7 @@ jobs:
         id: filter
         run: |
           # An allowlist of what is safe to skip, not a list of what
-          # matters: many inputs move facade.wasm bytes (.cargo/config.toml
+          # matters: many inputs move container.wasm bytes (.cargo/config.toml
           # rustflags, Makefile.toml, scripts/), and a missed one must run
           # the gate, not skip it. No Markdown file feeds the build, except
           # under ui/public/ (Dioxus asset_dir, shipped in the webapp).
@@ -74,8 +74,8 @@ jobs:
           fetch-depth: 2
 
       - name: Install Rust
-        # Pinned (issue #206): facade.wasm bytes are sensitive to rustc
-        # version. Stable-channel bumps would silently rotate the facade
+        # Pinned (issue #206): container.wasm bytes are sensitive to rustc
+        # version. Stable-channel bumps would silently rotate the container contract
         # contract id. Keep in sync with rust-toolchain.toml.
         uses: dtolnay/rust-toolchain@1.95.0
         with:
@@ -166,32 +166,32 @@ jobs:
           fi
           echo "✅ published-contract/ is in sync with source."
 
-      # Issue #206 (closes the Phase 1 informational gate). The facade
+      # Issue #206 (closes the Phase 1 informational gate). The container contract
       # contract id is intended to stay byte-stable across releases.
       # Both prerequisites are now in place:
       #   • rustc pinned in rust-toolchain.toml (and the dtolnay action
       #     in this workflow uses the same pinned version).
-      #   • Snapshot at published-contract/facade.{wasm,parameters,id.txt}
+      #   • Snapshot at published-contract/container{.wasm,.parameters,-id.txt}
       #     produced under linux/amd64 with that pinned rustc.
       # Any drift in the rebuilt wasm is now a release blocker —
       # the rebuild MUST match the committed snapshot byte-for-byte.
-      - name: Verify facade wasm byte-equality (issue #206)
+      - name: Verify container wasm byte-equality (issue #206)
         id: facade-verify
         run: |
-          if [ ! -f published-contract/facade.wasm ]; then
-            echo "::error::published-contract/facade.wasm missing."
-            echo "Bootstrap the snapshot via scripts/build-facade-snapshot-linux.sh"
-            echo "and commit published-contract/facade.{wasm,parameters,id.txt}."
+          if [ ! -f published-contract/container.wasm ]; then
+            echo "::error::published-contract/container.wasm missing."
+            echo "Bootstrap the snapshot via scripts/build-container-snapshot-linux.sh"
+            echo "and commit published-contract/container{.wasm,.parameters,-id.txt}."
             exit 1
           fi
-          bash scripts/check-facade-byte-equal.sh
+          bash scripts/check-container-byte-equal.sh
 
       # Bootstrap helper (#206): on drift, upload the freshly-built
-      # facade.wasm so an operator can download it, recompute the
+      # container.wasm so an operator can download it, recompute the
       # contract id, and commit the canonical CI-built snapshot. Local
       # docker amd64 emulation (qemu) produces different bytes from
       # native ubicloud amd64 — only CI bytes are canonical.
-      - name: Upload rebuilt facade.wasm on drift
+      - name: Upload rebuilt container.wasm on drift
         if: failure() && steps.facade-verify.conclusion == 'failure'
         uses: actions/upload-artifact@v7
         with:
@@ -200,24 +200,24 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
-      # Issue #214 F1: facade.parameters IS the production verifying
-      # key (32 bytes ed25519). The committed facade contract id is
-      # `hash(facade.wasm, facade.parameters)`, so swapping the
+      # Issue #214 F1: container.parameters IS the production verifying
+      # key (32 bytes ed25519). The committed container contract id is
+      # `hash(container.wasm, container.parameters)`, so swapping the
       # parameters silently rotates the stable bookmarkable URL —
       # exactly the failure #200 was designed to prevent. Hard-code
       # the production pubkey here as a tripwire: a PR that touches
-      # published-contract/facade.parameters MUST update this hex,
+      # published-contract/container.parameters MUST update this hex,
       # which is a visible, reviewable change.
       #
       # Production pubkey is the ed25519 verifying key under
       # ~/.config/freenet-email/web-container-keys.toml. Rotating the
       # production key requires bumping this constant in the same PR.
-      - name: Verify facade.parameters matches production pubkey
+      - name: Verify container.parameters matches production pubkey
         run: |
           EXPECTED="31dd371fedc842994c6e571a0868e5eece1367a7d8cc16c498a57c985526ae46"
-          ACTUAL=$(xxd -p -c 64 published-contract/facade.parameters | tr -d '\n')
+          ACTUAL=$(xxd -p -c 64 published-contract/container.parameters | tr -d '\n')
           if [ "$ACTUAL" != "$EXPECTED" ]; then
-              echo "::error::facade.parameters does not match the production verifying key."
+              echo "::error::container.parameters does not match the production verifying key."
               echo "  expected: $EXPECTED"
               echo "  actual:   $ACTUAL"
               echo ""
@@ -227,5 +227,5 @@ jobs:
               echo "      .github/workflows/check-contract-wasm.yml in the same PR."
               exit 1
           fi
-          echo "✅ facade.parameters matches the committed production pubkey."
+          echo "✅ container.parameters matches the committed production pubkey."
 

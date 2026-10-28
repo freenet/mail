@@ -87,8 +87,8 @@ pub(crate) const WEB_CONTAINER_CONTRACT_ID: &str =
 #[cfg(not(feature = "use-node"))]
 pub(crate) const WEB_CONTAINER_CONTRACT_ID: &str = "";
 
-/// Facade contract id — the STABLE bookmarkable URL users hit (#200).
-/// Populated by `ui/build.rs` from `published-contract/facade-id.txt`,
+/// Container contract id — the STABLE bookmarkable URL users hit (#200).
+/// Populated by `ui/build.rs` from `published-contract/container-id.txt`,
 /// or empty when the snapshot hasn't been committed yet (Phase 1
 /// prereq) OR when the offline UI build skips build.rs entirely.
 /// Phase 3 (this constant) only logs the value; the routing decision
@@ -134,9 +134,9 @@ pub fn main() {
         log::info(format!("web-container contract id (build-embedded): {id}"));
         let facade = FACADE_CONTRACT_ID.trim();
         if facade.is_empty() {
-            log::info("facade contract id: <not committed yet — issue #200 Phase 1 prereq>");
+            log::info("container contract id: <not committed yet — issue #200 Phase 1 prereq>");
         } else {
-            log::info(format!("facade contract id (build-embedded): {facade}"));
+            log::info(format!("container contract id (build-embedded): {facade}"));
         }
     }
 

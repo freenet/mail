@@ -159,9 +159,9 @@ designed to stay byte-stable across every release.
 
 `contracts/facade/` (stable wasm, never rebuilt for a release) and
 `contracts/facade-loader/` (static HTML+JS shell it serves) are checked
-into `published-contract/facade.{wasm,parameters,id.txt}` — CI enforces
-byte-equality on the wasm; `facade-id.txt` is the stable id users
-bookmark; `facade.parameters` is the same prod ed25519 key used for
+into `published-contract/container{.wasm,.parameters,-id.txt}` — CI enforces
+byte-equality on the wasm; `container-id.txt` is the stable id users
+bookmark; `container.parameters` is the same prod ed25519 key used for
 web-container (the "publisher identity").
 
 Per release the facade WASM is unchanged. Only the facade contract's
@@ -183,7 +183,7 @@ once per environment as the stable entry point. `scripts/release.sh`
 automatically renders + signs + UPDATEs the facade pointer per release
 (#200); UI's `lib.rs` logs both `WEB_CONTAINER_CONTRACT_ID` and
 `FACADE_CONTRACT_ID` on startup. Both are conditional on
-`published-contract/facade-id.txt` being committed (one-time facade
+`published-contract/container-id.txt` being committed (one-time facade
 publish required first; see RELEASING.md §"Facade contract update").
 
 #### Pointer lifecycle — how the facade actually serves a release
@@ -198,14 +198,14 @@ facade contract id fixed. The full chain on every release:
    `contracts/facade-loader/dist/index.html`. This loader is the file
    the facade actually serves; it's a static HTML+JS page that
    redirects the browser to the new web-container url.
-3. `cargo make pack-facade-loader` tars + xzs the loader into
-   `target/facade/loader.tar.xz`. The gateway's `WebApp::try_from`
+3. `cargo make pack-container-loader` tars + xzs the loader into
+   `target/container/loader.tar.xz`. The gateway's `WebApp::try_from`
    pipeline (XzDecoder → tar.unpack) requires this exact framing, see
    memory `facade_state_framing.md`.
-4. `cargo make sign-facade-state` signs a fresh `FacadePointer { version=now, current_app_id=<new>, prev_app_ids=[<old>] }`
+4. `cargo make sign-container-state` signs a fresh `FacadePointer { version=now, current_app_id=<new>, prev_app_ids=[<old>] }`
    with the production key from `~/.config/freenet-email/web-container-keys.toml`.
-   Output: `target/facade/facade.state` (signed `[meta_len][meta][web_len][web]`).
-5. `fdev execute update --as-state <facade_id> target/facade/facade.state`
+   Output: `target/container/container.state` (signed `[meta_len][meta][web_len][web]`).
+5. `fdev execute update --as-state <facade_id> target/container/container.state`
    pushes the new state to the network. **`--as-state` is required** —
    default is `UpdateData::Delta` which a facade-style contract rejects
    silently as `InvalidUpdate` (memory `fdev_update_needs_as_state.md`).
@@ -248,17 +248,17 @@ curl -sI "http://127.0.0.1:7509/v1/contract/web/$(cat published-contract/contrac
   | head -1   # expect HTTP/1.1 200
 
 # 2. Rebuild loader + repack + re-sign state with the production key.
-cargo make sign-facade-state
-# (chains build-facade-loader → pack-facade-loader → sign)
+cargo make sign-container-state
+# (chains build-container-loader → pack-container-loader → sign)
 
 # 3. Push the pointer update.
 fdev execute update --as-state \
-  "$(cat published-contract/facade-id.txt)" \
-  target/facade/facade.state
+  "$(cat published-contract/container-id.txt)" \
+  target/container/container.state
 # expect "Contract updated successfully" + StateSummary
 
 # 4. Verify the facade now serves the new loader.
-curl -s "http://127.0.0.1:7509/v1/contract/web/$(cat published-contract/facade-id.txt)/?__sandbox=1" \
+curl -s "http://127.0.0.1:7509/v1/contract/web/$(cat published-contract/container-id.txt)/?__sandbox=1" \
   | grep CURRENT_APP_ID
 # expect the new app id baked in
 
@@ -278,7 +278,7 @@ hand:
 CACHE_DIR="$HOME/Library/Caches/The-Freenet-Project-Inc.freenet/webapp_cache"
 # Linux:
 # CACHE_DIR="$HOME/.cache/freenet/webapp_cache"
-FACADE_ID=$(cat published-contract/facade-id.txt)
+FACADE_ID=$(cat published-contract/container-id.txt)
 rm -rf "${CACHE_DIR}/${FACADE_ID}" "${CACHE_DIR}/${FACADE_ID}.hash"
 
 # Trigger a GetResponse by hitting the MAIN URL (not ?__sandbox=1).
@@ -293,7 +293,7 @@ issue when you next encounter it.
 
 #### What NOT to commit per release
 
-- `target/facade/facade.state` is signed with the production key and
+- `target/container/container.state` is signed with the production key and
   carries a per-build timestamp version. **Do not commit it** — every
   release re-signs. Only the WASM/parameters/id snapshot under
   `published-contract/facade.*` is checked into git, and that triplet
@@ -440,21 +440,21 @@ freenet-email workspace re-exports the same types via
 so signer + UI keep their existing imports unchanged.
 
 Net effect: bumping `dioxus`, `chrono`, `ml-dsa`, or any other
-workspace dep cannot rotate `facade.wasm`, because cargo resolves the
+workspace dep cannot rotate `container.wasm`, because cargo resolves the
 facade build against `contracts/facade/Cargo.lock` — not the workspace
 lockfile. To deliberately bump a facade dep, edit the `=x.y.z` pin in
 `contracts/facade/Cargo.toml` (and pair with a snapshot regeneration +
 release-id update; see #200).
 
-**Build hygiene**: `scripts/check-facade-byte-equal.sh` rebuilds the
+**Build hygiene**: `scripts/check-container-byte-equal.sh` rebuilds the
 facade (using the facade-local manifest at `contracts/facade/`) and
-`cmp`s against `published-contract/facade.wasm`. CI runs this step in
+`cmp`s against `published-contract/container.wasm`. CI runs this step in
 `check-contract-wasm.yml`. The main `build.yml` workflow also runs
 `cargo fmt`, `cargo clippy`, `cargo test`, and a wasm32 release build
 inside `contracts/facade/` so PRs that touch facade are still gated.
 
 **Status (#206 closed)**: the committed snapshot at
-`published-contract/facade.{wasm,parameters,id.txt}` is the canonical
+`published-contract/container{.wasm,.parameters,-id.txt}` is the canonical
 artifact. It was produced under linux/amd64 with the rustc version
 pinned in `rust-toolchain.toml` (currently 1.95.0). The CI byte-equality
 step in `check-contract-wasm.yml` is now a **release blocker**: any
@@ -470,8 +470,8 @@ the rustc pin also means bumping every `dtolnay/rust-toolchain@` ref in
 **On native linux/amd64**:
 
 ```bash
-scripts/build-facade-snapshot-linux.sh
-git add published-contract/facade.{wasm,parameters,id.txt}
+scripts/build-container-snapshot-linux.sh
+git add published-contract/container{.wasm,.parameters,-id.txt}
 git commit -m "chore(facade): regenerate snapshot — <reason>"
 ```
 
@@ -479,18 +479,18 @@ git commit -m "chore(facade): regenerate snapshot — <reason>"
 bytes that drift from CI's native amd64 build (verified empirically),
 so local rebuilds can't match the gate. Use the CI-bootstrap path:
 
-1. Push the change with whatever facade.wasm bytes are on disk (any
+1. Push the change with whatever container.wasm bytes are on disk (any
    non-empty file works — gate WILL fail).
 2. The `check-contract-wasm.yml` job rebuilds and uploads the
    canonical wasm as workflow artifact `facade-wasm-rebuilt-<sha>`.
 3. Download via
    `gh run download <run-id> -n facade-wasm-rebuilt-<sha>`.
-4. Replace `published-contract/facade.wasm`, recompute the id with
+4. Replace `published-contract/container.wasm`, recompute the id with
    `fdev get-contract-id --code … --parameters …`, write to
-   `published-contract/facade-id.txt`, commit, push.
+   `published-contract/container-id.txt`, commit, push.
 5. CI passes.
 
-The local `check-facade-byte-equal.sh` skips with a warning on
+The local `check-container-byte-equal.sh` skips with a warning on
 non-canonical hosts so dev rebuilds aren't blocked.
 
 ### Reproducibility caveats

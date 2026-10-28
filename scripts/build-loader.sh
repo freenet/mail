@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Build the facade loader by substituting CURRENT_APP_ID into the template.
+# Build the container loader by substituting CURRENT_APP_ID into the template.
 # Issue #200 / Phase 1.
 #
 # Usage:
 #   scripts/build-loader.sh <current_app_id>
 #
-# Writes contracts/facade-loader/dist/index.html. The facade contract's
+# Writes contracts/facade-loader/dist/index.html. The container contract's
 # freenet.toml lists `dist/` as its webapp source-dir, so a subsequent
-# `cargo make build-facade` packages this loader as the facade webapp.
+# `cargo make build-container` packages this loader as the container contract webapp.
 
 set -euo pipefail
 

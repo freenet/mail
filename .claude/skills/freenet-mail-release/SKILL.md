@@ -136,7 +136,7 @@ scripts/smoke-test-production.sh
 
 # 2. Facade pointer flipped to new app id.
 NEW_APP_ID=$(cat published-contract/contract-id.txt)
-FACADE_ID=$(cat published-contract/facade-id.txt)
+FACADE_ID=$(cat published-contract/container-id.txt)
 curl -s "http://127.0.0.1:7509/v1/contract/web/${FACADE_ID}/?__sandbox=1" \
   | grep -F "${NEW_APP_ID}"
 # expect: var CURRENT_APP_ID = "<new app id>";
@@ -163,8 +163,8 @@ pointer flip"; the key facts:
   `UpdateData::Delta` (the facade contract silently rejects Delta as
   `InvalidUpdate`). See memory `fdev_update_needs_as_state.md`.
 - The facade `web` slot must be an xz-tar containing index.html, not
-  raw HTML. `cargo make sign-facade-state` (which chains
-  `pack-facade-loader`) gets this right; do not skip it. See memory
+  raw HTML. `cargo make sign-container-state` (which chains
+  `pack-container-loader`) gets this right; do not skip it. See memory
   `facade_state_framing.md`.
 
 ### Smoke test fails post-publish
@@ -202,7 +202,7 @@ path, not a routine action.
 - **Don't** edit `published-contract/` by hand. Every committed file
   there is produced by `update-published-contract-prod` (or the facade
   equivalent) and signed with the production key.
-- **Don't** commit `target/facade/facade.state`. Per-release signed
+- **Don't** commit `target/container/container.state`. Per-release signed
   artifact; only the WASM/parameters/id snapshot under
   `published-contract/facade.*` is tracked.
 

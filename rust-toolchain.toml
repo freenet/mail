@@ -1,8 +1,8 @@
 [toolchain]
-# Pinned (issue #206): facade.wasm bytes — and therefore the facade
+# Pinned (issue #206): container.wasm bytes — and therefore the container contract
 # contract id — are sensitive to rustc/LLVM version. A stable-channel
 # bump rotates the bytes and breaks every bookmarked URL. Bumping this
-# pin is a deliberate act paired with `cargo make update-published-facade`
+# pin is a deliberate act paired with `cargo make update-published-container`
 # + commit of the new snapshot + a release-notes mention. Bump every
 # `dtolnay/rust-toolchain@<version>` ref in .github/workflows/ with it;
 # Dependabot is told to ignore that action so it cannot do half the job.

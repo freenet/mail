@@ -15,7 +15,7 @@ facade serves; its job is to redirect the browser to the real app at
 The loader is built per-release with `<current_app_id>` baked in by the
 publish pipeline (`scripts/build-loader.sh`). The pipeline writes
 `dist/index.html` from `src/index.html.tmpl`, substituting the placeholder
-`__CURRENT_APP_ID__` with the real ID, then `cargo make build-facade`
+`__CURRENT_APP_ID__` with the real ID, then `cargo make build-container`
 embeds `dist/` as the facade webapp content.
 
 Pros: no in-browser binary-WS-protocol parsing; loader is ~50 lines of

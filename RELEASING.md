@@ -239,14 +239,14 @@ now does this for you. After the contract publish + before the commit,
 the script:
 
 1. Re-renders the loader with the new `current_app_id` baked in
-   (`cargo make build-facade-loader` with `FACADE_CURRENT_APP_ID` set).
+   (`cargo make build-container-loader` with `FACADE_CURRENT_APP_ID` set).
 2. Signs a new facade state with the production key (`cargo make
-   sign-facade-state`).
+   sign-container-state`).
 3. Prompts to push the facade UPDATE to the network (`fdev execute
-   update <FACADE_ID> target/facade/facade.state network`).
+   update <FACADE_ID> target/container/container.state network`).
 
 The facade-flip block is **conditional on
-`published-contract/facade-id.txt` being committed** — i.e. the facade
+`published-contract/container-id.txt` being committed** — i.e. the facade
 must have been published once and its id committed first. Until then,
 the script warns and skips the flip; the rest of the release still goes
 through.
@@ -258,7 +258,7 @@ at the new webapp:
 
 ```bash
 NEW_APP_ID=$(cat published-contract/contract-id.txt)
-FACADE_ID=$(cat published-contract/facade-id.txt)
+FACADE_ID=$(cat published-contract/container-id.txt)
 
 # 1. Facade serves the loader, and the loader bakes in the new app id.
 curl -s "http://127.0.0.1:7509/v1/contract/web/${FACADE_ID}/?__sandbox=1" \
@@ -289,10 +289,10 @@ curl -sI "http://127.0.0.1:7509/v1/contract/web/${NEW_APP_ID}/" | head -1
 # and you need to re-run the publish step.
 
 # Re-sign facade state with the new app id and push the pointer update.
-cargo make sign-facade-state
+cargo make sign-container-state
 fdev execute update --as-state \
-    "$(cat published-contract/facade-id.txt)" \
-    target/facade/facade.state
+    "$(cat published-contract/container-id.txt)" \
+    target/container/container.state
 # expect: "Contract updated successfully" + StateSummary blob
 
 # Verify (same as §"Verifying the pointer flip worked" above).
@@ -360,35 +360,35 @@ commit its id. Manual steps:
 
 ```bash
 # Build the facade and produce the snapshot.
-cargo make update-published-facade
-git add published-contract/facade.{wasm,parameters} published-contract/facade-id.txt
+cargo make update-published-container
+git add published-contract/container.{wasm,parameters} published-contract/container-id.txt
 git commit -m "chore(facade): commit production facade snapshot"
 
 # Publish (PUT) the facade with initial state pointing at the current
 # web-container id. After this, every subsequent release.sh run flips
 # its state via UPDATE.
-cargo make publish-facade-test    # for the local sandbox
+cargo make publish-container-test    # for the local sandbox
 # OR for production (one-shot, requires WEB_CONTAINER_KEY_FILE or
 # the default ~/.config/freenet-email/web-container-keys.toml):
-cargo make publish-facade
+cargo make publish-container
 ```
 
-`publish-facade` mirrors `publish-facade-test` but drops the
+`publish-container` mirrors `publish-container-test` but drops the
 `--port` override so fdev publishes to the live-network node. It is a
 one-time-per-environment operation — every subsequent release flips
 the facade pointer via UPDATE, not PUT.
 
 **Snapshot stability (#206)**: the committed
-`published-contract/facade.{wasm,parameters,id.txt}` snapshot is the
+`published-contract/container{.wasm,.parameters,-id.txt}` snapshot is the
 canonical artifact. CI rebuilds it under linux/amd64 with the rustc
 version pinned in `rust-toolchain.toml` and fails the PR on any
-byte-level drift. **If `scripts/check-facade-byte-equal.sh` fails on
+byte-level drift. **If `scripts/check-container-byte-equal.sh` fails on
 CI, treat it as a release blocker** — either revert the change that
 rotated the bytes or regenerate the snapshot deliberately:
 
 ```bash
-scripts/build-facade-snapshot-linux.sh
-git add published-contract/facade.{wasm,parameters,id.txt}
+scripts/build-container-snapshot-linux.sh
+git add published-contract/container{.wasm,.parameters,-id.txt}
 ```
 
 Bumping the rustc pin or any `=x.y.z` dep pin under

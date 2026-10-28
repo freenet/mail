@@ -162,12 +162,12 @@ command -v gh >/dev/null || die "gh (GitHub CLI) not in PATH"
 # `gh pr create` runs after the irreversible publish; fail here instead.
 gh auth status >/dev/null 2>&1 || die "gh is not authenticated (gh auth login)"
 
-# fdev must support the --as-state flag for facade pointer flips.
+# fdev must support the --as-state flag for container pointer flips.
 # Older builds silently wrap the file as `UpdateData::Delta` and the
-# facade contract then returns `InvalidUpdate`, so the pointer never
-# moves and users hitting the stable facade URL get a stale app.
+# container contract then returns `InvalidUpdate`, so the pointer never
+# moves and users hitting the stable container URL get a stale app.
 if ! fdev execute update --help 2>&1 | grep -q -- '--as-state'; then
-    die "fdev does not support \`--as-state\` (required for facade UPDATE).
+    die "fdev does not support \`--as-state\` (required for container UPDATE).
 Build a newer fdev from freenet-core HEAD:
   cargo install --path /path/to/freenet-core/crates/fdev"
 fi
@@ -232,7 +232,7 @@ echo "  1. Build the UI in release mode (contract WASM is frozen, not rebuilt)"
 echo "  2. Sign the webapp with the PRODUCTION key at $KEY_FILE"
 echo "  3. Publish the webapp to the real Freenet network via fdev, under the"
 echo "     committed container contract id $(tr -d '[:space:]' < published-contract/contract-id.txt)"
-echo "  4. Flip the stable facade pointer to the new webapp"
+echo "  4. Flip the stable container pointer to the new webapp"
 echo "  5. Commit any published-contract/ change on $RELEASE_BRANCH (normally none)"
 echo "  6. Push that branch and open the snapshot PR (only if step 5 committed)"
 echo ""
@@ -270,7 +270,7 @@ on_post_publish_exit() {
     echo "  Do NOT re-run release.sh; it would publish again." >&2
     echo "  Current branch: $(git rev-parse --abbrev-ref HEAD)" >&2
     echo "  To finish by hand (RELEASING.md 'Recovery'):" >&2
-    echo "    1. Check the facade points at the new webapp; if not, see 'Manual pointer flip'." >&2
+    echo "    1. Check the container contract points at the new webapp; if not, see 'Manual pointer flip'." >&2
     if [ "$SNAPSHOT_CHANGED" = "0" ]; then
         echo "    2. Nothing to commit: scripts/release-tag.sh $VERSION --sha $SOURCE_SHA" >&2
     else
@@ -302,37 +302,37 @@ echo ""
 echo "  ✓ published contract id: $CONTRACT_ID"
 echo ""
 
-# ─── Facade pointer flip (issue #200 Phase 3) ──────────────────────────────
+# ─── Container pointer flip (issue #200 Phase 3) ──────────────────────────────
 #
 # The web-container contract id rotates per release (#198 root cause).
-# Users hit the facade contract instead — a stable bookmarkable URL whose
+# Users hit the container contract instead — a stable bookmarkable URL whose
 # state points at the current release's webapp. Per release we re-render
-# the facade loader with the new current_app_id baked in, sign a new
-# facade state with bumped version, and UPDATE the facade contract.
+# the container loader with the new current_app_id baked in, sign a new
+# container state with bumped version, and UPDATE the container contract.
 #
-# Conditional: only runs when published-contract/facade-id.txt exists
-# (i.e. the facade has been published once and its id committed). Until
+# Conditional: only runs when published-contract/container-id.txt exists
+# (i.e. the container contract has been published once and its id committed). Until
 # then, this step warns + skips so the rest of the release still goes
 # through. See #200 Phase 1 (PR #205) and #206 (Linux-built snapshot).
 
-if [ -f published-contract/facade-id.txt ]; then
-    FACADE_ID=$(cat published-contract/facade-id.txt | tr -d '[:space:]')
-    echo "═══ Flipping facade pointer (issue #200) ════════════════════════════"
-    echo "  facade contract id: $FACADE_ID"
+if [ -f published-contract/container-id.txt ]; then
+    FACADE_ID=$(cat published-contract/container-id.txt | tr -d '[:space:]')
+    echo "═══ Flipping container pointer (issue #200) ════════════════════════════"
+    echo "  container contract id: $FACADE_ID"
     echo "  pointing at:        $CONTRACT_ID"
 
     # Re-render the loader with the new current_app_id and sign the
-    # facade state with the production key (same key that signs the
+    # container state with the production key (same key that signs the
     # web-container — facade reuses it).
-    FACADE_CURRENT_APP_ID="$CONTRACT_ID" cargo make build-facade-loader
-    cargo make sign-facade-state
+    FACADE_CURRENT_APP_ID="$CONTRACT_ID" cargo make build-container-loader
+    cargo make sign-container-state
 
-    FACADE_STATE="$REPO_ROOT/target/facade/facade.state"
+    FACADE_STATE="$REPO_ROOT/target/container/container.state"
     if [ ! -f "$FACADE_STATE" ]; then
-        die "facade state not produced at $FACADE_STATE — sign step failed?"
+        die "container state not produced at $FACADE_STATE — sign step failed?"
     fi
 
-    confirm "Push facade UPDATE to the network now?"
+    confirm "Push container UPDATE to the network now?"
 
     # fdev execute update takes positional args KEY DELTA [RELEASE].
     # The RELEASE positional is currently a no-op in fdev (and errors
@@ -349,9 +349,9 @@ if [ -f published-contract/facade-id.txt ]; then
     echo "  ✓ facade UPDATEd; bookmarked URL stays stable across releases"
     echo ""
 else
-    echo "  ⚠️  published-contract/facade-id.txt not committed yet."
-    echo "      Skipping facade pointer flip (issue #200 Phase 1 prerequisite)."
-    echo "      Once the facade is published once and the id committed, this"
+    echo "  ⚠️  published-contract/container-id.txt not committed yet."
+    echo "      Skipping container pointer flip (issue #200 Phase 1 prerequisite)."
+    echo "      Once the container contract is published once and the id committed, this"
     echo "      step will run automatically per release."
     echo ""
 fi
@@ -415,17 +415,17 @@ fi
 
 echo ""
 echo "Next steps:"
-echo "  1. Wait ~30s for the contract (and facade UPDATE, if applicable)"
+echo "  1. Wait ~30s for the contract (and container UPDATE, if applicable)"
 echo "     to propagate"
 echo "  2. Smoke-test against the rotating webapp id:"
 echo "       scripts/smoke-test-production.sh \\"
 echo "         http://<gw>:<port>/contract/web/$CONTRACT_ID/"
-if [ -f published-contract/facade-id.txt ]; then
-    FACADE_ID_FOR_NOTES=$(cat published-contract/facade-id.txt | tr -d '[:space:]')
-    echo "  3. Smoke-test against the STABLE facade URL (issue #200):"
+if [ -f published-contract/container-id.txt ]; then
+    FACADE_ID_FOR_NOTES=$(cat published-contract/container-id.txt | tr -d '[:space:]')
+    echo "  3. Smoke-test against the STABLE container URL (issue #200):"
     echo "       scripts/smoke-test-production.sh \\"
     echo "         http://<gw>:<port>/contract/web/$FACADE_ID_FOR_NOTES/"
-    echo "     The facade URL is what users bookmark and what stays stable"
+    echo "     The container URL is what users bookmark and what stays stable"
     echo "     across releases."
     echo "  4. Post the smoke-test result as a comment on issue #9"
 else

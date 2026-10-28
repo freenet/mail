@@ -36,7 +36,7 @@ between releases.
    the URL changing.
 
    The current canonical id is also committed at
-   [`published-contract/facade-id.txt`](published-contract/facade-id.txt).
+   [`published-contract/container-id.txt`](published-contract/container-id.txt).
 
 3. **Create an identity** in the app. Your private keys live inside
    the identity delegate, in the Freenet node sandbox — never in
@@ -88,7 +88,7 @@ every release would orphan every bookmark. The facade is a tiny
 wasm contract that's deliberately frozen — its lockfile is isolated
 from the workspace, its rustc version is pinned in
 `rust-toolchain.toml`, and CI byte-checks every PR against the
-committed `published-contract/facade.wasm`. Releases flip the
+committed `published-contract/container.wasm`. Releases flip the
 pointer state inside the facade rather than re-deploying it.
 
 ## Contributing

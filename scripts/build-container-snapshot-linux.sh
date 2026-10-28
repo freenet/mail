@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Issue #206. Rebuild published-contract/facade.{wasm,parameters,id.txt}
+# Issue #206. Rebuild published-contract/container{.wasm,.parameters,-id.txt}
 # from source. ONLY canonical on native linux/amd64 hosts — the bytes
 # CI produces under qemu emulation (Docker on macOS / arm64) drift
 # slightly even with identical rustc + source, so emulated rebuilds
@@ -13,12 +13,12 @@
 #
 # On non-Linux/amd64 hosts: do NOT use this. Instead rely on the
 # CI bootstrap path:
-#   1. Push the change with whatever facade.wasm bytes you have locally.
+#   1. Push the change with whatever container.wasm bytes you have locally.
 #   2. The check-contract-wasm.yml job will fail byte-equality and
 #      upload the canonical CI-built wasm as a workflow artifact named
 #      `facade-wasm-rebuilt-<sha>`.
-#   3. Download that artifact, replace published-contract/facade.wasm
-#      with its bytes, recompute facade-id.txt via
+#   3. Download that artifact, replace published-contract/container.wasm
+#      with its bytes, recompute container-id.txt via
 #      `fdev get-contract-id`, commit, push.
 #   4. CI passes.
 #
@@ -64,31 +64,31 @@ if [ ! -f "$WASM_OUT" ]; then
 fi
 
 # Reuse the existing parameters file. The 32-byte verifying key is
-# orthogonal to the facade source — it's the publisher identity, not
+# orthogonal to the container contract source — it's the publisher identity, not
 # something the build produces. If parameters are missing (first-ever
-# bootstrap), defer to `cargo make update-published-facade` to mint them
+# bootstrap), defer to `cargo make update-published-container` to mint them
 # from the committed test key.
-PARAMS="$ROOT/published-contract/facade.parameters"
+PARAMS="$ROOT/published-contract/container.parameters"
 if [ ! -f "$PARAMS" ]; then
     echo "error: $PARAMS not found." >&2
-    echo "       For a first-ever bootstrap, run \`cargo make update-published-facade\`" >&2
+    echo "       For a first-ever bootstrap, run \`cargo make update-published-container\`" >&2
     echo "       once natively to mint parameters, then re-run this script to overwrite" >&2
     echo "       the wasm with the canonical Linux-built bytes." >&2
     exit 1
 fi
 
-cp "$WASM_OUT" "$ROOT/published-contract/facade.wasm"
+cp "$WASM_OUT" "$ROOT/published-contract/container.wasm"
 
 NEW_ID=$(CARGO_TARGET_DIR="$ROOT/target" fdev get-contract-id \
-    --code "$ROOT/published-contract/facade.wasm" \
+    --code "$ROOT/published-contract/container.wasm" \
     --parameters "$PARAMS")
-echo "$NEW_ID" > "$ROOT/published-contract/facade-id.txt"
+echo "$NEW_ID" > "$ROOT/published-contract/container-id.txt"
 
 echo ""
-echo "✓ facade snapshot regenerated:"
-echo "    facade-id.txt    = $NEW_ID"
-echo "    facade.wasm      = $(wc -c < "$ROOT/published-contract/facade.wasm") bytes"
-echo "    facade.parameters= $(wc -c < "$PARAMS") bytes"
+echo "✓ container snapshot regenerated:"
+echo "    container-id.txt    = $NEW_ID"
+echo "    container.wasm      = $(wc -c < "$ROOT/published-contract/container.wasm") bytes"
+echo "    container.parameters= $(wc -c < "$PARAMS") bytes"
 echo ""
 echo "Commit the diff in published-contract/ alongside the change that"
 echo "rotated the bytes. The CI byte-equality gate will fail until both"
