@@ -106,12 +106,16 @@ scripts/smoke-test-production.sh         # post-publish liveness check
 `release.sh` prompts at:
 
 1. Before publish (irreversible step starts).
-2. After publish, before committing the snapshot on `release/v<VERSION>`.
-3. Before pushing that branch and opening the snapshot PR.
+2. Before the facade UPDATE.
+3. After publish, before committing the snapshot on `release/v<VERSION>`
+   (or, with no snapshot change, before tagging the published commit).
+4. Before pushing that branch and opening the snapshot PR.
 
 `main` only takes squash merges through PRs with green required checks,
 which is why the snapshot goes through a PR and the tag is created
-afterwards.
+afterwards. Merge the snapshot PR before anything else lands on main:
+`release-tag.sh` refuses to tag a snapshot merged onto a different base
+than the one published (`Published-From:`).
 
 If the user wants you to type "y" at each prompt, they should pass
 `--yes` to `release.sh` and confirm authorization explicitly. Don't

@@ -142,20 +142,25 @@ What happens, in order:
 4. **Build + sign + publish** — `cargo make publish-production` chains
    `build` → `update-published-contract-prod` → `publish-email`. This
    pushes the signed contract to the live Freenet network via fdev.
-5. **Diff verification** — confirms `published-contract/` actually
-   changed. If not, the script aborts with a diagnostic.
-6. **Second confirmation prompt** — shows the new contract id and
-   diff, asks whether to commit the snapshot.
+5. **Facade pointer flip** — re-signs the facade state for the new
+   webapp id and UPDATEs it (prompted).
+6. **Diff verification** — checks whether `published-contract/`
+   changed. If it didn't, there is nothing to commit and the script tags
+   the published commit directly (step 10 with `--sha`).
 7. **Commit** `published-contract/` on a new `release/v$VERSION`
-   branch with a standard message. Local `main` is not touched.
-8. **Third confirmation prompt** — asks whether to push the branch.
-9. **Push + PR** — pushes `release/v$VERSION` and opens the snapshot PR.
-10. **After the PR is squash-merged** — run `scripts/release-tag.sh
-    $VERSION` on main. It fast-forwards main, checks the version and
-    that HEAD is the snapshot commit, creates the annotated tag
-    `v$VERSION` with release notes from the git log since the last tag,
-    and pushes the tag. (With no snapshot change, `release.sh` calls it
-    directly instead of opening a PR.)
+   branch (prompted), with `Published-From: <sha>` naming the main
+   commit the webapp was built from. Local `main` is not touched.
+8. **Push + PR** — pushes `release/v$VERSION` and opens the snapshot PR
+   (prompted).
+9. **Squash-merge the PR before merging anything else.** If main moves
+   first, the merged commit would contain code that was never published.
+10. **`scripts/release-tag.sh $VERSION`** — finds the
+    `chore(release): v$VERSION ...` commit on `origin/main`, refuses if
+    its parent isn't the `Published-From` commit (override:
+    `--allow-base-drift`), checks the version, creates the annotated
+    tag `v$VERSION` on that commit with release notes since the last
+    tag, pushes it, and fast-forwards a clean local `main` so the smoke
+    test reads the new contract id.
 
 To auto-confirm all prompts (useful for CI or scripting), pass
 `--yes`:

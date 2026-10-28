@@ -110,10 +110,13 @@ remote_ref_absent "refs/heads/$RELEASE_BRANCH" \
     || die "branch $RELEASE_BRANCH already exists on origin (delete it if it is stale)"
 
 # Publish exactly what is on origin/main.
-git fetch -q origin main
+git fetch -q origin +refs/heads/main:refs/remotes/origin/main
 if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main)" ]; then
     die "local main ($(git rev-parse --short HEAD)) is not origin/main ($(git rev-parse --short origin/main)). Pull first."
 fi
+# Recorded in the snapshot commit; release-tag.sh refuses to tag if the
+# snapshot was merged onto any other base (it would carry unpublished code).
+SOURCE_SHA=$(git rev-parse HEAD)
 
 # Workspace Cargo.toml version must match the requested release version.
 # `ui/src/lib.rs` bakes `env!("CARGO_PKG_VERSION")` into the wasm; if the
@@ -156,6 +159,8 @@ command -v fdev >/dev/null || die "fdev not in PATH (cargo install fdev)"
 command -v dx >/dev/null || die "dx (dioxus-cli) not in PATH"
 command -v cargo-make >/dev/null || die "cargo-make not in PATH"
 command -v gh >/dev/null || die "gh (GitHub CLI) not in PATH"
+# `gh pr create` runs after the irreversible publish; fail here instead.
+gh auth status >/dev/null 2>&1 || die "gh is not authenticated (gh auth login)"
 
 # fdev must support the --as-state flag for facade pointer flips.
 # Older builds silently wrap the file as `UpdateData::Delta` and the
@@ -238,24 +243,32 @@ confirm "Proceed?"
 
 echo ""
 echo "═══ Building and publishing ═══════════════════════════════════════"
-cargo make publish-production
 
-# From here the release is live. If anything below fails, re-running the
-# script would publish again, so say how to finish by hand instead.
+# Armed BEFORE the publish: fdev can time out after the server-side publish
+# succeeded (freenet-core#4102). From here a re-run may publish again, so
+# say how to finish by hand instead.
 RELEASE_FINISHED=0
+SNAPSHOT_CHANGED=""
 on_post_publish_exit() {
     [ "$RELEASE_FINISHED" = "1" ] && return
     echo "" >&2
-    echo "✗ release.sh stopped AFTER publishing $TAG. Do NOT re-run it." >&2
+    echo "✗ release.sh stopped during or after publishing $TAG; it may be live. Do NOT re-run it." >&2
     echo "  Current branch: $(git rev-parse --abbrev-ref HEAD)" >&2
-    echo "  To finish by hand:" >&2
-    echo "    1. If the facade was not UPDATEd, see RELEASING.md 'Manual pointer flip'." >&2
-    echo "    2. Commit published-contract/ on $RELEASE_BRANCH (git checkout -b if needed)," >&2
-    echo "       git push -u origin $RELEASE_BRANCH, and open a PR against main." >&2
-    echo "    3. After the squash merge: scripts/release-tag.sh $VERSION" >&2
+    echo "  To finish by hand (RELEASING.md 'Recovery'):" >&2
+    echo "    1. Check the webapp landed and the facade points at it; if not, see 'Manual pointer flip'." >&2
+    if [ "$SNAPSHOT_CHANGED" = "0" ]; then
+        echo "    2. Nothing to commit: scripts/release-tag.sh $VERSION --sha $SOURCE_SHA" >&2
+    else
+        echo "    2. Commit published-contract/ on $RELEASE_BRANCH (git checkout -b if needed)," >&2
+        echo "       git push -u origin $RELEASE_BRANCH, and open a PR against main with" >&2
+        echo "       'Published-From: $SOURCE_SHA' in the commit message." >&2
+        echo "    3. After the squash merge: scripts/release-tag.sh $VERSION" >&2
+    fi
 }
 # EXIT, not ERR: `die` and a declined `confirm` leave via `exit`.
 trap on_post_publish_exit EXIT
+
+cargo make publish-production
 
 # ─── Verify the commit-worthy diff ─────────────────────────────────────────
 
@@ -346,6 +359,7 @@ if [ "$SNAPSHOT_CHANGED" = "1" ]; then
     git commit -m "chore(release): $TAG — production publish
 
 Contract ID: $CONTRACT_ID
+Published-From: $SOURCE_SHA
 
 Signed with the uncommitted production key at
 ~/.config/freenet-email/web-container-keys.toml.
@@ -361,8 +375,11 @@ Signed with the uncommitted production key at
         --body "Release snapshot from \`scripts/release.sh $VERSION\`, already published to the network.
 
 - webapp contract id: \`$CONTRACT_ID\`
+- built and published from main at \`$SOURCE_SHA\`
 
-Squash-merge once CI is green, then run \`scripts/release-tag.sh $VERSION\` on main to tag the merge commit.")
+Squash-merge once CI is green, **before merging anything else**: if main moves first, the merged commit would include code that was never published, and \`scripts/release-tag.sh\` will refuse to tag it. Then run \`scripts/release-tag.sh $VERSION\` on main.
+
+Published-From: $SOURCE_SHA")
     git checkout main
     RELEASE_FINISHED=1
 
@@ -373,7 +390,7 @@ Squash-merge once CI is green, then run \`scripts/release-tag.sh $VERSION\` on m
     echo "  scripts/release-tag.sh $VERSION"
 else
     confirm "Tag current HEAD as $TAG (no snapshot commit)?"
-    "$REPO_ROOT/scripts/release-tag.sh" "$VERSION" --head --yes
+    "$REPO_ROOT/scripts/release-tag.sh" "$VERSION" --sha "$SOURCE_SHA" --yes
     RELEASE_FINISHED=1
     echo ""
     echo "✅ released $TAG"
