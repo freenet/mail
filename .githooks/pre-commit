@@ -2,102 +2,66 @@
 # Pre-commit hook: protect the frozen published artifacts and block stray
 # WASM commits.
 #
-# Committed artifacts in this repo:
-#   published-contract/web_container_contract.wasm  (webapp contract; paired with contract-id.txt)
-#   published-contract/container.wasm                (container contract; paired with container-id.txt; issue #200)
-#   published-contract/wasm/v<N>/*                   (contract/delegate WASM the UI embeds)
-#
-# All of them are frozen: a contract's or delegate's key derives from its
-# bytes, so changing one moves users' data or URL to a new key. A new
-# generation goes in a new published-contract/wasm/v<N+1>/ directory; existing
-# files are never modified or deleted. CI checks every frozen file against its
-# pin (scripts/check-frozen-artifacts.sh). See published-contract/README.md.
+# Frozen (published-contract/README.md):
+#   * every file pinned in published-contract/frozen.sha256 (the webapp and
+#     container contracts, their parameters and ids, and wasm/v<N>/*);
+#   * every file under published-contract/wasm/;
+#   * every existing row of published-contract/frozen.sha256.
+# A contract's or delegate's key derives from these bytes, so changing one
+# moves users' data or URL to a new key. A new generation is added in a new
+# published-contract/wasm/v<N+1>/ directory, with new pin rows; nothing
+# existing is modified, deleted, renamed or retyped. CI enforces the same
+# (scripts/check-frozen-immutable.sh).
 #
 # Any other .wasm file showing up in a commit is almost certainly an
 # accidental `target/` or `build/` artifact that slipped past .gitignore.
 
 set -euo pipefail
 
-ALLOWED_WEB_CONTAINER='published-contract/web_container_contract.wasm'
-ALLOWED_CONTAINER='published-contract/container.wasm'
+MANIFEST='published-contract/frozen.sha256'
+ALLOWED_WASM='^published-contract/(web_container_contract|container)\.wasm$'
 
-# Frozen generations: adding files is fine, changing or removing them is not.
-CHANGED_FROZEN=$(git diff --cached --name-only --diff-filter=MD -- 'published-contract/wasm/' 2>/dev/null || true)
-if [ -n "$CHANGED_FROZEN" ]; then
+block() {
     echo ""
-    echo "🚫 BLOCKED: frozen artifacts under published-contract/wasm/ are modified or deleted:"
-    echo "$CHANGED_FROZEN" | sed 's/^/  /'
+    echo "🚫 BLOCKED: $1"
+    shift
+    printf '%s\n' "$@" | sed 's/^/  /'
     echo ""
     echo "These are the exact bytes that shipped; changing them re-keys a contract or"
-    echo "delegate and strands its users' data. Put a new generation in a new"
+    echo "delegate and strands its users' data or URL. A new generation goes in a new"
     echo "published-contract/wasm/v<N>/ directory instead. To restore:"
-    echo "  git restore --staged --worktree -- published-contract/wasm/"
+    echo "  git restore --staged --worktree -- published-contract/"
+    echo ""
+    exit 1
+}
+
+if git rev-parse --verify --quiet HEAD >/dev/null; then
+    frozen=$( { git show "HEAD:$MANIFEST" 2>/dev/null | awk '{print $2}'
+                git ls-tree -r --name-only HEAD -- published-contract/wasm/; } | sort -u)
+    changed=$(git diff --cached --no-renames --name-only --diff-filter=MDT -- published-contract/ | sort -u)
+    hit=$(comm -12 <(printf '%s\n' "$frozen") <(printf '%s\n' "$changed") | sed '/^$/d')
+    [ -z "$hit" ] || block "frozen artifacts are modified, deleted, renamed or retyped:" "$hit"
+
+    if git cat-file -e "HEAD:$MANIFEST" 2>/dev/null; then
+        lost=$(comm -23 <(git show "HEAD:$MANIFEST" | sort) \
+                        <(git show ":$MANIFEST" 2>/dev/null | sort) | sed '/^$/d')
+        [ -z "$lost" ] || block "existing rows of $MANIFEST are removed or changed:" "$lost"
+    fi
+fi
+
+STRAY=$(git diff --cached --no-renames --name-only --diff-filter=ACMT -- '*.wasm' \
+    | grep -vE "$ALLOWED_WASM" || true)
+if [ -n "$STRAY" ]; then
+    echo ""
+    echo "🚫 BLOCKED: stray .wasm files are staged for commit outside published-contract/."
+    echo ""
+    echo "Staged stray WASM files:"
+    printf '%s\n' "$STRAY" | sed 's/^/  /'
+    echo ""
+    echo "Everything else is a build artifact that should stay in target/ or"
+    echo "build/ (ignored by git). To unstage:"
+    echo "  git restore --staged <file>"
     echo ""
     exit 1
 fi
-
-# All staged .wasm files.
-WASM_FILES=$(git diff --cached --name-only --diff-filter=ACMR -- '*.wasm' 2>/dev/null || true)
-
-if [ -z "$WASM_FILES" ]; then
-    exit 0
-fi
-
-# Filter out allowlisted committed WASMs.
-STRAY=$(echo "$WASM_FILES" | grep -vE "^(${ALLOWED_WEB_CONTAINER}|${ALLOWED_CONTAINER})\$" || true)
-
-if [ -z "$STRAY" ]; then
-    # Each allowlisted WASM must be staged with its id.txt sibling so the
-    # `id = hash(wasm, parameters)` invariant holds in the committed snapshot.
-    if echo "$WASM_FILES" | grep -qx "$ALLOWED_WEB_CONTAINER"; then
-        CONTRACT_ID_STAGED=$(git diff --cached --name-only -- published-contract/contract-id.txt 2>/dev/null || true)
-        if [ -z "$CONTRACT_ID_STAGED" ]; then
-            echo ""
-            echo "🚫 BLOCKED: $ALLOWED_WEB_CONTAINER is staged"
-            echo "   without published-contract/contract-id.txt."
-            echo ""
-            echo "The webapp contract wasm is frozen: changing it moves the production"
-            echo "URL to a new contract id. If that was not the intent, restore it:"
-            echo "  git restore --staged --worktree -- published-contract/"
-            echo ""
-            exit 1
-        fi
-    fi
-    if echo "$WASM_FILES" | grep -qx "$ALLOWED_CONTAINER"; then
-        CONTAINER_ID_STAGED=$(git diff --cached --name-only -- published-contract/container-id.txt 2>/dev/null || true)
-        if [ -z "$CONTAINER_ID_STAGED" ]; then
-            echo ""
-            echo "🚫 BLOCKED: $ALLOWED_CONTAINER is staged without published-contract/container-id.txt."
-            echo ""
-            echo "The container contract id is hash(container.wasm, container.parameters)"
-            echo "and is supposed to stay STABLE across releases (issue #200)."
-            echo "If the wasm legitimately changed, refresh both files together:"
-            echo "  cargo make update-published-container"
-            echo "  git add published-contract/container.{wasm,parameters} published-contract/container-id.txt"
-            echo ""
-            echo "If the change was unintended, investigate which dependency"
-            echo "leaked into container.wasm and revert."
-            echo ""
-            exit 1
-        fi
-    fi
-    exit 0
-fi
-
-echo ""
-echo "🚫 BLOCKED: stray .wasm files are staged for commit outside published-contract/."
-echo ""
-echo "Staged stray WASM files:"
-echo "$STRAY" | sed 's/^/  /'
-echo ""
-echo "Allowed committed WASMs:"
-echo "  $ALLOWED_WEB_CONTAINER"
-echo "  $ALLOWED_CONTAINER"
-echo ""
-echo "Everything else is a build artifact that should stay in target/ or"
-echo "build/ (ignored by git)."
-echo ""
-echo "To unstage:"
-echo "  git restore --staged <file>"
-echo ""
-exit 1
+exit 0
