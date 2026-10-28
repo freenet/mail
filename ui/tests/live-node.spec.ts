@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect, type FrameLocator } from "@playwright/test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { APP_NAME } from "./app-name";
@@ -1878,25 +1878,48 @@ test.describe("Live node E2E", () => {
       !PEER_BASE_URL,
       "requires FREENET_EMAIL_BASE_URL to include the contract id",
     );
+    // Identities live in the nodes' delegates, which every repetition shares
+    // (--repeat-each), so each run uses its own aliases and subject.
+    const run = test.info().repeatEachIndex;
+    const aliceAlias = `${ALIAS_T8_ALICE}r${run}`;
+    const bobAlias = `${ALIAS_T8_BOB}r${run}`;
+    const subjectText = `delete me ${run}`;
+    const subject = new RegExp(`${subjectText}(?!\\d)`, "i");
     const stopGwPump = startPermissionPump(ISO_GW_ORIGIN);
     const stopPeerPump = startPermissionPump(ISO_PEER_ORIGIN);
     const aliceCtx = await browser.newContext();
     const bobCtx = await browser.newContext();
+    // Bob's requests to his node go through here, so the test can hold them:
+    // a delete the node has not stored yet is the window #286 is about.
+    let holdBobRequests = false;
+    const heldBobRequests: Array<() => void> = [];
+    await bobCtx.routeWebSocket(/\/v1\/contract\/command/, (ws) => {
+      const server = ws.connectToServer();
+      ws.onMessage((message) => {
+        if (holdBobRequests) heldBobRequests.push(() => server.send(message));
+        else server.send(message);
+      });
+    });
     const alicePage = await aliceCtx.newPage();
     const bobPage = await bobCtx.newPage();
+    // Bob's local-state sends and the node's answers, in order (which write
+    // a reload lost, if one does), and any panic.
+    bobPage.on("console", (m) => {
+      if (/local-state|PANIC/.test(m.text())) console.log(`[console:bob] ${m.text()}`);
+    });
 
     try {
       await Promise.all([alicePage.goto(""), bobPage.goto(PEER_BASE_URL)]);
       await Promise.all([
-        createIdentity(alicePage, ALIAS_T8_ALICE),
-        createIdentity(bobPage, ALIAS_T8_BOB),
+        createIdentity(alicePage, aliceAlias),
+        createIdentity(bobPage, bobAlias),
       ]);
 
       // Bob shares; alice imports (verified).
       const bobApp = bobPage.frameLocator("iframe#app");
       await bobApp
         .locator(
-          `[data-testid="fm-id-row"][data-alias="${ALIAS_T8_BOB}"] [data-testid="fm-id-share"]`,
+          `[data-testid="fm-id-row"][data-alias="${bobAlias}"] [data-testid="fm-id-share"]`,
         )
         .click();
       const shareModal = bobApp.locator('[data-testid="fm-share-modal"]');
@@ -1912,7 +1935,7 @@ test.describe("Live node E2E", () => {
       await importModal.locator("textarea").fill(bobCard);
       await aliceApp
         .locator('input[placeholder="e.g. Alice (work)"]')
-        .fill(ALIAS_T8_BOB);
+        .fill(bobAlias);
       const verifyCheck = aliceApp.locator('[data-testid="fm-verify-check"]');
       await verifyCheck.waitFor({ timeout: 30_000 });
       await verifyCheck.click();
@@ -1921,20 +1944,20 @@ test.describe("Live node E2E", () => {
       // Open both inboxes; alice sends; bob receives (quarantined).
       await aliceApp
         .locator(
-          `[data-testid="fm-id-row"][data-alias="${ALIAS_T8_ALICE}"] [data-testid="fm-id-open"]`,
+          `[data-testid="fm-id-row"][data-alias="${aliceAlias}"] [data-testid="fm-id-open"]`,
         )
         .first()
         .click();
       await bobApp
         .locator(
-          `[data-testid="fm-id-row"][data-alias="${ALIAS_T8_BOB}"] [data-testid="fm-id-open"]`,
+          `[data-testid="fm-id-row"][data-alias="${bobAlias}"] [data-testid="fm-id-open"]`,
         )
         .first()
         .click();
-      await composeAndSend(aliceApp, ALIAS_T8_BOB, "delete me", "doomed body");
+      await composeAndSend(aliceApp, bobAlias, subjectText, "doomed body");
       try {
         await expect(
-          bobApp.getByText(/delete me/i),
+          bobApp.getByText(subject),
           "bob receives the message",
         ).toBeVisible({ timeout: 60_000 });
       } catch (e) {
@@ -1950,37 +1973,78 @@ test.describe("Live node E2E", () => {
         throw e;
       }
 
-      // ── Bob opens the message and deletes it ──────────────────────
-      await bobApp.getByText(/delete me/i).click();
-      await bobApp.locator('[data-testid="fm-thread-container"]').waitFor({
-        timeout: 5_000,
-      });
-      // Delete via the thread-detail action bar (FM_DELETE).
-      await bobApp.locator('[data-testid="fm-delete"]').first().click();
+      const openBobInbox = async (app: FrameLocator) => {
+        await expect(
+          app.locator(".brand-name").first(),
+          "app re-mounts after reload",
+        ).toContainText(APP_NAME, { timeout: 60_000 });
+        await app
+          .locator(
+            `[data-testid="fm-id-row"][data-alias="${bobAlias}"] [data-testid="fm-id-open"]`,
+          )
+          .first()
+          .click();
+      };
+      const deleteOpenMessage = async (app: FrameLocator) => {
+        await app.getByText(subject).click();
+        await app.locator('[data-testid="fm-thread-container"]').waitFor({
+          timeout: 5_000,
+        });
+        // Delete via the thread-detail action bar (FM_DELETE).
+        await app.locator('[data-testid="fm-delete"]').first().click();
+        await expect(
+          app.getByText(subject),
+          "message gone from bob's inbox after delete",
+        ).toHaveCount(0, { timeout: 15_000 });
+      };
+
+      // ── 1. A delete the node has not stored is not reported done ──
+      // Hold Bob's requests so the delete cannot reach his node.
+      holdBobRequests = true;
+      await deleteOpenMessage(bobApp);
       await expect(
-        bobApp.getByText(/delete me/i),
-        "message gone from bob's inbox after delete",
-      ).toHaveCount(0, { timeout: 15_000 });
+        bobApp.getByText(/^Deleting/),
+        "the app says the delete is still in progress",
+      ).toBeVisible({ timeout: 5_000 });
+      // A single count, not a retrying assertion: a premature "Deleted" toast
+      // would pass a retrying one simply by expiring.
+      expect(
+        await bobApp.getByText(/^Deleted$/).count(),
+        "the app does not claim the delete is done before the node has it",
+      ).toBe(0);
+
+      // Reloading now loses the delete: the node never stored it. That is
+      // the window #286 hit, and why the app must not say "Deleted" in it.
+      await bobPage.reload();
+      holdBobRequests = false;
+      heldBobRequests.length = 0; // their connection closed with the reload
+      let bobAfter = bobPage.frameLocator("iframe#app");
+      await openBobInbox(bobAfter);
+      await expect(
+        bobAfter.getByText(subject),
+        "a delete the node never stored is not kept across a reload",
+      ).toBeVisible({ timeout: 30_000 });
+
+      // ── 2. Once the app says "Deleted", the delete survives a reload ─
+      holdBobRequests = true;
+      await deleteOpenMessage(bobAfter);
+      await expect(bobAfter.getByText(/^Deleting/)).toBeVisible({ timeout: 5_000 });
+      expect(await bobAfter.getByText(/^Deleted$/).count()).toBe(0);
+      holdBobRequests = false;
+      for (const send of heldBobRequests.splice(0)) send();
+      await expect(
+        bobAfter.getByText(/^Deleted$/),
+        "the app confirms the delete once the node has stored it",
+      ).toBeVisible({ timeout: 30_000 });
 
       // ── Reload (the #286 trigger) ─────────────────────────────────
       await bobPage.reload();
-      const bobAfter = bobPage.frameLocator("iframe#app");
-      await expect(
-        bobAfter.locator(".brand-name").first(),
-        "app re-mounts after reload",
-      ).toContainText(APP_NAME, { timeout: 60_000 });
-      await bobAfter
-        .locator(
-          `[data-testid="fm-id-row"][data-alias="${ALIAS_T8_BOB}"] [data-testid="fm-id-open"]`,
-        )
-        .first()
-        .click();
+      bobAfter = bobPage.frameLocator("iframe#app");
+      await openBobInbox(bobAfter);
 
       // ── Post-reload: STILL deleted (no resurrection from re-fetch) ─
-      // On the #286 bug the message reappears here, re-fetched from the
-      // inbox contract because the delete never committed to state.
       await expect(
-        bobAfter.getByText(/delete me/i),
+        bobAfter.getByText(subject),
         "deleted message STILL gone after reload (#286 regression target)",
       ).toHaveCount(0, { timeout: 30_000 });
     } finally {
