@@ -82,9 +82,8 @@ Three on-chain contracts and one delegate make up the system:
 ### Why two contracts in front of the UI?
 
 A Freenet contract id is `hash(wasm, parameters)`. The webapp contract's
-wasm is frozen, so its id no longer moves between releases, but the
-container contract keeps a stable entry point that can follow the app if
-it ever has to move. It is a tiny wasm contract that's deliberately
+wasm is frozen, so its id is fixed; the container contract is a stable
+entry point that can follow the app if it ever has to move. It is a tiny wasm contract that's deliberately
 frozen — its lockfile is isolated from the workspace, its rustc version is
 pinned in `contracts/facade/rust-toolchain.toml`, and CI byte-checks every
 PR against the committed `published-contract/container.wasm`. Releases

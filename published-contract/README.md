@@ -38,8 +38,14 @@ gives two different keys (#348).
 | `mail_local_state` | delegate | `mail_local_state_code_hash` | `mail-local-state-params` |
 
 The UI pulls these in with `include_bytes!` / `include_str!`
-(`ui/src/api.rs`, `inbox.rs`, `aft.rs`, `local_state.rs`), and `ui/build.rs`
-refuses to build if one is missing.
+(`ui/src/api.rs`, `inbox.rs`, `aft.rs`, `local_state.rs`), `ui/build.rs`
+refuses to build if one is missing, and a test per artifact checks the
+embedded WASM against its embedded code hash.
+
+`identity-manager-params` and `mail-local-state-params` were derived from
+the committed test keys under `test-contract/`. That material is not
+secret: it is already embedded in the published webapp, which every user
+downloads.
 
 ## What changes per release
 
@@ -58,13 +64,16 @@ from the frozen WASM and the committed test key's parameters into
 ## Checks
 
 ```bash
-scripts/check-frozen-artifacts.sh     # byte pins, code hashes, derived ids
-scripts/check-container-byte-equal.sh # container rebuild == container.wasm (linux/amd64)
+scripts/check-frozen-artifacts.sh        # byte pins, code hashes, derived ids
+scripts/check-frozen-immutable.sh <base> # nothing frozen changed since <base>
+scripts/check-container-byte-equal.sh    # container rebuild == container.wasm (linux/amd64)
+scripts/check-wasm-builds.sh             # sources still build reproducibly
 ```
 
-CI runs both (`check-contract-wasm.yml`). The pre-commit hook
-(`.githooks/pre-commit`) also refuses a commit that modifies or deletes a
-file under `wasm/`.
+CI runs all four (`check-contract-wasm.yml`). The pre-commit hook
+(`.githooks/pre-commit`) also refuses a commit that modifies, deletes,
+renames or retypes a pinned file or a file under `wasm/`, or changes an
+existing pin row.
 
 ## Adding a generation
 

@@ -33,11 +33,11 @@ The contract and delegate WASM are frozen in `published-contract/` (see
    the deployed webapp via the Freenet gateway to confirm the release
    actually works end to end.
 
-If a release ever does change `published-contract/` (a deliberate new
-generation landed without its snapshot, for example), `release.sh` commits
-it on `release/v<version>`, opens a PR (`main` takes only squash-merged
-PRs), and `scripts/release-tag.sh <version>` tags the merge commit
-afterwards.
+If anything under `published-contract/` changes during a release,
+`release.sh` stops after the publish rather than commit it: those files are
+frozen, and a change means something wrote to them. Restore them with
+`git checkout -- published-contract/`, then finish with
+`scripts/release-tag.sh <version> --sha <sha>`.
 
 The publish and the container pointer flip are irreversible and visible to
 every user of the project. The script prompts before each, and aborts on
@@ -115,12 +115,12 @@ git push
 `scripts/release.sh` now preflight-checks that the workspace version
 matches its argument and aborts otherwise.
 
-### 5. GNU tar, fdev, dioxus-cli, cargo-make, gh
+### 5. GNU tar, fdev, dioxus-cli, cargo-make
 
 All preflight-checked by `scripts/release.sh`. On macOS:
 
 ```bash
-brew install gnu-tar gh
+brew install gnu-tar
 cargo install fdev
 cargo binstall --version 0.7.10 dioxus-cli
 cargo binstall cargo-make
@@ -137,7 +137,8 @@ scripts/release.sh 0.3.0
 What happens, in order:
 
 1. **Preflight checks** — branch, clean tree, tag availability, key
-   present, tools installed, Freenet node reachable.
+   present, tools installed, Freenet node reachable, frozen artifacts
+   matching their pins (`scripts/check-frozen-artifacts.sh`).
 2. **Test gate** — `cargo make test`, `test-inbox`, `clippy`. Any
    failure aborts.
 3. **First confirmation prompt** — summarizes the steps about to run.
@@ -150,24 +151,11 @@ What happens, in order:
    the signed webapp state to the live Freenet network via fdev.
 5. **Container pointer flip** — re-signs the container state for the
    webapp id and UPDATEs it (prompted).
-6. **Diff verification** — checks whether `published-contract/`
-   changed. Normally it didn't: there is nothing to commit and the script
-   tags the published commit directly (step 10 with `--sha`), and the
-   release is done. Steps 7-10 run only when something there changed.
-7. **Commit** `published-contract/` on a new `release/v$VERSION`
-   branch (prompted), with `Published-From: <sha>` naming the main
-   commit the webapp was built from. Local `main` is not touched.
-8. **Push + PR** — pushes `release/v$VERSION` and opens the snapshot PR
-   (prompted).
-9. **Squash-merge the PR before merging anything else.** If main moves
-   first, the merged commit would contain code that was never published.
-10. **`scripts/release-tag.sh $VERSION`** — finds the
-    `chore(release): v$VERSION ...` commit on `origin/main`, refuses if
-    its parent isn't the `Published-From` commit (override:
-    `--allow-base-drift`), checks the version, creates the annotated
-    tag `v$VERSION` on that commit with release notes since the last
-    tag, pushes it, and fast-forwards a clean local `main` so the smoke
-    test reads the new contract id.
+6. **Frozen check** — stops if anything under `published-contract/`
+   changed during the release (it must not; see above).
+7. **Tag** — `scripts/release-tag.sh $VERSION --sha <source sha>` creates
+   the annotated tag `v$VERSION` on the commit the release was built
+   from, with release notes since the last tag, and pushes it (prompted).
 
 To auto-confirm all prompts (useful for CI or scripting), pass
 `--yes`:
@@ -240,9 +228,8 @@ comment on the release tracking issue.
 The container contract (id `122f6AR7PyF8d8mhczuNQM4xrLtBf5t8g2iB7PEVT7KC`)
 is the stable bookmarkable entry point; its state points at the webapp.
 See AGENTS.md §"Container contract" for the architecture. The webapp
-contract id no longer changes between releases either, so the pointer
-normally names the same app id; it is re-signed with a newer version on
-every release regardless.
+contract id is fixed, so the pointer names the same app id every release;
+it is re-signed with a newer version on every release regardless.
 
 `scripts/release.sh` does this for you. After the webapp publish, the
 script:
@@ -302,7 +289,7 @@ scripts/release-tag.sh <version> --sha <full 40-char sha>
 ```
 
 **Important**: `--as-state` is required on the `fdev execute update`
-invocation. The facade contract's `update_state` only accepts
+invocation. The container contract's `update_state` only accepts
 `UpdateData::State`; without the flag fdev sends `UpdateData::Delta`
 and the contract silently rejects the update as `InvalidUpdate`.
 
@@ -409,11 +396,5 @@ The webapp is live but broken for users. Options:
 Semver per `Cargo.toml`. Bump minor for new features, patch for fixes,
 major once the protocol stabilizes (we're not there yet).
 
-Normally the tag sits on the main commit the release was built from
-(`release-tag.sh --sha`). When a release does produce a snapshot PR, the
-`chore(release): vX.Y.Z` squash commit is the tag's anchor instead: keep
-its title (`release-tag.sh` finds the commit by it) and the
-`Contract ID:` / `Published-From:` lines in the squash message body (it
-checks them, and the only way past a missing one is `--allow-base-drift`,
-which waives every check). Its diff is always exactly
-`published-contract/` — any release that touches other files is a bug.
+The tag sits on the main commit the release was built from
+(`release-tag.sh --sha`). A release commits nothing.

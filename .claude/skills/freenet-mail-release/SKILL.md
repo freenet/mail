@@ -24,7 +24,8 @@ You **CAN**:
 - Audit commits since the last tag (`git log v0.1.X..main`).
 - Verify preflight requirements: clean tree, tag availability,
   production key file presence, GNU tar (`gtar`), `fdev`, `dx`,
-  `cargo-make`, `gh`.
+  `cargo-make`, and that the frozen artifacts match their pins
+  (`scripts/check-frozen-artifacts.sh`).
 - Confirm a `freenet network` node is reachable on `127.0.0.1:7509`
   (or whatever `FREENET_PORT` overrides to).
 - Draft release notes from the commit log.
@@ -72,7 +73,8 @@ curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:7509/
 # 200 / 404 / 405 = node is up; 000 = not running, user must run `freenet network`
 
 # 7. Required tools.
-which fdev dx cargo-make gh
+which fdev dx cargo-make
+scripts/check-frozen-artifacts.sh
 ```
 
 Report any failures as a punch list before the user runs `release.sh`.
@@ -107,13 +109,11 @@ scripts/smoke-test-production.sh         # post-publish liveness check
 2. Before the container UPDATE.
 3. After publish, before tagging the published commit.
 
-The contract WASM is frozen, so a release normally leaves
-`published-contract/` untouched and `release.sh` tags the commit it
-built from (`release-tag.sh --sha`). Only if something there did change
-does it commit it on `release/v<VERSION>` and open a PR; then merge that
-PR before anything else lands on main and run
-`scripts/release-tag.sh <VERSION>` (it refuses a snapshot merged onto a
-different base than the one published, `Published-From:`).
+The contract WASM is frozen, so a release leaves `published-contract/`
+untouched and `release.sh` tags the commit it built from
+(`release-tag.sh --sha`). If anything there changed during the release,
+`release.sh` stops: the frozen files must be restored
+(`git checkout -- published-contract/`), never committed.
 
 If the user wants you to type "y" at each prompt, they should pass
 `--yes` to `release.sh` and confirm authorization explicitly. Don't

@@ -84,9 +84,9 @@ scripts/release-tag.sh <version>         # Tag the release commit, push tag
 scripts/smoke-test-production.sh <url>   # Playwright suite against deployed webapp
 ```
 
-`update-published-contract` and `update-published-contract-prod` remain as
-aliases of `derive-test-contract-id` and `verify-published-contract`; neither
-writes `published-contract/` any more.
+`update-published-contract` and `update-published-contract-prod` are
+aliases of `derive-test-contract-id` and `verify-published-contract`. Nothing
+in the build or release flow writes to `published-contract/`.
 
 `example-data + use-node` is buildable but has no user — the app always
 reaches for the node when `use-node` is set. For offline dev builds use
@@ -202,9 +202,8 @@ snapshot is `published-contract/container{.wasm,.parameters,-id.txt}`; CI
 enforces byte-equality on the wasm, and `container.parameters` is the same
 production ed25519 key the webapp contract uses (the "publisher identity").
 
-Since the webapp contract's WASM is frozen too, the webapp id no longer
-moves between releases either, so the pointer normally names the same app
-id release after release. The container contract stays the documented entry
+The webapp contract's WASM is frozen too, so the webapp id is fixed and
+the pointer names the same app id release after release. The container contract stays the documented entry
 point: it is what lets the app move to a new webapp contract, should one ever
 be needed, without breaking a bookmark.
 
@@ -244,9 +243,9 @@ and `FACADE_CONTRACT_ID` on startup.
    pushes the new state to the network. **`--as-state` is required** —
    default is `UpdateData::Delta`, which the container contract rejects
    silently as `InvalidUpdate`.
-6. `scripts/release.sh` commits a `published-contract/` change on
-   `release/v<version>` and opens a PR only if something there changed
-   (normally nothing does); `scripts/release-tag.sh` tags the release commit.
+6. `scripts/release.sh` tags the commit it built from
+   (`scripts/release-tag.sh --sha`). It refuses to continue if anything
+   under `published-contract/` changed during the release.
 
 The container contract id never changes across any of this. Users
 bookmark `/v1/contract/web/<container_id>/` once and that URL keeps

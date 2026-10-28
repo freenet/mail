@@ -5,5 +5,5 @@ lang = "rust"
 [webapp]
 lang = "rust"
 # Loader assets ship under contracts/facade-loader/dist/. Built by
-# `cargo make build-facade-loader` before `cargo make build-facade`.
+# `cargo make build-container-loader` before `cargo make build-container`.
 state-sources = { source_dirs = ["../facade-loader/dist"] }
