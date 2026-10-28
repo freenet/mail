@@ -1741,11 +1741,12 @@ test.describe("Recovery key backup panel", () => {
   });
 
   // A copy of a DISCARDED key that lands later must not count against the
-  // next key. (A reset with the same create flow still mounted, e.g.
-  // generating again, isn't reachable in the UI: once keys are revealed,
-  // both Discard paths and Continue close the form, which drops its copy
-  // tracker. So the late copy settles against a dropped tracker and its
-  // panel is gone; this pins that end-to-end.)
+  // next key: the reachable discard path, end to end. (Generating again
+  // with the same create flow mounted isn't possible in the UI: once keys
+  // are revealed, both Discard paths and Continue close the form.) This
+  // test checks the user-visible result only; it doesn't pin which guard
+  // stops the report. The tracker-access arms are unit-tested in
+  // backup_panel.rs (`classify_tracker_write_covers_every_error_variant`).
   test("a copy of a discarded key that lands later doesn't mark the next key as copied", async ({
     page,
   }) => {

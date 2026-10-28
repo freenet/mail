@@ -117,54 +117,63 @@ fn masked(token: &str) -> String {
 /// and `aria-labelledby` stay unique even if two panels are mounted.
 static NEXT_PANEL_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
-/// How many times [`settle_copy`] retries a busy tracker before giving up.
-const SETTLE_ATTEMPTS: u8 = 20;
+/// The caller's copy tracker, as `try_write` found it. Generic over the
+/// write guard so the classification is unit-testable with a plain
+/// generational box.
+pub(crate) enum TrackerAccess<G> {
+    /// Writable: settle the copy on it.
+    Writable(G),
+    /// `BorrowMutError::Dropped`: the tracker's owner (the create flow) is
+    /// gone, so there is nobody left to warn.
+    OwnerGone,
+    /// `AlreadyBorrowed` / `AlreadyBorrowedMut`: something holds a borrow.
+    /// Not expected (every borrow of the tracker is taken and released
+    /// synchronously within one render or handler, and the wasm runtime is
+    /// single-threaded), but handled fail-safe rather than assumed away.
+    Busy,
+}
 
-/// Settle a finished copy on the caller's tracker, then `report(current)`,
-/// where `current` says whether the copy still belongs to the tracker's
-/// current keypair.
-///
-/// `try_write` fails in two different ways, handled differently:
-/// - `Dropped`: the tracker's owner (the create flow) is gone. Nobody is
-///   left to warn, so the copy is reported as not current.
-/// - `AlreadyBorrowed` / `AlreadyBorrowedMut`: something holds a borrow of
-///   the tracker. Not expected here: every borrow of it is taken and
-///   released synchronously within one render or event handler, and this
-///   runs from a separate task, so it can't interleave with one. Handled
-///   anyway rather than assumed, because skipping would leave the copy
-///   counted as in flight forever: retry on a later tick, and if the
-///   borrow never clears, still show the outcome and keep the copy counted
-///   as in flight (the discard warning stays on, the safe side).
-fn settle_copy(
-    mut tracker: Signal<CopyTracker>,
-    ticket: u32,
-    landed: bool,
-    attempts_left: u8,
-    report: impl FnOnce(bool) + 'static,
-) {
-    // Finish with the borrow before deciding, so the retry can move
-    // `tracker` into its task.
-    let settled: Result<bool, String> = match tracker.try_write() {
-        Ok(mut rec) => Ok(rec.settle(ticket, landed)),
-        Err(dioxus::signals::BorrowMutError::Dropped(_)) => Ok(false),
-        Err(e) => Err(e.to_string()),
-    };
-    match settled {
-        Ok(current) => report(current),
-        Err(e) if attempts_left > 0 => {
-            crate::log::debug!("copy tracker busy ({e}); retrying");
-            wasm_bindgen_futures::spawn_local(async move {
-                gloo_timers::future::TimeoutFuture::new(0).await;
-                settle_copy(tracker, ticket, landed, attempts_left - 1, report);
-            });
+pub(crate) fn classify_tracker_write<G>(
+    result: Result<G, dioxus::signals::BorrowMutError>,
+) -> TrackerAccess<G> {
+    match result {
+        Ok(guard) => TrackerAccess::Writable(guard),
+        Err(dioxus::signals::BorrowMutError::Dropped(_)) => TrackerAccess::OwnerGone,
+        Err(_) => TrackerAccess::Busy,
+    }
+}
+
+/// How the panel reports a finished copy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CopyReport {
+    /// Show the outcome, and fire `on_exported` if the copy landed.
+    Full,
+    /// Show the outcome only. The tracker couldn't be updated (busy), so
+    /// the copy stays counted as in flight and the discard warning stays
+    /// on: the fail-safe side. `on_exported` isn't fired on top of that.
+    StatusOnly,
+    /// Report nothing: the copy belongs to a key the create flow has since
+    /// reset, or the flow is gone. Reporting it would count against
+    /// whatever key comes next.
+    Nothing,
+}
+
+/// Decide how to report a finished copy. `settle` applies it to a writable
+/// tracker and returns whether its ticket was still current.
+pub(crate) fn copy_report<G>(
+    access: TrackerAccess<G>,
+    settle: impl FnOnce(G) -> bool,
+) -> CopyReport {
+    match access {
+        TrackerAccess::Writable(guard) => {
+            if settle(guard) {
+                CopyReport::Full
+            } else {
+                CopyReport::Nothing
+            }
         }
-        Err(e) => {
-            crate::log::error(
-                format!("copy tracker stayed busy ({e}); leaving the copy counted as in flight"),
-                None,
-            );
-            report(true);
-        }
+        TrackerAccess::OwnerGone => CopyReport::Nothing,
+        TrackerAccess::Busy => CopyReport::StatusOnly,
     }
 }
 
@@ -241,35 +250,41 @@ pub(crate) fn BackupKeyPanel(
                 // This panel's own display. Runs outside its task scope: if
                 // the panel is gone (modal closed, identity switched),
                 // writing its signals would panic, so check first.
-                let report = move |current: bool| {
-                    if !current {
-                        // The copy belongs to a key the create flow has
-                        // since reset (Discard), or the flow is gone.
-                        // Reporting it would count against whatever key
-                        // comes next. In today's UI a reset also closes the
-                        // form, so the panel is normally gone too and its
-                        // own guard below would stop the report; this gate
-                        // doesn't rely on that.
-                        return;
-                    }
-                    if copy_status.try_peek().is_err() {
-                        return;
-                    }
-                    if landed {
-                        on_exported.call(());
-                    }
-                    copy_status.set(Some(outcome));
-                };
                 // Settle against the parent's record first: it outlives this
                 // panel, so a copy that finishes after the panel unmounted
                 // still clears its in-flight entry, and a late success
                 // still counts as exported.
-                match (copy_tracker, ticket_for_done.get()) {
-                    (Some(tracker), Some(t)) => {
-                        settle_copy(tracker, t, landed, SETTLE_ATTEMPTS, report)
+                let how = match (copy_tracker, ticket_for_done.get()) {
+                    (Some(mut tracker), Some(t)) => {
+                        copy_report(classify_tracker_write(tracker.try_write()), |mut rec| {
+                            rec.settle(t, landed)
+                        })
                     }
-                    _ => report(true),
+                    _ => CopyReport::Full,
+                };
+                if how == CopyReport::StatusOnly {
+                    crate::log::error(
+                        "copy tracker was busy; leaving this copy counted as in flight",
+                        None,
+                    );
                 }
+                // In today's UI a reset also closes the form, so for
+                // `Nothing` the panel is normally gone too and the guard
+                // below would stop the report anyway; `Nothing` doesn't
+                // rely on that.
+                if how == CopyReport::Nothing {
+                    return;
+                }
+                // The rest is this panel's own display. It runs outside the
+                // panel's task scope: if the panel is gone (modal closed,
+                // identity switched), writing its signals would panic.
+                if copy_status.try_peek().is_err() {
+                    return;
+                }
+                if landed && how == CopyReport::Full {
+                    on_exported.call(());
+                }
+                copy_status.set(Some(outcome));
             });
             if !settled
                 && let Some(mut tracker) = copy_tracker
@@ -453,6 +468,60 @@ pub(crate) fn BackupKeyPanel(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A real generational box gives real `BorrowMutError`s for every arm.
+    #[test]
+    fn classify_tracker_write_covers_every_error_variant() {
+        use dioxus::signals::{AnyStorage, UnsyncStorage};
+        let owner = UnsyncStorage::owner();
+        let b = owner.insert(CopyTracker::default());
+
+        // Writable, and settling decides between Full and Nothing.
+        let mut t = b.write();
+        let ticket = t.start();
+        drop(t);
+        let access = classify_tracker_write(b.try_write());
+        assert!(matches!(access, TrackerAccess::Writable(_)));
+        assert_eq!(
+            copy_report(access, |mut rec| rec.settle(ticket, true)),
+            CopyReport::Full
+        );
+        assert_eq!(
+            copy_report(classify_tracker_write(b.try_write()), |mut rec| rec
+                .settle(ticket + 1, true)),
+            CopyReport::Nothing,
+            "a stale ticket reports nothing"
+        );
+
+        // AlreadyBorrowed: a read is held.
+        let read = b.read();
+        let access = classify_tracker_write(b.try_write());
+        assert!(matches!(access, TrackerAccess::Busy));
+        assert_eq!(
+            copy_report(access, |_| unreachable!("busy never settles")),
+            CopyReport::StatusOnly
+        );
+        drop(read);
+
+        // AlreadyBorrowedMut: a write is held.
+        let write = b.write();
+        let access = classify_tracker_write(b.try_write());
+        assert!(matches!(access, TrackerAccess::Busy));
+        assert_eq!(
+            copy_report(access, |_| unreachable!("busy never settles")),
+            CopyReport::StatusOnly
+        );
+        drop(write);
+
+        // Dropped: the owner is gone.
+        drop(owner);
+        let access = classify_tracker_write(b.try_write());
+        assert!(matches!(access, TrackerAccess::OwnerGone));
+        assert_eq!(
+            copy_report(access, |_| unreachable!("a dropped tracker never settles")),
+            CopyReport::Nothing
+        );
+    }
 
     /// Review #349 round 3, sequence A: an async copy is in flight, the
     /// panel unmounts (discard dialog) and remounts, and the copy then
