@@ -151,18 +151,31 @@ up() {
             --log-dir "$GW_LOGS" \
             --log-level info
         # Wait for gateway to bind ws port + write transport_keypair.
+        gw_ready=0
         for _ in $(seq 1 30); do
             if [ -f "$GW_DATA/secrets/transport_keypair" ] && \
                curl -sf -o /dev/null "http://127.0.0.1:$GW_PORT_WS/" 2>/dev/null; then
+                gw_ready=1
                 break
             fi
             sleep 0.5
         done
+        if [ "$gw_ready" != 1 ]; then
+            if [ -f "$GW_DATA/secrets/transport_keypair" ]; then
+                echo "error: the gateway wrote its keypair but is not answering on :$GW_PORT_WS after 15 s:" >&2
+            else
+                echo "error: the gateway wrote no $GW_DATA/secrets/transport_keypair within 15 s; it most likely exited at startup:" >&2
+            fi
+            tail -20 "$GW_LOGS/stdout.log" >&2 || true
+            exit 1
+        fi
     fi
 
     if [ ! -f "$GW_DATA/secrets/transport_keypair" ]; then
-        echo "error: the gateway wrote no $GW_DATA/secrets/transport_keypair; it most likely exited at startup:" >&2
-        tail -20 "$GW_LOGS/stdout.log" >&2 || true
+        # Only reachable when :$GW_PORT_WS was already taken above.
+        echo "error: something is already listening on :$GW_PORT_WS, but $GW_DATA has no transport keypair," >&2
+        echo "       so it is not this harness's gateway. Stop it, or choose other ports" >&2
+        echo "       (FREENET_ISO_GW_PORT and friends)." >&2
         exit 1
     fi
     GW_PUBKEY=$(derive_pubkey)
