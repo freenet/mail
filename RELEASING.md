@@ -308,7 +308,8 @@ git commit -m "chore(release): v<version> — production publish" \
     -m "Published-From: <full 40-char sha>"
 git push -u origin release/v<version>
 gh pr create --base main --head release/v<version> \
-    --title "chore(release): v<version> — production publish" --body "Release snapshot."
+    --title "chore(release): v<version> — production publish" \
+    --body "Release snapshot. Published-From: <full 40-char sha>"
 git checkout main
 # After the PR is squash-merged:
 scripts/release-tag.sh <version>

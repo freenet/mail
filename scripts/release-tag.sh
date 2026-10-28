@@ -141,6 +141,16 @@ CONTRACT_ID=$(git show "$SHA:published-contract/contract-id.txt" 2>/dev/null | t
     || die "published-contract/contract-id.txt missing at $(git rev-parse --short "$SHA")"
 [ -n "$CONTRACT_ID" ] || die "published-contract/contract-id.txt is empty at $(git rev-parse --short "$SHA")"
 
+# release.sh records the id it published as "Contract ID:" in the snapshot
+# commit. If the merged snapshot says otherwise, it was edited after the
+# publish and doesn't describe what is deployed.
+if [ -z "$EXPLICIT_SHA" ]; then
+    RECORDED_ID=$(git log -1 --format=%B "$SHA" | sed -n 's/^Contract ID: *\([1-9A-HJ-NP-Za-km-z]*\).*/\1/p' | head -1)
+    if [ -n "$RECORDED_ID" ] && [ "$RECORDED_ID" != "$CONTRACT_ID" ]; then
+        die "contract-id.txt at $(git rev-parse --short "$SHA") is $CONTRACT_ID, but the release recorded $RECORDED_ID as published"
+    fi
+fi
+
 PREV_TAG=$(git describe --tags --abbrev=0 "$SHA" 2>/dev/null || echo "")
 if [ -n "$PREV_TAG" ]; then
     CHANGELOG=$(git log --pretty=format:'  - %s' "$PREV_TAG..$SHA")
