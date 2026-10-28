@@ -44,6 +44,11 @@ const CHECKSUM_LEN: usize = 4;
 const BODY_LEN: usize = 1 + ML_DSA_SEED_LEN + ML_KEM_SEED_LEN;
 /// Decoded payload length: body + checksum.
 const PAYLOAD_LEN: usize = BODY_LEN + CHECKSUM_LEN;
+/// Longest whitespace-stripped input `decode` will try to base58-decode. A
+/// real key is ~150 characters; base58 decoding is quadratic and runs on
+/// every keystroke in the restore form, so anything far longer is rejected
+/// up front rather than decoded.
+const MAX_TOKEN_CHARS: usize = 512;
 
 /// Why a pasted recovery key was rejected. Each variant maps to a message a
 /// user can act on (see the `Display` impl).
@@ -59,6 +64,8 @@ pub(crate) enum TokenError {
     BadBase58,
     /// Decoded to the wrong number of bytes: truncated or has extra text.
     WrongLength { got: usize },
+    /// Far longer than any recovery key; not decoded at all.
+    TooLong,
     /// Right length, wrong checksum: a character was changed.
     BadChecksum,
 }
@@ -98,6 +105,11 @@ impl std::fmt::Display for TokenError {
                     )
                 }
             }
+            TokenError::TooLong => write!(
+                f,
+                "This is much longer than a recovery key. Paste just the line that \
+                 starts with \"{TOKEN_PREFIX}\"."
+            ),
             TokenError::BadChecksum => write!(
                 f,
                 "This recovery key doesn't check out: at least one character is \
@@ -141,17 +153,22 @@ pub(crate) fn encode(keys: &StoredIdentityKeys) -> Result<String, TokenError> {
 
 /// Decode a recovery key back into the identity's seeds.
 ///
-/// Tolerates what password managers and chat apps do to pasted text: all
-/// whitespace is removed first (leading/trailing, CR/LF line wrapping,
-/// spaces, tabs), wherever it appears. The prefix is case-sensitive.
+/// Tolerates what password managers, notes apps and chat apps do to pasted
+/// text: all whitespace is removed first (leading/trailing, CR/LF line
+/// wrapping, spaces, tabs), wherever it appears, and the `fmail-key-1:`
+/// prefix is matched case-insensitively (phones auto-capitalise it). The
+/// base58 payload stays case-sensitive: case is meaningful there.
 pub(crate) fn decode(text: &str) -> Result<StoredIdentityKeys, TokenError> {
     let compact: String = text.chars().filter(|c| !c.is_whitespace()).collect();
     if compact.is_empty() {
         return Err(TokenError::Empty);
     }
-    let Some(encoded) = compact.strip_prefix(TOKEN_PREFIX) else {
+    if compact.len() > MAX_TOKEN_CHARS {
+        return Err(TokenError::TooLong);
+    }
+    let Some(encoded) = strip_prefix_ignore_case(&compact, TOKEN_PREFIX) else {
         // Distinguish a newer-format key from unrelated text.
-        if let Some(rest) = compact.strip_prefix(PREFIX_STEM)
+        if let Some(rest) = strip_prefix_ignore_case(&compact, PREFIX_STEM)
             && let Some((version, _)) = rest.split_once(':')
             && !version.is_empty()
             && version.chars().all(|c| c.is_ascii_digit())
@@ -178,6 +195,35 @@ pub(crate) fn decode(text: &str) -> Result<StoredIdentityKeys, TokenError> {
         ml_dsa_seed: ml_dsa_seed.to_vec(),
         ml_kem_seed: ml_kem_seed.to_vec(),
     })
+}
+
+/// `s` without `prefix`, comparing the prefix ASCII-case-insensitively.
+fn strip_prefix_ignore_case<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
+    let head = s.get(..prefix.len())?;
+    head.eq_ignore_ascii_case(prefix)
+        .then(|| &s[prefix.len()..])
+}
+
+/// Whether restore input that failed to parse could still become valid by
+/// typing more: it is empty, the start of `fmail-key-1:`, a recovery key
+/// that is still too short, or the start of a JSON object. The restore form
+/// uses this to hold back the error while someone types a key by hand;
+/// pasted input is always checked at once.
+pub(crate) fn may_be_incomplete(text: &str, err: &BackupParseError) -> bool {
+    match err {
+        BackupParseError::Token(TokenError::Empty) => true,
+        BackupParseError::Token(TokenError::WrongPrefix) => {
+            let compact: String = text
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .collect::<String>()
+                .to_ascii_lowercase();
+            TOKEN_PREFIX.starts_with(compact.as_str())
+        }
+        BackupParseError::Token(TokenError::WrongLength { got }) => *got < PAYLOAD_LEN,
+        BackupParseError::InvalidJson => text.trim_start().starts_with('{'),
+        _ => false,
+    }
 }
 
 /// Why restore input was rejected. `Display` gives the user-facing text.
@@ -416,11 +462,83 @@ mod tests {
     }
 
     #[test]
+    fn prefix_is_case_insensitive_but_payload_is_not() {
+        let payload = &FIXTURE_TOKEN[TOKEN_PREFIX.len()..];
+        for variant in [
+            format!("FMAIL-KEY-1:{payload}"),
+            format!("Fmail-key-1:{payload}"),
+            format!("fMaIl-KeY-1:{payload}"),
+        ] {
+            assert_same_keys(&decode(&variant).unwrap(), &fixture_keys());
+        }
+        // Base58 is case-sensitive: changing a payload letter's case is a
+        // different key, caught by the checksum (or length).
+        let lowered = format!("{TOKEN_PREFIX}{}", payload.to_ascii_lowercase());
+        assert!(decode(&lowered).is_err());
+    }
+
+    #[test]
+    fn prefix_only_input_is_too_short_not_a_crash() {
+        assert!(matches!(
+            decode(TOKEN_PREFIX),
+            Err(TokenError::WrongLength { got: 0 })
+        ));
+        assert!(matches!(
+            decode("FMAIL-KEY-1:"),
+            Err(TokenError::WrongLength { got: 0 })
+        ));
+    }
+
+    #[test]
+    fn over_length_input_is_rejected_before_decoding() {
+        let huge = format!("{TOKEN_PREFIX}{}", "z".repeat(MAX_TOKEN_CHARS));
+        assert_eq!(decode(&huge).err(), Some(TokenError::TooLong));
+        // Whitespace doesn't count towards the cap: a wrapped real key passes.
+        let wrapped: String = FIXTURE_TOKEN
+            .chars()
+            .flat_map(|c| [c, ' ', ' ', ' '])
+            .collect();
+        assert!(wrapped.len() > MAX_TOKEN_CHARS);
+        assert_same_keys(&decode(&wrapped).unwrap(), &fixture_keys());
+        assert!(TokenError::TooLong.to_string().contains("longer"));
+    }
+
+    #[test]
+    fn may_be_incomplete_only_for_inputs_typing_could_finish() {
+        let check = |text: &str| {
+            let err = parse_backup(text).err().expect("must not parse");
+            may_be_incomplete(text, &err)
+        };
+        // Still being typed.
+        assert!(check(""));
+        assert!(check("fm"));
+        assert!(check("FMAIL-"));
+        assert!(check("fmail-key-1:"));
+        assert!(check(&FIXTURE_TOKEN[..60]));
+        assert!(check("{ \"version\": 2"));
+        // Already wrong, no matter what comes next.
+        assert!(!check("hello"));
+        assert!(!check("fmail-key-1:0OIl"));
+        assert!(!check(&format!("{FIXTURE_TOKEN}zz")));
+        let i = FIXTURE_TOKEN.len() - 20;
+        let swapped = format!(
+            "{}{}{}",
+            &FIXTURE_TOKEN[..i],
+            if &FIXTURE_TOKEN[i..=i] == "x" {
+                "y"
+            } else {
+                "x"
+            },
+            &FIXTURE_TOKEN[i + 1..]
+        );
+        assert!(!check(&swapped));
+    }
+
+    #[test]
     fn wrong_prefix_is_rejected() {
         let payload = &FIXTURE_TOKEN[TOKEN_PREFIX.len()..];
         for bad in [
             payload.to_string(),
-            format!("FMAIL-KEY-1:{payload}"),
             format!("fmail-key:{payload}"),
             format!("river-key-1:{payload}"),
             "hello".to_string(),
@@ -486,6 +604,42 @@ mod tests {
     }
 
     #[test]
+    fn newer_json_version_says_update_the_app() {
+        let v3 = r#"{"version": 3, "alias": "x", "description": "", "keys": {}}"#;
+        let err = parse_backup(v3).err().expect("v3 must be rejected");
+        assert_eq!(err, BackupParseError::UnsupportedJsonVersion(3));
+        let msg = err.to_string();
+        assert!(
+            msg.contains("v3") && msg.contains("Update the app"),
+            "{msg}"
+        );
+    }
+
+    /// A backup written exactly the way the previous exporter wrote it:
+    /// `serde_json::to_vec_pretty(&IdentityBackup { .. })`, built from real
+    /// keys via `StoredIdentityKeys::new`. Guards against the hand-written
+    /// fixture drifting from what users actually have on disk.
+    #[test]
+    fn backup_from_the_old_exporter_shape_parses() {
+        let keys = fixture_keys();
+        let signing = keys.ml_dsa_signing_key();
+        let dk = keys.ml_kem_dk();
+        let old = IdentityBackup {
+            version: IDENTITY_BACKUP_VERSION,
+            alias: "alice".into(),
+            description: "work".into(),
+            keys: StoredIdentityKeys::new(&signing, &dk),
+        };
+        let bytes = serde_json::to_vec_pretty(&old).unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        let parsed = parse_backup(&text).unwrap();
+        assert_eq!(parsed.alias, "alice");
+        assert_eq!(parsed.description, "work");
+        assert_same_keys(&parsed.keys, &keys);
+        assert_eq!(fingerprint(&parsed.keys), fingerprint(&keys));
+    }
+
+    #[test]
     fn v1_json_gives_a_visible_version_error() {
         let v1 = r#"{
           "version": 1,
@@ -532,6 +686,7 @@ mod tests {
             TokenError::BadBase58,
             TokenError::WrongLength { got: 3 },
             TokenError::WrongLength { got: 300 },
+            TokenError::TooLong,
             TokenError::BadChecksum,
         ] {
             assert!(!e.to_string().is_empty());
