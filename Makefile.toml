@@ -312,7 +312,6 @@ echo "wrote $OUT ($(wc -c < "$OUT") bytes)"
 
 [tasks.sign-container-state-test]
 description = "Sign a container state blob using the committed test key (current_app_id from published-contract)"
-dependencies = ["pack-container-loader"]
 script_runner = "bash"
 script = '''
 set -euo pipefail
@@ -322,7 +321,20 @@ if [ ! -f "$KEY_FILE" ]; then
     echo "error: $KEY_FILE not found — run \`cargo make generate-web-container-keys\`" >&2
     exit 1
 fi
-APP_ID="${FACADE_CURRENT_APP_ID:-$(cat "$ROOT/published-contract/contract-id.txt")}"
+# The sandbox container points at the SANDBOX webapp (the test-key id that
+# derive-test-contract-id writes), never at the production one.
+APP_ID="${FACADE_CURRENT_APP_ID:-}"
+if [ -z "$APP_ID" ]; then
+    if [ ! -s "$ROOT/target/webapp/contract-id.txt" ]; then
+        echo "error: no sandbox webapp id: run \`cargo make derive-test-contract-id\` first," >&2
+        echo "       or set FACADE_CURRENT_APP_ID" >&2
+        exit 1
+    fi
+    APP_ID=$(tr -d '[:space:]' < "$ROOT/target/webapp/contract-id.txt")
+fi
+# Render and pack the loader with that id (the shared loader tasks default to
+# the production id).
+FACADE_CURRENT_APP_ID="$APP_ID" cargo make pack-container-loader
 LOADER="$ROOT/target/container/loader.tar.xz"
 if [ ! -f "$LOADER" ]; then
     echo "error: $LOADER missing (pack-container-loader should have produced it)" >&2
@@ -372,43 +384,27 @@ echo "production container state signed at version $version pointing at $APP_ID"
 '''
 
 [tasks.update-published-container]
-description = "Build the container contract and derive its TEST id (test-key parameters) into target/container/; never writes published-contract/"
-dependencies = ["build-container", "sign-container-state-test"]
+description = "Derive the SANDBOX container contract id (frozen container.wasm + test-key parameters) into target/container/container-id.txt; never writes published-contract/"
+dependencies = ["sign-container-state-test"]
 script_runner = "bash"
 script = '''
 set -euo pipefail
 ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
-WASM="$ROOT/contracts/facade/target/wasm32-unknown-unknown/release/freenet_email_facade.wasm"
+# The same wasm publish-container-test publishes: the frozen one.
+WASM="$ROOT/published-contract/container.wasm"
 PARAMS="$ROOT/target/container/container.parameters"
-if [ ! -f "$WASM" ]; then
-    echo "error: $WASM not found" >&2
-    exit 1
-fi
-if [ ! -f "$PARAMS" ]; then
-    echo "error: $PARAMS not found" >&2
-    exit 1
-fi
+[ -s "$WASM" ] || { echo "error: $WASM missing; restore it with git checkout -- published-contract/" >&2; exit 1; }
+[ -s "$PARAMS" ] || { echo "error: $PARAMS missing (did sign-container-state-test run?)" >&2; exit 1; }
 contract_id=$(CARGO_TARGET_DIR="$ROOT/target" fdev get-contract-id \
     --code "$WASM" --parameters "$PARAMS")
-if [ -z "$contract_id" ]; then
-    echo "error: fdev get-contract-id returned empty id" >&2
-    exit 1
-fi
-# The published container contract is frozen (published-contract/README.md),
-# so a fresh build with the committed test key goes under target/ only.
-mkdir -p "$ROOT/target/container"
-cp "$WASM" "$ROOT/target/container/container.wasm"
+[ -n "$contract_id" ] || { echo "error: fdev get-contract-id returned an empty id" >&2; exit 1; }
 printf '%s\n' "$contract_id" > "$ROOT/target/container/container-id.txt"
-echo "test container contract in target/container/:"
-echo "  container-id.txt     = $contract_id"
-echo "  container.wasm       = $(wc -c < "$ROOT/target/container/container.wasm") bytes"
-echo "  container.parameters = test key"
-echo "published-contract/ is untouched."
+echo "sandbox container contract id: $contract_id (target/container/container-id.txt)"
 '''
 
 [tasks.publish-container-test]
 description = "Publish (PUT) the container contract to the local sandbox node — first-time publish only"
-dependencies = ["build-container", "sign-container-state-test"]
+dependencies = ["update-published-container"]
 script_runner = "bash"
 script = '''
 set -euo pipefail
@@ -475,19 +471,20 @@ script = '''
 
 [tasks.update-container-state-test]
 description = "UPDATE the container contract state on the local sandbox (per-release pointer flip)"
-dependencies = ["sign-container-state-test"]
+dependencies = ["update-published-container"]
 script_runner = "bash"
 script = '''
 set -euo pipefail
 ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
 PORT="${FREENET_LOCAL_PORT:-7509}"
-FACADE_ID=$(cat "$ROOT/published-contract/container-id.txt")
+# The sandbox container (derived by update-published-container), not the
+# production one.
+FACADE_ID=$(cat "$ROOT/target/container/container-id.txt")
 STATE="$ROOT/target/container/container.state"
 echo "UPDATEing container state at $FACADE_ID (port $PORT)"
-# `fdev execute update` takes the new full state as the delta — the container contract
-# contract's `update_state` accepts UpdateData::State and validates it the
-# same way `validate_state` would on the receiver side.
-fdev --port "$PORT" execute update "$FACADE_ID" "$STATE"
+# --as-state: the container contract's `update_state` accepts only
+# UpdateData::State; without it fdev sends a Delta, which it rejects.
+fdev --port "$PORT" execute update --as-state "$FACADE_ID" "$STATE"
 '''
 
 # Aliases of the container tasks, under their earlier "facade" names.
