@@ -3,11 +3,13 @@ resolver = "2"
 members = [
     "common",
     "ui",
-    # On-chain contract crates are EXCLUDED below (own lockfiles) so
-    # workspace dep churn cannot rotate their wasm bytes. Workspace-
-    # member crates here are: shared types (common), UI, dev tools,
-    # delegates whose wasm rotation is harmless (identity-management,
-    # mail-local-state — local-secret-store-only delegates).
+    # Members: shared types (common), the UI, dev tools, and the source of
+    # the webapp contract and the two local delegates. Nothing published is
+    # built from here: the WASM those crates shipped is frozen under
+    # published-contract/, because a delegate's key (and so every secret it
+    # stores) and a contract's id both derive from the WASM bytes. A rebuild
+    # is never harmless; a new generation needs a migration registry row
+    # (legacy_*.toml) and a new published-contract/wasm/v<N>/.
     "contracts/web-container",
     "modules/identity-management",
     "modules/mail-local-state",
@@ -15,10 +17,10 @@ members = [
 ]
 # Issues #198 + #199: every on-chain CONTRACT (and the shared types
 # crates they depend on) lives outside the workspace with its own
-# Cargo.lock. Workspace dep bumps cannot reach these build graphs, so
-# their wasm bytes stay stable across releases — which is what gives
-# users a stable contract id (and stable bookmarks / persistent inbox
-# state / spendable AFT tokens).
+# Cargo.lock, so workspace dep bumps cannot reach these build graphs.
+# That alone does not make a rebuild reproducible (embedded build paths
+# differ per machine, #348), so the shipped bytes are frozen under
+# published-contract/ and never rebuilt for a release.
 #
 # Each excluded crate has =x.y.z pins on every dep that influences wasm
 # output (ml-dsa, chrono, freenet-stdlib, ed25519-dalek, etc.).
