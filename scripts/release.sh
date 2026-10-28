@@ -228,12 +228,13 @@ echo ""
 echo "═══ About to release $TAG ════════════════════════════════════════════"
 echo ""
 echo "This will:"
-echo "  1. Build the UI and contracts in release mode"
+echo "  1. Build the UI in release mode (contract WASM is frozen, not rebuilt)"
 echo "  2. Sign the webapp with the PRODUCTION key at $KEY_FILE"
-echo "  3. Publish the contract to the real Freenet network via fdev"
+echo "  3. Publish the webapp to the real Freenet network via fdev, under the"
+echo "     committed container contract id $(tr -d '[:space:]' < published-contract/contract-id.txt)"
 echo "  4. Flip the stable facade pointer to the new webapp"
-echo "  5. Commit the new published-contract/ snapshot on $RELEASE_BRANCH"
-echo "  6. Push that branch and open the snapshot PR"
+echo "  5. Commit any published-contract/ change on $RELEASE_BRANCH (normally none)"
+echo "  6. Push that branch and open the snapshot PR (only if step 5 committed)"
 echo ""
 echo "Steps 3-6 are PUBLICLY VISIBLE; 3 and 4 cannot be undone."
 echo "Tag afterwards with scripts/release-tag.sh $VERSION once the PR merges."
@@ -253,28 +254,16 @@ on_post_publish_exit() {
     [ "$RELEASE_FINISHED" = "1" ] && return
     echo "" >&2
     if [ -z "$SNAPSHOT_CHANGED" ]; then
-        # Stopped inside `cargo make publish-production`: work out whether the
-        # publish itself happened before telling the user what to do.
-        local new_id old_id
-        new_id=$(tr -d '[:space:]' < published-contract/contract-id.txt 2>/dev/null || true)
-        old_id=$(git show "$SOURCE_SHA:published-contract/contract-id.txt" 2>/dev/null | tr -d '[:space:]' || true)
-        if [ -z "$new_id" ] || [ "$new_id" = "$old_id" ]; then
-            # Either the build failed before writing a new id, or the build
-            # reproduced the live contract exactly; publishing an identical
-            # contract again changes nothing, so a re-run is safe either way.
-            echo "✗ release.sh stopped before anything new was published for $TAG" >&2
-            echo "  (build or signing step, or the build reproduced the live contract id)." >&2
-            echo "  Fix the error, run 'git checkout -- published-contract/' if it shows" >&2
-            echo "  changes, and re-run scripts/release.sh $VERSION." >&2
-            return
-        fi
-        if ! curl -sf -m 60 -o /dev/null "http://127.0.0.1:${FREENET_PORT}/v1/contract/web/${new_id}/"; then
-            echo "✗ release.sh stopped while publishing $TAG, and the gateway does not serve" >&2
-            echo "  the new webapp ($new_id). It most likely did not land: run" >&2
-            echo "  'git checkout -- published-contract/' and re-run scripts/release.sh $VERSION." >&2
-            return
-        fi
-        echo "✗ release.sh stopped, but the new webapp ($new_id) IS live (fdev timeout?)." >&2
+        # Stopped inside `cargo make publish-production`. The container wasm
+        # is frozen, so the contract id is the same whether or not the new
+        # webapp landed, and nothing under published-contract/ changed. A
+        # re-run signs with a newer timestamp version, which supersedes
+        # whatever a timed-out publish left behind, so it is safe either way.
+        echo "✗ release.sh stopped in the build, sign or publish step for $TAG." >&2
+        echo "  The new webapp may or may not have landed (fdev can time out after a" >&2
+        echo "  publish that succeeded). A re-run signs a newer version, which supersedes" >&2
+        echo "  it: fix the error and re-run scripts/release.sh $VERSION." >&2
+        return
     else
         echo "✗ release.sh stopped after publishing $TAG." >&2
     fi
@@ -303,10 +292,9 @@ cargo make publish-production
 SNAPSHOT_CHANGED=1
 if [ -z "$(git status --porcelain -- published-contract/)" ]; then
     SNAPSHOT_CHANGED=0
-    echo "  ⚠️  published-contract/ unchanged — wasm bytes + parameters identical to last release."
-    echo "      Lockfile-isolated build (#198) kept wasm reproducible. Signature has a"
-    echo "      fresh timestamp and was re-published, but the snapshot files are bit-equal."
-    echo "      Will tag $TAG against current HEAD without an empty release commit."
+    echo "  ✓ published-contract/ unchanged, as expected: the container wasm is frozen"
+    echo "    and only the signed webapp state changes per release."
+    echo "    Will tag $TAG against current HEAD without an empty release commit."
 fi
 
 CONTRACT_ID=$(cat published-contract/contract-id.txt)

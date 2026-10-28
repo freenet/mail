@@ -17,6 +17,13 @@ command = "cargo"
 args = ["clean"]
 
 # ─── Contract / delegate WASM builds via fdev ─────────────────────────────────
+#
+# These rebuild contract/delegate WASM from source into each crate's build/
+# dir. Nothing the UI embeds or publishes comes from them: the shipped bytes
+# are frozen under published-contract/wasm/v1/ (see published-contract/README.md),
+# because a rebuild embeds build-machine paths and so changes the keys.
+# A deliberate new generation is built with scripts/build-wasm.sh, which
+# remaps those paths, and committed under a new published-contract/wasm/vN/.
 
 [tasks.build-inbox-contract]
 description = "Build the inbox contract WASM + code hash"
@@ -198,7 +205,7 @@ cargo run --quiet -p web-container-sign -- generate --output "$KEY_FILE"
 '''
 
 [tasks.build-contracts]
-description = "Build all contracts/delegates WASM and code hash files"
+description = "Rebuild all contracts/delegates from source into their build/ dirs (the UI embeds the frozen published-contract/wasm/v1/ copies, not these)"
 dependencies = [
     "build-inbox-contract",
     "build-token-allocation-record",
@@ -212,7 +219,7 @@ dependencies = [
 # ─── Web container, UI, dev ────────────────────────────────────────────────────
 
 [tasks.build-web-container]
-description = "Build the web container contract WASM"
+description = "Rebuild the web container contract from source (never published: the published wasm is the frozen published-contract/web_container_contract.wasm)"
 command = "cargo"
 args = ["build", "--profile", "${BUILD_PROFILE}", "--target", "${CONTRACT_TARGET}", "-p", "freenet-email-app-web"]
 
@@ -231,7 +238,7 @@ APP_ID="${FACADE_CURRENT_APP_ID:-}"
 if [ -z "$APP_ID" ]; then
     if [ ! -f "$ROOT/published-contract/contract-id.txt" ]; then
         echo "error: FACADE_CURRENT_APP_ID unset and published-contract/contract-id.txt missing" >&2
-        echo "       run \`cargo make update-published-contract\` first or set FACADE_CURRENT_APP_ID" >&2
+        echo "       restore it with \`git checkout -- published-contract/\` or set FACADE_CURRENT_APP_ID" >&2
         exit 1
     fi
     APP_ID=$(cat "$ROOT/published-contract/contract-id.txt")
@@ -480,27 +487,24 @@ fdev --port "$PORT" execute update "$FACADE_ID" "$STATE"
 '''
 
 [tasks.build-ui]
-description = "Build the Dioxus UI"
-dependencies = ["build-contracts"]
+description = "Build the Dioxus UI (embeds the frozen published-contract/wasm/v1/ artifacts)"
 command = "dx"
 args = ["build", "--${BUILD_PROFILE}", "--features", "use-node"]
 cwd = "./ui"
 
 [tasks.build]
-description = "Full release build (UI + contracts + web container)"
-dependencies = ["build-ui", "build-web-container"]
+description = "Full release build (the UI; contract and container WASM are frozen, committed artifacts)"
+dependencies = ["build-ui"]
 
 [tasks.dev]
 description = "Local Dioxus dev server"
-dependencies = ["build-contracts"]
 command = "dx"
 args = ["serve", "--features", "use-node"]
 cwd = "./ui"
 
 [tasks.dev-example]
 description = "Local dev server with example data, no node sync (offline)"
-# Intentionally no `build-contracts` dependency: the whole point of this
-# target is that it works on a clean clone with zero contract artifacts.
+# Offline build: needs none of the committed contract artifacts.
 command = "dx"
 args = ["serve", "--features", "example-data,no-sync", "--no-default-features"]
 cwd = "./ui"
@@ -521,9 +525,17 @@ cwd = "./ui"
 # The flow, in order:
 #
 #   build-ui  →  compress-webapp  →  sign-webapp{,-test}  →  \
-#                update-published-contract  →  publish-email{,-test}
+#                verify-published-contract | derive-test-contract-id  →  \
+#                publish-email{,-test}
 #
 # `publish-all` wires the test variant end-to-end for local validation.
+#
+# The container contract WASM is FROZEN: every publish uses the committed
+# published-contract/web_container_contract.wasm, never a rebuild, so the
+# production contract id (hash(wasm, parameters)) never changes. Only the
+# signed webapp state changes per release. Nothing in this pipeline writes
+# to published-contract/: the production flow verifies it, and the test
+# flow derives its own id into target/webapp/.
 #
 # `publish-email-test` uses the committed key at
 # `test-contract/web-container-keys.toml` so two developers building from
@@ -599,11 +611,8 @@ fi
 # state). Timestamp is the simplest source that's always monotonic
 # without coordination.
 #
-# Tradeoff: two developers signing at different times produce
-# different signed payloads and therefore different contract IDs.
-# `published-contract/contract-id.txt` is no longer reproducible from
-# source. The committed snapshot is now the authoritative ID, and
-# `update-published-contract*` rewrites it on every refresh.
+# The version lives in the signed metadata (contract state), not in the
+# parameters, so it never affects the contract id.
 version=$(date -u +%s)
 echo "signing with version $version (unix timestamp)"
 cargo run --quiet -p web-container-sign -- sign \
@@ -645,107 +654,84 @@ cargo run --quiet -p web-container-sign -- sign \
     --key-file "$KEY_FILE"
 '''
 
-[tasks.update-published-contract]
-description = "Copy the signed test artifacts into published-contract/ and record the contract ID"
-dependencies = ["sign-webapp-test", "build-web-container"]
+[tasks.derive-test-contract-id]
+description = "Derive the TEST contract id (frozen container wasm + test-key parameters) into target/webapp/contract-id.txt"
+dependencies = ["sign-webapp-test"]
 script_runner = "bash"
 script = '''
 set -euo pipefail
 ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
-WASM="$ROOT/target/wasm32-unknown-unknown/release/freenet_email_app_web.wasm"
+WASM="$ROOT/published-contract/web_container_contract.wasm"
 PARAMS="$ROOT/target/webapp/webapp.parameters"
-if [ ! -f "$WASM" ]; then
-    echo "error: $WASM not found (did cargo make build-web-container run?)" >&2
-    exit 1
-fi
-if [ ! -f "$PARAMS" ]; then
-    echo "error: $PARAMS not found (did sign-webapp-test run?)" >&2
-    exit 1
-fi
-
-# Ask fdev for the derived contract ID. This is hash(wasm, parameters)
-# and is fully deterministic given byte-identical inputs.
+[ -s "$WASM" ] || { echo "error: $WASM missing; restore it with git checkout -- published-contract/" >&2; exit 1; }
+[ -s "$PARAMS" ] || { echo "error: $PARAMS not found (did sign-webapp-test run?)" >&2; exit 1; }
+# hash(wasm, parameters): the frozen wasm with the committed test key's
+# parameters. Written under target/, never over the committed production
+# snapshot in published-contract/.
 contract_id=$(CARGO_TARGET_DIR="$ROOT/target" fdev get-contract-id \
     --code "$WASM" --parameters "$PARAMS")
-if [ -z "$contract_id" ]; then
-    echo "error: fdev get-contract-id returned an empty ID" >&2
-    echo "       fdev version: $(fdev --version 2>&1 || echo unknown)" >&2
+[ -n "$contract_id" ] || { echo "error: fdev get-contract-id returned an empty id" >&2; exit 1; }
+printf '%s\n' "$contract_id" > "$ROOT/target/webapp/contract-id.txt"
+echo "test contract id: $contract_id (target/webapp/contract-id.txt)"
+'''
+
+[tasks.update-published-contract]
+description = "Old name for derive-test-contract-id. It no longer writes published-contract/."
+dependencies = ["derive-test-contract-id"]
+
+[tasks.verify-published-contract]
+description = "Check the PRODUCTION signing key matches the committed snapshot: same parameters, same derived contract id"
+dependencies = ["sign-webapp"]
+script_runner = "bash"
+script = '''
+set -euo pipefail
+ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
+WASM="$ROOT/published-contract/web_container_contract.wasm"
+COMMITTED_PARAMS="$ROOT/published-contract/webapp.parameters"
+SIGNED_PARAMS="$ROOT/target/webapp/webapp.parameters"
+for f in "$WASM" "$COMMITTED_PARAMS" "$ROOT/published-contract/contract-id.txt"; do
+    [ -s "$f" ] || { echo "error: $f missing; restore it with git checkout -- published-contract/" >&2; exit 1; }
+done
+[ -s "$SIGNED_PARAMS" ] || { echo "error: $SIGNED_PARAMS not found (did sign-webapp run?)" >&2; exit 1; }
+# The parameters are the signer's verifying key. A webapp signed with any
+# other key is rejected by the published contract.
+if ! cmp -s "$SIGNED_PARAMS" "$COMMITTED_PARAMS"; then
+    echo "error: the signing key does not match published-contract/webapp.parameters" >&2
+    echo "       (signed with: ${WEB_CONTAINER_KEY_FILE:-$HOME/.config/freenet-email/web-container-keys.toml})" >&2
     exit 1
 fi
-
-mkdir -p "$ROOT/published-contract"
-cp "$WASM"   "$ROOT/published-contract/web_container_contract.wasm"
-cp "$PARAMS" "$ROOT/published-contract/webapp.parameters"
-printf '%s\n' "$contract_id" > "$ROOT/published-contract/contract-id.txt"
-
-echo "published-contract/ updated:"
-echo "  contract-id.txt             = $contract_id"
-echo "  web_container_contract.wasm = $(wc -c < "$ROOT/published-contract/web_container_contract.wasm") bytes"
-echo "  webapp.parameters           = $(wc -c < "$ROOT/published-contract/webapp.parameters") bytes"
-echo ""
-echo "commit these changes with a message referencing the release in #6 / #9."
+expected=$(tr -d '[:space:]' < "$ROOT/published-contract/contract-id.txt")
+derived=$(CARGO_TARGET_DIR="$ROOT/target" fdev get-contract-id \
+    --code "$WASM" --parameters "$COMMITTED_PARAMS")
+if [ "$derived" != "$expected" ]; then
+    echo "error: published-contract/ is inconsistent: wasm + parameters give $derived," >&2
+    echo "       contract-id.txt says $expected. Restore it with git checkout -- published-contract/" >&2
+    exit 1
+fi
+echo "production contract id: $expected (frozen wasm, signing key matches)"
 '''
 
 [tasks.update-published-contract-prod]
-description = "Copy the signed PRODUCTION artifacts into published-contract/ and record the contract ID"
-dependencies = ["sign-webapp", "build-web-container"]
-script_runner = "bash"
-script = '''
-set -euo pipefail
-ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
-WASM="$ROOT/target/wasm32-unknown-unknown/release/freenet_email_app_web.wasm"
-PARAMS="$ROOT/target/webapp/webapp.parameters"
-if [ ! -f "$WASM" ]; then
-    echo "error: $WASM not found (did cargo make build-web-container run?)" >&2
-    exit 1
-fi
-if [ ! -f "$PARAMS" ]; then
-    echo "error: $PARAMS not found (did sign-webapp run?)" >&2
-    exit 1
-fi
-
-contract_id=$(CARGO_TARGET_DIR="$ROOT/target" fdev get-contract-id \
-    --code "$WASM" --parameters "$PARAMS")
-if [ -z "$contract_id" ]; then
-    echo "error: fdev get-contract-id returned an empty ID" >&2
-    exit 1
-fi
-
-mkdir -p "$ROOT/published-contract"
-cp "$WASM"   "$ROOT/published-contract/web_container_contract.wasm"
-cp "$PARAMS" "$ROOT/published-contract/webapp.parameters"
-printf '%s\n' "$contract_id" > "$ROOT/published-contract/contract-id.txt"
-
-echo "published-contract/ updated (PRODUCTION):"
-echo "  contract-id.txt             = $contract_id"
-echo "  web_container_contract.wasm = $(wc -c < "$ROOT/published-contract/web_container_contract.wasm") bytes"
-echo "  webapp.parameters           = $(wc -c < "$ROOT/published-contract/webapp.parameters") bytes"
-'''
+description = "Old name for verify-published-contract. It no longer writes published-contract/."
+dependencies = ["verify-published-contract"]
 
 [tasks.publish-email-test]
 description = "Publish the test build of the webapp to a local Freenet node"
-dependencies = ["sign-webapp-test", "build-web-container"]
+dependencies = ["sign-webapp-test", "derive-test-contract-id"]
 script_runner = "bash"
 script = '''
 set -euo pipefail
 ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
-if [ ! -f "$ROOT/published-contract/contract-id.txt" ]; then
-    echo "error: published-contract/contract-id.txt missing" >&2
-    echo "       run \`cargo make update-published-contract\` first" >&2
-    exit 1
-fi
-contract_id=$(cat "$ROOT/published-contract/contract-id.txt")
+contract_id=$(cat "$ROOT/target/webapp/contract-id.txt")
 echo "publishing with test contract id $contract_id"
-# Publish against the committed artifacts, not the freshly built ones,
-# so we fail loudly if the committed published-contract/ is stale
-# relative to HEAD.
+# The frozen container wasm with the test key's parameters.
 # `--port` honours FREENET_LOCAL_PORT so we publish to the same isolated
 # node `run-node` started — otherwise fdev defaults to 7509 and publishes
 # to whatever node owns it, which may be a sibling worktree.
 PORT="${FREENET_LOCAL_PORT:-7509}"
 fdev --port "$PORT" publish \
     --code "$ROOT/published-contract/web_container_contract.wasm" \
-    --parameters "$ROOT/published-contract/webapp.parameters" \
+    --parameters "$ROOT/target/webapp/webapp.parameters" \
     contract \
     --webapp-archive "$ROOT/target/webapp/webapp.tar.xz" \
     --webapp-metadata "$ROOT/target/webapp/webapp.metadata"
@@ -753,22 +739,17 @@ fdev --port "$PORT" publish \
 
 [tasks.publish-email-iso]
 description = "Publish the test webapp to the isolated 2-node gateway (port 7510)"
-dependencies = ["sign-webapp-test", "build-web-container"]
+dependencies = ["sign-webapp-test", "derive-test-contract-id"]
 script_runner = "bash"
 script = '''
 set -euo pipefail
 ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
 PORT="${FREENET_ISO_GW_PORT:-7510}"
-if [ ! -f "$ROOT/published-contract/contract-id.txt" ]; then
-    echo "error: published-contract/contract-id.txt missing" >&2
-    echo "       run \`cargo make update-published-contract\` first" >&2
-    exit 1
-fi
-contract_id=$(cat "$ROOT/published-contract/contract-id.txt")
+contract_id=$(cat "$ROOT/target/webapp/contract-id.txt")
 echo "publishing with test contract id $contract_id to iso gateway :$PORT"
 fdev --port "$PORT" publish \
     --code "$ROOT/published-contract/web_container_contract.wasm" \
-    --parameters "$ROOT/published-contract/webapp.parameters" \
+    --parameters "$ROOT/target/webapp/webapp.parameters" \
     contract \
     --webapp-archive "$ROOT/target/webapp/webapp.tar.xz" \
     --webapp-metadata "$ROOT/target/webapp/webapp.metadata"
@@ -776,16 +757,12 @@ fdev --port "$PORT" publish \
 
 [tasks.publish-email]
 description = "Publish the production build of the webapp to Freenet"
-dependencies = ["sign-webapp", "build-web-container"]
+dependencies = ["sign-webapp", "verify-published-contract"]
 script_runner = "bash"
 script = '''
 set -euo pipefail
 ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
-if [ ! -f "$ROOT/published-contract/contract-id.txt" ]; then
-    echo "error: published-contract/contract-id.txt missing" >&2
-    exit 1
-fi
-contract_id=$(cat "$ROOT/published-contract/contract-id.txt")
+contract_id=$(tr -d '[:space:]' < "$ROOT/published-contract/contract-id.txt")
 echo "publishing with production contract id $contract_id"
 fdev publish \
     --code "$ROOT/published-contract/web_container_contract.wasm" \
@@ -796,18 +773,16 @@ fdev publish \
 '''
 
 [tasks.publish-all]
-description = "End-to-end test publish: build → sign → update-published-contract → publish-email-test"
+description = "End-to-end test publish: build → sign with the test key → derive the test id → publish-email-test"
 dependencies = [
     "build",
-    "update-published-contract",
     "publish-email-test",
 ]
 
 [tasks.publish-production]
-description = "End-to-end PRODUCTION publish: build → sign with prod key → update-published-contract → publish-email"
+description = "End-to-end PRODUCTION publish: build → sign with prod key → verify the committed snapshot → publish-email"
 dependencies = [
     "build",
-    "update-published-contract-prod",
     "publish-email",
 ]
 
@@ -953,7 +928,7 @@ script = '''
 
 [tasks.test-e2e-real-node]
 description = "Real-node E2E: wipe iso nodes → publish → run live-node spec → tear down (set FREENET_E2E_KEEP=1 to leave nodes up)"
-dependencies = ["build", "update-published-contract"]
+dependencies = ["build", "derive-test-contract-id"]
 script_runner = "bash"
 script = '''
 set -euo pipefail
@@ -978,7 +953,7 @@ bash "$ROOT/scripts/run-isolated-nodes.sh" up
 # Publish to the iso gateway (port-overridden fdev).
 FREENET_ISO_GW_PORT="$GW_PORT" cargo make publish-email-iso
 
-CONTRACT_ID="$(cat "$ROOT/published-contract/contract-id.txt")"
+CONTRACT_ID="$(cat "$ROOT/target/webapp/contract-id.txt")"
 BASE_URL="http://127.0.0.1:$GW_PORT/v1/contract/web/$CONTRACT_ID/"
 echo "running live-node spec against $BASE_URL"
 
