@@ -27,8 +27,7 @@ set -euo pipefail
 # Cargo.lock so workspace dep churn cannot rotate the inbox wasm bytes.
 # CARGO_TARGET_DIR pinned to the crate-local target/ — bypasses fdev's
 # `get_workspace_target_dir()` walk (which would otherwise panic if fdev
-# was installed from a different tree; see AGENTS.md "Self-hosted CI"
-# notes). Pointing it at the in-tree target/ is the explicit-override
+# was installed from a different tree). Pointing it at the in-tree target/ is the explicit-override
 # pattern fdev expects.
 CRATE_DIR="${CARGO_MAKE_WORKING_DIRECTORY}/contracts/inbox"
 cd "$CRATE_DIR"
