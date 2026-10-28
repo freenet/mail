@@ -57,6 +57,8 @@ interface TestIds {
   fmCreateAliasInput: string;
   fmCreateConfirm: string;
   fmCreateSubmit: string;
+  fmCreateBackupNow: string;
+  fmCreateDiscard: string;
   fmVerifyCheck: string;
   fmRestoreFile: string;
   fmRestoreSubmit: string;

@@ -431,8 +431,8 @@ fn ScrAccount() -> Element {
     // Copied state and its "I've saved it" button can't carry over (a user
     // could otherwise copy A's key and then mark B as backed up). As a
     // second guard that doesn't depend on that key, `backup_for` records
-    // which identity the panel was opened for (by verifying-key prefix,
-    // which a rename doesn't change) and it only shows for that one.
+    // which identity the panel was opened for (by verifying-key prefix)
+    // and it only shows for that one.
     let mut backup_for: Signal<Option<String>> = use_signal(|| None);
     let mut backup_scroll = use_signal(|| 0u32);
     let backup_open = backup_for.read().as_deref() == Some(vk_seed.as_str()) && !vk_seed.is_empty();

@@ -106,6 +106,7 @@ pub(crate) const FM_ACTION_IMPORT: &str = "fm-action-import";
 pub(crate) const FM_CREATE_ALIAS_INPUT: &str = "fm-create-alias-input";
 pub(crate) const FM_CREATE_CONFIRM: &str = "fm-create-confirm";
 pub(crate) const FM_CREATE_BACKUP_NOW: &str = "fm-create-backup-now";
+pub(crate) const FM_CREATE_DISCARD: &str = "fm-create-discard";
 pub(crate) const FM_CREATE_SUBMIT: &str = "fm-create-submit";
 pub(crate) const FM_VERIFY_CHECK: &str = "fm-verify-check";
 pub(crate) const FM_RESTORE_FILE: &str = "fm-restore-file";
@@ -240,6 +241,7 @@ mod tests {
             ("fmCreateAliasInput", super::FM_CREATE_ALIAS_INPUT),
             ("fmCreateConfirm", super::FM_CREATE_CONFIRM),
             ("fmCreateBackupNow", super::FM_CREATE_BACKUP_NOW),
+            ("fmCreateDiscard", super::FM_CREATE_DISCARD),
             ("fmCreateSubmit", super::FM_CREATE_SUBMIT),
             ("fmVerifyCheck", super::FM_VERIFY_CHECK),
             ("fmRestoreFile", super::FM_RESTORE_FILE),

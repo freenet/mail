@@ -741,6 +741,8 @@ pub(crate) fn trigger_browser_download(
     bytes: &[u8],
     mime: &str,
 ) -> Result<DownloadRoute, DownloadError> {
+    // The clock source is fixed for the page's lifetime (performance exists
+    // or it doesn't), so LAST_DOWNLOAD_MS is never compared across sources.
     let now = web_sys::window()
         .and_then(|w| w.performance())
         .map(|p| p.now())
@@ -1568,6 +1570,10 @@ pub(super) fn CreateAliasForm() -> Element {
     };
 
     let words_opt = pending.read().as_ref().map(|(_, _, w)| *w);
+    // What Discard knows, also exposed on the button (data-*) so tests can
+    // wait on the state itself instead of on timers.
+    let key_exported = *backup_taken.read() || copy_tracker.read().landed();
+    let copies_in_flight = copy_tracker.read().in_flight();
     // Recovery key for the pending keypair, built only while the panel is
     // open so the secret isn't rendered into the DOM unless asked for.
     let pending_token: Option<Result<String, String>> = if *backup_panel_open.read() {
@@ -1665,6 +1671,9 @@ pub(super) fn CreateAliasForm() -> Element {
                 div { class: "modal-foot", style: "background:transparent; border:0; padding:18px 0 0;",
                     button {
                         class: "btn btn-ghost",
+                        "data-testid": testid::FM_CREATE_DISCARD,
+                        "data-key-exported": "{key_exported}",
+                        "data-copies-in-flight": "{copies_in_flight}",
                         onclick: on_discard_click,
                         "Discard"
                     }

@@ -50,6 +50,16 @@ impl CopyTracker {
         self.landed || self.in_flight > 0
     }
 
+    /// A copy of the current key may have reached the clipboard.
+    pub(crate) fn landed(&self) -> bool {
+        self.landed
+    }
+
+    /// Copies of the current key that haven't settled yet.
+    pub(crate) fn in_flight(&self) -> u32 {
+        self.in_flight
+    }
+
     /// Forget everything (new keypair, or discarded). Copies already in
     /// flight become stale and are ignored when they settle.
     pub(crate) fn reset(&mut self) {
@@ -65,13 +75,17 @@ impl CopyTracker {
     }
 
     /// A copy started with `ticket` finished; `landed` if it may have
-    /// reached the clipboard.
-    pub(crate) fn settle(&mut self, ticket: u32, landed: bool) {
+    /// reached the clipboard. Returns whether the ticket is still current:
+    /// `false` means the copy was for a keypair since reset, and the caller
+    /// must not report it anywhere (it would count against the NEXT key).
+    #[must_use]
+    pub(crate) fn settle(&mut self, ticket: u32, landed: bool) -> bool {
         if ticket != self.generation {
-            return;
+            return false;
         }
         self.in_flight = self.in_flight.saturating_sub(1);
         self.landed |= landed;
+        true
     }
 }
 
@@ -177,10 +191,19 @@ pub(crate) fn BackupKeyPanel(
                 // panel, so a copy that finishes after the panel unmounted
                 // still clears its in-flight entry, and a late success
                 // still counts as exported.
-                if let (Some(mut tracker), Some(t)) = (copy_tracker, ticket_for_done.get())
-                    && let Ok(mut rec) = tracker.try_write()
-                {
-                    rec.settle(t, landed);
+                if let (Some(mut tracker), Some(t)) = (copy_tracker, ticket_for_done.get()) {
+                    let current = match tracker.try_write() {
+                        Ok(mut rec) => rec.settle(t, landed),
+                        // The tracker's owner (the create flow) is gone.
+                        Err(_) => false,
+                    };
+                    if !current {
+                        // Started for a keypair that has since been reset
+                        // (Generate again, or Discard) and the panel may
+                        // not be dropped yet: reporting it would mark the
+                        // NEXT keypair as exported.
+                        return;
+                    }
                 }
                 // The rest is this panel's own display, and runs outside
                 // its task scope: if the panel is gone (modal closed,
@@ -384,7 +407,7 @@ mod tests {
         let mut t = CopyTracker::default();
         let first = t.start();
         assert!(t.possibly_exported(), "in flight counts");
-        t.settle(first, false);
+        assert!(t.settle(first, false));
         assert!(!t.possibly_exported());
     }
 
@@ -396,9 +419,9 @@ mod tests {
         let mut t = CopyTracker::default();
         let first = t.start();
         let second = t.start();
-        t.settle(second, false);
+        assert!(t.settle(second, false));
         assert!(t.possibly_exported(), "copy 1 is still in flight");
-        t.settle(first, true);
+        assert!(t.settle(first, true));
         assert!(t.possibly_exported(), "copy 1 landed");
     }
 
@@ -408,7 +431,10 @@ mod tests {
         let stale = t.start();
         t.reset();
         assert!(!t.possibly_exported());
-        t.settle(stale, true);
+        assert!(
+            !t.settle(stale, true),
+            "a stale ticket is reported as stale, so the panel won't fire on_exported"
+        );
         assert!(
             !t.possibly_exported(),
             "an old keypair's copy can't mark the new one"

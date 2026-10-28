@@ -52,6 +52,7 @@
   "fmCreateAliasInput": "fm-create-alias-input",
   "fmCreateConfirm": "fm-create-confirm",
   "fmCreateBackupNow": "fm-create-backup-now",
+  "fmCreateDiscard": "fm-create-discard",
   "fmCreateSubmit": "fm-create-submit",
   "fmVerifyCheck": "fm-verify-check",
   "fmRestoreFile": "fm-restore-file",
