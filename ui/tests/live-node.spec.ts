@@ -1905,8 +1905,11 @@ test.describe("Live node E2E", () => {
     const bobPage = await bobCtx.newPage();
     // Bob's local-state sends and the node's answers, in order (which write
     // a reload lost, if one does), and any panic.
+    const bobLocalState: string[] = [];
     bobPage.on("console", (m) => {
-      if (/local-state|PANIC/.test(m.text())) console.log(`[console:bob] ${m.text()}`);
+      if (!/local-state|PANIC/.test(m.text())) return;
+      bobLocalState.push(m.text());
+      console.log(`[console:bob] ${m.text()}`);
     });
 
     try {
@@ -2034,15 +2037,15 @@ test.describe("Live node E2E", () => {
       holdBobRequests = false;
       for (const send of heldBobRequests.splice(0)) send();
       // "Deleting…" stays up until the node has answered, then gives way to
-      // "Deleted" (a short-lived toast, so it is checked at that moment).
-      await expect(
-        bobAfter.getByText(/^Deleting/),
-        "the in-progress notice clears once the node has answered",
-      ).toHaveCount(0, { timeout: 30_000 });
+      // "Deleted", which shows before "Deleting…" is gone for good.
       await expect(
         bobAfter.getByText(/^Deleted$/),
         "the app confirms the delete once the node has stored it",
-      ).toBeVisible();
+      ).toBeVisible({ timeout: 30_000 });
+      expect(
+        await bobAfter.getByText(/^Deleting/).count(),
+        "the in-progress notice is gone once the delete is confirmed",
+      ).toBe(0);
 
       // ── Reload (the #286 trigger) ─────────────────────────────────
       await bobPage.reload();
@@ -2054,6 +2057,15 @@ test.describe("Live node E2E", () => {
         bobAfter.getByText(subject),
         "deleted message STILL gone after reload (#286 regression target)",
       ).toHaveCount(0, { timeout: 30_000 });
+
+      // Every answer the node sent was to a request the app counted, the
+      // registration included: an uncounted one is what let a write be
+      // confirmed on another request's answer.
+      expect(
+        bobLocalState.filter((line) => line.includes("none unanswered")),
+        "every local-state answer matched a counted request",
+      ).toEqual([]);
+      expect(bobLocalState.filter((line) => line.includes("PANIC"))).toEqual([]);
     } finally {
       await aliceCtx.close().catch(() => {});
       await bobCtx.close().catch(() => {});
