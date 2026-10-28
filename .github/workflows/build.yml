@@ -252,14 +252,6 @@ jobs:
             exit 1
           fi
 
-      # TEMPORARY (reverted in the next commit): stability evidence for the
-      # #349 relay tests, 20 runs per project with retries off.
-      - name: Repeat the gateway shell relay tests
-        run: npx playwright test email-app.spec.ts -g "Gateway shell relays" --retries=0 --repeat-each=20
-        working-directory: ./ui/tests
-        env:
-          FREENET_EMAIL_BASE_URL: http://127.0.0.1:8082
-
       - name: Run Playwright tests
         run: npx playwright test
         working-directory: ./ui/tests
