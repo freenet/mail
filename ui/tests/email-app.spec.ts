@@ -1257,26 +1257,46 @@ async function slowClipboard(page: Page, ms: number) {
   }, ms);
 }
 
-// Clipboard API calls scripted one by one: call i settles after
-// `steps[i].ms`, resolving if `ok`, rejecting otherwise. execCommand fails,
-// so every copy goes down the async path.
-async function scriptedClipboard(page: Page, steps: Array<{ ms: number; ok: boolean }>) {
-  await page.addInitScript((plan) => {
+// Clipboard API whose writes the TEST settles: execCommand fails so every
+// copy goes down the async path, and each writeText promise waits on
+// window.__copies[i] until `settleCopy(page, i, ok)` resolves or rejects
+// it. No timers, so the sequence is driven by the test, not by elapsed time.
+async function manualClipboard(page: Page) {
+  await page.addInitScript(() => {
     document.execCommand = () => false;
-    let calls = 0;
+    const w = window as unknown as {
+      __copies: Array<{ resolve: () => void; reject: (e: Error) => void }>;
+    };
+    w.__copies = [];
     Object.defineProperty(navigator, "clipboard", {
       configurable: true,
       value: {
-        writeText: () => {
-          const step = plan[Math.min(calls, plan.length - 1)];
-          calls += 1;
-          return new Promise<void>((resolve, reject) =>
-            setTimeout(() => (step.ok ? resolve() : reject(new Error("blocked"))), step.ms),
-          );
-        },
+        writeText: () =>
+          new Promise<void>((resolve, reject) => w.__copies.push({ resolve, reject })),
       },
     });
-  }, steps);
+  });
+}
+
+async function copiesStarted(page: Page): Promise<number> {
+  return page.evaluate(
+    () => (window as unknown as { __copies: unknown[] }).__copies.length,
+  );
+}
+
+async function settleCopy(page: Page, index: number, ok: boolean) {
+  await page.evaluate(
+    ([i, success]) => {
+      const c = (
+        window as unknown as {
+          __copies: Array<{ resolve: () => void; reject: (e: Error) => void }>;
+        }
+      ).__copies[i as number];
+      if (success) c.resolve();
+      else c.reject(new Error("blocked"));
+    },
+    [index, ok] as const,
+  );
 }
 
 async function startCreateWithPanel(page: Page, alias: string) {
@@ -1657,52 +1677,65 @@ test.describe("Recovery key backup panel", () => {
   test("a copy that fails after the discard dialog unmounted the panel doesn't leave a stale warning", async ({
     page,
   }) => {
-    await scriptedClipboard(page, [{ ms: 2_000, ok: false }]);
+    await manualClipboard(page);
     const panel = await startCreateWithPanel(page, "seqa");
+    const discard = page.locator('[data-testid="fm-create-discard"]');
+    const warning = page.getByText("Discard backed-up identity?");
+
     await panel.locator('[data-testid="fm-backup-copy"]').click();
-    await page.getByRole("button", { name: "Discard", exact: true }).click();
-    await expect(page.getByText("Discard backed-up identity?")).toBeVisible();
+    await expect.poll(() => copiesStarted(page)).toBe(1);
+    await expect(discard).toHaveAttribute("data-copies-in-flight", "1");
+    await discard.click();
+    await expect(warning).toBeVisible();
     await page.getByRole("button", { name: "Go back" }).click();
 
-    // Let the first copy fail while its panel is gone.
-    await page.waitForTimeout(2_500);
-    await page.getByRole("button", { name: "Discard", exact: true }).click();
-    await expect(page.getByText("Discard backed-up identity?")).toHaveCount(0);
+    // The first copy fails while its panel is gone (a new one is mounted).
+    await settleCopy(page, 0, false);
+    await expect(discard).toHaveAttribute("data-copies-in-flight", "0");
+    await expect(discard).toHaveAttribute("data-key-exported", "false");
+    await discard.click();
+    await expect(warning).toHaveCount(0);
     await expect(page.locator('[data-testid="fm-id-create"]')).toBeVisible();
   });
 
   // Sequence B: copy 1 is in flight across the remount; copy 2 from the
   // remounted panel fails first. Copy 1 may still land, and then does, so
-  // Discard must keep warning throughout.
+  // Discard must keep warning throughout, first because copy 1 is in
+  // flight and then because it landed.
   test("a later failed copy can't clear the warning for an earlier copy still in flight", async ({
     page,
   }) => {
-    await scriptedClipboard(page, [
-      { ms: 4_000, ok: true },
-      { ms: 200, ok: false },
-    ]);
+    await manualClipboard(page);
     const panel = await startCreateWithPanel(page, "seqb");
-    const discard = page.getByRole("button", { name: "Discard", exact: true });
+    const discard = page.locator('[data-testid="fm-create-discard"]');
     const warning = page.getByText("Discard backed-up identity?");
     const goBack = page.getByRole("button", { name: "Go back" });
 
     await panel.locator('[data-testid="fm-backup-copy"]').click();
+    await expect.poll(() => copiesStarted(page)).toBe(1);
     await discard.click();
     await expect(warning).toBeVisible();
     await goBack.click();
 
-    // Copy 2, on the remounted panel, fails quickly.
+    // Copy 2, on the remounted panel, fails.
     await panel.locator('[data-testid="fm-backup-copy"]').click();
+    await expect.poll(() => copiesStarted(page)).toBe(2);
+    await settleCopy(page, 1, false);
     await expect(panel.locator('[data-testid="fm-backup-status"]')).toContainText(
       "Couldn't copy",
     );
-    // Copy 1 is still in flight.
+    // Copy 1 is still in flight: nothing landed yet, but Discard warns.
+    await expect(discard).toHaveAttribute("data-copies-in-flight", "1");
+    await expect(discard).toHaveAttribute("data-key-exported", "false");
     await discard.click();
     await expect(warning).toBeVisible();
     await goBack.click();
 
-    // Copy 1 lands (its panel was unmounted meanwhile): still warns.
-    await page.waitForTimeout(4_500);
+    // Copy 1 lands after its panel was unmounted: now it counts as landed,
+    // and Discard warns for that reason.
+    await settleCopy(page, 0, true);
+    await expect(discard).toHaveAttribute("data-copies-in-flight", "0");
+    await expect(discard).toHaveAttribute("data-key-exported", "true");
     await discard.click();
     await expect(warning).toBeVisible();
   });
@@ -1741,10 +1774,17 @@ test.describe("Recovery key backup panel", () => {
     await expect(status).not.toContainText("failed");
     expect(downloads).toBe(1);
 
-    // After the gap it goes through.
-    await page.waitForTimeout(2_300);
-    await modal.locator('[data-testid="fm-backup-download"]').click();
-    await expect(status).toContainText("Downloading freenet-identity-address2.txt");
+    // Once the gap has passed it goes through. Retry until it does, rather
+    // than sleeping a guessed interval; a refused attempt doesn't restart
+    // the gap.
+    const download = modal.locator('[data-testid="fm-backup-download"]');
+    await expect(async () => {
+      await expect(download).toBeEnabled();
+      await download.click();
+      await expect(status).toContainText("Downloading freenet-identity-address2.txt", {
+        timeout: 500,
+      });
+    }).toPass({ timeout: 10_000 });
     await expect.poll(() => downloads).toBe(2);
   });
 
@@ -2050,13 +2090,26 @@ test.describe("Gateway shell relays (#349)", () => {
       "Sent to your clipboard through Freenet",
     );
     await panel.locator('[data-testid="fm-backup-download"]').click();
-    // Give a misaddressed message ample time to arrive; none may.
-    await page.waitForTimeout(1_000);
+    // Positive control instead of a sleep: messages from one window are
+    // delivered in order, so once a marker the app frame posts AFTER the
+    // relays has arrived, any relay that was going to arrive already has.
+    const appFrame = page.frames().find((f) => f.url().startsWith(appOrigin))!;
+    await appFrame.evaluate(() => window.parent.postMessage({ __marker: true }, "*"));
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            (window as unknown as { __msgs: Array<Record<string, unknown>> }).__msgs.length,
+        ),
+      )
+      .toBe(1);
     expect(
       await page.evaluate(
-        () => (window as unknown as { __msgs: unknown[] }).__msgs.length,
+        () =>
+          (window as unknown as { __msgs: Array<Record<string, unknown>> }).__msgs[0]
+            .__marker,
       ),
-    ).toBe(0);
+    ).toBe(true);
   });
 });
 
