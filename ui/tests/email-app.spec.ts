@@ -1740,6 +1740,47 @@ test.describe("Recovery key backup panel", () => {
     await expect(warning).toBeVisible();
   });
 
+  // A copy of a DISCARDED key that lands later must not count against the
+  // next key. (A reset with the same create flow still mounted, e.g.
+  // generating again, isn't reachable in the UI: once keys are revealed,
+  // both Discard paths and Continue close the form, which drops its copy
+  // tracker. So the late copy settles against a dropped tracker and its
+  // panel is gone; this pins that end-to-end.)
+  test("a copy of a discarded key that lands later doesn't mark the next key as copied", async ({
+    page,
+  }) => {
+    await manualClipboard(page);
+    const panel = await startCreateWithPanel(page, "oldkey");
+    const discard = page.locator('[data-testid="fm-create-discard"]');
+
+    await panel.locator('[data-testid="fm-backup-copy"]').click();
+    await expect.poll(() => copiesStarted(page)).toBe(1);
+    await discard.click();
+    await page.getByRole("button", { name: "Discard anyway" }).click();
+    await expect(page.locator('[data-testid="fm-id-create"]')).toBeVisible();
+
+    // A new identity, then the OLD copy succeeds.
+    await page.locator('[data-testid="fm-id-create"]').click();
+    await page.locator('[data-testid="fm-create-alias-input"]').fill("newkey");
+    await page.locator('[data-testid="fm-create-submit"]').click();
+    await expect(discard).toHaveAttribute("data-key-exported", "false");
+    await settleCopy(page, 0, true);
+
+    // Proof the settle ran before we look: a copy started now gets the next
+    // slot and settles too, after the old one.
+    await page.locator('[data-testid="fm-create-backup-now"]').click();
+    await panel.locator('[data-testid="fm-backup-copy"]').click();
+    await expect.poll(() => copiesStarted(page)).toBe(2);
+    await settleCopy(page, 1, false);
+    await expect(panel.locator('[data-testid="fm-backup-status"]')).toContainText(
+      "Couldn't copy",
+    );
+    await expect(discard).toHaveAttribute("data-copies-in-flight", "0");
+    await expect(discard).toHaveAttribute("data-key-exported", "false");
+    await discard.click();
+    await expect(page.getByText("Discard backed-up identity?")).toHaveCount(0);
+  });
+
   test("the download gap is app-wide: a second key within 2s is refused, not silently lost", async ({
     page,
   }) => {
