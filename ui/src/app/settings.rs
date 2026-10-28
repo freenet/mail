@@ -26,23 +26,31 @@ use crate::app::menu;
 use crate::local_state;
 use crate::testid;
 
-/// Read the identity-settings bucket for the active identity. Re-runs when
-/// `local_state::GENERATION` advances, so an external refresh of the
-/// snapshot (e.g. delegate `GetAll` reply) re-renders dependent screens.
+/// Read the identity-settings bucket for the active identity, with that
+/// identity's alias. Re-runs when `local_state::GENERATION` advances (an
+/// external refresh of the snapshot, e.g. a delegate `GetAll` reply) AND
+/// when the active identity changes.
+///
+/// The alias must be read INSIDE the memo. It used to be captured once
+/// outside it, so after switching identity in the sidebar the screen kept
+/// the first identity's settings: Settings showed A's "Last backup" for B,
+/// and any edit on B (signature, auto-sign, ...) wrote A's whole settings
+/// record under B's alias, copying A's backup date and signature onto B.
 fn use_identity_settings() -> (String, IdentitySettings) {
     let user = use_context::<Signal<User>>();
-    let alias = user
-        .read()
-        .logged_id()
-        .map(|id| id.alias.to_string())
-        .unwrap_or_default();
-    let alias_for_memo = alias.clone();
     let settings = use_memo(move || {
         // Subscribe to GENERATION so this re-runs on snapshot mutation.
         let _gen = local_state::GENERATION();
-        local_state::identity_settings_for(&alias_for_memo)
+        // Subscribe to the user signal so it re-runs on identity switch.
+        let alias = user
+            .read()
+            .logged_id()
+            .map(|id| id.alias.to_string())
+            .unwrap_or_default();
+        let settings = local_state::identity_settings_for(&alias);
+        (alias, settings)
     });
-    (alias, settings())
+    settings()
 }
 
 fn use_global_settings() -> GlobalSettings {
@@ -172,11 +180,14 @@ pub(crate) fn SettingsShell() -> Element {
             main { class: "fm-set-main",
                 BarHeader { current: screen, alias: alias.clone() }
                 div { class: "fm-set-body",
+                    // Identity-scoped screens are keyed by alias so a switch
+                    // remounts them: no local state (open backup panel,
+                    // half-edited fields) survives into another identity.
                     match screen {
-                        menu::SettingsScreen::Account => rsx! { ScrAccount {} },
-                        menu::SettingsScreen::Privacy => rsx! { ScrPrivacy {} },
-                        menu::SettingsScreen::Aft => rsx! { ScrAft {} },
-                        menu::SettingsScreen::Inbox => rsx! { ScrInbox {} },
+                        menu::SettingsScreen::Account => rsx! { ScrAccount { key: "{alias}" } },
+                        menu::SettingsScreen::Privacy => rsx! { ScrPrivacy { key: "{alias}" } },
+                        menu::SettingsScreen::Aft => rsx! { ScrAft { key: "{alias}" } },
+                        menu::SettingsScreen::Inbox => rsx! { ScrInbox { key: "{alias}" } },
                         menu::SettingsScreen::Contacts => rsx! { ScrContacts {} },
                         menu::SettingsScreen::Appearance => rsx! { ScrAppearance {} },
                         menu::SettingsScreen::Advanced => rsx! { ScrAdvanced {} },

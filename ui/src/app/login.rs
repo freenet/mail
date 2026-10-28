@@ -588,16 +588,20 @@ pub(crate) fn mark_backed_up(alias: &str) {
     crate::local_state::persist_identity_settings(alias.to_string(), settings);
 }
 
-/// `last_backup_at` for an identity whose keys were just persisted:
-/// stamped if (and only if) a backup of THESE keys is known to exist.
+/// `last_backup_at` for an identity that was just created: stamped if (and
+/// only if) a backup of THESE keys is known to exist.
 pub(crate) fn backup_stamp_after_create(backed_up: bool, now_ms: i64) -> Option<i64> {
     backed_up.then_some(now_ms)
 }
 
 /// Record the backup state of a newly created or restored identity. Call
-/// only once its keys are persisted (`NodeAction::CreateIdentity` success),
-/// never before: a create that fails and is retried under the same alias
-/// with new keys must not inherit a stamp for keys that no longer exist.
+/// only once the create request has been handed to the node without error
+/// (`NodeAction::CreateIdentity`), never before: a create that fails and is
+/// retried under the same alias with new keys must not inherit a stamp for
+/// keys that no longer exist. "Handed to the node" means the identity
+/// delegate message was SENT; the delegate's own result isn't reported back
+/// here, so this is the same point at which the UI shows the new identity,
+/// not proof that it was stored.
 /// A fresh keypair also clears any stamp left by an earlier identity that
 /// used the same alias, since that backup holds different keys.
 pub(crate) fn record_backup_after_create(alias: &str, backed_up: bool) {
@@ -664,6 +668,40 @@ pub(crate) fn backup_filename<S: AsRef<str>>(alias: &str, words: &[S]) -> String
     }
 }
 
+/// How [`trigger_browser_download`] handed a download off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DownloadRoute {
+    /// Saved by this page with `<a download>` (dev server, Playwright).
+    Local,
+    /// Posted to the gateway shell, which saves it but can't report back,
+    /// so the UI must not claim the file arrived.
+    #[cfg_attr(not(target_family = "wasm"), allow(dead_code))]
+    Relayed,
+}
+
+/// Minimum gap between two downloads. The gateway shell silently drops a
+/// download that arrives within 2s of the previous one, and that limit is
+/// per shell, i.e. for the whole app, not per component: downloading A's
+/// key and then B's within 2s would lose B's without any signal. So the gap
+/// is enforced here, once, for every caller.
+#[cfg_attr(not(target_family = "wasm"), allow(dead_code))]
+pub(crate) const DOWNLOAD_GAP_MS: f64 = 2_100.0;
+// Must cover the shell's 2s limit.
+const _: () = assert!(DOWNLOAD_GAP_MS > 2_000.0);
+
+thread_local! {
+    /// `Date.now()` of the last download handed off, for [`DOWNLOAD_GAP_MS`].
+    static LAST_DOWNLOAD_MS: std::cell::Cell<Option<f64>> = const { std::cell::Cell::new(None) };
+}
+
+/// Milliseconds until another download may go out, or `None` if one may go
+/// now. Pure, so the gap rule is unit-testable.
+#[cfg_attr(not(target_family = "wasm"), allow(dead_code))]
+pub(crate) fn download_wait_ms(last_ms: Option<f64>, now_ms: f64) -> Option<f64> {
+    let left = DOWNLOAD_GAP_MS - (now_ms - last_ms?);
+    (left > 0.0).then_some(left)
+}
+
 /// Trigger a browser file-download of `bytes` as `filename` with MIME type
 /// `mime` (the gateway shell only accepts a small allowlist, which
 /// includes `text/plain` and `application/json`).
@@ -681,13 +719,28 @@ pub(crate) fn backup_filename<S: AsRef<str>>(alias: &str, words: &[S]) -> String
 ///     fall back to the original local `<a download>` path. There is
 ///     no parent shell to delegate to and no opaque-origin restriction.
 ///
-/// Returns `Ok(())` on success or an error string describing the failure.
+/// Returns how the download was handed off, or an error string describing
+/// why nothing was sent (including "too soon after the last download").
 #[cfg(target_family = "wasm")]
 pub(crate) fn trigger_browser_download(
     filename: &str,
     bytes: &[u8],
     mime: &str,
-) -> Result<(), String> {
+) -> Result<DownloadRoute, String> {
+    let now = web_sys::js_sys::Date::now();
+    if let Some(wait) = download_wait_ms(LAST_DOWNLOAD_MS.with(|c| c.get()), now) {
+        let secs = (wait / 1000.0).ceil().max(1.0);
+        return Err(format!(
+            "another download just went out; wait {secs:.0} s and try again"
+        ));
+    }
+    let route = download_now(filename, bytes, mime)?;
+    LAST_DOWNLOAD_MS.with(|c| c.set(Some(now)));
+    Ok(route)
+}
+
+#[cfg(target_family = "wasm")]
+fn download_now(filename: &str, bytes: &[u8], mime: &str) -> Result<DownloadRoute, String> {
     let window = web_sys::window().ok_or_else(|| "no browser window context".to_string())?;
     // `window.parent` always returns a window. Compare against `window`
     // itself: when they are the same object we're at the top level
@@ -706,7 +759,7 @@ pub(crate) fn trigger_browser_download(
             return Err("couldn't work out the Freenet gateway's address".to_string());
         };
         match shell_proxy_download(&shell, filename, bytes, mime) {
-            Ok(()) => return Ok(()),
+            Ok(()) => return Ok(DownloadRoute::Relayed),
             Err(e) => {
                 // Don't fall through to the local `<a download>` path —
                 // inside a sandboxed iframe that path is the broken one
@@ -717,7 +770,7 @@ pub(crate) fn trigger_browser_download(
         }
     }
 
-    local_anchor_download(filename, bytes, mime)
+    local_anchor_download(filename, bytes, mime).map(|()| DownloadRoute::Local)
 }
 
 /// Shell-proxied download: postMessage the payload to the parent
@@ -796,8 +849,8 @@ pub(crate) fn trigger_browser_download(
     _filename: &str,
     _bytes: &[u8],
     _mime: &str,
-) -> Result<(), String> {
-    Ok(())
+) -> Result<DownloadRoute, String> {
+    Ok(DownloadRoute::Local)
 }
 
 pub(crate) struct ImportBackup(pub(crate) bool);
@@ -1381,6 +1434,11 @@ pub(super) fn CreateAliasForm() -> Element {
     // True only after the user clicked "I've saved it". Drives the
     // `last_backup_at` stamp when the identity is created.
     let mut backup_confirmed = use_signal(|| false);
+    // True while a copy of the key is still in flight (async Clipboard API).
+    // It may yet land on the clipboard, so Discard must warn as if it had.
+    // Stays true if the panel unmounts before the copy settles: that is the
+    // safe reading.
+    let mut copy_in_flight = use_signal(|| false);
     // Whether the recovery-key panel is expanded in the reveal card.
     let mut backup_panel_open = use_signal(|| false);
     // When true, show the orphan-keyfile confirmation dialog.
@@ -1409,6 +1467,7 @@ pub(super) fn CreateAliasForm() -> Element {
                 login_error.set(String::new());
                 backup_taken.set(false);
                 backup_confirmed.set(false);
+                copy_in_flight.set(false);
                 backup_panel_open.set(false);
             }
             Err(e) => {
@@ -1423,8 +1482,8 @@ pub(super) fn CreateAliasForm() -> Element {
         let Some((ml_dsa, ml_kem, _words)) = pending.write().take() else {
             return;
         };
-        // Not stamped here: the node action stamps it once the keys are
-        // actually persisted (see `record_backup_after_create`).
+        // Not stamped here: the node action stamps it once the create
+        // request has gone to the node (see `record_backup_after_create`).
         let backed_up = *backup_confirmed.read();
         let alias: Rc<str> = alias_str.into();
         let ek_bytes = {
@@ -1474,6 +1533,7 @@ pub(super) fn CreateAliasForm() -> Element {
         pending.set(None);
         backup_taken.set(false);
         backup_confirmed.set(false);
+        copy_in_flight.set(false);
         backup_panel_open.set(false);
         discard_confirm_open.set(false);
         alias_input.set(String::new());
@@ -1484,7 +1544,7 @@ pub(super) fn CreateAliasForm() -> Element {
     // "Discard" button handler: warn if the user already downloaded a backup
     // (orphan risk), otherwise discard immediately.
     let on_discard_click = move |_| {
-        if *backup_taken.read() {
+        if *backup_taken.read() || *copy_in_flight.read() {
             discard_confirm_open.set(true);
         } else {
             pending.set(None);
@@ -1569,6 +1629,7 @@ pub(super) fn CreateAliasForm() -> Element {
                                     words: words.iter().map(|w| w.to_string()).collect::<Vec<_>>(),
                                     saved: *backup_confirmed.read(),
                                     on_exported: move |_| backup_taken.set(true),
+                                    on_copy_in_flight: move |pending: bool| copy_in_flight.set(pending),
                                     on_saved: move |_| {
                                         backup_taken.set(true);
                                         backup_confirmed.set(true);
@@ -1753,6 +1814,29 @@ fn FirstRunCards() -> Element {
     }
 }
 
+/// Whether an edit to the restore box is someone typing (checked leniently)
+/// rather than a paste, drop or autofill (checked at once). Uses the input
+/// event's `inputType` where the browser provides it, so select-all + paste
+/// of a similar-length string still counts as a paste; any edit that adds
+/// more than one character counts as bulk regardless.
+fn is_typed_edit(evt: &Event<FormData>, prev_chars: usize, new_chars: usize) -> bool {
+    #[cfg(target_family = "wasm")]
+    let input_type: Option<String> = {
+        use dioxus::web::WebEventExt;
+        use wasm_bindgen::JsCast;
+        evt.data()
+            .try_as_web_event()
+            .and_then(|e| e.dyn_into::<web_sys::InputEvent>().ok())
+            .map(|ie| ie.input_type())
+    };
+    #[cfg(not(target_family = "wasm"))]
+    let input_type: Option<String> = {
+        let _ = evt;
+        None
+    };
+    super::backup_token::is_typed_edit(input_type.as_deref(), prev_chars, new_chars)
+}
+
 /// Restore an identity from a pasted recovery key or an uploaded backup
 /// file (`.txt` recovery key or legacy v2 `.json`). Both inputs go through
 /// `backup_token::parse_backup`; any rejection is shown inline.
@@ -1771,10 +1855,13 @@ fn ImportForm() -> Element {
     let mut held_error: Signal<Option<String>> = use_signal(|| None);
     let mut address = use_signal(String::new);
     let mut description = use_signal(String::new);
-    // True while Alias/Description hold values filled in from a JSON
-    // backup rather than typed by the user, so switching to a recovery key
-    // (which carries no name) clears them instead of keeping a stale name.
-    let mut names_from_backup = use_signal(|| false);
+    // The alias and description most recently filled in from a JSON backup.
+    // When the input switches to a recovery key (which carries no name),
+    // each field is cleared only if it still holds that backup's value, so
+    // a stale imported name is dropped but anything the user typed stays.
+    // Tracked per field: editing only the description must not stop the
+    // imported alias from being cleared.
+    let mut backup_names: Signal<Option<(String, String)>> = use_signal(|| None);
     let mut restore_error = use_signal(String::new);
 
     // Parse restore input (from either the paste box or a file) and update
@@ -1793,11 +1880,18 @@ fn ImportForm() -> Element {
                 if !b.alias.is_empty() {
                     address.set(b.alias.clone());
                     description.set(b.description.clone());
-                    names_from_backup.set(true);
-                } else if *names_from_backup.peek() {
-                    address.set(String::new());
-                    description.set(String::new());
-                    names_from_backup.set(false);
+                    backup_names.set(Some((b.alias.clone(), b.description.clone())));
+                } else if let Some((old_alias, old_desc)) = backup_names.take() {
+                    let (keep_alias, keep_desc) = super::backup_token::names_to_keep(
+                        (&address.peek(), &description.peek()),
+                        (&old_alias, &old_desc),
+                    );
+                    if !keep_alias {
+                        address.set(String::new());
+                    }
+                    if !keep_desc {
+                        description.set(String::new());
+                    }
                 }
                 parse_error.set(String::new());
                 parsed_backup.set(Some(b));
@@ -1877,7 +1971,7 @@ fn ImportForm() -> Element {
                     oninput: move |evt| {
                         let v = evt.value();
                         let prev_len = paste_text.peek().chars().count();
-                        let typed = v.chars().count() <= prev_len + 1;
+                        let typed = is_typed_edit(&evt, prev_len, v.chars().count());
                         paste_text.set(v.clone());
                         loaded_file.set(None);
                         apply_input(v, typed);
@@ -1994,10 +2088,7 @@ fn ImportForm() -> Element {
                     placeholder: "e.g. mira",
                     "data-testid": testid::FM_RESTORE_ALIAS,
                     value: "{address}",
-                    oninput: move |evt| {
-                        address.set(evt.value());
-                        names_from_backup.set(false);
-                    },
+                    oninput: move |evt| address.set(evt.value()),
                 }
                 if needs_alias && existing_alias.is_none() {
                     span { class: "field-help",
@@ -2011,10 +2102,7 @@ fn ImportForm() -> Element {
                     class: "input",
                     placeholder: "e.g. work",
                     value: "{description}",
-                    oninput: move |evt| {
-                        description.set(evt.value());
-                        names_from_backup.set(false);
-                    },
+                    oninput: move |evt| description.set(evt.value()),
                 }
             }
             div { class: "nudge",
@@ -2937,9 +3025,24 @@ fn ContactsSection() -> Element {
 #[cfg(test)]
 mod tests {
     use super::{
-        ImportContact, backup_filename, backup_stamp_after_create, persisted_suggested_alias,
-        sanitize_filename_stem,
+        DOWNLOAD_GAP_MS, ImportContact, backup_filename, backup_stamp_after_create,
+        download_wait_ms, persisted_suggested_alias, sanitize_filename_stem,
     };
+
+    /// Review #349 round 2: the gateway shell drops a download within 2s of
+    /// the previous one, app-wide, so the gap is one rule for every caller.
+    #[test]
+    fn download_gap_applies_since_the_last_download() {
+        assert_eq!(download_wait_ms(None, 1_000.0), None);
+        assert_eq!(
+            download_wait_ms(Some(1_000.0), 1_100.0),
+            Some(DOWNLOAD_GAP_MS - 100.0)
+        );
+        assert_eq!(
+            download_wait_ms(Some(1_000.0), 1_000.0 + DOWNLOAD_GAP_MS),
+            None
+        );
+    }
 
     /// Review #349 item 3: a new identity is stamped as backed up only when
     /// a backup of its keys is known to exist, and otherwise has NO stamp

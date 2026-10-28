@@ -50,8 +50,9 @@ pub(crate) enum NodeAction {
         description: String,
         /// Whether a backup of THESE keys is known to exist (the user
         /// confirmed "I've saved it" while creating, or restored from a
-        /// recovery key / backup file). Recorded only once the keys are
-        /// persisted; see `login::record_backup_after_create`.
+        /// recovery key / backup file). Recorded only after the create
+        /// request has been sent to the node without error; see
+        /// `login::record_backup_after_create`.
         backed_up: bool,
     },
     CreateContract {

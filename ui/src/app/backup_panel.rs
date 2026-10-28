@@ -42,9 +42,9 @@ fn masked(token: &str) -> String {
     }
 }
 
-/// DOM id of the key element, so the Show-key toggle can point at it with
-/// `aria-controls`. Only one panel is ever on screen.
-const KEY_ELEMENT_ID: &str = "fm-backup-key-value";
+/// Source of per-panel DOM ids (key element + its label), so `aria-controls`
+/// and `aria-labelledby` stay unique even if two panels are mounted.
+static NEXT_PANEL_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 #[component]
 pub(crate) fn BackupKeyPanel(
@@ -58,6 +58,14 @@ pub(crate) fn BackupKeyPanel(
     saved: bool,
     /// Fired after a successful copy or download.
     on_exported: EventHandler<()>,
+    /// Fired with `true` while a copy is still in flight (the async
+    /// Clipboard API path) and `false` once every one has settled. A copy
+    /// that is in flight may still put the key on the clipboard, so the
+    /// create flow treats it as exported for its discard warning. If the
+    /// panel unmounts first, `false` never arrives: callers must treat a
+    /// stuck `true` as "possibly exported", which is the safe reading.
+    #[props(default)]
+    on_copy_in_flight: Option<EventHandler<bool>>,
     /// Fired when the user confirms they saved the key.
     on_saved: EventHandler<()>,
     /// Bump to scroll the panel back into view (e.g. "Back up now" clicked
@@ -67,11 +75,21 @@ pub(crate) fn BackupKeyPanel(
 ) -> Element {
     let mut revealed = use_signal(|| false);
     let mut copy_status: Signal<Option<CopyOutcome>> = use_signal(|| None);
-    let mut download_status: Signal<Option<Result<String, String>>> = use_signal(|| None);
-    // The gateway shell drops a download that arrives within 2s of the
-    // previous one without telling us, so hold the button off for that
-    // long rather than report a download that never happens.
+    let mut copies_in_flight = use_signal(|| 0u32);
+    let mut download_status: Signal<Option<Result<(String, super::login::DownloadRoute), String>>> =
+        use_signal(|| None);
+    // Visual cooldown for this button. The binding limit (the gateway
+    // shell drops a download within 2s of the previous one, app-wide) is
+    // enforced in `login::trigger_browser_download`, across every panel.
     let mut download_cooling = use_signal(|| false);
+    let ids = use_hook(|| {
+        let n = NEXT_PANEL_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        (
+            format!("fm-backup-key-value-{n}"),
+            format!("fm-backup-key-label-{n}"),
+        )
+    });
+    let (key_element_id, key_label_id) = ids;
     let mut mounted: Signal<Option<std::rc::Rc<MountedData>>> = use_signal(|| None);
 
     // Re-scroll when the caller asks again. The first scroll happens in
@@ -96,14 +114,22 @@ pub(crate) fn BackupKeyPanel(
         let token = token.clone();
         move |_| {
             copy_status.set(None);
-            copy_text(token.clone(), move |outcome| {
+            let settled = copy_text(token.clone(), move |outcome| {
                 // The Clipboard API path finishes asynchronously, outside
                 // this component's task scope, so the panel may be gone by
                 // now (modal closed, identity switched). Writing a dropped
-                // signal panics; drop the result instead, and don't count
-                // an export for a panel nobody is looking at.
+                // signal panics, so drop the result. The parent was told
+                // the copy was in flight and never hears it settle, which
+                // it treats as "possibly exported".
                 if copy_status.try_peek().is_err() {
                     return;
+                }
+                if *copies_in_flight.peek() > 0 {
+                    let left = *copies_in_flight.peek() - 1;
+                    copies_in_flight.set(left);
+                    if let Some(cb) = on_copy_in_flight {
+                        cb.call(left > 0);
+                    }
                 }
                 // SentToShell counts: the key may have reached the clipboard.
                 if !matches!(outcome, CopyOutcome::Failed(_)) {
@@ -111,6 +137,13 @@ pub(crate) fn BackupKeyPanel(
                 }
                 copy_status.set(Some(outcome));
             });
+            if !settled {
+                let n = *copies_in_flight.peek() + 1;
+                copies_in_flight.set(n);
+                if let Some(cb) = on_copy_in_flight {
+                    cb.call(true);
+                }
+            }
         }
     };
 
@@ -125,8 +158,8 @@ pub(crate) fn BackupKeyPanel(
             let fname = super::login::backup_filename(&alias, &words);
             let body = format!("{token}\n");
             match super::login::trigger_browser_download(&fname, body.as_bytes(), "text/plain") {
-                Ok(()) => {
-                    download_status.set(Some(Ok(fname)));
+                Ok(route) => {
+                    download_status.set(Some(Ok((fname, route))));
                     on_exported.call(());
                     download_cooling.set(true);
                     // `spawn` is scoped to this component: it is cancelled
@@ -166,7 +199,7 @@ pub(crate) fn BackupKeyPanel(
             }
             div { class: "field",
                 div { class: "bk-key-head",
-                    span { class: "field-label", id: "fm-backup-key-label", "Recovery key" }
+                    span { class: "field-label", id: "{key_label_id}", "Recovery key" }
                     // Fixed label; the state is carried by aria-pressed (and
                     // the pressed styling), so assistive tech hears one
                     // control whose state flips, not a renamed button.
@@ -175,7 +208,7 @@ pub(crate) fn BackupKeyPanel(
                         r#type: "button",
                         "data-testid": testid::FM_BACKUP_REVEAL,
                         "aria-pressed": "{is_revealed}",
-                        "aria-controls": KEY_ELEMENT_ID,
+                        "aria-controls": "{key_element_id}",
                         onclick: move |_| {
                             let next = !*revealed.read();
                             revealed.set(next);
@@ -186,19 +219,19 @@ pub(crate) fn BackupKeyPanel(
                 if is_revealed {
                     div {
                         class: "token-block bk-key",
-                        id: KEY_ELEMENT_ID,
+                        id: "{key_element_id}",
                         "data-testid": testid::FM_BACKUP_KEY,
                         role: "textbox",
                         "aria-readonly": "true",
                         "aria-multiline": "true",
-                        "aria-labelledby": "fm-backup-key-label",
+                        "aria-labelledby": "{key_label_id}",
                         tabindex: "0",
                         "{token}"
                     }
                 } else {
                     div {
                         class: "token-block bk-key bk-masked",
-                        id: KEY_ELEMENT_ID,
+                        id: "{key_element_id}",
                         "data-testid": testid::FM_BACKUP_KEY_MASKED,
                         role: "img",
                         "aria-label": "Recovery key, hidden. Press Show key to display it.",
@@ -244,8 +277,13 @@ pub(crate) fn BackupKeyPanel(
                     None => rsx! {},
                 }
                 match &*download_status.read() {
-                    Some(Ok(fname)) => rsx! {
+                    Some(Ok((fname, super::login::DownloadRoute::Local))) => rsx! {
                         p { class: "bk-status ok", "Downloading {fname}. Store the file somewhere safe, or delete it once the key is in your password manager." }
+                    },
+                    // The gateway saves it and can't report back: don't
+                    // claim the file arrived.
+                    Some(Ok((fname, super::login::DownloadRoute::Relayed))) => rsx! {
+                        p { class: "bk-status warn", "Asked Freenet to save {fname}. If no download appears, show the key and copy it by hand instead." }
                     },
                     Some(Err(e)) => rsx! {
                         p { class: "bk-status err", "Download failed: {e}" }

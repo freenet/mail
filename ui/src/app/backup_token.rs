@@ -226,6 +226,34 @@ pub(crate) fn may_be_incomplete(text: &str, err: &BackupParseError) -> bool {
     }
 }
 
+/// Whether an edit to the restore box is typing (as opposed to a paste,
+/// drop or autofill). `input_type` is the DOM `InputEvent.inputType` when
+/// available. Bulk insertions are recognised by type, so replacing a
+/// selection with a pasted string of similar length still counts as a
+/// paste; and anything that grows the text by more than one character is
+/// bulk whatever its type (some automation and IMEs report `insertText`).
+pub(crate) fn is_typed_edit(input_type: Option<&str>, prev_chars: usize, new_chars: usize) -> bool {
+    let bulk_type = matches!(
+        input_type,
+        Some(
+            "insertFromPaste"
+                | "insertFromPasteAsQuotation"
+                | "insertFromDrop"
+                | "insertReplacementText"
+                | "insertFromYank"
+        )
+    );
+    !bulk_type && new_chars <= prev_chars + 1
+}
+
+/// Which of the restore form's (alias, description) fields to keep when the
+/// input switches from a JSON backup to a recovery key. A field is cleared
+/// only if it still holds the value the backup filled in; anything the user
+/// has since typed is kept.
+pub(crate) fn names_to_keep(current: (&str, &str), from_backup: (&str, &str)) -> (bool, bool) {
+    (current.0 != from_backup.0, current.1 != from_backup.1)
+}
+
 /// Why restore input was rejected. `Display` gives the user-facing text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum BackupParseError {
@@ -532,6 +560,32 @@ mod tests {
             &FIXTURE_TOKEN[i + 1..]
         );
         assert!(!check(&swapped));
+    }
+
+    #[test]
+    fn typed_edit_classification() {
+        // Plain typing and deleting.
+        assert!(is_typed_edit(Some("insertText"), 10, 11));
+        assert!(is_typed_edit(Some("deleteContentBackward"), 10, 9));
+        assert!(is_typed_edit(None, 10, 11));
+        // Select-all + paste of a similar-length string is a paste.
+        assert!(!is_typed_edit(Some("insertFromPaste"), 149, 149));
+        assert!(!is_typed_edit(Some("insertFromDrop"), 0, 1));
+        assert!(!is_typed_edit(Some("insertReplacementText"), 20, 20));
+        // Any multi-character growth is bulk, whatever the reported type.
+        assert!(!is_typed_edit(Some("insertText"), 0, 149));
+        assert!(!is_typed_edit(None, 0, 2));
+    }
+
+    #[test]
+    fn names_to_keep_tracks_each_field_separately() {
+        let backup = ("alice", "work");
+        // Untouched: both came from the backup, both cleared.
+        assert_eq!(names_to_keep(("alice", "work"), backup), (false, false));
+        // Only the description edited: the imported alias still goes.
+        assert_eq!(names_to_keep(("alice", "home"), backup), (false, true));
+        // Only the alias edited.
+        assert_eq!(names_to_keep(("ally", "work"), backup), (true, false));
     }
 
     #[test]

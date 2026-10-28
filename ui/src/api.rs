@@ -1549,9 +1549,13 @@ pub(crate) async fn node_comms(
                     );
                     return;
                 }
-                // Keys are persisted: only now record whether they are
-                // backed up. Stamping earlier let a failed create, retried
-                // under the same alias with new keys, show as backed up.
+                // The create request went to the identity delegate without
+                // error (sent, not acknowledged: the delegate's result isn't
+                // reported back here, and this is also where the identity is
+                // surfaced in the UI). Only now record whether these keys
+                // are backed up; stamping earlier let a create that failed
+                // to send, retried under the same alias with new keys, show
+                // as backed up.
                 crate::app::login::record_backup_after_create(&alias, backed_up);
 
                 // ── Step 2: derive contract keys + populate ALIASES ──

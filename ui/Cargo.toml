@@ -64,6 +64,7 @@ features = [
     "HtmlDocument",
     "HtmlInputElement",
     "HtmlTextAreaElement",
+    "InputEvent",
     "Navigator",
     "Request",
     "RequestInit",

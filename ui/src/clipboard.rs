@@ -32,11 +32,16 @@ pub(crate) enum CopyOutcome {
 /// Copy `text` to the clipboard and call `done` with the outcome. `done`
 /// runs synchronously when the first path succeeds, otherwise after the
 /// Clipboard API promise settles.
+///
+/// Returns `true` when `done` has already run, `false` when the copy is
+/// still in flight. A caller that must not lose track of a key that may yet
+/// reach the clipboard (the create flow's discard warning) treats `false`
+/// as "possibly exported" until it hears otherwise.
 #[cfg(target_family = "wasm")]
-pub(crate) fn copy_text(text: String, done: impl FnOnce(CopyOutcome) + 'static) {
+pub(crate) fn copy_text(text: String, done: impl FnOnce(CopyOutcome) + 'static) -> bool {
     if exec_command_copy(&text) {
         done(CopyOutcome::Copied);
-        return;
+        return true;
     }
     wasm_bindgen_futures::spawn_local(async move {
         match clipboard_api_write(&text).await {
@@ -50,13 +55,15 @@ pub(crate) fn copy_text(text: String, done: impl FnOnce(CopyOutcome) + 'static) 
             }
         }
     });
+    false
 }
 
 #[cfg(not(target_family = "wasm"))]
-pub(crate) fn copy_text(_text: String, done: impl FnOnce(CopyOutcome) + 'static) {
+pub(crate) fn copy_text(_text: String, done: impl FnOnce(CopyOutcome) + 'static) -> bool {
     done(CopyOutcome::Failed(
         "no clipboard outside the browser".into(),
     ));
+    true
 }
 
 /// Path 1: select an off-screen textarea and run `execCommand("copy")`.
