@@ -10,7 +10,10 @@
 # The snapshot commit records `Published-From: <sha>`, the main commit the
 # webapp was built from. If the snapshot was merged onto any other base,
 # the tagged tree would include code that was never published, so this
-# refuses unless --allow-base-drift is given.
+# refuses unless --allow-base-drift is given. It also recomputes the contract
+# id from the merged wasm + parameters (fdev) and requires it to match both
+# contract-id.txt and the "Contract ID:" recorded at publish time; a missing
+# record is likewise overridable only with --allow-base-drift.
 #
 # With --sha <commit> it tags that commit directly (release.sh uses this
 # when the release produced no snapshot change).
@@ -141,13 +144,29 @@ CONTRACT_ID=$(git show "$SHA:published-contract/contract-id.txt" 2>/dev/null | t
     || die "published-contract/contract-id.txt missing at $(git rev-parse --short "$SHA")"
 [ -n "$CONTRACT_ID" ] || die "published-contract/contract-id.txt is empty at $(git rev-parse --short "$SHA")"
 
-# release.sh records the id it published as "Contract ID:" in the snapshot
-# commit. If the merged snapshot says otherwise, it was edited after the
-# publish and doesn't describe what is deployed.
+# The committed snapshot must describe what was deployed: the id derived
+# from the merged wasm + parameters must equal contract-id.txt, and (for a
+# snapshot commit) the "Contract ID:" release.sh recorded at publish time.
+command -v fdev >/dev/null || die "fdev not in PATH (needed to verify the snapshot)"
+SNAP_DIR=$(mktemp -d)
+cleanup_snap() { rm -f "$SNAP_DIR/wasm" "$SNAP_DIR/params"; rmdir "$SNAP_DIR" 2>/dev/null || true; }
+trap cleanup_snap EXIT
+git show "$SHA:published-contract/web_container_contract.wasm" > "$SNAP_DIR/wasm" \
+    || die "published-contract/web_container_contract.wasm missing at $(git rev-parse --short "$SHA")"
+git show "$SHA:published-contract/webapp.parameters" > "$SNAP_DIR/params" \
+    || die "published-contract/webapp.parameters missing at $(git rev-parse --short "$SHA")"
+DERIVED_ID=$(fdev get-contract-id --code "$SNAP_DIR/wasm" --parameters "$SNAP_DIR/params" 2>/dev/null \
+    | tr -d '[:space:]') || die "fdev get-contract-id failed on the merged snapshot"
+[ "$DERIVED_ID" = "$CONTRACT_ID" ] \
+    || die "merged snapshot is inconsistent: wasm + parameters give $DERIVED_ID, contract-id.txt says $CONTRACT_ID"
+
 if [ -z "$EXPLICIT_SHA" ]; then
     RECORDED_ID=$(git log -1 --format=%B "$SHA" | sed -n 's/^Contract ID: *\([1-9A-HJ-NP-Za-km-z]*\).*/\1/p' | head -1)
-    if [ -n "$RECORDED_ID" ] && [ "$RECORDED_ID" != "$CONTRACT_ID" ]; then
-        die "contract-id.txt at $(git rev-parse --short "$SHA") is $CONTRACT_ID, but the release recorded $RECORDED_ID as published"
+    if [ -z "$RECORDED_ID" ]; then
+        [ "$ALLOW_BASE_DRIFT" = "1" ] \
+            || die "$(git rev-parse --short "$SHA") has no \"Contract ID:\" line recording what was published. Check by hand, then pass --allow-base-drift."
+    elif [ "$RECORDED_ID" != "$CONTRACT_ID" ]; then
+        die "the merged snapshot is $CONTRACT_ID, but the release recorded $RECORDED_ID as published"
     fi
 fi
 
