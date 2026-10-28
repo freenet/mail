@@ -2113,14 +2113,19 @@ test.describe("Gateway shell relays (#349)", () => {
   test("a shell on another origin receives nothing", async ({ page, baseURL }) => {
     await breakLocalClipboard(page);
     const devOrigin = new URL(baseURL!).origin;
-    // Serve the app from a different origin (proxied to the dev server), so
-    // the framing page is NOT the app's gateway. Chromium refuses to frame
-    // a second loopback origin directly, hence the proxy.
+    // Serve the app from a different origin (redirected to the dev server),
+    // so the framing page is NOT the app's gateway. Chromium refuses to
+    // frame a second loopback origin directly, hence the redirect.
+    //
+    // `continue` with a new URL is invisible to the page (the frame keeps
+    // the app.test origin) and the browser fetches the body itself. Do not
+    // proxy it through route.fetch + route.fulfill instead: that carries
+    // every body over Playwright's connection to the browser, and a dev
+    // build's WASM (84 MB with the default dev debuginfo) closes the browser.
     const appOrigin = "http://app.test";
-    await page.route(`${appOrigin}/**`, async (route) => {
-      const url = route.request().url().replace(appOrigin, devOrigin);
-      await route.fulfill({ response: await route.fetch({ url }) });
-    });
+    await page.route(`${appOrigin}/**`, (route) =>
+      route.continue({ url: route.request().url().replace(appOrigin, devOrigin) }),
+    );
     await page.route(`${devOrigin}/__shell`, (route) =>
       route.fulfill({ contentType: "text/html", body: shellPage(`${appOrigin}/`) }),
     );
