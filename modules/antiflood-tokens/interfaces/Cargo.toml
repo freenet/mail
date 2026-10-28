@@ -37,7 +37,7 @@ strum = { version = "=0.24.1", features = ["derive"] }
 thiserror = "=1.0.69"
 
 [target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
-rand = "=0.8.5"
+rand = "=0.8.6"
 
 [features]
 contract = ["freenet-stdlib/contract"]
