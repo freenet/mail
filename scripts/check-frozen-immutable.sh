@@ -84,6 +84,16 @@ if git cat-file -e "$BASE:$MANIFEST" 2>/dev/null; then
     fi
 fi
 
+# The registries ui/build.rs reads. Against a base from before they existed
+# the list below is empty, so their presence is required here: a missing
+# registry must not pass as an empty list.
+for registry in legacy_inbox.toml legacy_identity_delegate.toml legacy_local_state_delegate.toml; do
+    if ! git cat-file -e "HEAD:$registry" 2>/dev/null; then
+        echo "FAIL: registry $registry is missing at HEAD" >&2
+        failed=1
+    fi
+done
+
 # ls-tree takes paths, not globs: list the top level and filter.
 top_level="$(git ls-tree --name-only "$BASE")"
 registries="$(printf '%s\n' "$top_level" | { grep -E '^legacy_.*\.toml$' || true; })"
