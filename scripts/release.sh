@@ -252,10 +252,32 @@ SNAPSHOT_CHANGED=""
 on_post_publish_exit() {
     [ "$RELEASE_FINISHED" = "1" ] && return
     echo "" >&2
-    echo "✗ release.sh stopped during or after publishing $TAG; it may be live. Do NOT re-run it." >&2
+    if [ -z "$SNAPSHOT_CHANGED" ]; then
+        # Stopped inside `cargo make publish-production`: work out whether the
+        # publish itself happened before telling the user what to do.
+        local new_id old_id
+        new_id=$(tr -d '[:space:]' < published-contract/contract-id.txt 2>/dev/null || true)
+        old_id=$(git show "$SOURCE_SHA:published-contract/contract-id.txt" 2>/dev/null | tr -d '[:space:]' || true)
+        if [ -z "$new_id" ] || [ "$new_id" = "$old_id" ]; then
+            echo "✗ release.sh failed before publishing $TAG (build or signing step)." >&2
+            echo "  Nothing is live. Fix the error, run 'git checkout -- published-contract/'" >&2
+            echo "  if it shows changes, and re-run scripts/release.sh $VERSION." >&2
+            return
+        fi
+        if ! curl -sf -m 60 -o /dev/null "http://127.0.0.1:${FREENET_PORT}/v1/contract/web/${new_id}/"; then
+            echo "✗ release.sh stopped while publishing $TAG, and the gateway does not serve" >&2
+            echo "  the new webapp ($new_id). It most likely did not land: run" >&2
+            echo "  'git checkout -- published-contract/' and re-run scripts/release.sh $VERSION." >&2
+            return
+        fi
+        echo "✗ release.sh stopped, but the new webapp ($new_id) IS live (fdev timeout?)." >&2
+    else
+        echo "✗ release.sh stopped after publishing $TAG." >&2
+    fi
+    echo "  Do NOT re-run release.sh; it would publish again." >&2
     echo "  Current branch: $(git rev-parse --abbrev-ref HEAD)" >&2
     echo "  To finish by hand (RELEASING.md 'Recovery'):" >&2
-    echo "    1. Check the webapp landed and the facade points at it; if not, see 'Manual pointer flip'." >&2
+    echo "    1. Check the facade points at the new webapp; if not, see 'Manual pointer flip'." >&2
     if [ "$SNAPSHOT_CHANGED" = "0" ]; then
         echo "    2. Nothing to commit: scripts/release-tag.sh $VERSION --sha $SOURCE_SHA" >&2
     else

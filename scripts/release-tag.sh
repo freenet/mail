@@ -101,8 +101,10 @@ else
     PUBLISHED_FROM=$(git log -1 --format=%B "$SHA" | sed -n 's/^Published-From: *\([0-9a-f]\{40\}\).*/\1/p' | head -1)
     PARENT=$(git rev-parse "$SHA^")
     if [ -z "$PUBLISHED_FROM" ]; then
-        echo "  ⚠️  $(git rev-parse --short "$SHA") has no Published-From line; can't check it matches what was published."
-        [ "$ALLOW_BASE_DRIFT" = "1" ] || confirm "Tag it anyway?"
+        echo "  $(git rev-parse --short "$SHA") has no Published-From line, so there is no way to check" >&2
+        echo "  it matches what was published." >&2
+        [ "$ALLOW_BASE_DRIFT" = "1" ] \
+            || die "refusing to tag. Check by hand, then pass --allow-base-drift."
     elif [ "$PARENT" != "$PUBLISHED_FROM" ]; then
         echo "  The webapp was published from $(git rev-parse --short "$PUBLISHED_FROM"), but the snapshot" >&2
         echo "  was merged onto $(git rev-parse --short "$PARENT"). These commits are in the tagged tree" >&2
@@ -156,8 +158,10 @@ echo "  ✓ tagged $TAG at $SHA and pushed"
 
 # The smoke test reads published-contract/contract-id.txt from the working
 # tree, so bring local main up to the release.
-if [ "$(git rev-parse --abbrev-ref HEAD)" = "main" ] && [ -z "$(git status --porcelain)" ]; then
-    git merge -q --ff-only origin/main && echo "  ✓ local main fast-forwarded to $(git rev-parse --short HEAD)"
+# The tag is already pushed, so nothing here may fail the script.
+if [ "$(git rev-parse --abbrev-ref HEAD)" = "main" ] && [ -z "$(git status --porcelain)" ] \
+    && git merge -q --ff-only origin/main 2>/dev/null; then
+    echo "  ✓ local main fast-forwarded to $(git rev-parse --short HEAD)"
 else
     echo "  Note: update your main checkout before running scripts/smoke-test-production.sh."
 fi
