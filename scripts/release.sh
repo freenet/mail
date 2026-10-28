@@ -407,6 +407,7 @@ Signed with the uncommitted production key at
 
 Squash-merge once CI is green, **before merging anything else**: if main moves first, the merged commit would include code that was never published, and \`scripts/release-tag.sh\` will refuse to tag it. Then run \`scripts/release-tag.sh $VERSION\` on main.
 
+Contract ID: $CONTRACT_ID
 Published-From: $SOURCE_SHA")
     git checkout main
     RELEASE_FINISHED=1
