@@ -116,7 +116,8 @@ else
 
     # The snapshot commit must be exactly published-contract/; anything else
     # in it was never built or published.
-    OTHER_CHANGES=$(git diff --name-only "$SHA^" "$SHA" | grep -v '^published-contract/' || true)
+    # --no-renames so a file moved INTO published-contract/ still lists its source.
+    OTHER_CHANGES=$(git diff --no-renames --name-only "$SHA^" "$SHA" | grep -v '^published-contract/' || true)
     if [ -n "$OTHER_CHANGES" ]; then
         echo "  $(git rev-parse --short "$SHA") changes files outside published-contract/:" >&2
         printf '    %s\n' $OTHER_CHANGES >&2
