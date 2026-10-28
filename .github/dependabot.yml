@@ -107,4 +107,5 @@ updates:
 # NOTE -- this workspace contains contract and/or delegate crates whose compiled
 # WASM IS THE CONTRACT ADDRESS, so a grouped dependency bump can re-key a
 # deployed contract. `check-contract-wasm.yml` guards that here: do not merge a cargo
-# PR if that check is red or did not run. See the `freenet-app-migration` skill.
+# PR if that check is red or was skipped (it skips only docs-only PRs, so a
+# cargo PR that shows it skipped means the gate itself is broken). See the `freenet-app-migration` skill.
