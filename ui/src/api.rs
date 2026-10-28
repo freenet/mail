@@ -508,7 +508,7 @@ mod inbox_management {
     use super::*;
 
     const INBOX_CODE: &[u8] =
-        include_bytes!("../../contracts/inbox/build/freenet/freenet_email_inbox");
+        include_bytes!("../../published-contract/wasm/v1/freenet_email_inbox");
 
     thread_local! {
         pub(super) static CREATED_INBOX: RefCell<Vec<(Rc<str>, ContractKey)>> = const { RefCell::new(Vec::new()) };
@@ -781,9 +781,8 @@ mod token_record_management {
 
     use super::*;
 
-    const TOKEN_RECORD_CODE: &[u8] = include_bytes!(
-        "../../modules/antiflood-tokens/contracts/token-allocation-record/build/freenet/freenet_token_allocation_record"
-    );
+    const TOKEN_RECORD_CODE: &[u8] =
+        include_bytes!("../../published-contract/wasm/v1/freenet_token_allocation_record");
 
     thread_local! {
         pub(super) static CREATED_AFT_RECORD: RefCell<Vec<(Rc<str>, ContractKey)>> = const { RefCell::new(Vec::new()) };
@@ -919,12 +918,10 @@ mod token_generator_management {
 
     use super::*;
 
-    const TOKEN_GEN_CODE_HASH: &str = include_str!(
-        "../../modules/antiflood-tokens/delegates/token-generator/build/token_generator_code_hash"
-    );
-    const TOKEN_GEN_CODE: &[u8] = include_bytes!(
-        "../../modules/antiflood-tokens/delegates/token-generator/build/freenet/freenet_token_generator"
-    );
+    const TOKEN_GEN_CODE_HASH: &str =
+        include_str!("../../published-contract/wasm/v1/token_generator_code_hash");
+    const TOKEN_GEN_CODE: &[u8] =
+        include_bytes!("../../published-contract/wasm/v1/freenet_token_generator");
 
     thread_local! {
         pub(super) static CREATED_AFT_GEN: RefCell<Vec<(Rc<str>, DelegateKey)>> = const { RefCell::new(Vec::new()) };
@@ -976,11 +973,11 @@ mod identity_management {
     use super::*;
 
     const ID_MANAGER_CODE_HASH: &str =
-        include_str!("../../modules/identity-management/build/identity_management_code_hash");
+        include_str!("../../published-contract/wasm/v1/identity_management_code_hash");
     const ID_MANAGER_CODE: &[u8] =
-        include_bytes!("../../modules/identity-management/build/freenet/identity_management");
+        include_bytes!("../../published-contract/wasm/v1/identity_management");
     const ID_MANAGER_KEY: &[u8] =
-        include_bytes!("../../modules/identity-management/build/identity-manager-params");
+        include_bytes!("../../published-contract/wasm/v1/identity-manager-params");
 
     pub(super) async fn create_delegate(
         client: &mut WebApiRequestClient,

@@ -24,16 +24,14 @@ use crate::{DynError, api::WebApiRequestClient, app::Identity};
 // dereferenced from `use-node` flows. Under offline builds we fall back to
 // empty placeholders so the artifacts aren't required at compile time.
 #[cfg(feature = "use-node")]
-pub(crate) const TOKEN_RECORD_CODE_HASH: &str = include_str!(
-    "../../modules/antiflood-tokens/contracts/token-allocation-record/build/token_allocation_record_code_hash"
-);
+pub(crate) const TOKEN_RECORD_CODE_HASH: &str =
+    include_str!("../../published-contract/wasm/v1/token_allocation_record_code_hash");
 #[cfg(not(feature = "use-node"))]
 pub(crate) const TOKEN_RECORD_CODE_HASH: &str = "";
 
 #[cfg(feature = "use-node")]
-pub(crate) const TOKEN_GENERATOR_DELEGATE_CODE_HASH: &str = include_str!(
-    "../../modules/antiflood-tokens/delegates/token-generator/build/token_generator_code_hash"
-);
+pub(crate) const TOKEN_GENERATOR_DELEGATE_CODE_HASH: &str =
+    include_str!("../../published-contract/wasm/v1/token_generator_code_hash");
 #[cfg(not(feature = "use-node"))]
 pub(crate) const TOKEN_GENERATOR_DELEGATE_CODE_HASH: &str = "";
 

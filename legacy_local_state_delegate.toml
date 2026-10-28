@@ -1,0 +1,24 @@
+# Legacy mail-local-state delegate registry.
+#
+# Every PREVIOUS mail-local-state delegate, so a migration can read drafts,
+# sent and archived mail and settings stored under an older delegate key. The
+# currently shipped delegate is NOT listed: its hash comes from the committed
+# artifact (published-contract/wasm/v1/mail_local_state_code_hash), and
+# ui/src/legacy_registry.rs refuses a registry that contains it.
+#
+# Format: freenet-migrate-build's unified schema. `code_hash` is blake3 of the
+# delegate WASM (base58); `delegate_key` is blake3(code_hash ‖ params), which
+# the build re-derives from `params_hex` and checks. The params are the
+# serialized key derived from the COMMITTED test key in
+# test-contract/mail-local-state/ (not a user secret). `generation` =
+# major*10000 + minor*100 + patch of the release.
+#
+# Append-only. Removing or editing a row strands any user still on that
+# generation.
+
+[[delegate]]
+generation = 205
+code_hash = "2VLTifcxLyhkw8XQEn4ZvT846UJu5jGnLaYCcaZcfYXw"
+delegate_key = "874fe75799e2684f41ce8f16bbec915b0edebe03f4540eafa6da1ec4694e4004"
+params_hex = "7b227365637265745f6b6579223a22303544373435303738453130333544454432423230323243313342334331393933353932343345344541453433384635414631314634303730324430423734434230303736353439423144384339413035364644324134453239424335364233227d"
+note = "mail-local-state as embedded in the live v0.2.5 webapp (#348)"

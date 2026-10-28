@@ -49,7 +49,8 @@ type InboxContract = ContractKey;
 // fail at `ContractKey::from_params` time, but those code paths are dead
 // when `use-node` is disabled.
 #[cfg(feature = "use-node")]
-pub(crate) const INBOX_CODE_HASH: &str = include_str!("../../build/inbox_code_hash");
+pub(crate) const INBOX_CODE_HASH: &str =
+    include_str!("../../published-contract/wasm/v1/inbox_code_hash");
 #[cfg(not(feature = "use-node"))]
 pub(crate) const INBOX_CODE_HASH: &str = "";
 

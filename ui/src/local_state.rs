@@ -246,11 +246,10 @@ mod wire {
     use std::sync::OnceLock;
 
     const CODE_HASH: &str =
-        include_str!("../../modules/mail-local-state/build/mail_local_state_code_hash");
-    const CODE: &[u8] =
-        include_bytes!("../../modules/mail-local-state/build/freenet/mail_local_state");
+        include_str!("../../published-contract/wasm/v1/mail_local_state_code_hash");
+    const CODE: &[u8] = include_bytes!("../../published-contract/wasm/v1/mail_local_state");
     const PARAMS: &[u8] =
-        include_bytes!("../../modules/mail-local-state/build/mail-local-state-params");
+        include_bytes!("../../published-contract/wasm/v1/mail-local-state-params");
 
     /// Set after the delegate is registered + its initial `GetAll` is issued.
     /// Used by the response handler in `api::node_comms` to recognise replies

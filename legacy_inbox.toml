@@ -1,0 +1,25 @@
+# Legacy inbox-contract registry.
+#
+# Every PREVIOUS inbox contract code hash, so a migration can find a user's
+# mail under an older inbox key. The currently shipped inbox is NOT listed: its
+# hash comes from the committed artifact
+# (published-contract/wasm/v1/inbox_code_hash), and ui/src/legacy_registry.rs
+# refuses a registry that contains it.
+#
+# Format: freenet-migrate-build's unified schema. `code_hash` is blake3 of the
+# contract WASM, base58 (stdlib CodeHash form). `generation` encodes the
+# release that shipped the row as major*10000 + minor*100 + patch, so rows
+# recovered later for older releases slot in without renumbering.
+#
+# Append-only. Removing or editing a row strands any user still on that
+# generation.
+
+[[contract]]
+generation = 0
+code_hash = "Ht8rcMjTpnraRNbzkmDCBFJJfmQGJ8M2iUAGaZimE9Ji"
+note = "inbox before #253 widened the signed payload (pre-v0.2 releases)"
+
+[[contract]]
+generation = 205
+code_hash = "9Kuhod6Bfrd2uZAtVNtQKVWy4mku3tbfv2zop1u9HU98"
+note = "inbox as embedded in the live v0.2.5 webapp (built on a different machine; v0.2.6 rebuilt it with new bytes)"

@@ -86,3 +86,7 @@ example-data = []
 # (and `--no-default-features`) for the offline dev loop.
 no-sync = []
 use-node = []
+
+[build-dependencies]
+# Validates the repo-root legacy_*.toml registries and generates their consts.
+freenet-migrate-build = "0.2"

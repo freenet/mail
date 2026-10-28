@@ -17,6 +17,7 @@ mod app;
 pub(crate) mod clipboard;
 pub(crate) mod contact_tier_cache;
 pub(crate) mod inbox;
+pub(crate) mod legacy_registry;
 pub(crate) mod local_state;
 pub(crate) mod log;
 #[cfg(test)]
