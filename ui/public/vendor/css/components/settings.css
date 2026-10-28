@@ -782,18 +782,31 @@
       font-size: 12.5px; color: var(--accent); cursor: default;
     }
     .bk-link:hover { text-decoration: underline; }
+    /* "Show key" is a toggle with a fixed label; pressed state is visual. */
+    .bk-link[aria-pressed="true"] {
+      background: var(--accent-bg); border-radius: 6px; font-weight: 600;
+    }
     .bk-key { user-select: all; }
     .bk-key.bk-masked { user-select: none; color: var(--ink3); letter-spacing: 0.08em; }
     .bk-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
     .bk-status { font-size: 13px; line-height: 1.5; margin: 10px 0 0; }
-    .bk-status.ok { color: var(--trust); }
-    .bk-status.warn { color: var(--caution); }
-    .bk-status.err { color: var(--warn); }
+    .bk-status.ok { color: var(--trust-ink); }
+    .bk-status.warn { color: var(--caution-ink); }
+    .bk-status.err { color: var(--danger-ink); }
     .bk-confirm {
       display: flex; flex-wrap: wrap; align-items: center; gap: 10px;
       margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line2);
     }
-    .bk-btn-confirm { background: var(--trust); color: #f8fafc; }
+    .bk-btn-confirm { background: var(--trust-solid); color: var(--on-trust); }
     .bk-btn-confirm:hover { filter: brightness(0.92); }
+
+    /* Inline errors (restore form, contact modals rendered in .fm-app).
+       Tokens, not hex, so dark mode stays readable. */
+    .fm-error {
+      background: color-mix(in srgb, var(--warn) 10%, var(--bg-card));
+      border-color: color-mix(in srgb, var(--warn) 35%, transparent);
+      color: var(--danger-ink);
+    }
+    .fm-error-text { color: var(--danger-ink); }
   }
 }

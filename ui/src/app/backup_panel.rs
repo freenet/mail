@@ -42,6 +42,10 @@ fn masked(token: &str) -> String {
     }
 }
 
+/// DOM id of the key element, so the Show-key toggle can point at it with
+/// `aria-controls`. Only one panel is ever on screen.
+const KEY_ELEMENT_ID: &str = "fm-backup-key-value";
+
 #[component]
 pub(crate) fn BackupKeyPanel(
     /// The recovery key (`fmail-key-1:...`).
@@ -56,6 +60,10 @@ pub(crate) fn BackupKeyPanel(
     on_exported: EventHandler<()>,
     /// Fired when the user confirms they saved the key.
     on_saved: EventHandler<()>,
+    /// Bump to scroll the panel back into view (e.g. "Back up now" clicked
+    /// again while the panel is already open somewhere off-screen).
+    #[props(default)]
+    scroll_request: u32,
 ) -> Element {
     let mut revealed = use_signal(|| false);
     let mut copy_status: Signal<Option<CopyOutcome>> = use_signal(|| None);
@@ -64,6 +72,22 @@ pub(crate) fn BackupKeyPanel(
     // previous one without telling us, so hold the button off for that
     // long rather than report a download that never happens.
     let mut download_cooling = use_signal(|| false);
+    let mut mounted: Signal<Option<std::rc::Rc<MountedData>>> = use_signal(|| None);
+
+    // Re-scroll when the caller asks again. The first scroll happens in
+    // `onmounted`; this effect only fires for later bumps.
+    let mut last_scroll_request = use_signal(|| scroll_request);
+    use_effect(use_reactive!(|scroll_request| {
+        if *last_scroll_request.peek() == scroll_request {
+            return;
+        }
+        last_scroll_request.set(scroll_request);
+        if let Some(el) = mounted.peek().clone() {
+            spawn(async move {
+                let _ = el.scroll_to(ScrollBehavior::Smooth).await;
+            });
+        }
+    }));
 
     let title = entry_title(&alias, &words);
     let is_revealed = *revealed.read();
@@ -73,6 +97,14 @@ pub(crate) fn BackupKeyPanel(
         move |_| {
             copy_status.set(None);
             copy_text(token.clone(), move |outcome| {
+                // The Clipboard API path finishes asynchronously, outside
+                // this component's task scope, so the panel may be gone by
+                // now (modal closed, identity switched). Writing a dropped
+                // signal panics; drop the result instead, and don't count
+                // an export for a panel nobody is looking at.
+                if copy_status.try_peek().is_err() {
+                    return;
+                }
                 // SentToShell counts: the key may have reached the clipboard.
                 if !matches!(outcome, CopyOutcome::Failed(_)) {
                     on_exported.call(());
@@ -97,6 +129,8 @@ pub(crate) fn BackupKeyPanel(
                     download_status.set(Some(Ok(fname)));
                     on_exported.call(());
                     download_cooling.set(true);
+                    // `spawn` is scoped to this component: it is cancelled
+                    // if the panel unmounts first.
                     spawn(async move {
                         gloo_timers::future::TimeoutFuture::new(2_100).await;
                         download_cooling.set(false);
@@ -118,11 +152,13 @@ pub(crate) fn BackupKeyPanel(
             // renders it at the top of a long, scrolled screen; the create
             // flow below the fingerprint grid), so bring it into view.
             onmounted: move |evt| async move {
-                let _ = evt.scroll_to(ScrollBehavior::Smooth).await;
+                let el = evt.data();
+                mounted.set(Some(el.clone()));
+                let _ = el.scroll_to(ScrollBehavior::Smooth).await;
             },
             p { class: "bk-lede",
                 strong { "Save this recovery key in your password manager." }
-                " Anyone who has it can read your mail and send as you. It is the only way to get this identity back if this browser's storage is lost."
+                " Anyone who has it can read your mail and send as you. It is the only way to get this identity back if your Freenet node's data is lost."
             }
             div { class: "field",
                 span { class: "field-label", "Suggested entry name" }
@@ -130,28 +166,47 @@ pub(crate) fn BackupKeyPanel(
             }
             div { class: "field",
                 div { class: "bk-key-head",
-                    span { class: "field-label", "Recovery key" }
+                    span { class: "field-label", id: "fm-backup-key-label", "Recovery key" }
+                    // Fixed label; the state is carried by aria-pressed (and
+                    // the pressed styling), so assistive tech hears one
+                    // control whose state flips, not a renamed button.
                     button {
                         class: "bk-link",
                         r#type: "button",
                         "data-testid": testid::FM_BACKUP_REVEAL,
                         "aria-pressed": "{is_revealed}",
+                        "aria-controls": KEY_ELEMENT_ID,
                         onclick: move |_| {
                             let next = !*revealed.read();
                             revealed.set(next);
                         },
-                        if is_revealed { "Hide" } else { "Reveal" }
+                        "Show key"
                     }
                 }
                 if is_revealed {
-                    div { class: "token-block bk-key", "data-testid": testid::FM_BACKUP_KEY, "{token}" }
+                    div {
+                        class: "token-block bk-key",
+                        id: KEY_ELEMENT_ID,
+                        "data-testid": testid::FM_BACKUP_KEY,
+                        role: "textbox",
+                        "aria-readonly": "true",
+                        "aria-multiline": "true",
+                        "aria-labelledby": "fm-backup-key-label",
+                        tabindex: "0",
+                        "{token}"
+                    }
                 } else {
                     div {
                         class: "token-block bk-key bk-masked",
+                        id: KEY_ELEMENT_ID,
                         "data-testid": testid::FM_BACKUP_KEY_MASKED,
-                        "aria-label": "Recovery key (hidden)",
+                        role: "img",
+                        "aria-label": "Recovery key, hidden. Press Show key to display it.",
                         "{masked(&token)}"
                     }
+                }
+                span { class: "field-help",
+                    "The key doesn't include this identity's alias or description; you'll choose an alias when you restore it."
                 }
             }
             div { class: "bk-actions",
@@ -178,12 +233,12 @@ pub(crate) fn BackupKeyPanel(
                     },
                     Some(CopyOutcome::SentToShell) => rsx! {
                         p { class: "bk-status warn",
-                            "Sent to your clipboard through Freenet, which can't confirm it worked. Paste it somewhere to check, or reveal the key and copy it by hand."
+                            "Sent to your clipboard through Freenet, which can't confirm it worked. Paste it somewhere to check, or show the key and copy it by hand."
                         }
                     },
                     Some(CopyOutcome::Failed(why)) => rsx! {
                         p { class: "bk-status err",
-                            "Couldn't copy: {why}. Reveal the key, select it and copy it by hand, or download it as a file."
+                            "Couldn't copy: {why}. Show the key, select it and copy it by hand, or download it as a file."
                         }
                     },
                     None => rsx! {},

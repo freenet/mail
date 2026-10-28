@@ -133,16 +133,9 @@ async fn clipboard_api_write(text: &str) -> Result<(), String> {
 fn shell_proxy_copy(text: &str) -> bool {
     use web_sys::js_sys;
 
-    let Some(window) = web_sys::window() else {
+    let Some(shell) = gateway_shell() else {
         return false;
     };
-    let Some(parent) = window.parent().ok().flatten() else {
-        return false;
-    };
-    if js_sys::Object::is(parent.as_ref(), window.as_ref()) {
-        // Top-level page: no shell to delegate to.
-        return false;
-    }
     let msg = js_sys::Object::new();
     let set = |k: &str, v: wasm_bindgen::JsValue| js_sys::Reflect::set(&msg, &k.into(), &v).is_ok();
     if !(set("__freenet_shell__", true.into())
@@ -151,5 +144,55 @@ fn shell_proxy_copy(text: &str) -> bool {
     {
         return false;
     }
-    parent.post_message(&msg, "*").is_ok()
+    shell.post(&msg).is_ok()
+}
+
+/// The gateway shell page that frames this app, and the origin to address
+/// it with.
+#[cfg(target_family = "wasm")]
+pub(crate) struct GatewayShell {
+    parent: web_sys::Window,
+    origin: String,
+}
+
+#[cfg(target_family = "wasm")]
+impl GatewayShell {
+    /// postMessage `msg` to the shell, addressed to the gateway's origin.
+    ///
+    /// Never `"*"`: these messages can carry a private key (clipboard and
+    /// download relays). With an explicit origin the browser delivers the
+    /// message only if the parent really is the gateway, so a page that
+    /// framed the app from somewhere else receives nothing.
+    pub(crate) fn post(&self, msg: &wasm_bindgen::JsValue) -> Result<(), String> {
+        self.parent
+            .post_message(msg, &self.origin)
+            .map_err(|e| format!("postMessage: {e:?}"))
+    }
+}
+
+/// `Some` when this app runs inside a parent frame (the gateway shell).
+///
+/// The app's own document origin is opaque (the gateway's sandbox omits
+/// `allow-same-origin`), but its URL is the gateway URL plus
+/// `?__sandbox=1`, so the URL's origin is the shell's origin. The shell
+/// accepts a message by checking `event.source` is its app iframe
+/// (freenet-core `shell_bridge.js`), which an explicit target origin
+/// doesn't affect. `None` at top level (dev server, Playwright) or when the
+/// origin can't be worked out, in which case nothing is posted.
+#[cfg(target_family = "wasm")]
+pub(crate) fn gateway_shell() -> Option<GatewayShell> {
+    use web_sys::js_sys;
+
+    let window = web_sys::window()?;
+    let parent = window.parent().ok().flatten()?;
+    if js_sys::Object::is(parent.as_ref(), window.as_ref()) {
+        // Top-level page: no shell to delegate to.
+        return None;
+    }
+    let href = window.location().href().ok()?;
+    let origin = web_sys::Url::new(&href).ok()?.origin();
+    if origin.is_empty() || origin == "null" {
+        return None;
+    }
+    Some(GatewayShell { parent, origin })
 }

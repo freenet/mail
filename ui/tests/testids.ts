@@ -63,6 +63,7 @@ interface TestIds {
   fmRestorePaste: string;
   fmRestoreError: string;
   fmRestoreAlias: string;
+  fmRestoreExisting: string;
   fmBackupModal: string;
   fmBackupPanel: string;
   fmBackupEntryTitle: string;

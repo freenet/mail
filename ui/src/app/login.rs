@@ -579,10 +579,35 @@ pub(crate) fn fingerprint_word_vec(identity: &Identity) -> Vec<String> {
 }
 
 /// Stamp `last_backup_at` for `alias`. Called only when the user confirms
-/// "I've saved it" in `BackupKeyPanel`, never on copy or download alone.
+/// "I've saved it" in `BackupKeyPanel` for an identity that already exists,
+/// never on copy or download alone. New identities go through
+/// [`record_backup_after_create`] instead.
 pub(crate) fn mark_backed_up(alias: &str) {
     let mut settings = crate::local_state::identity_settings_for(alias);
     settings.last_backup_at = Some(chrono::Utc::now().timestamp_millis());
+    crate::local_state::persist_identity_settings(alias.to_string(), settings);
+}
+
+/// `last_backup_at` for an identity whose keys were just persisted:
+/// stamped if (and only if) a backup of THESE keys is known to exist.
+pub(crate) fn backup_stamp_after_create(backed_up: bool, now_ms: i64) -> Option<i64> {
+    backed_up.then_some(now_ms)
+}
+
+/// Record the backup state of a newly created or restored identity. Call
+/// only once its keys are persisted (`NodeAction::CreateIdentity` success),
+/// never before: a create that fails and is retried under the same alias
+/// with new keys must not inherit a stamp for keys that no longer exist.
+/// A fresh keypair also clears any stamp left by an earlier identity that
+/// used the same alias, since that backup holds different keys.
+pub(crate) fn record_backup_after_create(alias: &str, backed_up: bool) {
+    let mut settings = crate::local_state::identity_settings_for(alias);
+    let next = backup_stamp_after_create(backed_up, chrono::Utc::now().timestamp_millis());
+    if settings.last_backup_at.is_none() && next.is_none() {
+        // Nothing to change; don't write an untouched settings record.
+        return;
+    }
+    settings.last_backup_at = next;
     crate::local_state::persist_identity_settings(alias.to_string(), settings);
 }
 
@@ -675,7 +700,12 @@ pub(crate) fn trigger_browser_download(
         .unwrap_or(false);
 
     if in_iframe {
-        match shell_proxy_download(parent.as_ref(), filename, bytes, mime) {
+        let Some(shell) = crate::clipboard::gateway_shell() else {
+            // Embedded, but we can't tell which origin to address: don't
+            // post the payload anywhere rather than broadcast it with "*".
+            return Err("couldn't work out the Freenet gateway's address".to_string());
+        };
+        match shell_proxy_download(&shell, filename, bytes, mime) {
             Ok(()) => return Ok(()),
             Err(e) => {
                 // Don't fall through to the local `<a download>` path —
@@ -692,10 +722,11 @@ pub(crate) fn trigger_browser_download(
 
 /// Shell-proxied download: postMessage the payload to the parent
 /// gateway shell, which performs the download from its own origin.
-/// See `path_handlers.rs` for the matching `download` handler.
+/// See `path_handlers.rs` for the matching `download` handler. Addressed to
+/// the gateway's origin, never `"*"`: the payload is a private key.
 #[cfg(target_family = "wasm")]
 fn shell_proxy_download(
-    parent: Option<&web_sys::Window>,
+    shell: &crate::clipboard::GatewayShell,
     filename: &str,
     bytes: &[u8],
     mime: &str,
@@ -703,7 +734,6 @@ fn shell_proxy_download(
     use base64::Engine;
     use web_sys::js_sys;
 
-    let parent = parent.ok_or_else(|| "no parent window".to_string())?;
     let payload = base64::engine::general_purpose::STANDARD.encode(bytes);
 
     let msg = js_sys::Object::new();
@@ -718,9 +748,7 @@ fn shell_proxy_download(
     js_sys::Reflect::set(&msg, &"base64".into(), &payload.into())
         .map_err(|e| format!("set base64: {e:?}"))?;
 
-    parent
-        .post_message(&msg, "*")
-        .map_err(|e| format!("postMessage: {e:?}"))
+    shell.post(&msg)
 }
 
 /// Local `<a download>` path. Used when the webapp is served outside
@@ -1263,11 +1291,25 @@ fn BackupKeyModal(
 ) -> Element {
     let token = recovery_key_for(&identity);
     let words = fingerprint_word_vec(&identity);
+    // Close on a backdrop click only when the press also STARTED on the
+    // backdrop. Selecting the key by hand and releasing the mouse outside
+    // the dialog produces a click on the veil; that must not close it.
+    let mut pressed_on_veil = use_signal(|| false);
     rsx! {
         div { class: "veil",
-            onclick: move |_| on_close.call(()),
+            onmousedown: move |_| pressed_on_veil.set(true),
+            onclick: move |_| {
+                if *pressed_on_veil.peek() {
+                    on_close.call(());
+                }
+                pressed_on_veil.set(false);
+            },
             div { class: "modal",
                 "data-testid": testid::FM_BACKUP_MODAL,
+                onmousedown: move |evt| {
+                    evt.stop_propagation();
+                    pressed_on_veil.set(false);
+                },
                 onclick: move |evt| { evt.stop_propagation(); },
                 div { class: "modal-head",
                     span { class: "modal-title", "Back up {alias_str}" }
@@ -1292,7 +1334,7 @@ fn BackupKeyModal(
                             }
                         },
                         Err(e) => rsx! {
-                            div { class: "info", style: "background:#fef2f2; border-color:#fecaca; color:#991b1b;",
+                            div { class: "info fm-error",
                                 "Couldn't build a recovery key for this identity: {e}"
                             }
                         },
@@ -1381,9 +1423,9 @@ pub(super) fn CreateAliasForm() -> Element {
         let Some((ml_dsa, ml_kem, _words)) = pending.write().take() else {
             return;
         };
-        if *backup_confirmed.read() {
-            mark_backed_up(&alias_str);
-        }
+        // Not stamped here: the node action stamps it once the keys are
+        // actually persisted (see `record_backup_after_create`).
+        let backed_up = *backup_confirmed.read();
         let alias: Rc<str> = alias_str.into();
         let ek_bytes = {
             use ml_kem::kem::KeyExport;
@@ -1414,6 +1456,7 @@ pub(super) fn CreateAliasForm() -> Element {
             ml_dsa_key: ml_dsa,
             ml_kem_dk: Box::new(ml_kem),
             description: desc_val,
+            backed_up,
         });
         create_alias_form.write().0 = false;
     };
@@ -1533,7 +1576,7 @@ pub(super) fn CreateAliasForm() -> Element {
                                 }
                             },
                             Err(e) => rsx! {
-                                div { class: "info", style: "background:#fef2f2; border-color:#fecaca; color:#991b1b;",
+                                div { class: "info fm-error",
                                     "Couldn't build a recovery key: {e}"
                                 }
                             },
@@ -1541,7 +1584,7 @@ pub(super) fn CreateAliasForm() -> Element {
                     }
                 }
                 if !login_error.read().is_empty() {
-                    div { class: "info", style: "background:#fef2f2; border-color:#fecaca; color:#991b1b;",
+                    div { class: "info fm-error",
                         "{login_error.read()}"
                     }
                 }
@@ -1596,7 +1639,7 @@ pub(super) fn CreateAliasForm() -> Element {
                     }
                 }
                 if !login_error.read().is_empty() {
-                    div { class: "info", style: "background:#fef2f2; border-color:#fecaca; color:#991b1b;",
+                    div { class: "info fm-error",
                         "{login_error.read()}"
                     }
                 }
@@ -1723,15 +1766,23 @@ fn ImportForm() -> Element {
     // Name of the uploaded file the current input came from, if any.
     let mut loaded_file: Signal<Option<String>> = use_signal(|| None);
     let mut parse_error = use_signal(String::new);
+    // An error held back while a key is being typed by hand (the input
+    // could still become valid); shown when the box loses focus.
+    let mut held_error: Signal<Option<String>> = use_signal(|| None);
     let mut address = use_signal(String::new);
     let mut description = use_signal(String::new);
+    // True while Alias/Description hold values filled in from a JSON
+    // backup rather than typed by the user, so switching to a recovery key
+    // (which carries no name) clears them instead of keeping a stale name.
+    let mut names_from_backup = use_signal(|| false);
     let mut restore_error = use_signal(String::new);
 
     // Parse restore input (from either the paste box or a file) and update
-    // the form. JSON backups carry an alias/description; recovery keys
-    // don't, so those fields keep whatever the user has typed.
-    let mut apply_input = move |text: String| {
+    // the form. `typed` is true for single-character edits in the paste
+    // box; pasted and uploaded input is always checked at once.
+    let mut apply_input = move |text: String, typed: bool| {
         restore_error.set(String::new());
+        held_error.set(None);
         if text.trim().is_empty() {
             parsed_backup.set(None);
             parse_error.set(String::new());
@@ -1741,35 +1792,58 @@ fn ImportForm() -> Element {
             Ok(b) => {
                 if !b.alias.is_empty() {
                     address.set(b.alias.clone());
-                }
-                if !b.description.is_empty() {
                     description.set(b.description.clone());
+                    names_from_backup.set(true);
+                } else if *names_from_backup.peek() {
+                    address.set(String::new());
+                    description.set(String::new());
+                    names_from_backup.set(false);
                 }
                 parse_error.set(String::new());
                 parsed_backup.set(Some(b));
             }
             Err(e) => {
                 parsed_backup.set(None);
-                parse_error.set(e.to_string());
+                if typed && super::backup_token::may_be_incomplete(&text, &e) {
+                    parse_error.set(String::new());
+                    held_error.set(Some(e.to_string()));
+                } else {
+                    parse_error.set(e.to_string());
+                }
             }
         }
     };
 
-    // `parse_backup` guarantees correct seed lengths, so deriving the keys
-    // here cannot panic.
-    let preview_words: Option<[&'static str; 6]> = parsed_backup.read().as_ref().map(|b| {
-        let ml_dsa = b.keys.ml_dsa_signing_key();
-        let ml_kem = b.keys.ml_kem_dk();
-        use ml_dsa::signature::Keypair;
-        use ml_kem::kem::KeyExport;
-        let vk_bytes: Vec<u8> = ml_dsa.as_ref().verifying_key().encode().to_vec();
-        let ek_bytes: Vec<u8> = ml_kem.encapsulation_key().to_bytes().to_vec();
-        crate::app::address_book::fingerprint_words(&vk_bytes, &ek_bytes)
-    });
+    // Derive the identity once per render: the fingerprint preview and the
+    // already-on-this-device check both need it. `parse_backup` guarantees
+    // correct seed lengths, so deriving the keys here cannot panic.
+    let (preview_words, existing_alias): (Option<[&'static str; 6]>, Option<String>) =
+        match parsed_backup.read().as_ref() {
+            Some(b) => {
+                let ml_dsa = b.keys.ml_dsa_signing_key();
+                let ml_kem = b.keys.ml_kem_dk();
+                use ml_dsa::signature::Keypair;
+                use ml_kem::kem::KeyExport;
+                let vk_bytes: Vec<u8> = ml_dsa.as_ref().verifying_key().encode().to_vec();
+                let ek_bytes: Vec<u8> = ml_kem.encapsulation_key().to_bytes().to_vec();
+                let words = crate::app::address_book::fingerprint_words(&vk_bytes, &ek_bytes);
+                // Restoring keys that are already here would create a
+                // second identity on the same inbox. Same check the
+                // identity's PartialEq uses: the ML-DSA verifying key.
+                let existing = Identity::get_aliases()
+                    .borrow()
+                    .iter()
+                    .find(|i| i.ml_dsa_vk_bytes() == vk_bytes)
+                    .map(|i| i.alias.to_string());
+                (Some(words), existing)
+            }
+            None => (None, None),
+        };
     let needs_alias = parsed_backup
         .read()
         .as_ref()
         .is_some_and(|b| b.alias.is_empty());
+    let can_restore = parsed_backup.read().is_some() && existing_alias.is_none();
 
     let cancel = move |_| {
         // Both flows share this form: hub mode toggles ImportBackup;
@@ -1786,6 +1860,8 @@ fn ImportForm() -> Element {
             }
             div { class: "field", style: "margin-top:24px;",
                 label { class: "field-label", r#for: "restore-paste-input", "Recovery key" }
+                // A secret: keep the browser and OS from learning it,
+                // spell-checking it, or "fixing" its capitalisation.
                 textarea {
                     class: "textarea",
                     id: "restore-paste-input",
@@ -1794,13 +1870,22 @@ fn ImportForm() -> Element {
                     spellcheck: "false",
                     autocomplete: "off",
                     autocapitalize: "off",
+                    "autocorrect": "off",
+                    "data-gramm": "false",
                     "data-testid": testid::FM_RESTORE_PASTE,
                     value: "{paste_text}",
                     oninput: move |evt| {
                         let v = evt.value();
+                        let prev_len = paste_text.peek().chars().count();
+                        let typed = v.chars().count() <= prev_len + 1;
                         paste_text.set(v.clone());
                         loaded_file.set(None);
-                        apply_input(v);
+                        apply_input(v, typed);
+                    },
+                    onblur: move |_| {
+                        if let Some(e) = held_error.write().take() {
+                            parse_error.set(e);
+                        }
                     },
                 }
             }
@@ -1817,13 +1902,14 @@ fn ImportForm() -> Element {
                         {
                             use wasm_bindgen::{JsCast, closure::Closure};
                             use web_sys::{FileReader, HtmlInputElement};
-                            let Some(file) = web_sys::window()
+                            let Some(input) = web_sys::window()
                                 .and_then(|w| w.document())
                                 .and_then(|d| d.get_element_by_id("restore-file-input"))
                                 .and_then(|el| el.dyn_into::<HtmlInputElement>().ok())
-                                .and_then(|input| input.files())
-                                .and_then(|files| files.item(0))
                             else {
+                                return;
+                            };
+                            let Some(file) = input.files().and_then(|files| files.item(0)) else {
                                 return;
                             };
                             let Ok(reader) = FileReader::new() else {
@@ -1832,12 +1918,17 @@ fn ImportForm() -> Element {
                             };
                             let file_name = file.name();
                             let reader_c = reader.clone();
+                            let input_c = input.clone();
                             let cb = Closure::once(Box::new(move || {
+                                // Clear the picker so choosing the same
+                                // file again (e.g. after fixing it) fires
+                                // `onchange` again.
+                                input_c.set_value("");
                                 paste_text.set(String::new());
                                 match reader_c.result().ok().and_then(|v| v.as_string()) {
                                     Some(text) => {
                                         loaded_file.set(Some(file_name));
-                                        apply_input(text);
+                                        apply_input(text, false);
                                     }
                                     None => {
                                         loaded_file.set(None);
@@ -1862,11 +1953,20 @@ fn ImportForm() -> Element {
             }
             if !parse_error.read().is_empty() {
                 div {
-                    class: "info",
+                    class: "info fm-error",
                     role: "alert",
                     "data-testid": testid::FM_RESTORE_ERROR,
-                    style: "background:#fef2f2; border-color:#fecaca; color:#991b1b; margin:0 0 18px;",
+                    style: "margin:0 0 18px;",
                     "{parse_error.read()}"
+                }
+            }
+            if let Some(existing) = &existing_alias {
+                div {
+                    class: "info",
+                    role: "status",
+                    "data-testid": testid::FM_RESTORE_EXISTING,
+                    style: "margin:0 0 18px;",
+                    "This identity is already on this device, as “{existing}”. There's nothing to restore."
                 }
             }
             if let Some(words) = preview_words {
@@ -1894,9 +1994,12 @@ fn ImportForm() -> Element {
                     placeholder: "e.g. mira",
                     "data-testid": testid::FM_RESTORE_ALIAS,
                     value: "{address}",
-                    oninput: move |evt| address.set(evt.value()),
+                    oninput: move |evt| {
+                        address.set(evt.value());
+                        names_from_backup.set(false);
+                    },
                 }
-                if needs_alias {
+                if needs_alias && existing_alias.is_none() {
                     span { class: "field-help",
                         "Recovery keys don't include a name. Choose the alias to use on this device."
                     }
@@ -1908,7 +2011,10 @@ fn ImportForm() -> Element {
                     class: "input",
                     placeholder: "e.g. work",
                     value: "{description}",
-                    oninput: move |evt| description.set(evt.value()),
+                    oninput: move |evt| {
+                        description.set(evt.value());
+                        names_from_backup.set(false);
+                    },
                 }
             }
             div { class: "nudge",
@@ -1919,7 +2025,7 @@ fn ImportForm() -> Element {
                 }
             }
             if !restore_error.read().is_empty() {
-                div { class: "info", style: "background:#fef2f2; border-color:#fecaca; color:#991b1b;",
+                div { class: "info fm-error",
                     "{restore_error.read()}"
                 }
             }
@@ -1932,7 +2038,7 @@ fn ImportForm() -> Element {
                 button {
                     class: "btn btn-primary btn-lg",
                     "data-testid": testid::FM_RESTORE_SUBMIT,
-                    disabled: parsed_backup.read().is_none(),
+                    disabled: !can_restore,
                     onclick: move |_| {
                         if let Some(backup) = parsed_backup.read().clone() {
                             let alias_str = address.read().trim().to_string();
@@ -1980,6 +2086,9 @@ fn ImportForm() -> Element {
                                 ml_dsa_key: ml_dsa,
                                 ml_kem_dk: Box::new(ml_kem),
                                 description: desc_val,
+                                // Restored from a recovery key or backup
+                                // file, so the user demonstrably holds one.
+                                backed_up: true,
                             });
                             import_backup_form.write().0 = false;
                             import_id_form.write().0 = false;
@@ -2073,7 +2182,7 @@ pub(super) fn ShareContactModal() -> Element {
                             }
                         },
                         Some(CopyOutcome::Failed(why)) => rsx! {
-                            p { class: "field-help", style: "margin-top:10px; color:#b91c1c;",
+                            p { class: "field-help fm-error-text", style: "margin-top:10px;",
                                 "Couldn't copy: {why}. Select the token above and copy it by hand."
                             }
                         },
@@ -2089,7 +2198,12 @@ pub(super) fn ShareContactModal() -> Element {
                             move |_| {
                                 copied.set(None);
                                 copy_text(share_text.clone(), move |outcome| {
-                                    copied.set(Some(outcome));
+                                    // May complete after the modal closed
+                                    // (async Clipboard API path); writing a
+                                    // dropped signal would panic.
+                                    if let Ok(mut c) = copied.try_write() {
+                                        *c = Some(outcome);
+                                    }
                                 });
                             }
                         },
@@ -2531,7 +2645,7 @@ pub(super) fn ImportContactForm() -> Element {
                         }
                     }
                     if !error_msg.read().is_empty() {
-                        div { class: "info", style: "background:#fef2f2; border-color:#fecaca; color:#991b1b;",
+                        div { class: "info fm-error",
                             "{error_msg}"
                         }
                     }
@@ -2823,8 +2937,18 @@ fn ContactsSection() -> Element {
 #[cfg(test)]
 mod tests {
     use super::{
-        ImportContact, backup_filename, persisted_suggested_alias, sanitize_filename_stem,
+        ImportContact, backup_filename, backup_stamp_after_create, persisted_suggested_alias,
+        sanitize_filename_stem,
     };
+
+    /// Review #349 item 3: a new identity is stamped as backed up only when
+    /// a backup of its keys is known to exist, and otherwise has NO stamp
+    /// (clearing any left by an earlier identity under the same alias).
+    #[test]
+    fn backup_stamp_after_create_only_when_backed_up() {
+        assert_eq!(backup_stamp_after_create(true, 1_234), Some(1_234));
+        assert_eq!(backup_stamp_after_create(false, 1_234), None);
+    }
 
     /// #289 (add-from-message half): the modal constructor must carry the
     /// sender's display name into `prefill_alias` so the prefill effect can

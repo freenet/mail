@@ -32,6 +32,13 @@
       --sh-lg: 0 20px 60px rgba(0, 40, 100, 0.14), 0 4px 12px rgba(0, 40, 100, 0.06);
       --unread: #d97706;
       --unread-bg: #fef3c7;
+      /* Same values as the .fm-app light tokens (tokens.css). The
+         pre-login surface has no dark theme, so no dark overrides. */
+      --danger-ink: #991b1b;
+      --on-trust: #fff;
+      --trust-solid: #1f6f47;
+      --trust-ink: #1f6f47;
+      --caution-ink: #8a5a12;
 
       min-height: 100vh;
       background-color: var(--c0);
@@ -474,19 +481,27 @@
       font-size: 12.5px; color: var(--accent); cursor: default;
     }
     .bk-link:hover { text-decoration: underline; }
+    /* "Show key" is a toggle with a fixed label; pressed state is visual. */
+    .bk-link[aria-pressed="true"] {
+      background: var(--accent-bg); border-radius: 6px; font-weight: 600;
+    }
     .bk-key { user-select: all; }
     .bk-key.bk-masked { user-select: none; color: var(--ink3); letter-spacing: 0.08em; }
     .bk-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
     .bk-status { font-size: 13px; line-height: 1.5; margin: 10px 0 0; }
-    .bk-status.ok { color: var(--trust); }
-    .bk-status.warn { color: var(--unread); }
-    .bk-status.err { color: #b91c1c; }
+    .bk-status.ok { color: var(--trust-ink); }
+    .bk-status.warn { color: var(--caution-ink); }
+    .bk-status.err { color: var(--danger-ink); }
     .bk-confirm {
       display: flex; flex-wrap: wrap; align-items: center; gap: 10px;
       margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line2);
     }
-    .bk-btn-confirm { background: var(--trust); color: #f8fafc; box-shadow: var(--sh-sm); }
-    .bk-btn-confirm:hover { background: #2a7a52; }
+    .bk-btn-confirm { background: var(--trust-solid); color: var(--on-trust); box-shadow: var(--sh-sm); }
+    .bk-btn-confirm:hover { filter: brightness(0.92); }
+
+    /* Inline errors (restore form, create flow, contact modals). */
+    .fm-error { background: #fef2f2; border-color: #fecaca; color: var(--danger-ink); }
+    .fm-error-text { color: var(--danger-ink); }
 
   }
 }

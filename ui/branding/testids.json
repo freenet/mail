@@ -59,6 +59,7 @@
   "fmRestorePaste": "fm-restore-paste",
   "fmRestoreError": "fm-restore-error",
   "fmRestoreAlias": "fm-restore-alias",
+  "fmRestoreExisting": "fm-restore-existing",
   "fmBackupModal": "fm-backup-modal",
   "fmBackupPanel": "fm-backup-panel",
   "fmBackupEntryTitle": "fm-backup-entry-title",

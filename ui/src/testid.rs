@@ -115,6 +115,7 @@ pub(crate) const FM_RESTORE_SUBMIT: &str = "fm-restore-submit";
 pub(crate) const FM_RESTORE_PASTE: &str = "fm-restore-paste";
 pub(crate) const FM_RESTORE_ERROR: &str = "fm-restore-error";
 pub(crate) const FM_RESTORE_ALIAS: &str = "fm-restore-alias";
+pub(crate) const FM_RESTORE_EXISTING: &str = "fm-restore-existing";
 pub(crate) const FM_BACKUP_MODAL: &str = "fm-backup-modal";
 pub(crate) const FM_BACKUP_PANEL: &str = "fm-backup-panel";
 pub(crate) const FM_BACKUP_ENTRY_TITLE: &str = "fm-backup-entry-title";
@@ -246,6 +247,7 @@ mod tests {
             ("fmRestorePaste", super::FM_RESTORE_PASTE),
             ("fmRestoreError", super::FM_RESTORE_ERROR),
             ("fmRestoreAlias", super::FM_RESTORE_ALIAS),
+            ("fmRestoreExisting", super::FM_RESTORE_EXISTING),
             ("fmBackupModal", super::FM_BACKUP_MODAL),
             ("fmBackupPanel", super::FM_BACKUP_PANEL),
             ("fmBackupEntryTitle", super::FM_BACKUP_ENTRY_TITLE),

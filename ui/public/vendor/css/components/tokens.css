@@ -73,6 +73,15 @@
          light-theme green but not on the brighter dark-theme green (#340). */
       --on-trust: #fff;
 
+      /* Solid --trust surface that carries --on-trust text at >= 4.5:1
+         (#fff on --trust #339966 is only 3.6:1). Dark theme uses --trust
+         itself with the dark --on-trust ink (6.5:1). */
+      --trust-solid: #1f6f47;
+      /* Text-weight accents on a card surface, for status lines. --trust
+         and --caution are too light as 13px text on white (3.6:1, 4.1:1). */
+      --trust-ink: #1f6f47;
+      --caution-ink: #8a5a12;
+
       position: fixed;
       inset: 0;
       display: flex;
@@ -135,6 +144,9 @@
     --warn: #e06c6c;
     --danger-ink: #f87171;
     --on-trust: #052e16;
+    --trust-solid: #22c55e;
+    --trust-ink: #22c55e;
+    --caution-ink: #fbbf24;
   }
 
   @media (prefers-color-scheme: dark) {
@@ -169,6 +181,9 @@
       --warn: #e06c6c;
       --danger-ink: #f87171;
       --on-trust: #052e16;
+      --trust-solid: #22c55e;
+      --trust-ink: #22c55e;
+      --caution-ink: #fbbf24;
     }
   }
 

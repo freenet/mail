@@ -1503,6 +1503,7 @@ pub(crate) async fn node_comms(
                 ml_dsa_key,
                 ml_kem_dk,
                 description,
+                backed_up,
             } => {
                 // #185 / #186: persist the keypair to the identity-management
                 // delegate IMMEDIATELY and surface the identity in the UI
@@ -1548,6 +1549,10 @@ pub(crate) async fn node_comms(
                     );
                     return;
                 }
+                // Keys are persisted: only now record whether they are
+                // backed up. Stamping earlier let a failed create, retried
+                // under the same alias with new keys, show as backed up.
+                crate::app::login::record_backup_after_create(&alias, backed_up);
 
                 // ── Step 2: derive contract keys + populate ALIASES ──
                 // `inbox_key` is `hash(wasm, InboxParams::from(vk))` —

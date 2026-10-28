@@ -673,6 +673,13 @@ pub(crate) fn local_set_global_settings(settings: GlobalSettings) {
 /// the dispatch are logged via `crate::log` but don't fail the call — the
 /// local snapshot is the source of truth for the current session and the
 /// delegate write is best-effort.
+///
+/// Safe to call from outside the Dioxus runtime (the `api.rs` node loop
+/// calls it when an identity is created): the snapshot bump is already
+/// runtime-guarded, and the delegate write runs on
+/// `wasm_bindgen_futures::spawn_local` rather than Dioxus `spawn`, which
+/// needs a current scope and would also cancel the write if the calling
+/// component unmounted first.
 pub(crate) fn persist_identity_settings(alias: String, settings: IdentitySettings) {
     local_set_identity_settings(&alias, settings.clone());
     #[cfg(feature = "use-node")]
@@ -681,7 +688,7 @@ pub(crate) fn persist_identity_settings(alias: String, settings: IdentitySetting
             return;
         };
         let mut client = client.clone();
-        dioxus::prelude::spawn(async move {
+        wasm_bindgen_futures::spawn_local(async move {
             if let Err(e) = wire::set_identity_settings(&mut client, alias, settings).await {
                 crate::log::error(format!("set_identity_settings failed: {e}"), None);
             }

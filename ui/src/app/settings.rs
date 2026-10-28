@@ -412,9 +412,39 @@ fn ScrAccount() -> Element {
     // `last_backup_at` is stamped only when the user confirms "I've saved
     // it" in the panel (see `login::mark_backed_up`), so the amber banner
     // and the "Last backup" row reflect a confirmed backup, not a click.
-    let mut backup_open = use_signal(|| false);
-    let on_backup = move |_| backup_open.set(true);
-    let backup_panel: Option<(Result<String, String>, Vec<String>)> = if *backup_open.read() {
+    //
+    // The panel belongs to ONE identity: `backup_for` records which (by
+    // verifying-key prefix, which a rename doesn't change). This screen is
+    // not remounted when the sidebar switches identity, so without that
+    // the open panel, its Copied state and its "I've saved it" button
+    // would carry over to the next identity, letting a user copy A's key
+    // and then mark B as backed up.
+    let mut backup_for: Signal<Option<String>> = use_signal(|| None);
+    let mut backup_scroll = use_signal(|| 0u32);
+    let panel_owner = vk_seed.clone();
+    use_effect(use_reactive!(|panel_owner| {
+        if backup_for
+            .peek()
+            .as_ref()
+            .is_some_and(|open_for| *open_for != panel_owner)
+        {
+            backup_for.set(None);
+        }
+    }));
+    let backup_open = backup_for.read().as_deref() == Some(vk_seed.as_str()) && !vk_seed.is_empty();
+    let on_backup = {
+        let vk_seed = vk_seed.clone();
+        move |_| {
+            if backup_for.peek().as_deref() == Some(vk_seed.as_str()) {
+                // Already open (perhaps scrolled out of view): bring it back.
+                let next = backup_scroll.peek().wrapping_add(1);
+                backup_scroll.set(next);
+            } else {
+                backup_for.set(Some(vk_seed.clone()));
+            }
+        }
+    };
+    let backup_panel: Option<(Result<String, String>, Vec<String>)> = if backup_open {
         user.read().logged_id().map(|active| {
             (
                 crate::app::login::recovery_key_for(active),
@@ -425,6 +455,7 @@ fn ScrAccount() -> Element {
         None
     };
     let alias_for_panel = alias.clone();
+    let panel_key = vk_seed.clone();
 
     // Restore: route through the existing import-backup modal; close
     // settings so the modal is visible over the login pane.
@@ -448,16 +479,21 @@ fn ScrAccount() -> Element {
                         match token {
                             Ok(token) => rsx! {
                                 crate::app::backup_panel::BackupKeyPanel {
+                                    // Keyed by identity: a different identity
+                                    // gets a fresh panel (hidden key, no
+                                    // stale "Copied"), never this one's state.
+                                    key: "{panel_key}",
                                     token,
                                     alias: alias_for_panel.clone(),
                                     words,
                                     saved: false,
+                                    scroll_request: *backup_scroll.read(),
                                     on_exported: move |_| {},
                                     on_saved: {
                                         let alias = alias_for_panel.clone();
                                         move |_| {
                                             crate::app::login::mark_backed_up(&alias);
-                                            backup_open.set(false);
+                                            backup_for.set(None);
                                         }
                                     },
                                 }
@@ -470,7 +506,7 @@ fn ScrAccount() -> Element {
                             button {
                                 class: "fm-btn-secondary",
                                 r#type: "button",
-                                onclick: move |_| backup_open.set(false),
+                                onclick: move |_| backup_for.set(None),
                                 "Close"
                             }
                         }
@@ -487,7 +523,7 @@ fn ScrAccount() -> Element {
                         button {
                             class: "fm-btn-primary",
                             "data-testid": testid::FM_SETTINGS_BACKUP_BANNER,
-                            onclick: on_backup,
+                            onclick: on_backup.clone(),
                             "Back up now"
                         }
                     }
