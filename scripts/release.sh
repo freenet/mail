@@ -11,17 +11,19 @@
 #     $WEB_CONTAINER_KEY_FILE (default ~/.config/freenet-email/web-container-keys.toml)
 #   • A Freenet network-connected node is running and reachable
 #     (not a `freenet local` sandbox)
-#   • `gh` is authenticated to push tags
+#   • `gh` is authenticated to push a branch and open a PR
 #   • GNU tar is installed (for reproducible archives)
 #
 # Usage:
 #     scripts/release.sh 0.1.0
-#     scripts/release.sh 0.1.0 --yes   # skip the final confirmation prompt
+#     scripts/release.sh 0.1.0 --yes   # auto-confirm every prompt
 #
-# The script is idempotent up to the point of committing
-# `published-contract/`: re-running after a failed publish re-runs the
-# build and prompts again, so recovery from a transient network error is
-# just `scripts/release.sh $version` again.
+# After the snapshot PR it opens is squash-merged, finish with
+# `scripts/release-tag.sh <version>`.
+#
+# The script is idempotent up to the publish: re-running after a failed
+# build or publish re-runs it and prompts again. Once the publish has
+# succeeded, do NOT re-run it; follow the recovery steps it prints.
 
 set -euo pipefail
 
@@ -84,9 +86,37 @@ fi
 if git rev-parse "$TAG" >/dev/null 2>&1; then
     die "tag $TAG already exists locally. Delete with 'git tag -d $TAG' first if re-running."
 fi
-if git ls-remote --exit-code --tags origin "$TAG" >/dev/null 2>&1; then
-    die "tag $TAG already exists on origin. Either bump the version or delete it remotely."
+# `ls-remote --exit-code` exits 2 when the ref is absent; anything else
+# non-zero is a network/auth error, which must not read as "absent".
+remote_ref_absent() {
+    local rc=0
+    git ls-remote --exit-code origin "$1" >/dev/null 2>&1 || rc=$?
+    case "$rc" in
+        0) return 1 ;;
+        2) return 0 ;;
+        *) die "could not query origin for $1 (git ls-remote exit $rc)" ;;
+    esac
+}
+remote_ref_absent "refs/tags/$TAG" \
+    || die "tag $TAG already exists on origin. Either bump the version or delete it remotely."
+
+# The snapshot goes up as release/$TAG after the publish. Check now, so a
+# leftover branch can't fail the run after the irreversible steps.
+RELEASE_BRANCH="release/$TAG"
+if git rev-parse -q --verify "refs/heads/$RELEASE_BRANCH" >/dev/null; then
+    die "branch $RELEASE_BRANCH already exists locally (git branch -D $RELEASE_BRANCH if it is stale)"
 fi
+remote_ref_absent "refs/heads/$RELEASE_BRANCH" \
+    || die "branch $RELEASE_BRANCH already exists on origin (delete it if it is stale)"
+
+# Publish exactly what is on origin/main.
+git fetch -q origin +refs/heads/main:refs/remotes/origin/main
+if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main)" ]; then
+    die "local main ($(git rev-parse --short HEAD)) is not origin/main ($(git rev-parse --short origin/main)). Pull first."
+fi
+# Recorded in the snapshot commit; release-tag.sh refuses to tag if the
+# snapshot was merged onto any other base (it would carry unpublished code).
+SOURCE_SHA=$(git rev-parse HEAD)
 
 # Workspace Cargo.toml version must match the requested release version.
 # `ui/src/lib.rs` bakes `env!("CARGO_PKG_VERSION")` into the wasm; if the
@@ -129,6 +159,8 @@ command -v fdev >/dev/null || die "fdev not in PATH (cargo install fdev)"
 command -v dx >/dev/null || die "dx (dioxus-cli) not in PATH"
 command -v cargo-make >/dev/null || die "cargo-make not in PATH"
 command -v gh >/dev/null || die "gh (GitHub CLI) not in PATH"
+# `gh pr create` runs after the irreversible publish; fail here instead.
+gh auth status >/dev/null 2>&1 || die "gh is not authenticated (gh auth login)"
 
 # fdev must support the --as-state flag for facade pointer flips.
 # Older builds silently wrap the file as `UpdateData::Delta` and the
@@ -199,17 +231,71 @@ echo "This will:"
 echo "  1. Build the UI and contracts in release mode"
 echo "  2. Sign the webapp with the PRODUCTION key at $KEY_FILE"
 echo "  3. Publish the contract to the real Freenet network via fdev"
-echo "  4. Commit the new published-contract/ snapshot"
-echo "  5. Create an annotated tag $TAG"
-echo "  6. Push the commit AND tag to origin/main"
+echo "  4. Flip the stable facade pointer to the new webapp"
+echo "  5. Commit the new published-contract/ snapshot on $RELEASE_BRANCH"
+echo "  6. Push that branch and open the snapshot PR"
 echo ""
-echo "Steps 3, 4, 5, 6 are PUBLICLY VISIBLE and hard to undo."
+echo "Steps 3-6 are PUBLICLY VISIBLE; 3 and 4 cannot be undone."
+echo "Tag afterwards with scripts/release-tag.sh $VERSION once the PR merges."
 confirm "Proceed?"
 
 # ─── Build + publish ───────────────────────────────────────────────────────
 
 echo ""
 echo "═══ Building and publishing ═══════════════════════════════════════"
+
+# Armed BEFORE the publish: fdev can time out after the server-side publish
+# succeeded (freenet-core#4102). From here a re-run may publish again, so
+# say how to finish by hand instead.
+RELEASE_FINISHED=0
+SNAPSHOT_CHANGED=""
+on_post_publish_exit() {
+    [ "$RELEASE_FINISHED" = "1" ] && return
+    echo "" >&2
+    if [ -z "$SNAPSHOT_CHANGED" ]; then
+        # Stopped inside `cargo make publish-production`: work out whether the
+        # publish itself happened before telling the user what to do.
+        local new_id old_id
+        new_id=$(tr -d '[:space:]' < published-contract/contract-id.txt 2>/dev/null || true)
+        old_id=$(git show "$SOURCE_SHA:published-contract/contract-id.txt" 2>/dev/null | tr -d '[:space:]' || true)
+        if [ -z "$new_id" ] || [ "$new_id" = "$old_id" ]; then
+            # Either the build failed before writing a new id, or the build
+            # reproduced the live contract exactly; publishing an identical
+            # contract again changes nothing, so a re-run is safe either way.
+            echo "✗ release.sh stopped before anything new was published for $TAG" >&2
+            echo "  (build or signing step, or the build reproduced the live contract id)." >&2
+            echo "  Fix the error, run 'git checkout -- published-contract/' if it shows" >&2
+            echo "  changes, and re-run scripts/release.sh $VERSION." >&2
+            return
+        fi
+        if ! curl -sf -m 60 -o /dev/null "http://127.0.0.1:${FREENET_PORT}/v1/contract/web/${new_id}/"; then
+            echo "✗ release.sh stopped while publishing $TAG, and the gateway does not serve" >&2
+            echo "  the new webapp ($new_id). It most likely did not land: run" >&2
+            echo "  'git checkout -- published-contract/' and re-run scripts/release.sh $VERSION." >&2
+            return
+        fi
+        echo "✗ release.sh stopped, but the new webapp ($new_id) IS live (fdev timeout?)." >&2
+    else
+        echo "✗ release.sh stopped after publishing $TAG." >&2
+    fi
+    echo "  Do NOT re-run release.sh; it would publish again." >&2
+    echo "  Current branch: $(git rev-parse --abbrev-ref HEAD)" >&2
+    echo "  To finish by hand (RELEASING.md 'Recovery'):" >&2
+    echo "    1. Check the facade points at the new webapp; if not, see 'Manual pointer flip'." >&2
+    if [ "$SNAPSHOT_CHANGED" = "0" ]; then
+        echo "    2. Nothing to commit: scripts/release-tag.sh $VERSION --sha $SOURCE_SHA" >&2
+    else
+        echo "    2. Commit published-contract/ on $RELEASE_BRANCH (git checkout -b if needed)," >&2
+        echo "       git push -u origin $RELEASE_BRANCH, and open a PR against main. The commit" >&2
+        echo "       message must contain these two lines (release-tag.sh checks them):" >&2
+        echo "         Contract ID: $(tr -d '[:space:]' < published-contract/contract-id.txt 2>/dev/null || echo '<id from published-contract/contract-id.txt>')" >&2
+        echo "         Published-From: $SOURCE_SHA" >&2
+        echo "    3. After the squash merge: scripts/release-tag.sh $VERSION" >&2
+    fi
+}
+# EXIT, not ERR: `die` and a declined `confirm` leave via `exit`.
+trap on_post_publish_exit EXIT
+
 cargo make publish-production
 
 # ─── Verify the commit-worthy diff ─────────────────────────────────────────
@@ -286,57 +372,59 @@ if [ "$SNAPSHOT_CHANGED" = "1" ]; then
     echo "Diff in published-contract/:"
     git status --short -- published-contract/
     echo ""
-    confirm "Commit this snapshot and tag as $TAG?"
+    confirm "Commit this snapshot on release/$TAG and open a PR?"
 
-    # ─── Commit ────────────────────────────────────────────────────────────────
+    # ─── Commit on a release branch ────────────────────────────────────────────
+    #
+    # main is protected by a ruleset (required checks, squash-only merges), so
+    # the snapshot cannot be pushed to main directly. It goes up as
+    # release/$TAG with a PR, and local main is left untouched. The tag is
+    # created after the squash merge by scripts/release-tag.sh, because
+    # squashing gives the commit a new SHA.
 
+    git checkout -b "$RELEASE_BRANCH"
     git add published-contract/
     git commit -m "chore(release): $TAG — production publish
 
 Contract ID: $CONTRACT_ID
+Published-From: $SOURCE_SHA
 
 Signed with the uncommitted production key at
 ~/.config/freenet-email/web-container-keys.toml.
 "
+
+    echo ""
+    echo "═══ Pushing release branch ═════════════════════════════════════════"
+    confirm "Push $RELEASE_BRANCH and open the snapshot PR?"
+
+    git push -u origin "$RELEASE_BRANCH"
+    PR_URL=$(gh pr create --base main --head "$RELEASE_BRANCH" \
+        --title "chore(release): $TAG — production publish" \
+        --body "Release snapshot from \`scripts/release.sh $VERSION\`, already published to the network.
+
+- webapp contract id: \`$CONTRACT_ID\`
+- built and published from main at \`$SOURCE_SHA\`
+
+Squash-merge once CI is green, **before merging anything else**: if main moves first, the merged commit would include code that was never published, and \`scripts/release-tag.sh\` will refuse to tag it. Then run \`scripts/release-tag.sh $VERSION\` on main.
+
+Contract ID: $CONTRACT_ID
+Published-From: $SOURCE_SHA")
+    git checkout main
+    RELEASE_FINISHED=1
+
+    echo ""
+    echo "✅ published $TAG; snapshot PR: $PR_URL"
+    echo ""
+    echo "Finish the release once that PR is merged:"
+    echo "  scripts/release-tag.sh $VERSION"
 else
     confirm "Tag current HEAD as $TAG (no snapshot commit)?"
+    "$REPO_ROOT/scripts/release-tag.sh" "$VERSION" --sha "$SOURCE_SHA" --yes
+    RELEASE_FINISHED=1
+    echo ""
+    echo "✅ released $TAG"
 fi
 
-COMMIT=$(git rev-parse HEAD)
-
-# ─── Tag ───────────────────────────────────────────────────────────────────
-
-# Pull the changelog from the last tag (if any) for the annotated message.
-PREV_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
-if [ -n "$PREV_TAG" ]; then
-    CHANGELOG=$(git log --pretty=format:'  - %s' "$PREV_TAG..HEAD")
-    RANGE="since $PREV_TAG"
-else
-    CHANGELOG=$(git log --pretty=format:'  - %s')
-    RANGE="initial release"
-fi
-
-git tag -a "$TAG" -m "freenet-email $TAG
-
-Production webapp contract id: $CONTRACT_ID
-
-Changes $RANGE:
-$CHANGELOG
-"
-
-echo "  ✓ tagged $TAG at $COMMIT"
-
-# ─── Push ──────────────────────────────────────────────────────────────────
-
-echo ""
-echo "═══ Pushing to origin ══════════════════════════════════════════════"
-confirm "Push the commit AND tag to origin/main?"
-
-git push origin main
-git push origin "$TAG"
-
-echo ""
-echo "✅ released $TAG"
 echo ""
 echo "Next steps:"
 echo "  1. Wait ~30s for the contract (and facade UPDATE, if applicable)"
