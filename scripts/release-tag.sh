@@ -16,7 +16,9 @@
 # record is likewise overridable only with --allow-base-drift.
 #
 # With --sha <commit> it tags that commit directly (release.sh uses this
-# when the release produced no snapshot change).
+# when the release produced no snapshot change). That skips the snapshot
+# checks above, which only apply to a snapshot commit; the fdev id check
+# still runs.
 #
 # Usage:
 #     scripts/release-tag.sh 0.2.7
@@ -123,7 +125,7 @@ else
     OTHER_CHANGES=$(git diff --no-renames --name-only "$SHA^" "$SHA" | grep -v '^published-contract/' || true)
     if [ -n "$OTHER_CHANGES" ]; then
         echo "  $(git rev-parse --short "$SHA") changes files outside published-contract/:" >&2
-        printf '    %s\n' $OTHER_CHANGES >&2
+        printf '%s\n' "$OTHER_CHANGES" | sed 's/^/    /' >&2
         die "refusing to tag: those changes were never published. Cut a new release."
     fi
 fi

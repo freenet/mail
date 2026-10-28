@@ -443,6 +443,9 @@ Semver per `Cargo.toml`. Bump minor for new features, patch for fixes,
 major once the protocol stabilizes (we're not there yet).
 
 The `chore(release): vX.Y.Z` commit (the squash-merged snapshot PR) is
-the annotated tag's anchor; keep that title when merging, since
-`release-tag.sh` finds the commit by it. Its diff is always exactly
+the annotated tag's anchor. When merging, keep the title (`release-tag.sh`
+finds the commit by it) and keep the `Contract ID:` / `Published-From:`
+lines in the squash message body (it checks them, and the only way past
+a missing one is `--allow-base-drift`, which waives every check). Its
+diff is always exactly
 `published-contract/` — any release that touches other files is a bug.
