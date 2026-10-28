@@ -12,6 +12,9 @@ export default defineConfig({
     baseURL: process.env.FREENET_EMAIL_BASE_URL || "http://127.0.0.1:8092",
     navigationTimeout: 30_000,
     actionTimeout: 10_000,
+    // A failure that only reproduces in CI is otherwise undiagnosable: the
+    // uploaded report then carries the trace (network, console, DOM).
+    trace: "on-first-retry",
   },
   projects: [
     {
