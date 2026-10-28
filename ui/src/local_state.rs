@@ -233,6 +233,11 @@ pub(crate) fn global_settings() -> GlobalSettings {
     SNAPSHOT.with(|s| s.borrow().global_settings().clone())
 }
 
+mod write_tracker;
+pub(crate) use write_tracker::Stored;
+#[cfg(feature = "use-node")]
+use write_tracker::WriteTracker;
+
 #[cfg(feature = "use-node")]
 mod wire {
     use super::*;
@@ -256,9 +261,8 @@ mod wire {
         crate::api::embedded_artifact::assert_delegate(CODE, CODE_HASH);
     }
 
-    /// Set after the delegate is registered + its initial `GetAll` is issued.
-    /// Used by the response handler in `api::node_comms` to recognise replies
-    /// destined for this delegate.
+    /// Set before the delegate is registered. Used by the response handler in
+    /// `api::node_comms` to recognise replies destined for this delegate.
     pub(crate) static LOCAL_STATE_KEY: OnceLock<DelegateKey> = OnceLock::new();
 
     fn params() -> Result<Parameters<'static>, DynError> {
@@ -267,20 +271,35 @@ mod wire {
     }
 
     thread_local! {
-        /// Requests sent to the local-state delegate that the node has not
-        /// answered yet. The node answers every one with a `DelegateResponse`
-        /// once the delegate has run it (an empty one for a write), so zero
-        /// means every write sent so far is stored. A write the UI has
-        /// applied optimistically but the node has not answered is lost if
-        /// the page reloads first (#286), so nothing may be reported as
-        /// done until this reaches zero.
-        ///
-        /// A count, not a per-request match: responses carry no request id
-        /// and the node may answer out of order. Waiting for zero is
-        /// conservative (it also waits for later writes), never early.
-        static UNANSWERED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-        static ON_ANSWERED: RefCell<Vec<futures::channel::oneshot::Sender<()>>> =
-            const { RefCell::new(Vec::new()) };
+        /// Requests to the local-state delegate the node has not answered
+        /// yet. A write the UI applied optimistically is lost if the page
+        /// reloads before the node answers it (#286), so nothing may be
+        /// reported done before then. See [`super::write_tracker`].
+        static WRITES: RefCell<WriteTracker> = RefCell::new(WriteTracker::default());
+    }
+
+    /// The request's kind, for logs. Never the payload: it can hold drafts.
+    fn kind(msg: &LocalStateMsg) -> &'static str {
+        match msg {
+            LocalStateMsg::Init => "Init",
+            LocalStateMsg::SaveDraft { .. } => "SaveDraft",
+            LocalStateMsg::DeleteDraft { .. } => "DeleteDraft",
+            LocalStateMsg::MarkRead { .. } => "MarkRead",
+            LocalStateMsg::SaveSent { .. } => "SaveSent",
+            LocalStateMsg::DeleteSent { .. } => "DeleteSent",
+            LocalStateMsg::SetSentDeliveryState { .. } => "SetSentDeliveryState",
+            LocalStateMsg::ArchiveMessage { .. } => "ArchiveMessage",
+            LocalStateMsg::UnarchiveMessage { .. } => "UnarchiveMessage",
+            LocalStateMsg::DeleteMessage { .. } => "DeleteMessage",
+            LocalStateMsg::SetIdentitySettings { .. } => "SetIdentitySettings",
+            LocalStateMsg::SetGlobalSettings { .. } => "SetGlobalSettings",
+            LocalStateMsg::GetAll => "GetAll",
+        }
+    }
+
+    fn count_sent(kind: &str) {
+        let unanswered = WRITES.with(|w| w.borrow_mut().sent());
+        crate::log::info(format!("local-state {kind} sent ({unanswered} unanswered)"));
     }
 
     /// Send a local-state request and count it until the node answers.
@@ -289,59 +308,54 @@ mod wire {
         request: DelegateRequest<'static>,
         msg: &LocalStateMsg,
     ) -> Result<(), DynError> {
-        // The variant name only: payloads can hold drafts.
-        let debug = format!("{msg:?}");
-        let kind = debug
-            .split(|c: char| !c.is_alphanumeric())
-            .next()
-            .unwrap_or("request");
-        let unanswered = UNANSWERED.with(|n| {
-            n.set(n.get() + 1);
-            n.get()
-        });
-        crate::log::info(format!("local-state {kind} sent ({unanswered} unanswered)"));
+        count_sent(kind(msg));
         if let Err(e) = client.send(request.into()).await {
             // It never reached the node, so nothing will answer it.
-            note_response();
+            WRITES.with(|w| w.borrow_mut().unsent());
             return Err(e.into());
         }
         Ok(())
     }
 
-    /// Count one answer from the node to a local-state request.
-    pub(crate) fn note_response() {
-        let unanswered = UNANSWERED.with(|n| {
-            // Saturating: a stray answer (one to the registration, if the node
-            // sends it) must not wrap the count.
-            n.set(n.get().saturating_sub(1));
-            n.get()
-        });
-        crate::log::info(format!("local-state answered ({unanswered} unanswered)"));
-        if unanswered == 0 {
-            ON_ANSWERED.with(|waiters| {
-                for waiter in waiters.borrow_mut().drain(..) {
-                    let _ = waiter.send(());
-                }
-            });
-        }
+    /// The node answered a local-state request: with a `DelegateResponse`
+    /// (`ok`), or with an error naming this delegate.
+    pub(crate) fn note_answer(ok: bool) {
+        let unanswered = WRITES.with(|w| w.borrow_mut().answered(ok));
+        let how = if ok {
+            "answered"
+        } else {
+            "answered with an error"
+        };
+        crate::log::info(format!("local-state {how} ({unanswered} unanswered)"));
     }
 
-    /// Resolves once the node has answered every local-state request sent so
-    /// far, i.e. every write made so far is stored and survives a reload.
-    pub(crate) async fn writes_stored() {
-        if UNANSWERED.with(|n| n.get()) == 0 {
-            return;
-        }
-        let (tx, rx) = futures::channel::oneshot::channel();
-        ON_ANSWERED.with(|waiters| waiters.borrow_mut().push(tx));
-        let _ = rx.await;
+    /// The node reported a delegate error that names no delegate.
+    pub(crate) fn note_unattributed_error() {
+        WRITES.with(|w| w.borrow_mut().unattributed_error());
+    }
+
+    /// Whether every local-state request sent so far was stored: waits for
+    /// the node's answers, or for `timeout`.
+    pub(crate) async fn writes_stored(timeout: impl std::future::Future<Output = ()>) -> Stored {
+        let wait = WRITES.with(|w| w.borrow_mut().wait());
+        super::write_tracker::stored_or_timeout(wait, timeout).await
     }
 
     pub(crate) async fn register_and_init(
         client: &mut WebApiRequestClient,
     ) -> Result<DelegateKey, DynError> {
         let params = params()?;
-        let key = crate::api::create_delegate(client, CODE_HASH, CODE, &params).await?;
+        // Known before anything is sent, so the response handler recognises
+        // every answer, the first included.
+        let key = DelegateKey::from_params(CODE_HASH, &params)?;
+        let _ = LOCAL_STATE_KEY.set(key.clone());
+        // The node answers the registration too (an empty `DelegateResponse`
+        // for this key), so it is counted like every other request.
+        count_sent("RegisterDelegate");
+        if let Err(e) = crate::api::create_delegate(client, CODE_HASH, CODE, &params).await {
+            WRITES.with(|w| w.borrow_mut().unsent());
+            return Err(e);
+        }
         // Init is idempotent in the delegate.
         let request = DelegateRequest::ApplicationMessages {
             params: params.clone(),
@@ -511,8 +525,8 @@ pub(crate) use wire::delete_sent;
 #[cfg(feature = "use-node")]
 pub(crate) use wire::{
     LOCAL_STATE_KEY, archive_message, delete_draft, delete_message, fetch_all, mark_read,
-    note_response, register_and_init, save_draft, save_sent, set_sent_delivery_state,
-    writes_stored,
+    note_answer, note_unattributed_error, register_and_init, save_draft, save_sent,
+    set_sent_delivery_state, writes_stored,
 };
 // `unarchive_message` is wired but unused until later phases.
 #[cfg(feature = "use-node")]

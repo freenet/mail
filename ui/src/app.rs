@@ -4576,14 +4576,18 @@ fn OpenArchivedMessage(msg_id: u64, msg: mail_local_state::ArchivedMessage) -> E
                                             }
                                         }
                                     },
-                                    "Deleting…",
-                                    "Deleted",
+                                    &CONFIRM_DELETE,
                                 );
                             }
                         }
                         menu_selection.write().at_inbox_list();
-                        #[cfg(not(feature = "use-node"))]
-                        crate::toast::push_toast("Deleted", crate::toast::ToastLevel::Success);
+                        // Nothing was written that a node must confirm.
+                        if delete_alias.is_empty() || cfg!(not(feature = "use-node")) {
+                            crate::toast::push_toast(
+                                CONFIRM_DELETE.done,
+                                crate::toast::ToastLevel::Success,
+                            );
+                        }
                     },
                     "Delete"
                 }
@@ -4764,14 +4768,18 @@ fn OpenSentMessage(sent_id: String, msg: mail_local_state::SentMessage) -> Eleme
                                             }
                                         }
                                     },
-                                    "Deleting…",
-                                    "Deleted",
+                                    &CONFIRM_DELETE,
                                 );
                             }
                         }
                         menu_selection.write().at_inbox_list();
-                        #[cfg(not(feature = "use-node"))]
-                        crate::toast::push_toast("Deleted", crate::toast::ToastLevel::Success);
+                        // Nothing was written that a node must confirm.
+                        if delete_alias.is_empty() || cfg!(not(feature = "use-node")) {
+                            crate::toast::push_toast(
+                                CONFIRM_DELETE.done,
+                                crate::toast::ToastLevel::Success,
+                            );
+                        }
                     },
                     "Delete"
                 }
@@ -4886,8 +4894,7 @@ fn archive_message(
                         }
                     }
                 },
-                "Archiving…",
-                "Archived",
+                &CONFIRM_ARCHIVE,
             );
         }
     }
@@ -4899,8 +4906,10 @@ fn archive_message(
         queue.borrow_mut().push(result);
     });
     post.apply(&mut menu_selection);
-    #[cfg(not(feature = "use-node"))]
-    crate::toast::push_toast("Archived", crate::toast::ToastLevel::Success);
+    // Nothing was written that a node must confirm.
+    if alias.is_empty() || cfg!(not(feature = "use-node")) {
+        crate::toast::push_toast(CONFIRM_ARCHIVE.done, crate::toast::ToastLevel::Success);
+    }
 }
 
 /// Shared Delete logic (#270 BLOCKER-1): drop any local kept/archived copies
@@ -4937,8 +4946,7 @@ fn delete_message(
                         }
                     }
                 },
-                "Deleting…",
-                "Deleted",
+                &CONFIRM_DELETE,
             );
         }
     }
@@ -4950,17 +4958,51 @@ fn delete_message(
         queue.borrow_mut().push(result);
     });
     post.apply(&mut menu_selection);
-    #[cfg(not(feature = "use-node"))]
-    crate::toast::push_toast("Deleted", crate::toast::ToastLevel::Success);
+    // Nothing was written that a node must confirm.
+    if alias.is_empty() || cfg!(not(feature = "use-node")) {
+        crate::toast::push_toast(CONFIRM_DELETE.done, crate::toast::ToastLevel::Success);
+    }
 }
 
-/// Run a local-state `write` and confirm it only once it is stored: `pending`
-/// from now until the write was sent and the node has answered every
-/// local-state request so far, then `done`. The UI applies the change at
-/// once, but until the node answers, a reload loses it (#286), so `done` must
-/// not appear before then, and `pending` stays up for exactly that window.
-/// Runs as one task so `done` cannot overtake the write; a failed write gets
-/// no `done` (its own error path reports it).
+/// What the user is told about a local-state write, by outcome.
+#[cfg_attr(not(feature = "use-node"), allow(dead_code))]
+struct Confirmation {
+    /// While the node has not answered.
+    pending: &'static str,
+    /// The node stored it.
+    done: &'static str,
+    /// The write failed or the node answered with an error.
+    failed: &'static str,
+    /// No answer in time, or one that could not be attributed.
+    unconfirmed: &'static str,
+}
+
+const CONFIRM_DELETE: Confirmation = Confirmation {
+    pending: "Deleting…",
+    done: "Deleted",
+    failed: "Your node didn't save the delete; the message may reappear after a reload",
+    unconfirmed: "Couldn't confirm the delete was saved; it may reappear after a reload",
+};
+
+const CONFIRM_ARCHIVE: Confirmation = Confirmation {
+    pending: "Archiving…",
+    done: "Archived",
+    failed: "Your node didn't save the archive; the message may be lost after a reload",
+    unconfirmed: "Couldn't confirm the archive was saved; the message may be lost after a reload",
+};
+
+/// How long to wait for the node to answer before saying the write could not
+/// be confirmed.
+#[cfg(feature = "use-node")]
+const CONFIRM_TIMEOUT_MS: u32 = 20_000;
+
+/// Run a local-state `write` and confirm it only once it is stored. `pending`
+/// shows from now until the node has answered every local-state request sent
+/// so far, then `done`. The UI applies the change at once, but until the node
+/// answers, a reload loses it (#286), so `done` must not appear before then.
+/// A failed write, or an error answer, shows `failed`; no answer within
+/// [`CONFIRM_TIMEOUT_MS`], or one that cannot be attributed, `unconfirmed`.
+/// Runs as one task so the outcome cannot overtake the write.
 ///
 /// `spawn_forever`: the caller navigates away and unmounts the view right
 /// after this, which would cancel a bare `spawn()` before the write is sent.
@@ -4969,21 +5011,25 @@ fn delete_message(
 #[cfg(feature = "use-node")]
 fn confirm_when_stored(
     write: impl std::future::Future<Output = bool> + 'static,
-    pending: &'static str,
-    done: &'static str,
+    say: &'static Confirmation,
 ) {
+    use crate::local_state::Stored;
+    use crate::toast::{ToastLevel, dismiss_toast_in, push_sticky_toast_to, push_toast_to};
     let toasts = use_context::<crate::toast::ToastQueue>();
-    let pending =
-        crate::toast::push_sticky_toast_to(toasts, pending, crate::toast::ToastLevel::Info);
+    let pending = push_sticky_toast_to(toasts, say.pending, ToastLevel::Info);
     let _task = dioxus_core::spawn_forever(async move {
-        let sent = write.await;
-        if sent {
-            crate::local_state::writes_stored().await;
-        }
-        crate::toast::dismiss_toast_in(toasts, pending);
-        if sent {
-            crate::toast::push_toast_to(toasts, done, crate::toast::ToastLevel::Success);
-        }
+        let outcome = if write.await {
+            let timeout = gloo_timers::future::TimeoutFuture::new(CONFIRM_TIMEOUT_MS);
+            crate::local_state::writes_stored(timeout).await
+        } else {
+            Stored::Failed
+        };
+        dismiss_toast_in(toasts, pending);
+        match outcome {
+            Stored::Yes => push_toast_to(toasts, say.done, ToastLevel::Success),
+            Stored::Failed => push_toast_to(toasts, say.failed, ToastLevel::Error),
+            Stored::Unknown => push_toast_to(toasts, say.unconfirmed, ToastLevel::Warning),
+        };
     });
 }
 

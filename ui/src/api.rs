@@ -2276,6 +2276,25 @@ pub(crate) async fn node_comms(
                                 }
                             }
                             RequestError::DelegateError(error) => {
+                                // An error is the node's answer to a request. One
+                                // naming the local-state delegate answers one of its
+                                // requests; one naming no delegate might have.
+                                let named = match &error {
+                                    DelegateError::RegisterError(key)
+                                    | DelegateError::Missing(key) => Some(key),
+                                    DelegateError::MissingSecret { key, .. } => Some(key),
+                                    _ => None,
+                                };
+                                match named {
+                                    Some(key)
+                                        if crate::local_state::LOCAL_STATE_KEY.get()
+                                            == Some(key) =>
+                                    {
+                                        crate::local_state::note_answer(false)
+                                    }
+                                    Some(_) => {}
+                                    None => crate::local_state::note_unattributed_error(),
+                                }
                                 crate::log::error(
                                     format!("received delegate request error: {error}"),
                                     None,
@@ -3053,7 +3072,7 @@ pub(crate) async fn node_comms(
                 if is_local_state_empty {
                     // Every local-state request gets exactly this answer once
                     // the delegate has run it: a write is stored from here.
-                    crate::local_state::note_response();
+                    crate::local_state::note_answer(true);
                 }
                 if values.is_empty() && &key == IDENTITIES_KEY.get().unwrap() {
                     // no-op: see comment above
