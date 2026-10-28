@@ -99,3 +99,11 @@ lto = true
 codegen-units = 1
 strip = true
 panic = "abort"
+
+# dx builds the web UI with this profile. Under rustc 1.99's LLVM,
+# `strip = true` removes every custom section, including the one wasm-bindgen
+# reads, so the UI strips debug info only; wasm-opt strips the rest after
+# wasm-bindgen has run.
+[profile.wasm-release]
+inherits = "release"
+strip = "debuginfo"

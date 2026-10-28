@@ -138,6 +138,9 @@ pub(crate) struct WebApiRequestClient {
 #[derive(Clone, Debug)]
 pub(crate) struct WebApiRequestClient;
 
+// The error type is freenet-stdlib's own; boxing it here would only move
+// the size into every caller's `map_err`.
+#[allow(clippy::result_large_err)]
 impl WebApiRequestClient {
     #[cfg(feature = "use-node")]
     pub async fn send(
