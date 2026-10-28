@@ -158,10 +158,32 @@ pub(crate) fn push_toast_to(
     id
 }
 
+/// Push a toast with no auto-dismiss, for a state that lasts until the
+/// caller ends it (e.g. "Deleting…" until the node has stored the delete).
+/// The caller removes it with [`dismiss_toast_in`]; the user can dismiss it
+/// at any time.
+pub(crate) fn push_sticky_toast_to(
+    mut queue: ToastQueue,
+    message: impl Into<String>,
+    level: ToastLevel,
+) -> ToastId {
+    let id = ToastId::next();
+    queue.write().push(Toast {
+        id,
+        message: message.into(),
+        level,
+    });
+    id
+}
+
 /// Remove a toast by id. Silently no-ops if the id is no longer in the queue
 /// (already dismissed or expired).
 pub(crate) fn dismiss_toast(id: ToastId) {
-    let mut queue = use_context::<ToastQueue>();
+    dismiss_toast_in(use_context::<ToastQueue>(), id);
+}
+
+/// [`dismiss_toast`] on a queue captured earlier (see [`push_toast_to`]).
+pub(crate) fn dismiss_toast_in(mut queue: ToastQueue, id: ToastId) {
     queue.write().retain(|t| t.id != id);
 }
 

@@ -4955,11 +4955,12 @@ fn delete_message(
 }
 
 /// Run a local-state `write` and confirm it only once it is stored: `pending`
-/// now, `done` after the write was sent and the node has answered every
-/// local-state request so far. The UI applies the change at once, but until
-/// the node answers, a reload loses it (#286), so `done` must not appear
-/// before then. Runs as one task so `done` cannot overtake the write; a
-/// failed write gets no `done` (its own error path reports it).
+/// from now until the write was sent and the node has answered every
+/// local-state request so far, then `done`. The UI applies the change at
+/// once, but until the node answers, a reload loses it (#286), so `done` must
+/// not appear before then, and `pending` stays up for exactly that window.
+/// Runs as one task so `done` cannot overtake the write; a failed write gets
+/// no `done` (its own error path reports it).
 ///
 /// `spawn_forever`: the caller navigates away and unmounts the view right
 /// after this, which would cancel a bare `spawn()` before the write is sent.
@@ -4972,10 +4973,15 @@ fn confirm_when_stored(
     done: &'static str,
 ) {
     let toasts = use_context::<crate::toast::ToastQueue>();
-    crate::toast::push_toast_to(toasts, pending, crate::toast::ToastLevel::Info);
+    let pending =
+        crate::toast::push_sticky_toast_to(toasts, pending, crate::toast::ToastLevel::Info);
     let _task = dioxus_core::spawn_forever(async move {
-        if write.await {
+        let sent = write.await;
+        if sent {
             crate::local_state::writes_stored().await;
+        }
+        crate::toast::dismiss_toast_in(toasts, pending);
+        if sent {
             crate::toast::push_toast_to(toasts, done, crate::toast::ToastLevel::Success);
         }
     });
