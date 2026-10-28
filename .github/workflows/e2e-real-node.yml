@@ -159,18 +159,6 @@ jobs:
           # Don't tear down on failure — uploads below capture state.
           FREENET_E2E_KEEP: '1'
 
-      # TEMPORARY (reverted in the next commit): stability evidence for the
-      # #286 test, 20 serial runs with retries off, on the nodes left up above.
-      - name: Repeat the #286 delete test
-        working-directory: ./ui/tests
-        run: |
-          CONTRACT_ID="$(cat ../../target/webapp/contract-id.txt)"
-          FREENET_EMAIL_BASE_URL="http://127.0.0.1:7510/v1/contract/web/$CONTRACT_ID/" \
-          FREENET_ISO_GW_LOG_DIR="$HOME/freenet-mail-iso/gw/logs" \
-          FREENET_ISO_PEER_LOG_DIR="$HOME/freenet-mail-iso/peer/logs" \
-            npx playwright test live-node.spec.ts --project=chromium \
-              -g "deleted message stays deleted" --repeat-each=20 --retries=0 --workers=1
-
       - name: Upload Playwright artifacts
         if: always()
         uses: actions/upload-artifact@v7
