@@ -1,19 +1,13 @@
 name: Check Published Contract Drift
 
 on:
+  # No path filter on pull_request (issue #339): `check-drift` is a
+  # required status check, and a path-filtered workflow never reports
+  # it on a PR outside these paths, which leaves that PR unmergeable.
+  # The `changes` job below applies the same filter instead, and
+  # `check-drift` is skipped when nothing relevant changed. A job
+  # skipped by its `if:` reports success to required checks.
   pull_request:
-    paths:
-      - 'contracts/web-container/**'
-      - 'contracts/facade/**'
-      - 'contracts/facade-types/**'
-      - 'contracts/facade-loader/**'
-      - 'common/**'
-      - 'ui/**'
-      - 'published-contract/**'
-      - 'test-contract/web-container-keys.toml'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'rust-toolchain.toml'
   push:
     branches: [main]
     paths:
@@ -30,7 +24,44 @@ on:
       - 'rust-toolchain.toml'
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      relevant: ${{ steps.filter.outputs.relevant }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The pull_request checkout is the merge commit, so HEAD^1 is
+          # the base branch and `HEAD^1 HEAD` is exactly the PR's diff.
+          fetch-depth: 2
+
+      - name: Detect drift-relevant changes
+        id: filter
+        run: |
+          # Keep in sync with the push paths above.
+          if [ "${{ github.event_name }}" != "pull_request" ] \
+            || ! git diff --quiet HEAD^1 HEAD -- \
+              'contracts/web-container/' \
+              'contracts/facade/' \
+              'contracts/facade-types/' \
+              'contracts/facade-loader/' \
+              'common/' \
+              'ui/' \
+              'published-contract/' \
+              'test-contract/web-container-keys.toml' \
+              'Cargo.toml' \
+              'Cargo.lock' \
+              'rust-toolchain.toml' \
+              '.github/workflows/check-contract-wasm.yml'; then
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "relevant=false" >> "$GITHUB_OUTPUT"
+            echo "No drift-relevant paths changed; check-drift will be skipped."
+          fi
+
   check-drift:
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     # ubicloud-standard-8 — rebuilding the published contract from
     # source involves a full wasm32 compile of the web-container +
     # webapp, same compile-bound profile as build.yml.
