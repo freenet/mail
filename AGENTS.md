@@ -44,9 +44,11 @@ scripts/smoke-test-production.sh <url>   # Playwright suite against deployed web
 ```
 
 `example-data + use-node` is buildable but has no user — the app always
-reaches for the node when `use-node` is set. Use `no-sync` (combined with
-`example-data`) for offline dev builds; see `ui/Cargo.toml` for the full
-feature list.
+reaches for the node when `use-node` is set. For offline dev builds use
+`cargo make dev-example` (`--no-default-features --features
+example-data,no-sync`); see `ui/Cargo.toml` for the full feature list.
+
+### Running a Freenet node
 
 Two node modes: `freenet local` / `cargo make run-node` (local sandbox, no
 peers; used by `publish-email-test`/`publish-all`/tests) vs. `freenet network`
@@ -77,7 +79,7 @@ peers; used by `publish-email-test`/`publish-all`/tests) vs. `freenet network`
 
 ```bash
 cargo test --workspace              # All tests
-cargo test -p freenet-email-inbox   # Inbox contract tests only
+cargo make test-inbox               # Inbox contract tests (outside the workspace, needs --features contract)
 cargo make test-ui-playwright       # Playwright E2E tests (build + serve + test)
 cargo make test-ui-playwright-setup # One-time: install Playwright browsers
 ```
@@ -455,9 +457,13 @@ artifact. It was produced under linux/amd64 with the rustc version
 pinned in `rust-toolchain.toml` (currently 1.95.0). The CI byte-equality
 step in `check-contract-wasm.yml` is now a **release blocker**: any
 rebuild that doesn't match the committed bytes fails the PR.
+`check-drift` is required and runs on every PR except docs-only ones
+(#339).
 
 To regenerate the snapshot deliberately (e.g. after bumping the rustc
-pin or a `=x.y.z` dep pin in `contracts/facade/Cargo.toml`):
+pin or a `=x.y.z` dep pin in `contracts/facade/Cargo.toml`). Bumping
+the rustc pin also means bumping every `dtolnay/rust-toolchain@` ref in
+`.github/workflows/`; Dependabot ignores that action on purpose:
 
 **On native linux/amd64**:
 
