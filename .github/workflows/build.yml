@@ -21,7 +21,7 @@ jobs:
     # to parallelise the workspace build).
     runs-on: ubicloud-standard-8
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
 
@@ -38,7 +38,7 @@ jobs:
 
       - name: Cache cargo-installed binaries
         id: cache-bins
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/bin/cargo-make
@@ -137,7 +137,7 @@ jobs:
     runs-on: ubicloud-standard-8
     needs: build-and-test
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
 
@@ -149,7 +149,7 @@ jobs:
 
       - name: Cache cargo-installed binaries
         id: cache-bins
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/bin/cargo-make
@@ -185,7 +185,7 @@ jobs:
         run: cargo binstall -y --force --version 0.7.3 dioxus-cli
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: '20'
 
@@ -195,7 +195,7 @@ jobs:
 
       - name: Cache Playwright browsers
         id: cache-playwright
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/ms-playwright
           key: ${{ runner.os }}-playwright-1.59.1-chromium
@@ -256,7 +256,7 @@ jobs:
 
       - name: Upload Playwright artifacts
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: playwright-report
           path: |
