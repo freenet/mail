@@ -1878,9 +1878,10 @@ test.describe("Live node E2E", () => {
       !PEER_BASE_URL,
       "requires FREENET_EMAIL_BASE_URL to include the contract id",
     );
-    // Identities live in the nodes' delegates, which every repetition shares
-    // (--repeat-each), so each run uses its own aliases and subject.
-    const run = test.info().repeatEachIndex;
+    // Identities live in the nodes' delegates, which outlive one run (other
+    // runs against kept nodes, --repeat-each), so each run uses its own
+    // aliases and subject.
+    const run = `${Date.now().toString(36)}${test.info().repeatEachIndex}`;
     const aliceAlias = `${ALIAS_T8_ALICE}r${run}`;
     const bobAlias = `${ALIAS_T8_BOB}r${run}`;
     const subjectText = `delete me ${run}`;
@@ -2032,10 +2033,16 @@ test.describe("Live node E2E", () => {
       expect(await bobAfter.getByText(/^Deleted$/).count()).toBe(0);
       holdBobRequests = false;
       for (const send of heldBobRequests.splice(0)) send();
+      // "Deleting…" stays up until the node has answered, then gives way to
+      // "Deleted" (a short-lived toast, so it is checked at that moment).
+      await expect(
+        bobAfter.getByText(/^Deleting/),
+        "the in-progress notice clears once the node has answered",
+      ).toHaveCount(0, { timeout: 30_000 });
       await expect(
         bobAfter.getByText(/^Deleted$/),
         "the app confirms the delete once the node has stored it",
-      ).toBeVisible({ timeout: 30_000 });
+      ).toBeVisible();
 
       // ── Reload (the #286 trigger) ─────────────────────────────────
       await bobPage.reload();
