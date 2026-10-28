@@ -247,17 +247,17 @@ bash "$ROOT/scripts/build-loader.sh" "$APP_ID"
 '''
 
 [tasks.build-container]
-description = "Build the container contract WASM (stable across releases). Issue #198: facade lives outside the workspace with its own Cargo.lock."
+description = "Build the container contract WASM with its pinned toolchain (contracts/facade, own Cargo.lock, issue #198)"
 dependencies = ["build-container-loader"]
 script_runner = "bash"
 script = '''
 set -euo pipefail
 ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
-# Run cargo against the container-local manifest. Setting CARGO_TARGET_DIR
-# to the container contract's own target/ keeps the wasm output co-located with its
-# lockfile and avoids polluting the workspace target/ (which would also
-# create a circular CARGO_TARGET_DIR conflict).
+# The container contract's own manifest, lockfile and target/, and its own
+# rustc: cargo make exports the root toolchain as RUSTUP_TOOLCHAIN, which
+# would win over contracts/facade/rust-toolchain.toml.
 cd "$ROOT/contracts/facade"
+. "$ROOT/scripts/container-toolchain.sh"
 cargo build --profile "${BUILD_PROFILE}" --target "${CONTRACT_TARGET}"
 '''
 

@@ -9,7 +9,7 @@
 #   • Bumping rustc in contracts/facade/rust-toolchain.toml.
 #   • Bumping a `=x.y.z` pin under contracts/facade/Cargo.toml or
 #     contracts/facade-types/Cargo.toml.
-#   • Editing facade source.
+#   • Editing the container contract source.
 #
 # On non-Linux/amd64 hosts: do NOT use this. Instead rely on the
 # CI bootstrap path:
@@ -22,18 +22,18 @@
 #      `fdev get-contract-id`, commit, push.
 #   4. CI passes.
 #
-# After this script succeeds (linux/amd64 only), the new bytes are in
-# published-contract/. Commit them as part of the same PR as the change
-# that caused the rotation. The CI gate fails until both the bytes AND
-# the change land in the same PR.
+# Regenerating the snapshot moves the container contract id, which is the
+# bookmarkable URL every user has. It is a deliberate re-key: after this
+# script, update CONTAINER_CONTRACT_ID in scripts/check-frozen-artifacts.sh
+# and the container rows of published-contract/frozen.sha256, and expect
+# scripts/check-frozen-immutable.sh to flag the change for review.
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-# Read the pinned channel from contracts/facade/rust-toolchain.toml so the docker image
-# tag and the host-native rustup tracker stay in sync.
+# The pinned channel, from contracts/facade/rust-toolchain.toml.
 PINNED_RUSTC=$(awk -F'"' '/^channel/ {print $2; exit}' contracts/facade/rust-toolchain.toml)
 if [ -z "$PINNED_RUSTC" ] || [ "$PINNED_RUSTC" = "stable" ]; then
     echo "error: contracts/facade/rust-toolchain.toml has no explicit version pin (channel=$PINNED_RUSTC)." >&2
@@ -52,9 +52,11 @@ if [ "$HOST_OS" != "Linux" ] || [ "$HOST_ARCH" != "x86_64" ]; then
     exit 1
 fi
 
-echo "→ building facade natively (linux/amd64 host with rustc $PINNED_RUSTC)"
+echo "→ building the container contract natively (linux/amd64 host with rustc $PINNED_RUSTC)"
 (
     cd "$ROOT/contracts/facade"
+    # shellcheck source=scripts/container-toolchain.sh
+    . "$ROOT/scripts/container-toolchain.sh"
     cargo build --release --target wasm32-unknown-unknown
 )
 
@@ -90,6 +92,6 @@ echo "    container-id.txt    = $NEW_ID"
 echo "    container.wasm      = $(wc -c < "$ROOT/published-contract/container.wasm") bytes"
 echo "    container.parameters= $(wc -c < "$PARAMS") bytes"
 echo ""
-echo "Commit the diff in published-contract/ alongside the change that"
-echo "rotated the bytes. The CI byte-equality gate will fail until both"
-echo "land in the same PR."
+echo "This moves the container contract id (the bookmarkable URL). Update"
+echo "CONTAINER_CONTRACT_ID in scripts/check-frozen-artifacts.sh and the"
+echo "container rows of published-contract/frozen.sha256 in the same PR."
