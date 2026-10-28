@@ -39,7 +39,8 @@ cargo make publish               # Alias for publish-email-test
 
 # Release automation (see RELEASING.md)
 scripts/generate-production-key.sh       # One-time: generate prod ed25519 key
-scripts/release.sh <version>             # Full release: build → sign → publish → tag → push
+scripts/release.sh <version>             # Release: build → sign → publish → facade flip → snapshot PR
+scripts/release-tag.sh <version>         # After the snapshot PR merges: tag the merge commit, push tag
 scripts/smoke-test-production.sh <url>   # Playwright suite against deployed webapp
 ```
 
@@ -208,8 +209,9 @@ facade contract id fixed. The full chain on every release:
    pushes the new state to the network. **`--as-state` is required** —
    default is `UpdateData::Delta` which a facade-style contract rejects
    silently as `InvalidUpdate` (memory `fdev_update_needs_as_state.md`).
-6. `scripts/release.sh` commits the new web-container snapshot, tags,
-   pushes.
+6. `scripts/release.sh` commits the new web-container snapshot on
+   `release/v<version>` and opens a PR; `scripts/release-tag.sh` tags
+   the squash-merge commit afterwards.
 
 The facade contract id never changes across any of this. Users
 bookmark `/v1/contract/web/<facade_id>/` once and that URL keeps

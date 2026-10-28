@@ -33,10 +33,10 @@ A release is a tuple of `(git tag, contract id, signed webapp)`:
    the deployed webapp via the Freenet gateway to confirm the release
    actually works end to end.
 
-Steps 3, 4, 5, 6 of `release.sh` (publish, commit, tag, push) are
-irreversible and visible to every user of the project. The script
-prompts before each of those, and aborts on failure of any preflight
-check.
+The publish and the facade pointer flip are irreversible and visible to
+every user of the project; the snapshot branch and PR are public. The
+script prompts before each of those, and aborts on failure of any
+preflight check.
 
 ## Preconditions
 
@@ -292,11 +292,17 @@ fdev execute update --as-state \
 
 # Verify (same as §"Verifying the pointer flip worked" above).
 
-# Then complete the commit/tag/push that release.sh would have run:
-git add published-contract/contract-id.txt
+# Then land the snapshot the way release.sh would have (main only takes
+# squash-merged PRs):
+git checkout -b release/v<version>
+git add published-contract/
 git commit -m "chore(release): v<version> — production publish"
-git tag -a "v<version>" -m "freenet-email v<version>"
-git push origin main && git push origin "v<version>"
+git push -u origin release/v<version>
+gh pr create --base main --head release/v<version> \
+    --title "chore(release): v<version> — production publish" --body "Release snapshot."
+git checkout main
+# After the PR is squash-merged:
+scripts/release-tag.sh <version>
 ```
 
 **Important**: `--as-state` is required on the `fdev execute update`
@@ -383,37 +389,23 @@ treat it as a deliberate, announced action.
 
 ### Publish failed halfway
 
-The script is idempotent up to step 7 (commit). If any step 1-6 fails,
-re-run `scripts/release.sh 0.1.0` — no state persists between runs
-until commit time.
+If the build or publish fails, re-run `scripts/release.sh 0.1.0`: nothing
+is committed or pushed before the publish succeeds.
 
-If the publish succeeded but the tag push failed:
+Once the publish has succeeded, do **not** re-run `release.sh`: it would
+publish again. If anything after that point fails (facade flip, commit,
+push, `gh pr create`, or a declined prompt), the script prints the steps
+to finish by hand. In short:
 
-```bash
-git tag -d v0.1.0            # drop the local tag
-scripts/release.sh 0.1.0     # start over
-```
+1. If the facade was not UPDATEd, follow §"Manual pointer flip" above.
+2. Commit `published-contract/` on `release/v0.1.0` (create the branch if
+   the script didn't get that far), `git push -u origin release/v0.1.0`,
+   and open a PR against `main`.
+3. After the squash merge, `scripts/release-tag.sh 0.1.0`.
 
-If the commit + tag both succeeded but the push failed, you're in an
-inconsistent state between your local and origin. Either:
-
-```bash
-git push origin main
-git push origin v0.1.0
-```
-
-...or unwind:
-
-```bash
-git reset --hard HEAD~1
-git tag -d v0.1.0
-```
-
-Unwinding leaves the published contract on Freenet, but without the
-committed snapshot to pin its id. Re-run `release.sh` to rebuild and
-re-publish (the second publish will likely produce a different id if
-anything about the build environment shifted; that's fine for a failed
-release).
+`release-tag.sh` only tags the `chore(release): v0.1.0 ...` commit it
+finds on `origin/main`, so running it before the PR merges is refused
+rather than tagging the wrong commit.
 
 ### Production key lost
 
@@ -437,6 +429,7 @@ The webapp is live but broken for users. Options:
 Semver per `Cargo.toml`. Bump minor for new features, patch for fixes,
 major once the protocol stabilizes (we're not there yet).
 
-Don't squash release commits: the `chore(release): vX.Y.Z` commit is
-the annotated tag's anchor. Its diff is always exactly
+The `chore(release): vX.Y.Z` commit (the squash-merged snapshot PR) is
+the annotated tag's anchor; keep that title when merging, since
+`release-tag.sh` finds the commit by it. Its diff is always exactly
 `published-contract/` — any release that touches other files is a bug.

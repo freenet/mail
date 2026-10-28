@@ -97,7 +97,7 @@ The user runs:
 
 ```bash
 freenet network                          # other terminal — wait for peers
-scripts/release.sh <VERSION>             # interactive, three confirmations
+scripts/release.sh <VERSION>             # interactive, confirms each public step
 # squash-merge the release/v<VERSION> snapshot PR once CI is green
 scripts/release-tag.sh <VERSION>         # tag main's merge commit, push tag
 scripts/smoke-test-production.sh         # post-publish liveness check

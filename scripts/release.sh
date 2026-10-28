@@ -11,17 +11,19 @@
 #     $WEB_CONTAINER_KEY_FILE (default ~/.config/freenet-email/web-container-keys.toml)
 #   • A Freenet network-connected node is running and reachable
 #     (not a `freenet local` sandbox)
-#   • `gh` is authenticated to push tags
+#   • `gh` is authenticated to push a branch and open a PR
 #   • GNU tar is installed (for reproducible archives)
 #
 # Usage:
 #     scripts/release.sh 0.1.0
-#     scripts/release.sh 0.1.0 --yes   # skip the final confirmation prompt
+#     scripts/release.sh 0.1.0 --yes   # auto-confirm every prompt
 #
-# The script is idempotent up to the point of committing
-# `published-contract/`: re-running after a failed publish re-runs the
-# build and prompts again, so recovery from a transient network error is
-# just `scripts/release.sh $version` again.
+# After the snapshot PR it opens is squash-merged, finish with
+# `scripts/release-tag.sh <version>`.
+#
+# The script is idempotent up to the publish: re-running after a failed
+# build or publish re-runs it and prompts again. Once the publish has
+# succeeded, do NOT re-run it; follow the recovery steps it prints.
 
 set -euo pipefail
 
@@ -84,8 +86,33 @@ fi
 if git rev-parse "$TAG" >/dev/null 2>&1; then
     die "tag $TAG already exists locally. Delete with 'git tag -d $TAG' first if re-running."
 fi
-if git ls-remote --exit-code --tags origin "$TAG" >/dev/null 2>&1; then
-    die "tag $TAG already exists on origin. Either bump the version or delete it remotely."
+# `ls-remote --exit-code` exits 2 when the ref is absent; anything else
+# non-zero is a network/auth error, which must not read as "absent".
+remote_ref_absent() {
+    local rc=0
+    git ls-remote --exit-code origin "$1" >/dev/null 2>&1 || rc=$?
+    case "$rc" in
+        0) return 1 ;;
+        2) return 0 ;;
+        *) die "could not query origin for $1 (git ls-remote exit $rc)" ;;
+    esac
+}
+remote_ref_absent "refs/tags/$TAG" \
+    || die "tag $TAG already exists on origin. Either bump the version or delete it remotely."
+
+# The snapshot goes up as release/$TAG after the publish. Check now, so a
+# leftover branch can't fail the run after the irreversible steps.
+RELEASE_BRANCH="release/$TAG"
+if git rev-parse -q --verify "refs/heads/$RELEASE_BRANCH" >/dev/null; then
+    die "branch $RELEASE_BRANCH already exists locally (git branch -D $RELEASE_BRANCH if it is stale)"
+fi
+remote_ref_absent "refs/heads/$RELEASE_BRANCH" \
+    || die "branch $RELEASE_BRANCH already exists on origin (delete it if it is stale)"
+
+# Publish exactly what is on origin/main.
+git fetch -q origin main
+if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main)" ]; then
+    die "local main ($(git rev-parse --short HEAD)) is not origin/main ($(git rev-parse --short origin/main)). Pull first."
 fi
 
 # Workspace Cargo.toml version must match the requested release version.
@@ -199,11 +226,12 @@ echo "This will:"
 echo "  1. Build the UI and contracts in release mode"
 echo "  2. Sign the webapp with the PRODUCTION key at $KEY_FILE"
 echo "  3. Publish the contract to the real Freenet network via fdev"
-echo "  4. Commit the new published-contract/ snapshot"
-echo "  5. Create an annotated tag $TAG"
-echo "  6. Push the commit AND tag to origin/main"
+echo "  4. Flip the stable facade pointer to the new webapp"
+echo "  5. Commit the new published-contract/ snapshot on $RELEASE_BRANCH"
+echo "  6. Push that branch and open the snapshot PR"
 echo ""
-echo "Steps 3, 4, 5, 6 are PUBLICLY VISIBLE and hard to undo."
+echo "Steps 3-6 are PUBLICLY VISIBLE; 3 and 4 cannot be undone."
+echo "Tag afterwards with scripts/release-tag.sh $VERSION once the PR merges."
 confirm "Proceed?"
 
 # ─── Build + publish ───────────────────────────────────────────────────────
@@ -211,6 +239,23 @@ confirm "Proceed?"
 echo ""
 echo "═══ Building and publishing ═══════════════════════════════════════"
 cargo make publish-production
+
+# From here the release is live. If anything below fails, re-running the
+# script would publish again, so say how to finish by hand instead.
+RELEASE_FINISHED=0
+on_post_publish_exit() {
+    [ "$RELEASE_FINISHED" = "1" ] && return
+    echo "" >&2
+    echo "✗ release.sh stopped AFTER publishing $TAG. Do NOT re-run it." >&2
+    echo "  Current branch: $(git rev-parse --abbrev-ref HEAD)" >&2
+    echo "  To finish by hand:" >&2
+    echo "    1. If the facade was not UPDATEd, see RELEASING.md 'Manual pointer flip'." >&2
+    echo "    2. Commit published-contract/ on $RELEASE_BRANCH (git checkout -b if needed)," >&2
+    echo "       git push -u origin $RELEASE_BRANCH, and open a PR against main." >&2
+    echo "    3. After the squash merge: scripts/release-tag.sh $VERSION" >&2
+}
+# EXIT, not ERR: `die` and a declined `confirm` leave via `exit`.
+trap on_post_publish_exit EXIT
 
 # ─── Verify the commit-worthy diff ─────────────────────────────────────────
 
@@ -296,7 +341,6 @@ if [ "$SNAPSHOT_CHANGED" = "1" ]; then
     # created after the squash merge by scripts/release-tag.sh, because
     # squashing gives the commit a new SHA.
 
-    RELEASE_BRANCH="release/$TAG"
     git checkout -b "$RELEASE_BRANCH"
     git add published-contract/
     git commit -m "chore(release): $TAG — production publish
@@ -320,6 +364,7 @@ Signed with the uncommitted production key at
 
 Squash-merge once CI is green, then run \`scripts/release-tag.sh $VERSION\` on main to tag the merge commit.")
     git checkout main
+    RELEASE_FINISHED=1
 
     echo ""
     echo "✅ published $TAG; snapshot PR: $PR_URL"
@@ -328,7 +373,8 @@ Squash-merge once CI is green, then run \`scripts/release-tag.sh $VERSION\` on m
     echo "  scripts/release-tag.sh $VERSION"
 else
     confirm "Tag current HEAD as $TAG (no snapshot commit)?"
-    "$REPO_ROOT/scripts/release-tag.sh" "$VERSION" --yes
+    "$REPO_ROOT/scripts/release-tag.sh" "$VERSION" --head --yes
+    RELEASE_FINISHED=1
     echo ""
     echo "✅ released $TAG"
 fi
