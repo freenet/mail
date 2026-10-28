@@ -145,6 +145,7 @@ up() {
             --config-dir "$GW_CONFIG" \
             --data-dir "$GW_DATA" \
             --public-network-address 127.0.0.1 \
+            --public-network-port "$GW_PORT_NET" \
             --log-dir "$GW_LOGS" \
             --log-level info
         # Wait for gateway to bind ws port + write transport_keypair.
@@ -157,6 +158,11 @@ up() {
         done
     fi
 
+    if [ ! -f "$GW_DATA/secrets/transport_keypair" ]; then
+        echo "error: the gateway wrote no $GW_DATA/secrets/transport_keypair; it most likely exited at startup:" >&2
+        tail -20 "$GW_LOGS/stdout.log" >&2 || true
+        exit 1
+    fi
     GW_PUBKEY=$(derive_pubkey)
     echo "$GW_PUBKEY" > "$GW_PUBKEY_FILE"
     echo "gateway pubkey: $GW_PUBKEY"
