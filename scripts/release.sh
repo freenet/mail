@@ -286,10 +286,18 @@ if [ "$SNAPSHOT_CHANGED" = "1" ]; then
     echo "Diff in published-contract/:"
     git status --short -- published-contract/
     echo ""
-    confirm "Commit this snapshot and tag as $TAG?"
+    confirm "Commit this snapshot on release/$TAG and open a PR?"
 
-    # ─── Commit ────────────────────────────────────────────────────────────────
+    # ─── Commit on a release branch ────────────────────────────────────────────
+    #
+    # main is protected by a ruleset (required checks, squash-only merges), so
+    # the snapshot cannot be pushed to main directly. It goes up as
+    # release/$TAG with a PR, and local main is left untouched. The tag is
+    # created after the squash merge by scripts/release-tag.sh, because
+    # squashing gives the commit a new SHA.
 
+    RELEASE_BRANCH="release/$TAG"
+    git checkout -b "$RELEASE_BRANCH"
     git add published-contract/
     git commit -m "chore(release): $TAG — production publish
 
@@ -298,45 +306,33 @@ Contract ID: $CONTRACT_ID
 Signed with the uncommitted production key at
 ~/.config/freenet-email/web-container-keys.toml.
 "
+
+    echo ""
+    echo "═══ Pushing release branch ═════════════════════════════════════════"
+    confirm "Push $RELEASE_BRANCH and open the snapshot PR?"
+
+    git push -u origin "$RELEASE_BRANCH"
+    PR_URL=$(gh pr create --base main --head "$RELEASE_BRANCH" \
+        --title "chore(release): $TAG — production publish" \
+        --body "Release snapshot from \`scripts/release.sh $VERSION\`, already published to the network.
+
+- webapp contract id: \`$CONTRACT_ID\`
+
+Squash-merge once CI is green, then run \`scripts/release-tag.sh $VERSION\` on main to tag the merge commit.")
+    git checkout main
+
+    echo ""
+    echo "✅ published $TAG; snapshot PR: $PR_URL"
+    echo ""
+    echo "Finish the release once that PR is merged:"
+    echo "  scripts/release-tag.sh $VERSION"
 else
     confirm "Tag current HEAD as $TAG (no snapshot commit)?"
+    "$REPO_ROOT/scripts/release-tag.sh" "$VERSION" --yes
+    echo ""
+    echo "✅ released $TAG"
 fi
 
-COMMIT=$(git rev-parse HEAD)
-
-# ─── Tag ───────────────────────────────────────────────────────────────────
-
-# Pull the changelog from the last tag (if any) for the annotated message.
-PREV_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
-if [ -n "$PREV_TAG" ]; then
-    CHANGELOG=$(git log --pretty=format:'  - %s' "$PREV_TAG..HEAD")
-    RANGE="since $PREV_TAG"
-else
-    CHANGELOG=$(git log --pretty=format:'  - %s')
-    RANGE="initial release"
-fi
-
-git tag -a "$TAG" -m "freenet-email $TAG
-
-Production webapp contract id: $CONTRACT_ID
-
-Changes $RANGE:
-$CHANGELOG
-"
-
-echo "  ✓ tagged $TAG at $COMMIT"
-
-# ─── Push ──────────────────────────────────────────────────────────────────
-
-echo ""
-echo "═══ Pushing to origin ══════════════════════════════════════════════"
-confirm "Push the commit AND tag to origin/main?"
-
-git push origin main
-git push origin "$TAG"
-
-echo ""
-echo "✅ released $TAG"
 echo ""
 echo "Next steps:"
 echo "  1. Wait ~30s for the contract (and facade UPDATE, if applicable)"

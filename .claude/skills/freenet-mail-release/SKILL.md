@@ -34,8 +34,9 @@ You **CAN**:
 You **CANNOT**:
 
 - Run `scripts/release.sh` itself unsupervised. It signs with the
-  production key, pushes to the live network, commits + tags + pushes
-  to `origin/main`. Steps 4-10 are irreversible. The user must drive
+  production key, pushes to the live network, then commits the snapshot
+  on `release/v<VERSION>` and opens a PR. The publish and facade flip
+  are irreversible. The user must drive
   this, or explicitly authorize each confirmation.
 - Start `freenet network`. The node is a long-running interactive
   process whose output the user should be watching during publish.
@@ -97,14 +98,20 @@ The user runs:
 ```bash
 freenet network                          # other terminal — wait for peers
 scripts/release.sh <VERSION>             # interactive, three confirmations
+# squash-merge the release/v<VERSION> snapshot PR once CI is green
+scripts/release-tag.sh <VERSION>         # tag main's merge commit, push tag
 scripts/smoke-test-production.sh         # post-publish liveness check
 ```
 
 `release.sh` prompts at:
 
 1. Before publish (irreversible step starts).
-2. After publish, before commit + tag.
-3. Before push to origin.
+2. After publish, before committing the snapshot on `release/v<VERSION>`.
+3. Before pushing that branch and opening the snapshot PR.
+
+`main` only takes squash merges through PRs with green required checks,
+which is why the snapshot goes through a PR and the tag is created
+afterwards.
 
 If the user wants you to type "y" at each prompt, they should pass
 `--yes` to `release.sh` and confirm authorization explicitly. Don't

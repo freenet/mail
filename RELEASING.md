@@ -11,10 +11,12 @@ scripts/generate-production-key.sh
 # Every release:
 freenet network   # in another terminal (network-connected node)
 scripts/release.sh 0.1.0
+# squash-merge the snapshot PR it opens once CI is green, then:
+scripts/release-tag.sh 0.1.0
 scripts/smoke-test-production.sh
 ```
 
-Everything else is automation around those three commands.
+Everything else is automation around those commands.
 
 ## Overview
 
@@ -22,9 +24,12 @@ A release is a tuple of `(git tag, contract id, signed webapp)`:
 
 1. `scripts/release.sh` builds the webapp, signs it with the production
    key, publishes the contract to the real Freenet network, commits the
-   updated `published-contract/` snapshot, creates an annotated tag, and
-   pushes both commit and tag to `origin/main`.
-2. `scripts/smoke-test-production.sh` runs the Playwright suite against
+   updated `published-contract/` snapshot on a `release/v<version>`
+   branch, and opens a PR for it. `main` is protected (required checks,
+   squash-only merges), so the snapshot cannot be pushed there directly.
+2. Once that PR is squash-merged, `scripts/release-tag.sh <version>`
+   creates the annotated tag on main's merge commit and pushes it.
+3. `scripts/smoke-test-production.sh` runs the Playwright suite against
    the deployed webapp via the Freenet gateway to confirm the release
    actually works end to end.
 
@@ -140,13 +145,17 @@ What happens, in order:
 5. **Diff verification** — confirms `published-contract/` actually
    changed. If not, the script aborts with a diagnostic.
 6. **Second confirmation prompt** — shows the new contract id and
-   diff, asks whether to commit + tag.
-7. **Commit** `published-contract/` with a standard message.
-8. **Annotated tag** `v$VERSION` with auto-generated release notes from
-   the git log since the last tag.
-9. **Third confirmation prompt** — asks whether to push commit + tag
-   to `origin/main`.
-10. **Push** both to origin.
+   diff, asks whether to commit the snapshot.
+7. **Commit** `published-contract/` on a new `release/v$VERSION`
+   branch with a standard message. Local `main` is not touched.
+8. **Third confirmation prompt** — asks whether to push the branch.
+9. **Push + PR** — pushes `release/v$VERSION` and opens the snapshot PR.
+10. **After the PR is squash-merged** — run `scripts/release-tag.sh
+    $VERSION` on main. It fast-forwards main, checks the version and
+    that HEAD is the snapshot commit, creates the annotated tag
+    `v$VERSION` with release notes from the git log since the last tag,
+    and pushes the tag. (With no snapshot change, `release.sh` calls it
+    directly instead of opening a PR.)
 
 To auto-confirm all prompts (useful for CI or scripting), pass
 `--yes`:
