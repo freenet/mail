@@ -215,6 +215,11 @@ test.describe("Live node E2E", () => {
       // on the shell page BEFORE the click so we don't race the post.
       // Two-step pattern: install captures the next matching message on
       // `window.__fm_proxy_download__`; await polls for it.
+      //
+      // Since the copyable-recovery-key change the "↓" button opens the
+      // backup panel instead of downloading at once: the download is the
+      // panel's secondary "Download as .txt" action, carrying the
+      // `fmail-key-1:` recovery key as text/plain rather than JSON.
       await page.evaluate(() => {
         const w = window as unknown as { __fm_proxy_download__?: unknown };
         w.__fm_proxy_download__ = undefined;
@@ -224,10 +229,16 @@ test.describe("Live node E2E", () => {
           if (data.__freenet_shell__ !== true || data.type !== "download")
             return;
           window.removeEventListener("message", handler);
+          let text = "";
+          try {
+            text = typeof data.base64 === "string" ? atob(data.base64) : "";
+          } catch {
+            text = "";
+          }
           w.__fm_proxy_download__ = {
             filename: String(data.filename ?? ""),
             mimeType: String(data.mimeType ?? ""),
-            base64Len: typeof data.base64 === "string" ? data.base64.length : 0,
+            text,
           };
         });
       });
@@ -236,6 +247,23 @@ test.describe("Live node E2E", () => {
           `[data-testid="fm-id-row"][data-alias="${ALIAS_T1_ALICE}"] [data-testid="fm-id-backup"]`,
         )
         .click();
+      const backupPanel = appAfterReload.locator('[data-testid="fm-backup-panel"]');
+      await expect(backupPanel, "backup panel opens from the row").toBeVisible();
+
+      // Copy inside the real sandboxed iframe. Either the browser
+      // confirms ("Copied.") or the shell proxy took it (unconfirmed);
+      // what must never happen is a claimed success that failed, so a
+      // visible "Couldn't copy" is the only failing outcome.
+      await backupPanel.locator('[data-testid="fm-backup-copy"]').click();
+      await expect(
+        backupPanel.locator('[data-testid="fm-backup-status"]'),
+        "copy reports an outcome",
+      ).toContainText(/Copied\.|Sent to your clipboard through Freenet/);
+      await expect(
+        backupPanel.locator('[data-testid="fm-backup-status"]'),
+      ).not.toContainText("Couldn't copy");
+
+      await backupPanel.locator('[data-testid="fm-backup-download"]').click();
       const proxyMessage = await page
         .waitForFunction(
           () => {
@@ -250,20 +278,30 @@ test.describe("Live node E2E", () => {
             handle.jsonValue() as Promise<{
               filename: string;
               mimeType: string;
-              base64Len: number;
+              text: string;
             }>,
         );
       expect(
         proxyMessage.filename,
-        "backup filename matches freenet-identity-<alias>.json (regression for #77)",
-      ).toMatch(/freenet-identity-.+\.json/);
-      expect(proxyMessage.mimeType, "backup proxied as application/json").toBe(
-        "application/json",
+        "backup filename matches freenet-identity-<alias>.txt (regression for #77)",
+      ).toMatch(/freenet-identity-.+\.txt/);
+      expect(proxyMessage.mimeType, "backup proxied as text/plain").toBe(
+        "text/plain",
       );
       expect(
-        proxyMessage.base64Len,
-        "backup payload is non-empty base64",
-      ).toBeGreaterThan(0);
+        proxyMessage.text.trim(),
+        "downloaded file is the one-line recovery key",
+      ).toMatch(/^fmail-key-1:[1-9A-HJ-NP-Za-km-z]+$/);
+
+      // Only the explicit confirmation marks the identity as backed up.
+      await backupPanel.locator('[data-testid="fm-backup-saved"]').click();
+      await expect(
+        backupPanel.locator('[data-testid="fm-backup-saved-note"]'),
+      ).toBeVisible();
+      await appAfterReload
+        .locator('[data-testid="fm-backup-modal"]')
+        .getByRole("button", { name: "Close" })
+        .click();
     } finally {
       stopPermissionPump();
     }

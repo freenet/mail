@@ -62,8 +62,17 @@ state. In-session offline coverage is a separate, weaker row.
 |---|---|---|
 | Create identity (alias input + reveal stage + confirm) | auto | offline: `renders with mock identities and create link`; iso: `create identity → reload persists → drives permission flow` |
 | Identity surfaces without manual reload (#76) | auto | iso: `create identity → reload persists` |
-| Backup file-picker disabled until a backup is parsed | auto | offline: `opens a file-picker form with disabled Restore until a backup is parsed` |
-| Backup → restore round-trip (export, wipe, import, identity present) | manual | Compose, generate backup, save file, log out, restore from file, confirm alias + sent + drafts present |
+| Recovery-key codec: format pinned, whitespace/CRLF tolerated, truncation / substitution / wrong prefix / River token / v1 JSON rejected with distinct errors, v2 JSON fixture still restores | auto | Rust unit: `app::backup_token::tests::*` (`fixed_test_vector`, `committed_v2_json_fixture_still_restores`, `json_and_token_for_same_keys_give_same_fingerprint`, …) |
+| Restore form: paste + upload (.json,.txt), Restore disabled until input parses | auto | offline: `offers paste + upload, with Restore disabled until input parses` |
+| Restore form: bad paste shows inline error; valid wrapped paste enables Restore | auto | offline: `pasting a recovery key enables Restore; a bad paste shows an error` |
+| Restore from uploaded v2 JSON file; same fingerprint as the recovery key | auto | offline: `restores from an uploaded v2 JSON file, matching the recovery key` |
+| v1 JSON backup rejected with a visible error | auto | offline: `an old v1 JSON backup is rejected with a visible error` |
+| Backup panel (identity row): masked by default, Copy reports truthfully, Reveal, "I've saved it", copied key restores to same fingerprint | auto | offline: `identity row: masked key, copy, reveal, confirm, and it restores to the same identity` (reads the clipboard back in Chromium) |
+| Backup panel (create flow): opens from Back up now; copy arms the discard warning | auto | offline: `create flow: Back up now opens the panel and confirming is required` |
+| Settings backup: download alone doesn't clear "not backed up"; confirm does | auto | offline: `settings: Back up now opens the panel; only confirming clears the banner` |
+| Backup panel inside the real sandboxed gateway iframe: copy outcome + .txt download via shell proxy | auto (iso) | iso: `create identity → reload persists → drives permission flow` (step 5) |
+| Copy into a real password manager (1Password / Bitwarden / KeePassXC / browser), then paste back into Restore | manual | On a published build, open an identity's ↓ panel, Copy, paste into a new password-manager entry named with the suggested title, then Restore → paste from the manager. Fingerprint must match. Repeat in Firefox and Safari: the copy path differs per browser (execCommand vs shell proxy), and only Chromium runs in CI. |
+| Backup → restore round-trip (export, wipe, import, identity present) | manual | Copy the recovery key, log out / wipe node data, restore by pasting it, confirm alias + sent + drafts present |
 | Rename identity in place | auto | offline: `renames an id-row in place and surfaces the new alias` |
 | Refuses duplicate alias on rename | auto | offline: `refuses to rename to an alias that already exists` |
 | Delete identity (confirm-modal + row removed) | manual | Open IdentifiersList, click 🗑 on an id-row, type alias verbatim, click Delete identity, confirm row disappears and `Identity::get_alias()` no longer returns it. Inbox + AFT contracts remain on-chain (no on-chain delete primitive). |
@@ -236,7 +245,7 @@ add/remove protocol.
 3. Search filter → covered by sidebar testid, easy
 4. Auto-sign idempotent on Resend → easy
 5. Settings round-trip across reload → moderate (involves localStorage / delegate)
-6. Backup → restore round-trip → moderate (file picker)
+6. Backup → restore round-trip → moderate (paste a recovery key; file upload still supported)
 7. Multiple identities (3+) → easy in offline mode
 8. Reply from Archive folder → easy
 9. Sent Pending → Failed on send error → needs failure-injection harness
