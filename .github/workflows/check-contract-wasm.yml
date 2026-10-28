@@ -22,6 +22,13 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
+      - 'modules/**'
+      - 'contracts/inbox/**'
+      - 'scripts/**'
+      - 'Makefile.toml'
+      - 'legacy_*.toml'
+      - '.githooks/**'
+      - '.github/workflows/check-contract-wasm.yml'
 
 jobs:
   changes:
@@ -133,6 +140,21 @@ jobs:
       # embeds the build machine's paths.
       - name: Verify frozen artifacts
         run: bash scripts/check-frozen-artifacts.sh
+
+      # The check above only proves the tree is self-consistent: rewriting a
+      # WASM, its code hash and its pin together passes it. This one proves
+      # nothing frozen changed. HEAD^1 is the base branch on a pull_request
+      # run (the checkout is the merge commit) and the previous main commit
+      # on a push; fetch-depth: 2 above makes it available.
+      - name: Verify no frozen artifact changed
+        run: bash scripts/check-frozen-immutable.sh HEAD^1
+
+      # Nothing else compiles the contract and delegate sources for wasm32
+      # now that the shipped bytes are frozen. Build each the way a new
+      # generation would be built, so the sources, scripts/build-wasm.sh and
+      # scripts/check-wasm-paths.sh keep working. The output is discarded.
+      - name: Build contract and delegate WASM reproducibly
+        run: bash scripts/check-wasm-builds.sh
 
       # Issue #206 (closes the Phase 1 informational gate). The container
       # contract id is intended to stay byte-stable across releases.
