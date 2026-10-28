@@ -66,6 +66,7 @@ features = [
     "HtmlTextAreaElement",
     "InputEvent",
     "Navigator",
+    "Performance",
     "Request",
     "RequestInit",
     "Response",

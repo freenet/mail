@@ -668,6 +668,18 @@ pub(crate) fn backup_filename<S: AsRef<str>>(alias: &str, words: &[S]) -> String
     }
 }
 
+/// Why [`trigger_browser_download`] sent nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DownloadError {
+    /// Another download went out less than [`DOWNLOAD_GAP_MS`] ago. Not a
+    /// failure: the UI says to wait a moment and retry.
+    #[cfg_attr(not(target_family = "wasm"), allow(dead_code))]
+    TooSoon,
+    /// The download couldn't be started.
+    #[cfg_attr(not(target_family = "wasm"), allow(dead_code))]
+    Failed(String),
+}
+
 /// How [`trigger_browser_download`] handed a download off.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DownloadRoute {
@@ -690,7 +702,9 @@ pub(crate) const DOWNLOAD_GAP_MS: f64 = 2_100.0;
 const _: () = assert!(DOWNLOAD_GAP_MS > 2_000.0);
 
 thread_local! {
-    /// `Date.now()` of the last download handed off, for [`DOWNLOAD_GAP_MS`].
+    /// `performance.now()` of the last download handed off, for
+    /// [`DOWNLOAD_GAP_MS`]. Monotonic, so a wall-clock step backwards
+    /// can't refuse downloads until the clock catches up.
     static LAST_DOWNLOAD_MS: std::cell::Cell<Option<f64>> = const { std::cell::Cell::new(None) };
 }
 
@@ -726,15 +740,15 @@ pub(crate) fn trigger_browser_download(
     filename: &str,
     bytes: &[u8],
     mime: &str,
-) -> Result<DownloadRoute, String> {
-    let now = web_sys::js_sys::Date::now();
-    if let Some(wait) = download_wait_ms(LAST_DOWNLOAD_MS.with(|c| c.get()), now) {
-        let secs = (wait / 1000.0).ceil().max(1.0);
-        return Err(format!(
-            "another download just went out; wait {secs:.0} s and try again"
-        ));
+) -> Result<DownloadRoute, DownloadError> {
+    let now = web_sys::window()
+        .and_then(|w| w.performance())
+        .map(|p| p.now())
+        .unwrap_or_else(web_sys::js_sys::Date::now);
+    if download_wait_ms(LAST_DOWNLOAD_MS.with(|c| c.get()), now).is_some() {
+        return Err(DownloadError::TooSoon);
     }
-    let route = download_now(filename, bytes, mime)?;
+    let route = download_now(filename, bytes, mime).map_err(DownloadError::Failed)?;
     LAST_DOWNLOAD_MS.with(|c| c.set(Some(now)));
     Ok(route)
 }
@@ -849,7 +863,7 @@ pub(crate) fn trigger_browser_download(
     _filename: &str,
     _bytes: &[u8],
     _mime: &str,
-) -> Result<DownloadRoute, String> {
+) -> Result<DownloadRoute, DownloadError> {
     Ok(DownloadRoute::Local)
 }
 
@@ -1434,11 +1448,10 @@ pub(super) fn CreateAliasForm() -> Element {
     // True only after the user clicked "I've saved it". Drives the
     // `last_backup_at` stamp when the identity is created.
     let mut backup_confirmed = use_signal(|| false);
-    // True while a copy of the key is still in flight (async Clipboard API).
-    // It may yet land on the clipboard, so Discard must warn as if it had.
-    // Stays true if the panel unmounts before the copy settles: that is the
-    // safe reading.
-    let mut copy_in_flight = use_signal(|| false);
+    // Copies of the pending key, including ones still in flight. Owned here
+    // rather than in the panel because opening the discard dialog unmounts
+    // the panel while its async copies keep running (see `CopyTracker`).
+    let mut copy_tracker = use_signal(crate::app::backup_panel::CopyTracker::default);
     // Whether the recovery-key panel is expanded in the reveal card.
     let mut backup_panel_open = use_signal(|| false);
     // When true, show the orphan-keyfile confirmation dialog.
@@ -1467,7 +1480,7 @@ pub(super) fn CreateAliasForm() -> Element {
                 login_error.set(String::new());
                 backup_taken.set(false);
                 backup_confirmed.set(false);
-                copy_in_flight.set(false);
+                copy_tracker.write().reset();
                 backup_panel_open.set(false);
             }
             Err(e) => {
@@ -1533,7 +1546,7 @@ pub(super) fn CreateAliasForm() -> Element {
         pending.set(None);
         backup_taken.set(false);
         backup_confirmed.set(false);
-        copy_in_flight.set(false);
+        copy_tracker.write().reset();
         backup_panel_open.set(false);
         discard_confirm_open.set(false);
         alias_input.set(String::new());
@@ -1544,7 +1557,7 @@ pub(super) fn CreateAliasForm() -> Element {
     // "Discard" button handler: warn if the user already downloaded a backup
     // (orphan risk), otherwise discard immediately.
     let on_discard_click = move |_| {
-        if *backup_taken.read() || *copy_in_flight.read() {
+        if *backup_taken.read() || copy_tracker.read().possibly_exported() {
             discard_confirm_open.set(true);
         } else {
             pending.set(None);
@@ -1629,7 +1642,7 @@ pub(super) fn CreateAliasForm() -> Element {
                                     words: words.iter().map(|w| w.to_string()).collect::<Vec<_>>(),
                                     saved: *backup_confirmed.read(),
                                     on_exported: move |_| backup_taken.set(true),
-                                    on_copy_in_flight: move |pending: bool| copy_in_flight.set(pending),
+                                    copy_tracker,
                                     on_saved: move |_| {
                                         backup_taken.set(true);
                                         backup_confirmed.set(true);

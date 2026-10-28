@@ -18,6 +18,63 @@ use dioxus::prelude::*;
 use crate::clipboard::{CopyOutcome, copy_text};
 use crate::testid;
 
+/// Last download result shown in the panel. `Ok((file, route))`: handed
+/// off. `Err(None)`: refused because another download just went out (a
+/// notice, not a failure). `Err(Some(e))`: the download failed.
+type DownloadStatus = Option<Result<(String, super::login::DownloadRoute), Option<String>>>;
+
+/// What the create flow knows about copies of a not-yet-created identity's
+/// key, for its "you already copied this key" discard warning.
+///
+/// Owned by the PARENT (a `Signal` in the create flow), not the panel: the
+/// panel is unmounted whenever the discard-confirm dialog opens, but an
+/// async copy started from it keeps running and may still land. Each copy
+/// settles against this record directly, so the count can't be lost with a
+/// remount, and a copy that succeeds after its panel is gone still counts.
+///
+/// `generation` ties each copy to the keypair it was started for: a reset
+/// (new keypair, or discard) bumps it, and copies from before the reset no
+/// longer change anything.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct CopyTracker {
+    generation: u32,
+    in_flight: u32,
+    landed: bool,
+}
+
+impl CopyTracker {
+    /// The key may be on the clipboard: a copy landed, or one is still in
+    /// flight. A copy that never settles keeps this true, deliberately:
+    /// the browser may still complete it.
+    pub(crate) fn possibly_exported(&self) -> bool {
+        self.landed || self.in_flight > 0
+    }
+
+    /// Forget everything (new keypair, or discarded). Copies already in
+    /// flight become stale and are ignored when they settle.
+    pub(crate) fn reset(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.in_flight = 0;
+        self.landed = false;
+    }
+
+    /// An async copy started; returns the ticket it must settle with.
+    pub(crate) fn start(&mut self) -> u32 {
+        self.in_flight += 1;
+        self.generation
+    }
+
+    /// A copy started with `ticket` finished; `landed` if it may have
+    /// reached the clipboard.
+    pub(crate) fn settle(&mut self, ticket: u32, landed: bool) {
+        if ticket != self.generation {
+            return;
+        }
+        self.in_flight = self.in_flight.saturating_sub(1);
+        self.landed |= landed;
+    }
+}
+
 /// Suggested name for the password-manager entry. Includes the first two
 /// fingerprint words (the same pair shown on the identity row) so two
 /// identities with similar aliases stay distinguishable.
@@ -58,14 +115,11 @@ pub(crate) fn BackupKeyPanel(
     saved: bool,
     /// Fired after a successful copy or download.
     on_exported: EventHandler<()>,
-    /// Fired with `true` while a copy is still in flight (the async
-    /// Clipboard API path) and `false` once every one has settled. A copy
-    /// that is in flight may still put the key on the clipboard, so the
-    /// create flow treats it as exported for its discard warning. If the
-    /// panel unmounts first, `false` never arrives: callers must treat a
-    /// stuck `true` as "possibly exported", which is the safe reading.
+    /// The caller's record of copies of this key (see [`CopyTracker`]).
+    /// Every copy settles against it, even one that finishes after this
+    /// panel has unmounted.
     #[props(default)]
-    on_copy_in_flight: Option<EventHandler<bool>>,
+    copy_tracker: Option<Signal<CopyTracker>>,
     /// Fired when the user confirms they saved the key.
     on_saved: EventHandler<()>,
     /// Bump to scroll the panel back into view (e.g. "Back up now" clicked
@@ -75,9 +129,7 @@ pub(crate) fn BackupKeyPanel(
 ) -> Element {
     let mut revealed = use_signal(|| false);
     let mut copy_status: Signal<Option<CopyOutcome>> = use_signal(|| None);
-    let mut copies_in_flight = use_signal(|| 0u32);
-    let mut download_status: Signal<Option<Result<(String, super::login::DownloadRoute), String>>> =
-        use_signal(|| None);
+    let mut download_status: Signal<DownloadStatus> = use_signal(|| None);
     // Visual cooldown for this button. The binding limit (the gateway
     // shell drops a download within 2s of the previous one, app-wide) is
     // enforced in `login::trigger_browser_download`, across every panel.
@@ -114,35 +166,38 @@ pub(crate) fn BackupKeyPanel(
         let token = token.clone();
         move |_| {
             copy_status.set(None);
+            // Filled in after `copy_text` returns, if the copy went async;
+            // the async completion can only run after that.
+            let ticket: std::rc::Rc<std::cell::Cell<Option<u32>>> = Default::default();
+            let ticket_for_done = ticket.clone();
             let settled = copy_text(token.clone(), move |outcome| {
-                // The Clipboard API path finishes asynchronously, outside
-                // this component's task scope, so the panel may be gone by
-                // now (modal closed, identity switched). Writing a dropped
-                // signal panics, so drop the result. The parent was told
-                // the copy was in flight and never hears it settle, which
-                // it treats as "possibly exported".
+                // SentToShell counts: the key may have reached the clipboard.
+                let landed = !matches!(outcome, CopyOutcome::Failed(_));
+                // Settle against the parent's record first: it outlives this
+                // panel, so a copy that finishes after the panel unmounted
+                // still clears its in-flight entry, and a late success
+                // still counts as exported.
+                if let (Some(mut tracker), Some(t)) = (copy_tracker, ticket_for_done.get())
+                    && let Ok(mut rec) = tracker.try_write()
+                {
+                    rec.settle(t, landed);
+                }
+                // The rest is this panel's own display, and runs outside
+                // its task scope: if the panel is gone (modal closed,
+                // identity switched), writing its signals would panic.
                 if copy_status.try_peek().is_err() {
                     return;
                 }
-                if *copies_in_flight.peek() > 0 {
-                    let left = *copies_in_flight.peek() - 1;
-                    copies_in_flight.set(left);
-                    if let Some(cb) = on_copy_in_flight {
-                        cb.call(left > 0);
-                    }
-                }
-                // SentToShell counts: the key may have reached the clipboard.
-                if !matches!(outcome, CopyOutcome::Failed(_)) {
+                if landed {
                     on_exported.call(());
                 }
                 copy_status.set(Some(outcome));
             });
-            if !settled {
-                let n = *copies_in_flight.peek() + 1;
-                copies_in_flight.set(n);
-                if let Some(cb) = on_copy_in_flight {
-                    cb.call(true);
-                }
+            if !settled
+                && let Some(mut tracker) = copy_tracker
+                && let Ok(mut rec) = tracker.try_write()
+            {
+                ticket.set(Some(rec.start()));
             }
         }
     };
@@ -169,7 +224,10 @@ pub(crate) fn BackupKeyPanel(
                         download_cooling.set(false);
                     });
                 }
-                Err(e) => download_status.set(Some(Err(e))),
+                Err(super::login::DownloadError::TooSoon) => download_status.set(Some(Err(None))),
+                Err(super::login::DownloadError::Failed(e)) => {
+                    download_status.set(Some(Err(Some(e))))
+                }
             }
         }
     };
@@ -285,7 +343,10 @@ pub(crate) fn BackupKeyPanel(
                     Some(Ok((fname, super::login::DownloadRoute::Relayed))) => rsx! {
                         p { class: "bk-status warn", "Asked Freenet to save {fname}. If no download appears, show the key and copy it by hand instead." }
                     },
-                    Some(Err(e)) => rsx! {
+                    Some(Err(None)) => rsx! {
+                        p { class: "bk-status warn", "Another download just went out. Wait a moment and try again." }
+                    },
+                    Some(Err(Some(e))) => rsx! {
                         p { class: "bk-status err", "Download failed: {e}" }
                     },
                     None => rsx! {},
@@ -314,6 +375,48 @@ pub(crate) fn BackupKeyPanel(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Review #349 round 3, sequence A: an async copy is in flight, the
+    /// panel unmounts (discard dialog) and remounts, and the copy then
+    /// FAILS. The record must end clear, not stuck "possibly exported".
+    #[test]
+    fn copy_tracker_failed_copy_after_remount_clears() {
+        let mut t = CopyTracker::default();
+        let first = t.start();
+        assert!(t.possibly_exported(), "in flight counts");
+        t.settle(first, false);
+        assert!(!t.possibly_exported());
+    }
+
+    /// Sequence B: copy 1 is in flight; copy 2 (from a remounted panel)
+    /// settles first and fails; copy 1 then succeeds. The record must stay
+    /// "possibly exported" throughout and end exported.
+    #[test]
+    fn copy_tracker_later_copy_cannot_clear_an_earlier_one() {
+        let mut t = CopyTracker::default();
+        let first = t.start();
+        let second = t.start();
+        t.settle(second, false);
+        assert!(t.possibly_exported(), "copy 1 is still in flight");
+        t.settle(first, true);
+        assert!(t.possibly_exported(), "copy 1 landed");
+    }
+
+    #[test]
+    fn copy_tracker_ignores_copies_from_before_a_reset() {
+        let mut t = CopyTracker::default();
+        let stale = t.start();
+        t.reset();
+        assert!(!t.possibly_exported());
+        t.settle(stale, true);
+        assert!(
+            !t.possibly_exported(),
+            "an old keypair's copy can't mark the new one"
+        );
+        // And a never-settling copy keeps the warning, deliberately.
+        let _pending = t.start();
+        assert!(t.possibly_exported());
+    }
 
     fn words() -> Vec<String> {
         ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot"]

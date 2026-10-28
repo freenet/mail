@@ -180,14 +180,16 @@ pub(crate) fn SettingsShell() -> Element {
             main { class: "fm-set-main",
                 BarHeader { current: screen, alias: alias.clone() }
                 div { class: "fm-set-body",
-                    // Identity-scoped screens are keyed by alias so a switch
-                    // remounts them: no local state (open backup panel,
-                    // half-edited fields) survives into another identity.
+                    // The screens that read per-identity settings
+                    // (`use_identity_settings`) are keyed by alias so a
+                    // switch remounts them: no local state (open backup
+                    // panel, half-edited fields) survives into another
+                    // identity. The rest read only global settings.
                     match screen {
                         menu::SettingsScreen::Account => rsx! { ScrAccount { key: "{alias}" } },
                         menu::SettingsScreen::Privacy => rsx! { ScrPrivacy { key: "{alias}" } },
                         menu::SettingsScreen::Aft => rsx! { ScrAft { key: "{alias}" } },
-                        menu::SettingsScreen::Inbox => rsx! { ScrInbox { key: "{alias}" } },
+                        menu::SettingsScreen::Inbox => rsx! { ScrInbox {} },
                         menu::SettingsScreen::Contacts => rsx! { ScrContacts {} },
                         menu::SettingsScreen::Appearance => rsx! { ScrAppearance {} },
                         menu::SettingsScreen::Advanced => rsx! { ScrAdvanced {} },
@@ -424,24 +426,15 @@ fn ScrAccount() -> Element {
     // it" in the panel (see `login::mark_backed_up`), so the amber banner
     // and the "Last backup" row reflect a confirmed backup, not a click.
     //
-    // The panel belongs to ONE identity: `backup_for` records which (by
-    // verifying-key prefix, which a rename doesn't change). This screen is
-    // not remounted when the sidebar switches identity, so without that
-    // the open panel, its Copied state and its "I've saved it" button
-    // would carry over to the next identity, letting a user copy A's key
-    // and then mark B as backed up.
+    // The panel belongs to ONE identity. SettingsShell keys this screen by
+    // alias, so switching identity remounts it and the open panel, its
+    // Copied state and its "I've saved it" button can't carry over (a user
+    // could otherwise copy A's key and then mark B as backed up). As a
+    // second guard that doesn't depend on that key, `backup_for` records
+    // which identity the panel was opened for (by verifying-key prefix,
+    // which a rename doesn't change) and it only shows for that one.
     let mut backup_for: Signal<Option<String>> = use_signal(|| None);
     let mut backup_scroll = use_signal(|| 0u32);
-    let panel_owner = vk_seed.clone();
-    use_effect(use_reactive!(|panel_owner| {
-        if backup_for
-            .peek()
-            .as_ref()
-            .is_some_and(|open_for| *open_for != panel_owner)
-        {
-            backup_for.set(None);
-        }
-    }));
     let backup_open = backup_for.read().as_deref() == Some(vk_seed.as_str()) && !vk_seed.is_empty();
     let on_backup = {
         let vk_seed = vk_seed.clone();
