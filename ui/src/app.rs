@@ -4559,21 +4559,30 @@ fn OpenArchivedMessage(msg_id: u64, msg: mail_local_state::ArchivedMessage) -> E
                                 // would cancel a bare spawn() before the
                                 // DeleteMessage delegate write committed —
                                 // message returns after reload (#286).
-                                let _task = dioxus_core::spawn_forever(async move {
-                                    if let Err(e) = crate::local_state::delete_message(
-                                        &mut c, a, msg_id,
-                                    )
-                                    .await
-                                    {
-                                        crate::log::error(
-                                            format!("delete_message failed: {e}"),
-                                            None,
-                                        );
-                                    }
-                                });
+                                confirm_when_stored(
+                                    async move {
+                                        match crate::local_state::delete_message(
+                                            &mut c, a, msg_id,
+                                        )
+                                        .await
+                                        {
+                                            Ok(()) => true,
+                                            Err(e) => {
+                                                crate::log::error(
+                                                    format!("delete_message failed: {e}"),
+                                                    None,
+                                                );
+                                                false
+                                            }
+                                        }
+                                    },
+                                    "Deleting…",
+                                    "Deleted",
+                                );
                             }
                         }
                         menu_selection.write().at_inbox_list();
+                        #[cfg(not(feature = "use-node"))]
                         crate::toast::push_toast("Deleted", crate::toast::ToastLevel::Success);
                     },
                     "Delete"
@@ -4741,19 +4750,27 @@ fn OpenSentMessage(sent_id: String, msg: mail_local_state::SentMessage) -> Eleme
                                 // this view; a bare spawn() would cancel before
                                 // the DeleteSent delegate write committed, so the
                                 // row would return after reload (mirrors #286).
-                                let _task = dioxus_core::spawn_forever(async move {
-                                    if let Err(e) =
-                                        crate::local_state::delete_sent(&mut c, a, id).await
-                                    {
-                                        crate::log::error(
-                                            format!("delete_sent failed: {e}"),
-                                            None,
-                                        );
-                                    }
-                                });
+                                confirm_when_stored(
+                                    async move {
+                                        match crate::local_state::delete_sent(&mut c, a, id).await
+                                        {
+                                            Ok(()) => true,
+                                            Err(e) => {
+                                                crate::log::error(
+                                                    format!("delete_sent failed: {e}"),
+                                                    None,
+                                                );
+                                                false
+                                            }
+                                        }
+                                    },
+                                    "Deleting…",
+                                    "Deleted",
+                                );
                             }
                         }
                         menu_selection.write().at_inbox_list();
+                        #[cfg(not(feature = "use-node"))]
                         crate::toast::push_toast("Deleted", crate::toast::ToastLevel::Success);
                     },
                     "Delete"
@@ -4859,11 +4876,19 @@ fn archive_message(
             // navigating away and unmounting the view. A bare spawn() would
             // cancel the ArchiveMessage delegate write on unmount, so the
             // archived message bounced back to the Inbox after reload (#286).
-            let _task = dioxus_core::spawn_forever(async move {
-                if let Err(e) = crate::local_state::archive_message(&mut c, a, id, ar).await {
-                    crate::log::local_state_failure("archive message", e);
-                }
-            });
+            confirm_when_stored(
+                async move {
+                    match crate::local_state::archive_message(&mut c, a, id, ar).await {
+                        Ok(()) => true,
+                        Err(e) => {
+                            crate::log::local_state_failure("archive message", e);
+                            false
+                        }
+                    }
+                },
+                "Archiving…",
+                "Archived",
+            );
         }
     }
     let result = inbox
@@ -4874,6 +4899,7 @@ fn archive_message(
         queue.borrow_mut().push(result);
     });
     post.apply(&mut menu_selection);
+    #[cfg(not(feature = "use-node"))]
     crate::toast::push_toast("Archived", crate::toast::ToastLevel::Success);
 }
 
@@ -4901,11 +4927,19 @@ fn delete_message(
             // spawn() would cancel the DeleteMessage delegate write on
             // unmount, so the deletion never committed to the node and the
             // message returned after reload (#286).
-            let _task = dioxus_core::spawn_forever(async move {
-                if let Err(e) = crate::local_state::delete_message(&mut c, a, id).await {
-                    crate::log::error(format!("delete_message failed: {e}"), None);
-                }
-            });
+            confirm_when_stored(
+                async move {
+                    match crate::local_state::delete_message(&mut c, a, id).await {
+                        Ok(()) => true,
+                        Err(e) => {
+                            crate::log::error(format!("delete_message failed: {e}"), None);
+                            false
+                        }
+                    }
+                },
+                "Deleting…",
+                "Deleted",
+            );
         }
     }
     let result = inbox
@@ -4916,7 +4950,35 @@ fn delete_message(
         queue.borrow_mut().push(result);
     });
     post.apply(&mut menu_selection);
+    #[cfg(not(feature = "use-node"))]
     crate::toast::push_toast("Deleted", crate::toast::ToastLevel::Success);
+}
+
+/// Run a local-state `write` and confirm it only once it is stored: `pending`
+/// now, `done` after the write was sent and the node has answered every
+/// local-state request so far. The UI applies the change at once, but until
+/// the node answers, a reload loses it (#286), so `done` must not appear
+/// before then. Runs as one task so `done` cannot overtake the write; a
+/// failed write gets no `done` (its own error path reports it).
+///
+/// `spawn_forever`: the caller navigates away and unmounts the view right
+/// after this, which would cancel a bare `spawn()` before the write is sent.
+/// The toast queue is captured here, in the caller's scope: the detached
+/// task runs outside the component tree, where `use_context` cannot find it.
+#[cfg(feature = "use-node")]
+fn confirm_when_stored(
+    write: impl std::future::Future<Output = bool> + 'static,
+    pending: &'static str,
+    done: &'static str,
+) {
+    let toasts = use_context::<crate::toast::ToastQueue>();
+    crate::toast::push_toast_to(toasts, pending, crate::toast::ToastLevel::Info);
+    let _task = dioxus_core::spawn_forever(async move {
+        if write.await {
+            crate::local_state::writes_stored().await;
+            crate::toast::push_toast_to(toasts, done, crate::toast::ToastLevel::Success);
+        }
+    });
 }
 
 /// Shared Add-to-address-book logic (#270 BLOCKER-1): derive the sender's bs58

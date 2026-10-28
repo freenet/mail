@@ -3050,6 +3050,11 @@ pub(crate) async fn node_comms(
                 let is_local_state_empty = crate::local_state::LOCAL_STATE_KEY
                     .get()
                     .is_some_and(|k| k == &key);
+                if is_local_state_empty {
+                    // Every local-state request gets exactly this answer once
+                    // the delegate has run it: a write is stored from here.
+                    crate::local_state::note_response();
+                }
                 if values.is_empty() && &key == IDENTITIES_KEY.get().unwrap() {
                     // no-op: see comment above
                 } else if values.is_empty() && is_local_state_empty {

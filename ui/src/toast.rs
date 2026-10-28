@@ -117,13 +117,24 @@ pub(crate) type ToastQueue = Signal<Vec<Toast>>;
 /// Returns the [`ToastId`] assigned to the new toast; callers that want to
 /// dismiss it early can pass the id to [`dismiss_toast`].
 pub(crate) fn push_toast(message: impl Into<String>, level: ToastLevel) -> ToastId {
+    push_toast_to(use_context::<ToastQueue>(), message, level)
+}
+
+/// [`push_toast`] onto a queue captured earlier. For code that runs outside
+/// the component tree, such as a detached task, where `use_context` cannot
+/// find the queue: capture it with `use_context::<ToastQueue>()` while still
+/// in a component scope, and push here later.
+pub(crate) fn push_toast_to(
+    mut queue: ToastQueue,
+    message: impl Into<String>,
+    level: ToastLevel,
+) -> ToastId {
     let id = ToastId::next();
     let toast = Toast {
         id,
         message: message.into(),
         level,
     };
-    let mut queue = use_context::<ToastQueue>();
     queue.write().push(toast);
 
     // Spawn a TTL timer. It captures the id and only removes *this* toast,

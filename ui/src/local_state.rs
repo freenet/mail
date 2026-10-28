@@ -266,6 +266,77 @@ mod wire {
         Ok(Parameters::try_from(p)?)
     }
 
+    thread_local! {
+        /// Requests sent to the local-state delegate that the node has not
+        /// answered yet. The node answers every one with a `DelegateResponse`
+        /// once the delegate has run it (an empty one for a write), so zero
+        /// means every write sent so far is stored. A write the UI has
+        /// applied optimistically but the node has not answered is lost if
+        /// the page reloads first (#286), so nothing may be reported as
+        /// done until this reaches zero.
+        ///
+        /// A count, not a per-request match: responses carry no request id
+        /// and the node may answer out of order. Waiting for zero is
+        /// conservative (it also waits for later writes), never early.
+        static UNANSWERED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        static ON_ANSWERED: RefCell<Vec<futures::channel::oneshot::Sender<()>>> =
+            const { RefCell::new(Vec::new()) };
+    }
+
+    /// Send a local-state request and count it until the node answers.
+    async fn send_counted(
+        client: &mut WebApiRequestClient,
+        request: DelegateRequest<'static>,
+        msg: &LocalStateMsg,
+    ) -> Result<(), DynError> {
+        // The variant name only: payloads can hold drafts.
+        let debug = format!("{msg:?}");
+        let kind = debug
+            .split(|c: char| !c.is_alphanumeric())
+            .next()
+            .unwrap_or("request");
+        let unanswered = UNANSWERED.with(|n| {
+            n.set(n.get() + 1);
+            n.get()
+        });
+        crate::log::info(format!("local-state {kind} sent ({unanswered} unanswered)"));
+        if let Err(e) = client.send(request.into()).await {
+            // It never reached the node, so nothing will answer it.
+            note_response();
+            return Err(e.into());
+        }
+        Ok(())
+    }
+
+    /// Count one answer from the node to a local-state request.
+    pub(crate) fn note_response() {
+        let unanswered = UNANSWERED.with(|n| {
+            // Saturating: a stray answer (one to the registration, if the node
+            // sends it) must not wrap the count.
+            n.set(n.get().saturating_sub(1));
+            n.get()
+        });
+        crate::log::info(format!("local-state answered ({unanswered} unanswered)"));
+        if unanswered == 0 {
+            ON_ANSWERED.with(|waiters| {
+                for waiter in waiters.borrow_mut().drain(..) {
+                    let _ = waiter.send(());
+                }
+            });
+        }
+    }
+
+    /// Resolves once the node has answered every local-state request sent so
+    /// far, i.e. every write made so far is stored and survives a reload.
+    pub(crate) async fn writes_stored() {
+        if UNANSWERED.with(|n| n.get()) == 0 {
+            return;
+        }
+        let (tx, rx) = futures::channel::oneshot::channel();
+        ON_ANSWERED.with(|waiters| waiters.borrow_mut().push(tx));
+        let _ = rx.await;
+    }
+
     pub(crate) async fn register_and_init(
         client: &mut WebApiRequestClient,
     ) -> Result<DelegateKey, DynError> {
@@ -279,7 +350,7 @@ mod wire {
             )],
             key: key.clone(),
         };
-        client.send(request.into()).await?;
+        send_counted(client, request, &LocalStateMsg::Init).await?;
         Ok(key)
     }
 
@@ -295,8 +366,7 @@ mod wire {
             )],
             key: key.clone(),
         };
-        client.send(request.into()).await?;
-        Ok(())
+        send_counted(client, request, &LocalStateMsg::GetAll).await
     }
 
     async fn send_msg(
@@ -315,8 +385,7 @@ mod wire {
             )],
             key,
         };
-        client.send(request.into()).await?;
-        Ok(())
+        send_counted(client, request, msg).await
     }
 
     pub(crate) async fn save_draft(
@@ -442,7 +511,8 @@ pub(crate) use wire::delete_sent;
 #[cfg(feature = "use-node")]
 pub(crate) use wire::{
     LOCAL_STATE_KEY, archive_message, delete_draft, delete_message, fetch_all, mark_read,
-    register_and_init, save_draft, save_sent, set_sent_delivery_state,
+    note_response, register_and_init, save_draft, save_sent, set_sent_delivery_state,
+    writes_stored,
 };
 // `unarchive_message` is wired but unused until later phases.
 #[cfg(feature = "use-node")]
