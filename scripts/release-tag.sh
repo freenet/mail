@@ -113,6 +113,15 @@ else
         [ "$ALLOW_BASE_DRIFT" = "1" ] \
             || die "refusing to tag. Cut a new release that includes them, or pass --allow-base-drift."
     fi
+
+    # The snapshot commit must be exactly published-contract/; anything else
+    # in it was never built or published.
+    OTHER_CHANGES=$(git diff --name-only "$SHA^" "$SHA" | grep -v '^published-contract/' || true)
+    if [ -n "$OTHER_CHANGES" ]; then
+        echo "  $(git rev-parse --short "$SHA") changes files outside published-contract/:" >&2
+        printf '    %s\n' $OTHER_CHANGES >&2
+        die "refusing to tag: those changes were never published. Cut a new release."
+    fi
 fi
 
 CARGO_VERSION=$(git show "$SHA:Cargo.toml" | awk '

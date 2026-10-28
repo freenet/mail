@@ -259,9 +259,13 @@ on_post_publish_exit() {
         new_id=$(tr -d '[:space:]' < published-contract/contract-id.txt 2>/dev/null || true)
         old_id=$(git show "$SOURCE_SHA:published-contract/contract-id.txt" 2>/dev/null | tr -d '[:space:]' || true)
         if [ -z "$new_id" ] || [ "$new_id" = "$old_id" ]; then
-            echo "✗ release.sh failed before publishing $TAG (build or signing step)." >&2
-            echo "  Nothing is live. Fix the error, run 'git checkout -- published-contract/'" >&2
-            echo "  if it shows changes, and re-run scripts/release.sh $VERSION." >&2
+            # Either the build failed before writing a new id, or the build
+            # reproduced the live contract exactly; publishing an identical
+            # contract again changes nothing, so a re-run is safe either way.
+            echo "✗ release.sh stopped before anything new was published for $TAG" >&2
+            echo "  (build or signing step, or the build reproduced the live contract id)." >&2
+            echo "  Fix the error, run 'git checkout -- published-contract/' if it shows" >&2
+            echo "  changes, and re-run scripts/release.sh $VERSION." >&2
             return
         fi
         if ! curl -sf -m 60 -o /dev/null "http://127.0.0.1:${FREENET_PORT}/v1/contract/web/${new_id}/"; then
