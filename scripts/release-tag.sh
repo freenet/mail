@@ -160,7 +160,9 @@ echo "  ✓ tagged $TAG at $SHA and pushed"
 # tree, so bring local main up to the release.
 # The tag is already pushed, so nothing here may fail the script.
 if [ "$(git rev-parse --abbrev-ref HEAD)" = "main" ] && [ -z "$(git status --porcelain)" ] \
-    && git merge -q --ff-only origin/main 2>/dev/null; then
+    && git merge-base --is-ancestor HEAD origin/main \
+    && git merge -q --ff-only origin/main 2>/dev/null \
+    && [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ]; then
     echo "  ✓ local main fast-forwarded to $(git rev-parse --short HEAD)"
 else
     echo "  Note: update your main checkout before running scripts/smoke-test-production.sh."
