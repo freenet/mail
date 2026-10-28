@@ -301,11 +301,13 @@ fdev execute update --as-state \
 # squash-merged PRs):
 git checkout -b release/v<version>
 git add published-contract/
-# Published-From: the main commit the webapp was built from (release.sh
-# prints it; it is origin/main at the time you ran it). release-tag.sh
-# refuses a snapshot commit without it.
+# release-tag.sh refuses a snapshot commit without these two lines:
+#   Contract ID     the published id (published-contract/contract-id.txt)
+#   Published-From  the main commit the webapp was built from (release.sh
+#                   prints it; it is origin/main at the time you ran it)
 git commit -m "chore(release): v<version> — production publish" \
-    -m "Published-From: <full 40-char sha>"
+    -m "Contract ID: $(cat published-contract/contract-id.txt)
+Published-From: <full 40-char sha>"
 git push -u origin release/v<version>
 gh pr create --base main --head release/v<version> \
     --title "chore(release): v<version> — production publish" \
@@ -409,8 +411,8 @@ to finish by hand. In short:
 
 1. If the facade was not UPDATEd, follow §"Manual pointer flip" above.
 2. Commit `published-contract/` on `release/v0.1.0` (create the branch if
-   the script didn't get that far) with a `Published-From: <sha>` line
-   naming the commit it was built from (the script prints it),
+   the script didn't get that far) with `Contract ID: <id>` and
+   `Published-From: <sha>` lines (the script prints both),
    `git push -u origin release/v0.1.0`, and open a PR against `main`.
 3. After the squash merge, `scripts/release-tag.sh 0.1.0`.
 

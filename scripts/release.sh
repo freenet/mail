@@ -286,8 +286,10 @@ on_post_publish_exit() {
         echo "    2. Nothing to commit: scripts/release-tag.sh $VERSION --sha $SOURCE_SHA" >&2
     else
         echo "    2. Commit published-contract/ on $RELEASE_BRANCH (git checkout -b if needed)," >&2
-        echo "       git push -u origin $RELEASE_BRANCH, and open a PR against main with" >&2
-        echo "       'Published-From: $SOURCE_SHA' in the commit message." >&2
+        echo "       git push -u origin $RELEASE_BRANCH, and open a PR against main. The commit" >&2
+        echo "       message must contain these two lines (release-tag.sh checks them):" >&2
+        echo "         Contract ID: $(tr -d '[:space:]' < published-contract/contract-id.txt 2>/dev/null || echo '<id from published-contract/contract-id.txt>')" >&2
+        echo "         Published-From: $SOURCE_SHA" >&2
         echo "    3. After the squash merge: scripts/release-tag.sh $VERSION" >&2
     fi
 }
