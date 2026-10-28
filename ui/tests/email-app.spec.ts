@@ -1257,6 +1257,38 @@ async function slowClipboard(page: Page, ms: number) {
   }, ms);
 }
 
+// Clipboard API calls scripted one by one: call i settles after
+// `steps[i].ms`, resolving if `ok`, rejecting otherwise. execCommand fails,
+// so every copy goes down the async path.
+async function scriptedClipboard(page: Page, steps: Array<{ ms: number; ok: boolean }>) {
+  await page.addInitScript((plan) => {
+    document.execCommand = () => false;
+    let calls = 0;
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: {
+        writeText: () => {
+          const step = plan[Math.min(calls, plan.length - 1)];
+          calls += 1;
+          return new Promise<void>((resolve, reject) =>
+            setTimeout(() => (step.ok ? resolve() : reject(new Error("blocked"))), step.ms),
+          );
+        },
+      },
+    });
+  }, steps);
+}
+
+async function startCreateWithPanel(page: Page, alias: string) {
+  await page.goto("/");
+  await waitForApp(page);
+  await page.locator('[data-testid="fm-id-create"]').click();
+  await page.locator('[data-testid="fm-create-alias-input"]').fill(alias);
+  await page.locator('[data-testid="fm-create-submit"]').click();
+  await page.locator('[data-testid="fm-create-backup-now"]').click();
+  return page.locator('[data-testid="fm-backup-panel"]');
+}
+
 test.describe("Restore backup card (#52)", () => {
   test("offers paste + upload, with Restore disabled until input parses", async ({
     page,
@@ -1619,6 +1651,62 @@ test.describe("Recovery key backup panel", () => {
     await expect(page.getByText("Discard backed-up identity?")).toBeVisible();
   });
 
+  // Review #349 round 3, sequence A: the discard dialog unmounts the panel
+  // while its copy is in flight. When that copy then FAILS, nothing reached
+  // the clipboard, so a later Discard must not warn.
+  test("a copy that fails after the discard dialog unmounted the panel doesn't leave a stale warning", async ({
+    page,
+  }) => {
+    await scriptedClipboard(page, [{ ms: 2_000, ok: false }]);
+    const panel = await startCreateWithPanel(page, "seqa");
+    await panel.locator('[data-testid="fm-backup-copy"]').click();
+    await page.getByRole("button", { name: "Discard", exact: true }).click();
+    await expect(page.getByText("Discard backed-up identity?")).toBeVisible();
+    await page.getByRole("button", { name: "Go back" }).click();
+
+    // Let the first copy fail while its panel is gone.
+    await page.waitForTimeout(2_500);
+    await page.getByRole("button", { name: "Discard", exact: true }).click();
+    await expect(page.getByText("Discard backed-up identity?")).toHaveCount(0);
+    await expect(page.locator('[data-testid="fm-id-create"]')).toBeVisible();
+  });
+
+  // Sequence B: copy 1 is in flight across the remount; copy 2 from the
+  // remounted panel fails first. Copy 1 may still land, and then does, so
+  // Discard must keep warning throughout.
+  test("a later failed copy can't clear the warning for an earlier copy still in flight", async ({
+    page,
+  }) => {
+    await scriptedClipboard(page, [
+      { ms: 4_000, ok: true },
+      { ms: 200, ok: false },
+    ]);
+    const panel = await startCreateWithPanel(page, "seqb");
+    const discard = page.getByRole("button", { name: "Discard", exact: true });
+    const warning = page.getByText("Discard backed-up identity?");
+    const goBack = page.getByRole("button", { name: "Go back" });
+
+    await panel.locator('[data-testid="fm-backup-copy"]').click();
+    await discard.click();
+    await expect(warning).toBeVisible();
+    await goBack.click();
+
+    // Copy 2, on the remounted panel, fails quickly.
+    await panel.locator('[data-testid="fm-backup-copy"]').click();
+    await expect(panel.locator('[data-testid="fm-backup-status"]')).toContainText(
+      "Couldn't copy",
+    );
+    // Copy 1 is still in flight.
+    await discard.click();
+    await expect(warning).toBeVisible();
+    await goBack.click();
+
+    // Copy 1 lands (its panel was unmounted meanwhile): still warns.
+    await page.waitForTimeout(4_500);
+    await discard.click();
+    await expect(warning).toBeVisible();
+  });
+
   test("the download gap is app-wide: a second key within 2s is refused, not silently lost", async ({
     page,
   }) => {
@@ -1645,8 +1733,12 @@ test.describe("Recovery key backup panel", () => {
       .click();
     await modal.locator('[data-testid="fm-backup-download"]').click();
     const status = modal.locator('[data-testid="fm-backup-status"]');
-    await expect(status).toContainText("another download just went out");
+    // A notice, not a failure.
+    await expect(status).toContainText(
+      "Another download just went out. Wait a moment and try again.",
+    );
     await expect(status).not.toContainText("Downloading");
+    await expect(status).not.toContainText("failed");
     expect(downloads).toBe(1);
 
     // After the gap it goes through.
