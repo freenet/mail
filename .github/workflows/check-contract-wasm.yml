@@ -41,12 +41,15 @@ jobs:
           # An allowlist of what is safe to skip, not a list of what
           # matters: many inputs move facade.wasm bytes (.cargo/config.toml
           # rustflags, Makefile.toml, scripts/), and a missed one must run
-          # the gate, not skip it. No Markdown file feeds the build.
+          # the gate, not skip it. No Markdown file feeds the build, except
+          # under ui/public/ (Dioxus asset_dir, shipped in the webapp).
+          # --no-renames so a rename lists its source path too.
           relevant=true
           if [ "${{ github.event_name }}" = "pull_request" ] \
-            && changed=$(git diff --name-only HEAD^1 HEAD) \
+            && changed=$(git diff --no-renames --name-only HEAD^1 HEAD) \
+            && ! printf '%s\n' "$changed" | grep -qE '^ui/public/' \
             && ! printf '%s\n' "$changed" \
-              | grep -qvE '(\.md$|^LICENSE|^COPYING|^$)'; then
+              | grep -qvE '(\.md$|^(LICENSE|COPYING)(\.(LESSER|txt|md))?$|^$)'; then
             relevant=false
             echo "Only documentation changed; check-drift will be skipped."
           fi
@@ -57,7 +60,9 @@ jobs:
     # Run unless `changes` positively said "docs only". If `changes`
     # failed or was cancelled, its output is empty and the gate runs:
     # a skipped required check would otherwise pass (fail-open).
-    if: always() && needs.changes.outputs.relevant != 'false'
+    # `!cancelled()` rather than `always()`: still runs when `changes`
+    # failed, but not on a run that was cancelled outright.
+    if: ${{ !cancelled() && needs.changes.outputs.relevant != 'false' }}
     # ubicloud-standard-8 — rebuilding the published contract from
     # source involves a full wasm32 compile of the web-container +
     # webapp, same compile-bound profile as build.yml.
