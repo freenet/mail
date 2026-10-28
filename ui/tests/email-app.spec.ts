@@ -1243,6 +1243,20 @@ async function breakLocalClipboard(page: Page) {
   });
 }
 
+// Clipboard writes that take `ms` to settle: execCommand fails and the
+// Clipboard API resolves late, so a copy stays in flight for a while.
+async function slowClipboard(page: Page, ms: number) {
+  await page.addInitScript((delay) => {
+    document.execCommand = () => false;
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: {
+        writeText: () => new Promise<void>((resolve) => setTimeout(resolve, delay)),
+      },
+    });
+  }, ms);
+}
+
 test.describe("Restore backup card (#52)", () => {
   test("offers paste + upload, with Restore disabled until input parses", async ({
     page,
@@ -1335,6 +1349,30 @@ test.describe("Restore backup card (#52)", () => {
     await expect(error).toContainText("can't appear in one");
   });
 
+  test("select-all + paste of a same-length bad key is checked at once, not treated as typing", async ({
+    page,
+    context,
+    browserName,
+  }) => {
+    test.skip(browserName !== "chromium", "uses the Chromium clipboard permission");
+    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+    await openRestoreForm(page);
+    const paste = page.locator('[data-testid="fm-restore-paste"]');
+    const error = page.locator('[data-testid="fm-restore-error"]');
+    await paste.fill(FIXTURE_TOKEN);
+    await expect(error).toHaveCount(0);
+
+    // Same length, truncated payload + junk: too short once decoded, which
+    // would be held back if this counted as typing.
+    const bad = FIXTURE_TOKEN.slice(0, -1) + " ";
+    await page.evaluate((t) => navigator.clipboard.writeText(t), bad);
+    await paste.focus();
+    await page.keyboard.press("ControlOrMeta+A");
+    await page.keyboard.press("ControlOrMeta+V");
+    await expect(paste).toHaveValue(bad);
+    await expect(error).toContainText("too short");
+  });
+
   test("restores from an uploaded v2 JSON file, matching the recovery key", async ({
     page,
   }) => {
@@ -1358,6 +1396,17 @@ test.describe("Restore backup card (#52)", () => {
     // alias rather than restoring the key under a stale name.
     await page.locator('[data-testid="fm-restore-paste"]').fill(FIXTURE_TOKEN);
     await expect(alias).toHaveValue("");
+    await file.setInputFiles(FIXTURE_JSON_PATH);
+    await expect(alias).toHaveValue("fixture-alice");
+
+    // Provenance is per field: after editing only the description, a
+    // pasted key still drops the file's alias but keeps the typed text.
+    const desc = page.getByPlaceholder("e.g. work");
+    await expect(desc).toHaveValue("committed v2 test fixture");
+    await desc.fill("my own words");
+    await page.locator('[data-testid="fm-restore-paste"]').fill(FIXTURE_TOKEN);
+    await expect(alias).toHaveValue("");
+    await expect(desc).toHaveValue("my own words");
     await file.setInputFiles(FIXTURE_JSON_PATH);
     await expect(alias).toHaveValue("fixture-alice");
 
@@ -1433,10 +1482,14 @@ test.describe("Recovery key backup panel", () => {
     );
     await expect(modal.locator('[data-testid="fm-backup-copy"]')).toHaveText("Copied");
 
-    // One fixed-label toggle; state is aria-pressed.
+    // One fixed-label toggle; state is aria-pressed, and aria-controls
+    // points at exactly one element (ids are per panel).
     const toggle = modal.locator('[data-testid="fm-backup-reveal"]');
     await expect(toggle).toHaveText("Show key");
     await expect(toggle).toHaveAttribute("aria-pressed", "false");
+    const controls = await toggle.getAttribute("aria-controls");
+    expect(controls).toMatch(/^fm-backup-key-value-\d+$/);
+    await expect(page.locator(`#${controls}`)).toHaveCount(1);
     await toggle.click();
     await expect(toggle).toHaveText("Show key");
     await expect(toggle).toHaveAttribute("aria-pressed", "true");
@@ -1544,6 +1597,63 @@ test.describe("Recovery key backup panel", () => {
     await page.getByRole("button", { name: "Discard", exact: true }).click();
     await expect(page.getByText("Discard backed-up identity?")).toHaveCount(0);
     await expect(page.locator('[data-testid="fm-id-create"]')).toBeVisible();
+  });
+
+  test("Discard while a copy is still in flight warns as if it had landed", async ({
+    page,
+  }) => {
+    await slowClipboard(page, 4_000);
+    await page.goto("/");
+    await waitForApp(page);
+    await page.locator('[data-testid="fm-id-create"]').click();
+    await page.locator('[data-testid="fm-create-alias-input"]').fill("slowcopy");
+    await page.locator('[data-testid="fm-create-submit"]').click();
+    await page.locator('[data-testid="fm-create-backup-now"]').click();
+    const panel = page.locator('[data-testid="fm-backup-panel"]');
+
+    await panel.locator('[data-testid="fm-backup-copy"]').click();
+    // Nothing has settled yet...
+    await expect(panel.locator('[data-testid="fm-backup-status"]')).toHaveText("");
+    // ...but the key may still reach the clipboard, so Discard must warn.
+    await page.getByRole("button", { name: "Discard", exact: true }).click();
+    await expect(page.getByText("Discard backed-up identity?")).toBeVisible();
+  });
+
+  test("the download gap is app-wide: a second key within 2s is refused, not silently lost", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await waitForApp(page);
+    let downloads = 0;
+    page.on("download", () => {
+      downloads += 1;
+    });
+    const modal = page.locator('[data-testid="fm-backup-modal"]');
+
+    await page
+      .locator('[data-testid="fm-id-row"][data-alias="address1"] [data-testid="fm-id-backup"]')
+      .click();
+    await modal.locator('[data-testid="fm-backup-download"]').click();
+    await expect(modal.locator('[data-testid="fm-backup-status"]')).toContainText(
+      "Downloading freenet-identity-address1.txt",
+    );
+    await modal.getByRole("button", { name: "Close" }).click();
+
+    // A different identity's panel, straight away.
+    await page
+      .locator('[data-testid="fm-id-row"][data-alias="address2"] [data-testid="fm-id-backup"]')
+      .click();
+    await modal.locator('[data-testid="fm-backup-download"]').click();
+    const status = modal.locator('[data-testid="fm-backup-status"]');
+    await expect(status).toContainText("another download just went out");
+    await expect(status).not.toContainText("Downloading");
+    expect(downloads).toBe(1);
+
+    // After the gap it goes through.
+    await page.waitForTimeout(2_300);
+    await modal.locator('[data-testid="fm-backup-download"]').click();
+    await expect(status).toContainText("Downloading freenet-identity-address2.txt");
+    await expect.poll(() => downloads).toBe(2);
   });
 
   test("create flow: confirming the backup before creating clears the Settings banner", async ({
@@ -1705,6 +1815,55 @@ test.describe("Recovery key backup panel", () => {
     await expect(panel).toHaveCount(0);
     await expect(page.getByText(NOT_BACKED_UP)).toBeVisible();
   });
+
+  test("settings: after switching identity, the screen shows and edits the NEW identity's settings", async ({
+    page,
+    isMobile,
+  }) => {
+    test.skip(isMobile, "the settings identity switcher is desktop-only");
+    await page.goto("/");
+    await waitForApp(page);
+    await selectIdentity(page, "address1");
+    await openAccountSettings(page);
+    const lastBackup = page.locator(".fm-row-set", { hasText: "Last backup" });
+    const signature = page.locator(".fm-row-set", { hasText: "Signature" }).locator("textarea");
+    const autoSign = page
+      .locator(".fm-row-set", { hasText: "Append signature to new messages" })
+      .locator('[role="switch"]');
+    const switchTo = async (alias: string) => {
+      await page.locator('[data-testid="fm-settings-ident-switcher"]').click();
+      await page.getByRole("option", { name: new RegExp(alias) }).click();
+      await expect(page.locator(".fm-set-ident-name")).toHaveText(alias);
+    };
+
+    // address1: backed up, with a signature.
+    await page.locator('[data-testid="fm-settings-backup"]').click();
+    await page.locator('[data-testid="fm-backup-saved"]').click();
+    await expect(page.getByText(NOT_BACKED_UP)).toHaveCount(0);
+    await signature.fill("signed, address1");
+    const aBackup = await lastBackup.innerText();
+    expect(aBackup).not.toContain("Never");
+
+    // address2 shows ITS state: not backed up, no signature.
+    await switchTo("address2");
+    await expect(page.getByText(NOT_BACKED_UP)).toBeVisible();
+    await expect(lastBackup).toContainText("Never");
+    await expect(signature).toHaveValue("");
+
+    // An edit on address2 must not copy address1's record onto it.
+    const before = await autoSign.getAttribute("aria-checked");
+    await autoSign.click();
+    await expect(autoSign).not.toHaveAttribute("aria-checked", before!);
+    await expect(page.getByText(NOT_BACKED_UP)).toBeVisible();
+    await expect(lastBackup).toContainText("Never");
+    await expect(signature).toHaveValue("");
+
+    // address1 is unchanged by any of that.
+    await switchTo("address1");
+    await expect(signature).toHaveValue("signed, address1");
+    await expect(page.getByText(NOT_BACKED_UP)).toHaveCount(0);
+    expect(await lastBackup.innerText()).toBe(aBackup);
+  });
 });
 
 // The gateway serves the app inside an iframe and relays clipboard writes
@@ -1771,6 +1930,10 @@ test.describe("Gateway shell relays (#349)", () => {
         ),
       )
       .toContain("download:text/plain");
+    // A relayed download can't be confirmed, so the panel doesn't claim it.
+    const status = panel.locator('[data-testid="fm-backup-status"]');
+    await expect(status).toContainText("Asked Freenet to save freenet-identity-address1.txt");
+    await expect(status).not.toContainText("Downloading");
   });
 
   test("a shell on another origin receives nothing", async ({ page, baseURL }) => {
