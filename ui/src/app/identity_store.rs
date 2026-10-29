@@ -226,30 +226,51 @@ pub(crate) async fn load_and_report() {
     }
 }
 
-/// Everything the node loop needs for one identity. Records the migration
-/// markers before the node loop dispatches any migration GET, so a crash in
-/// between still leaves the retry marker set.
-pub(crate) async fn prepare(info: IdentityInfo) -> LoadedIdentity {
-    let mut markers = load_markers(info.addr).await.unwrap_or_else(|e| {
-        crate::log::error(
-            format!("reading migration markers for `{}` failed: {e}", info.alias),
-            None,
-        );
-        MigrationMarkers::default()
-    });
+/// The migrations to run for an identity whose markers read as `read`, and
+/// the markers to write back, if they changed. Markers that could not be
+/// read (`None`) are unknown, never absent: nothing is planned and nothing
+/// is written, since writing defaults would wipe a pending migration marker.
+/// The next session tries again.
+pub(crate) fn plan_load(
+    read: Option<MigrationMarkers>,
+) -> (Option<String>, Option<String>, Option<MigrationMarkers>) {
+    let Some(mut markers) = read else {
+        return (None, None, None);
+    };
     let before = markers.clone();
-    let inbox_migrate_from = plan_migration(
+    let inbox = plan_migration(
         &mut markers.inbox_wasm_hash,
         &mut markers.pending_migration_from,
         crate::inbox::INBOX_CODE_HASH,
     );
-    let aft_migrate_from = plan_migration(
+    let aft = plan_migration(
         &mut markers.aft_record_wasm_hash,
         &mut markers.pending_aft_migration_from,
         crate::aft::TOKEN_RECORD_CODE_HASH,
     );
-    if markers != before {
-        let new = markers.clone();
+    let write = (markers != before).then_some(markers);
+    (inbox, aft, write)
+}
+
+/// Everything the node loop needs for one identity. Records the migration
+/// markers before the node loop dispatches any migration GET, so a crash in
+/// between still leaves the retry marker set.
+pub(crate) async fn prepare(info: IdentityInfo) -> LoadedIdentity {
+    let read = match load_markers(info.addr).await {
+        Ok(markers) => Some(markers),
+        Err(e) => {
+            crate::log::error(
+                format!(
+                    "reading migration markers for `{}` failed; skipping migrations this session: {e}",
+                    info.alias
+                ),
+                None,
+            );
+            None
+        }
+    };
+    let (inbox_migrate_from, aft_migrate_from, write) = plan_load(read);
+    if let Some(new) = write {
         if let Err(e) = update_markers(info.addr, move |m| *m = new.clone()).await {
             crate::log::error(
                 format!(
@@ -435,6 +456,41 @@ mod tests {
         let (mut rec, mut pend) = (Some("cur".to_string()), Some("old".to_string()));
         assert_eq!(plan_migration(&mut rec, &mut pend, "cur"), None);
         assert_eq!(pend, None);
+    }
+
+    #[test]
+    fn unreadable_markers_plan_nothing_and_write_nothing() {
+        assert_eq!(plan_load(None), (None, None, None));
+    }
+
+    #[test]
+    fn readable_markers_plan_and_record_a_drift() {
+        let read = MigrationMarkers {
+            inbox_wasm_hash: Some("old-inbox".into()),
+            pending_migration_from: None,
+            aft_record_wasm_hash: Some(crate::aft::TOKEN_RECORD_CODE_HASH.to_string()),
+            pending_aft_migration_from: None,
+        };
+        let (inbox, aft, write) = plan_load(Some(read));
+        assert_eq!(inbox.as_deref(), Some("old-inbox"));
+        assert_eq!(aft, None);
+        let write = write.expect("a drift is recorded");
+        assert_eq!(write.pending_migration_from.as_deref(), Some("old-inbox"));
+        assert_eq!(
+            write.inbox_wasm_hash.as_deref(),
+            Some(crate::inbox::INBOX_CODE_HASH)
+        );
+    }
+
+    #[test]
+    fn unchanged_markers_are_not_written() {
+        let read = MigrationMarkers {
+            inbox_wasm_hash: Some(crate::inbox::INBOX_CODE_HASH.to_string()),
+            pending_migration_from: None,
+            aft_record_wasm_hash: Some(crate::aft::TOKEN_RECORD_CODE_HASH.to_string()),
+            pending_aft_migration_from: None,
+        };
+        assert_eq!(plan_load(Some(read)), (None, None, None));
     }
 
     #[test]
