@@ -120,6 +120,7 @@ async fn delete(item: ItemRef) -> Result<(), CallError> {
                 ) && attempt < ops::MERGE_RETRIES =>
             {
                 attempt += 1;
+                ops::pause_ms(50 * 2u32.pow(attempt)).await;
             }
             other => return other,
         }

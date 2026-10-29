@@ -4064,7 +4064,7 @@ fn ThreadDetail(group: crate::app::threads::ThreadGroup) -> Element {
                 };
                 crate::local_state::local_mark_read(&alias, m.id, kept.clone());
                 #[cfg(feature = "use-node")]
-                {
+                if crate::local_state::should_persist_read(&alias, m.id) {
                     let alias_for_send = alias.clone();
                     let mid = m.id;
                     // spawn_forever: opening a message then immediately
@@ -5181,7 +5181,7 @@ fn OpenMessage(msg: Message) -> Element {
             };
             crate::local_state::local_mark_read(&alias, msg.id, kept.clone());
             #[cfg(feature = "use-node")]
-            {
+            if crate::local_state::should_persist_read(&alias, msg.id) {
                 let alias_for_send = alias.clone();
                 // spawn_forever: same as the group-open path — navigating
                 // away right after opening unmounts this view and a bare

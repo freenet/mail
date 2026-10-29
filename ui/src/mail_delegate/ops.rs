@@ -180,17 +180,24 @@ pub(crate) const MERGE_RETRIES: u32 = 3;
 /// On a lost compare-and-swap (another tab wrote first) the item is read
 /// again and merged again, up to [`MERGE_RETRIES`] times with a growing
 /// pause, then the conflict is returned to the caller.
+///
+/// An item that existed when first read and is gone on a retry was deleted
+/// meanwhile: the write is dropped (`Ok(None)`) rather than recreating it,
+/// so a delete is never undone by a write that raced it.
 pub(crate) async fn put_item_merged(
     item: ItemRef,
     mut merge: impl FnMut(Option<&[u8]>) -> Option<Vec<u8>>,
 ) -> Result<Option<u64>, CallError> {
     let mut attempt = 0;
+    let mut existed = false;
     loop {
         let current = get_item(item.clone()).await?;
         let (stored, generation) = match &current {
             Some(i) => (Some(i.body.as_slice()), i.generation),
+            None if existed => return Ok(None),
             None => (None, 0),
         };
+        existed |= current.is_some();
         let Some(body) = merge(stored) else {
             return Ok(None);
         };
@@ -441,7 +448,7 @@ fn nonzero_entropy() -> [u8; 32] {
     }
 }
 
-async fn pause_ms(ms: u32) {
+pub(crate) async fn pause_ms(ms: u32) {
     #[cfg(target_family = "wasm")]
     gloo_timers::future::TimeoutFuture::new(ms).await;
     #[cfg(not(target_family = "wasm"))]
@@ -481,6 +488,39 @@ mod tests {
             ml_kem_seed: kem.to_vec(),
         };
         (info, keys)
+    }
+
+    #[test]
+    fn a_merged_write_does_not_resurrect_an_item_deleted_meanwhile() {
+        let (owner, _) = imported("no-resurrect", 61);
+        let item = ItemRef {
+            kind: ItemKind::Draft,
+            owner: Some(owner.addr),
+            id: vec![9; 16],
+        };
+        let created = block_on(put_item(item.clone(), b"draft".to_vec(), Some(0))).unwrap();
+        let mut first = true;
+        let outcome = block_on(put_item_merged(item.clone(), |stored| {
+            if first {
+                first = false;
+                // Another tab deletes the item between this read and the
+                // write below (the in-page delegate runs synchronously).
+                let request = crate::mail_delegate::new_request(Op::DeleteItem {
+                    item: item.clone(),
+                    expected_gen: created,
+                });
+                crate::mail_delegate::local::process(
+                    &freenet_mail_protocol::to_cbor(&request).unwrap(),
+                );
+            }
+            stored.map(|_| b"autosaved".to_vec())
+        }))
+        .unwrap();
+        assert_eq!(outcome, None);
+        assert!(
+            block_on(get_item(item)).unwrap().is_none(),
+            "the delete stands"
+        );
     }
 
     #[test]

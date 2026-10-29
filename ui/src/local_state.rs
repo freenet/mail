@@ -245,6 +245,22 @@ pub(crate) fn is_deleted(alias: &str, id: MessageId) -> bool {
     SNAPSHOT.with(|s| s.borrow().is_deleted(alias, id))
 }
 
+thread_local! {
+    /// Messages whose read mark this page has already sent to the delegate.
+    static READ_SENT: RefCell<HashSet<(String, MessageId)>> = RefCell::new(HashSet::new());
+}
+
+/// Whether opening message `id` should send its read mark to the delegate:
+/// once per page, and never for a message already deleted or archived (a
+/// late read mark would write its kept copy back after the delete). Views
+/// render many times while open; each render used to send it again.
+pub(crate) fn should_persist_read(alias: &str, id: MessageId) -> bool {
+    if is_deleted(alias, id) || is_archived(alias, id) {
+        return false;
+    }
+    READ_SENT.with(|sent| sent.borrow_mut().insert((alias.to_string(), id)))
+}
+
 pub(crate) fn sent_for(alias: &str) -> Vec<(String, SentMessage)> {
     SNAPSHOT.with(|s| {
         s.borrow()
@@ -673,6 +689,29 @@ mod tests {
     /// single kept entry, not duplicates. The live UI path runs
     /// `OpenMessage` on every render, which re-fires `local_mark_read`
     /// — that must be a no-op on second call.
+    #[test]
+    fn a_read_mark_is_sent_once_and_never_after_a_delete() {
+        fresh_snapshot();
+        assert!(should_persist_read("rs-alice", 41));
+        assert!(!should_persist_read("rs-alice", 41), "once per page");
+        local_delete_message("rs-alice", 42);
+        assert!(!should_persist_read("rs-alice", 42), "not after a delete");
+        local_archive_message("rs-alice", 43, archived_for_test());
+        assert!(!should_persist_read("rs-alice", 43), "not after an archive");
+    }
+
+    fn archived_for_test() -> ArchivedMessage {
+        ArchivedMessage {
+            from: "bob".into(),
+            title: "t".into(),
+            content: "c".into(),
+            archived_at: 0,
+            thread_id: None,
+            in_reply_to: None,
+            quoted_excerpt: None,
+        }
+    }
+
     #[test]
     fn local_mark_read_is_idempotent() {
         fresh_snapshot();
