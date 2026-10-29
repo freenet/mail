@@ -2697,9 +2697,10 @@ pub(crate) async fn node_comms(
                     Some(identity) => {
                         match update {
                             UpdateData::Delta(delta) => {
-                                match serde_json::from_slice::<freenet_mail_wire_v1::inbox::UpdateInbox>(
-                                    delta.as_ref(),
-                                ) {
+                                match serde_json::from_slice::<
+                                    freenet_mail_wire_v1::inbox::UpdateInbox,
+                                >(delta.as_ref())
+                                {
                                     Ok(parsed) => {
                                         let models = inboxes.0.write();
                                         if let Some(pos) =

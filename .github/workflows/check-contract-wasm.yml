@@ -24,6 +24,8 @@ on:
       - 'rust-toolchain.toml'
       - 'modules/**'
       - 'contracts/inbox/**'
+      - 'contracts/.cargo/**'
+      - 'wire-v1/**'
       - 'scripts/**'
       - 'Makefile.toml'
       - 'legacy_*.toml'

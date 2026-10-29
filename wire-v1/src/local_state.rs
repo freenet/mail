@@ -651,7 +651,6 @@ impl TryFrom<&LocalStateMsg> for Vec<u8> {
     }
 }
 
-
 #[cfg(test)]
 mod boundary_tests {
     //! Regression tests for the deserialization boundaries.

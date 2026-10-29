@@ -7,8 +7,8 @@ use std::{
 use std::sync::Arc;
 
 use dioxus::prelude::*;
-use freenet_stdlib::prelude::ContractKey;
 use freenet_mail_wire_v1::identity::{EntryKind, IdentityManagement};
+use freenet_stdlib::prelude::ContractKey;
 use ml_dsa::{MlDsa65, SigningKey as MlDsaSigningKey, VerifyingKey as MlDsaVerifyingKey};
 use ml_kem::{DecapsulationKey, EncapsulationKey, MlKem768};
 
@@ -1759,11 +1759,14 @@ fn get_keys() -> Result<IdentityKeyBundle, DynError> {
 
     // ML-DSA-65: generate from random 32-byte seed.
     let ml_dsa_seed: [u8; 32] = crate::rng::random_bytes();
-    let ml_dsa_key = Arc::new(ml_dsa::SigningKey::<MlDsa65>::from_seed(&ml_dsa_seed.into()));
+    let ml_dsa_key = Arc::new(ml_dsa::SigningKey::<MlDsa65>::from_seed(
+        &ml_dsa_seed.into(),
+    ));
 
     // ML-KEM-768: derive from a random 64-byte seed. The seed is what a
     // recovery key stores, so the key is built from it explicitly.
-    let ml_kem_dk = DecapsulationKey::<MlKem768>::from_seed(crate::rng::random_bytes::<64>().into());
+    let ml_kem_dk =
+        DecapsulationKey::<MlKem768>::from_seed(crate::rng::random_bytes::<64>().into());
 
     Ok((ml_dsa_key, ml_kem_dk))
 }

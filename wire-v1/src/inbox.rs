@@ -15,7 +15,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::aft::{Tier, TokenAssignment, TokenAssignmentHash};
 
-
 /// Sign this byte array and include the signature in the `inbox_signature` so
 /// this inbox can be verified on updates. Value is arbitrary but must stay
 /// constant across versions — it's part of the signed-payload convention, so

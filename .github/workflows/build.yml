@@ -117,19 +117,27 @@ jobs:
           cargo test
           cargo build --release --target wasm32-unknown-unknown
 
-      # Issue #199: inbox + AFT contracts and the shared aft-interface
-      # crate also live OUTSIDE the workspace (own Cargo.locks) so dep
-      # churn can't rotate their wasm bytes. Same gating treatment.
+      # Issue #199: every other contract and delegate source (and the
+      # shared aft-interface crate) also lives OUTSIDE the workspace with
+      # its own Cargo.lock, so dep churn can't rotate their wasm bytes.
+      # Same gating treatment. --locked fails a lockfile that no longer
+      # matches its manifest (contracts/web-container follows common/'s
+      # versions, so a root bump can leave it stale).
       - name: Lint + test out-of-workspace contracts (issue #199)
         run: |
           for crate in \
             modules/antiflood-tokens/interfaces \
             contracts/inbox \
+            contracts/web-container \
             modules/antiflood-tokens/contracts/token-allocation-record \
-            modules/antiflood-tokens/delegates/token-generator
+            modules/antiflood-tokens/delegates/token-generator \
+            modules/identity-management \
+            modules/mail-local-state
           do
             echo "::group::$crate"
-            (cd "$crate" && cargo fmt -- --check && cargo clippy --all-targets -- -D warnings)
+            (cd "$crate" && cargo fmt -- --check \
+              && cargo clippy --locked --all-targets -- -D warnings \
+              && cargo test --locked)
             echo "::endgroup::"
           done
           # Inbox host-side integration tests (the lockfile-isolated

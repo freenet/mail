@@ -852,11 +852,16 @@ pub(crate) struct User {
 impl User {
     #[cfg(feature = "example-data")]
     fn new() -> Self {
-
-        let ml_dsa0 = Arc::new(ml_dsa::SigningKey::<MlDsa65>::from_seed(&crate::rng::random_bytes::<32>().into()));
-        let ml_dsa1 = Arc::new(ml_dsa::SigningKey::<MlDsa65>::from_seed(&crate::rng::random_bytes::<32>().into()));
-        let ml_kem_dk0 = DecapsulationKey::<MlKem768>::from_seed(crate::rng::random_bytes::<64>().into());
-        let ml_kem_dk1 = DecapsulationKey::<MlKem768>::from_seed(crate::rng::random_bytes::<64>().into());
+        let ml_dsa0 = Arc::new(ml_dsa::SigningKey::<MlDsa65>::from_seed(
+            &crate::rng::random_bytes::<32>().into(),
+        ));
+        let ml_dsa1 = Arc::new(ml_dsa::SigningKey::<MlDsa65>::from_seed(
+            &crate::rng::random_bytes::<32>().into(),
+        ));
+        let ml_kem_dk0 =
+            DecapsulationKey::<MlKem768>::from_seed(crate::rng::random_bytes::<64>().into());
+        let ml_kem_dk1 =
+            DecapsulationKey::<MlKem768>::from_seed(crate::rng::random_bytes::<64>().into());
 
         let identities = vec![
             Identity::new(
@@ -1094,7 +1099,9 @@ pub(crate) fn compose_post_send(send_succeeded: bool) -> ComposePostSend {
 /// MarkRead click time (`kept_at`). Legacy entries (pre-#229) lack
 /// `sent_at`; they fall back to `kept_at` — wrong but matches the
 /// pre-#229 behaviour and self-heals the next time the row is read.
-fn kept_render_time(kept: &freenet_mail_wire_v1::local_state::KeptMessage) -> chrono::DateTime<chrono::Utc> {
+fn kept_render_time(
+    kept: &freenet_mail_wire_v1::local_state::KeptMessage,
+) -> chrono::DateTime<chrono::Utc> {
     chrono::DateTime::from_timestamp_millis(kept.sent_at.unwrap_or(kept.kept_at))
         .unwrap_or_else(chrono::Utc::now)
 }
@@ -1139,7 +1146,10 @@ fn kept_to_message(
 /// `Message.id` being stable across contract-state reloads.
 fn merge_inbox_list(
     live: Vec<Message>,
-    kept: Vec<(freenet_mail_wire_v1::local_state::MessageId, freenet_mail_wire_v1::local_state::KeptMessage)>,
+    kept: Vec<(
+        freenet_mail_wire_v1::local_state::MessageId,
+        freenet_mail_wire_v1::local_state::KeptMessage,
+    )>,
     is_archived: impl Fn(u64) -> bool,
     is_read: impl Fn(u64) -> bool,
 ) -> Vec<Message> {
@@ -2951,7 +2961,11 @@ const SENT_FOLD_ID_BASE: u64 = 1 << 48;
 /// (#310). `from = alias` lights up `.is-me` styling; `read = true` (own mail
 /// is never unread); `id` is stable per sent UUID and offset out of the
 /// inbox id space.
-fn sent_message_to_row(id: &str, s: &freenet_mail_wire_v1::local_state::SentMessage, alias: &str) -> Message {
+fn sent_message_to_row(
+    id: &str,
+    s: &freenet_mail_wire_v1::local_state::SentMessage,
+    alias: &str,
+) -> Message {
     // Stable, collision-resistant synthetic id from the sent UUID.
     let mut hash: u64 = 1469598103934665603; // FNV-1a offset basis
     for b in id.as_bytes() {
@@ -3410,17 +3424,18 @@ fn MessageList() -> Element {
     } else {
         Vec::new()
     };
-    let drafts: Vec<(String, freenet_mail_wire_v1::local_state::Draft)> = if matches!(folder, menu::Folder::Drafts)
-        || (matches!(folder, menu::Folder::Inbox) && inbox_settings.drafts_in_inbox)
-    {
-        let mut d = crate::local_state::drafts_for(&active_alias);
-        // Newest first; tie-break by UUID string for stability only — UUID v4
-        // order is not chronological (#137).
-        d.sort_by(sort_cmp_drafts);
-        d
-    } else {
-        Vec::new()
-    };
+    let drafts: Vec<(String, freenet_mail_wire_v1::local_state::Draft)> =
+        if matches!(folder, menu::Folder::Drafts)
+            || (matches!(folder, menu::Folder::Inbox) && inbox_settings.drafts_in_inbox)
+        {
+            let mut d = crate::local_state::drafts_for(&active_alias);
+            // Newest first; tie-break by UUID string for stability only — UUID v4
+            // order is not chronological (#137).
+            d.sort_by(sort_cmp_drafts);
+            d
+        } else {
+            Vec::new()
+        };
     let sent_msgs: Vec<(String, freenet_mail_wire_v1::local_state::SentMessage)> =
         if matches!(folder, menu::Folder::Sent) {
             let mut s = crate::local_state::sent_for(&active_alias);
@@ -4453,7 +4468,10 @@ fn ThreadCompact(group: crate::app::threads::ThreadGroup) -> Element {
 }
 
 #[component]
-fn OpenArchivedMessage(msg_id: u64, msg: freenet_mail_wire_v1::local_state::ArchivedMessage) -> Element {
+fn OpenArchivedMessage(
+    msg_id: u64,
+    msg: freenet_mail_wire_v1::local_state::ArchivedMessage,
+) -> Element {
     let mut menu_selection = use_context::<Signal<menu::MenuSelection>>();
     let user = use_context::<Signal<User>>();
     let client = crate::api::WEB_API_SENDER.get().unwrap();
@@ -4594,7 +4612,10 @@ fn OpenArchivedMessage(msg_id: u64, msg: freenet_mail_wire_v1::local_state::Arch
 }
 
 #[component]
-fn OpenSentMessage(sent_id: String, msg: freenet_mail_wire_v1::local_state::SentMessage) -> Element {
+fn OpenSentMessage(
+    sent_id: String,
+    msg: freenet_mail_wire_v1::local_state::SentMessage,
+) -> Element {
     let mut menu_selection = use_context::<Signal<menu::MenuSelection>>();
     let user = use_context::<Signal<User>>();
     #[cfg(feature = "use-node")]
@@ -6071,7 +6092,9 @@ mod folder_count_tests {
     /// Reset the shared local-state snapshot so deleted/archived sets don't
     /// leak between tests on the same thread.
     fn reset_state() {
-        crate::local_state::replace_snapshot(::freenet_mail_wire_v1::local_state::LocalState::default());
+        crate::local_state::replace_snapshot(
+            ::freenet_mail_wire_v1::local_state::LocalState::default(),
+        );
     }
 
     /// Repro for #268: the Inbox badge counted unread rows that the list

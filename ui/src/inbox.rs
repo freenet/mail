@@ -1534,8 +1534,11 @@ mod tests {
 
     #[test]
     fn remove_msg() {
-        let ml_dsa_key = Arc::new(ml_dsa::SigningKey::<MlDsa65>::from_seed(&crate::rng::random_bytes::<32>().into()));
-        let ml_kem_dk = DecapsulationKey::<MlKem768>::from_seed(crate::rng::random_bytes::<64>().into());
+        let ml_dsa_key = Arc::new(ml_dsa::SigningKey::<MlDsa65>::from_seed(
+            &crate::rng::random_bytes::<32>().into(),
+        ));
+        let ml_kem_dk =
+            DecapsulationKey::<MlKem768>::from_seed(crate::rng::random_bytes::<64>().into());
         let mut inbox = InboxModel::new(ml_dsa_key, ml_kem_dk).unwrap();
         for id in 0..10000 {
             inbox.messages.push(MessageModel {
@@ -1758,7 +1761,8 @@ mod tests {
     // ─── #150 UI-side bypass helpers ──────────────────────────────────────
 
     fn make_test_inbox(ml_dsa_key: Arc<MlDsaSigningKey<MlDsa65>>) -> InboxModel {
-        let ml_kem_dk = DecapsulationKey::<MlKem768>::from_seed(crate::rng::random_bytes::<64>().into());
+        let ml_kem_dk =
+            DecapsulationKey::<MlKem768>::from_seed(crate::rng::random_bytes::<64>().into());
         InboxModel::new(ml_dsa_key, ml_kem_dk).unwrap()
     }
 
@@ -1824,8 +1828,10 @@ mod tests {
                 if let UpdateData::Delta(d) = data {
                     let decoded: freenet_mail_wire_v1::inbox::UpdateInbox =
                         serde_json::from_slice(&d).expect("delta must decode as UpdateInbox");
-                    if let freenet_mail_wire_v1::inbox::UpdateInbox::ModifySettings { settings, .. } =
-                        decoded
+                    if let freenet_mail_wire_v1::inbox::UpdateInbox::ModifySettings {
+                        settings,
+                        ..
+                    } = decoded
                     {
                         assert!(
                             settings.allow_verified_skip_token,
@@ -1882,7 +1888,9 @@ mod tests {
         {
             let decoded: freenet_mail_wire_v1::inbox::UpdateInbox =
                 serde_json::from_slice(&d).expect("delta decode");
-            if let freenet_mail_wire_v1::inbox::UpdateInbox::ModifySettings { settings, .. } = decoded {
+            if let freenet_mail_wire_v1::inbox::UpdateInbox::ModifySettings { settings, .. } =
+                decoded
+            {
                 assert_eq!(
                     settings.verified_senders.len(),
                     vs.len(),
@@ -1957,7 +1965,9 @@ mod tests {
         {
             let decoded: freenet_mail_wire_v1::inbox::UpdateInbox =
                 serde_json::from_slice(&d).expect("delta decode");
-            if let freenet_mail_wire_v1::inbox::UpdateInbox::ModifySettings { settings, .. } = decoded {
+            if let freenet_mail_wire_v1::inbox::UpdateInbox::ModifySettings { settings, .. } =
+                decoded
+            {
                 assert!(settings.allow_verified_skip_token);
                 assert!(settings.verified_senders.is_empty());
             } else {

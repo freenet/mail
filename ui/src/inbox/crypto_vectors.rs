@@ -53,10 +53,7 @@ fn v1_signature_verifies() {
 #[test]
 fn ml_kem_seed_derives_the_v1_encapsulation_key() {
     let dk = DecapsulationKey::<MlKem768>::from_seed(kem_seed().into());
-    assert_eq!(
-        dk.encapsulation_key().to_bytes().to_vec(),
-        vector("kem_ek")
-    );
+    assert_eq!(dk.encapsulation_key().to_bytes().to_vec(), vector("kem_ek"));
 }
 
 #[test]

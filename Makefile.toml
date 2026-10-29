@@ -220,8 +220,11 @@ dependencies = [
 
 [tasks.build-web-container]
 description = "Rebuild the web container contract from source (never published: the published wasm is the frozen published-contract/web_container_contract.wasm)"
+# Outside the workspace with its own Cargo.lock; run from its directory so
+# contracts/.cargo/config.toml applies.
+cwd = "./contracts/web-container"
 command = "cargo"
-args = ["build", "--profile", "${BUILD_PROFILE}", "--target", "${CONTRACT_TARGET}", "-p", "freenet-email-app-web"]
+args = ["build", "--profile", "${BUILD_PROFILE}", "--target", "${CONTRACT_TARGET}"]
 
 # ─── Container contract (issue #200, Phase 1) ─────────────────────────────────
 # The container contract has a STABLE contract id by design. Its wasm + parameters

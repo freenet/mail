@@ -8,7 +8,6 @@ use std::collections::HashMap;
 use freenet_stdlib::prelude::*;
 use serde::{Deserialize, Serialize};
 
-
 type Key = Vec<u8>;
 type Alias = String;
 type Extra = String;
