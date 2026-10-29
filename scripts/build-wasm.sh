@@ -6,6 +6,9 @@
 #   * remaps CARGO_HOME, RUSTUP_HOME, the checkout and the target dir to fixed
 #     prefixes (/cargo, /rustup, /build, /target), so embedded source paths are
 #     the same on every machine;
+#   * builds from a copy of the checkout at a fixed path
+#     (/tmp/freenet-mail-wasm-build), because cargo hashes the absolute path
+#     of out-of-workspace path dependencies into symbol names;
 #   * builds into a fresh throwaway target dir with --locked;
 #   * refuses the output if any build-machine path survived
 #     (scripts/check-wasm-paths.sh).
@@ -38,20 +41,46 @@ case "$KIND" in
 esac
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
-CRATE_ABS="$(cd "$CRATE_DIR" && pwd -P)"
+CRATE_REL="$(cd "$CRATE_DIR" && pwd -P)"
+case "$CRATE_REL" in
+    "$REPO_ROOT"/*) CRATE_REL="${CRATE_REL#"$REPO_ROOT"/}" ;;
+    *) echo "error: $CRATE_DIR is not inside $REPO_ROOT" >&2; exit 2 ;;
+esac
 CARGO_HOME_ABS="$(cd "${CARGO_HOME:-$HOME/.cargo}" && pwd -P)"
 RUSTUP_HOME_ABS="$(cd "${RUSTUP_HOME:-$HOME/.rustup}" && pwd -P)"
 
-mkdir -p "$REPO_ROOT/target"
-BUILD_TARGET="$(mktemp -d "$REPO_ROOT/target/wasm-build.XXXXXX")"
-trap 'rm -r -- "$BUILD_TARGET"' EXIT
+# Build from a copy of the checkout at ONE fixed path. Cargo hashes the
+# absolute path of every path dependency outside the building workspace's
+# root into that crate's -C metadata, which appears in every mangled symbol
+# name; path remapping does not reach it. The mail delegate's protocol/ and
+# wire-v1/ are such dependencies, so the same commit built in two checkouts
+# gave two different WASMs, and CI a third. At a fixed path every machine
+# hashes the same bytes. The lock serializes builds on a shared machine.
+STAGE=/tmp/freenet-mail-wasm-build
+exec 9> "$STAGE.lock"
+flock -w 3600 9 || { echo "error: timed out waiting for $STAGE.lock" >&2; exit 1; }
+if [ -e "$STAGE" ]; then rm -r -- "$STAGE"; fi
+mkdir -p "$STAGE"
+trap 'rm -r -- "$STAGE"' EXIT
+# Tracked and untracked-but-not-ignored files, as they are on disk; from a
+# source export with no git metadata, everything but target/ and build/.
+if git -C "$REPO_ROOT" rev-parse --is-inside-work-tree > /dev/null 2>&1; then
+    (cd "$REPO_ROOT" && git ls-files -z --cached --others --exclude-standard \
+        | tar --null --ignore-failed-read -T - -cf -) | tar -xf - -C "$STAGE"
+else
+    (cd "$REPO_ROOT" && tar --exclude=./target --exclude='*/target' \
+        --exclude='*/build/freenet' -cf - .) | tar -xf - -C "$STAGE"
+fi
+CRATE_ABS="$STAGE/$CRATE_REL"
+BUILD_TARGET="$STAGE/target/wasm-build"
+mkdir -p "$BUILD_TARGET"
 
 # Order matters: rustc applies the LAST matching remap, so list the most
-# specific prefixes last (the target dir sits inside the checkout).
+# specific prefixes last (the target dir sits inside the stage).
 REMAPS=(
     "--remap-path-prefix=$CARGO_HOME_ABS=/cargo"
     "--remap-path-prefix=$RUSTUP_HOME_ABS=/rustup"
-    "--remap-path-prefix=$REPO_ROOT=/build"
+    "--remap-path-prefix=$STAGE=/build"
     "--remap-path-prefix=$BUILD_TARGET=/target"
 )
 # Env RUSTFLAGS replaces the target rustflags from contracts/.cargo/ and
@@ -71,7 +100,7 @@ NAME="$(sed -n 's/^name *= *"\(.*\)"/\1/p' Cargo.toml | head -1 | tr '-' '_')"
 BUILT="$CRATE_ABS/build/freenet/$NAME"
 [ -f "$BUILT" ] || { echo "error: fdev produced no $BUILT" >&2; exit 1; }
 
-"$REPO_ROOT/scripts/check-wasm-paths.sh" "$BUILT" "$REPO_ROOT" "$BUILD_TARGET" "$CRATE_ABS"
+"$REPO_ROOT/scripts/check-wasm-paths.sh" "$BUILT" "$REPO_ROOT" "$STAGE"
 
 cp "$BUILT" "$OUT"
 inspect_kind=code
