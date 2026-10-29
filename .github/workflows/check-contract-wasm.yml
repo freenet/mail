@@ -23,6 +23,10 @@ on:
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
       - 'modules/**'
+      - 'delegates/**'
+      - 'protocol/**'
+      - 'wire-v1/**'
+      - 'scripts/**'
       - 'contracts/inbox/**'
       - 'contracts/.cargo/**'
       - 'wire-v1/**'
@@ -176,6 +180,12 @@ jobs:
       # the reviewed source builds.
       - name: Verify the mail-delegate candidate is the source's build
         run: bash scripts/check-delegate-candidate.sh
+
+      # A guard only ever seen passing is not known to work. This applies,
+      # to a staged copy, the regression each delegate guard exists to catch
+      # (and runs the release guard's tests) and requires each to fail.
+      - name: Show each mail-delegate guard failing when broken
+        run: bash scripts/check-guards-fail.sh
 
       - name: Upload the rebuilt mail-delegate candidate
         if: failure()

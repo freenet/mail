@@ -56,6 +56,8 @@ RUSTUP_HOME_ABS="$(cd "${RUSTUP_HOME:-$HOME/.rustup}" && pwd -P)"
 # wire-v1/ are such dependencies, so the same commit built in two checkouts
 # gave two different WASMs, and CI a third. At a fixed path every machine
 # hashes the same bytes. The lock serializes builds on a shared machine.
+# Linux (flock) and one user per machine: the path is fixed by design, so
+# two users building at once would contend for it.
 STAGE=/tmp/freenet-mail-wasm-build
 exec 9> "$STAGE.lock"
 flock -w 3600 9 || { echo "error: timed out waiting for $STAGE.lock" >&2; exit 1; }

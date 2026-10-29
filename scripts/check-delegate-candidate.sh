@@ -2,12 +2,11 @@
 # Check that the committed mail-delegate candidate is exactly what the source
 # builds, and that its committed code hash is that build's hash.
 #
-# The candidate (published-contract/candidate/) is the WASM the v0.3.0 UI
-# will embed. A delegate's key is derived from its WASM, so the committed
-# bytes ARE the key users' data will live under: a source change that is not
-# rebuilt into the candidate would ship a delegate other than the one
-# reviewed. Unlike published-contract/wasm/, the candidate may still change;
-# the v0.3.0 release freezes it into published-contract/wasm/v2/.
+# The candidate (published-contract/candidate/) is the mail delegate's WASM
+# between releases; a release freezes it into published-contract/wasm/v2/.
+# A delegate's key is derived from its WASM, so the committed bytes ARE the
+# key users' data lives under: a source change not rebuilt into the
+# candidate would ship a delegate other than the one reviewed.
 #
 # Usage: scripts/check-delegate-candidate.sh
 # Exit status: 0 = matches, 1 = it does not.

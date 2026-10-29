@@ -39,6 +39,8 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 default = ["v1-transition"]
+# Exports the delegate's FFI entry points (the `#[delegate]` macro gates them
+# on it); build-wasm.sh enables it. Native tests build without it.
 freenet-main-delegate = []
 # Keeps the operations the v0.2.x (v1 inbox) send path needs. Removed with
 # that path when the v2 inbox lands.

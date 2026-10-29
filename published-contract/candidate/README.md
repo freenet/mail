@@ -1,9 +1,9 @@
 # Candidate artifacts
 
-WASM for the next generation, committed while that generation is still being
-built. Unlike `../wasm/`, these files may change: each PR that changes the
-source rebuilds them, and CI (`scripts/check-delegate-candidate.sh`) fails if
-the committed bytes are not what the source builds.
+The mail delegate's WASM between releases. Unlike `../wasm/`, these files
+change: each PR that changes the delegate's source rebuilds them, and CI
+(`scripts/check-delegate-candidate.sh`) fails if the committed bytes are not
+what the source builds.
 
 The release that ships them moves them into `../wasm/v2/`, pins them in
 `../frozen.sha256` and adds their registry rows. From then on they never change.
