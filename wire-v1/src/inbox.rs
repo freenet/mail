@@ -290,3 +290,55 @@ impl TryFrom<Inbox> for StateDelta<'static> {
         Ok(serialized.into())
     }
 }
+
+/// Ported from `contracts/inbox`'s tests: the serde round trips that do not
+/// need the contract implementation.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn update_inbox_round_trips_through_state_delta() {
+        let payload = UpdateInbox::AddMessages { messages: vec![] };
+        let bytes = serde_json::to_vec(&payload).expect("encode");
+        // Pin the wire shape — the JSON must contain the externally-tagged
+        // discriminant so the decoder can route to the right variant.
+        assert!(
+            bytes.starts_with(br#"{"AddMessages""#),
+            "UpdateInbox::AddMessages must serialize as externally-tagged enum; \
+             got: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let delta = StateDelta::from(bytes);
+        let decoded = UpdateInbox::try_from(delta).expect("decode");
+        match decoded {
+            UpdateInbox::AddMessages { messages } => assert!(messages.is_empty()),
+            UpdateInbox::RemoveMessages { .. } => {
+                panic!("expected AddMessages, got RemoveMessages")
+            }
+            UpdateInbox::ModifySettings { .. } => {
+                panic!("expected AddMessages, got ModifySettings")
+            }
+        }
+    }
+
+    #[test]
+    fn inbox_settings_max_age_serde_round_trips() {
+        let settings = InboxSettings {
+            minimum_tier: Tier::Min10,
+            max_age_secs: 7 * 86_400,
+            allow_verified_skip_token: false,
+            verified_senders: BTreeSet::new(),
+            private: Vec::new(),
+        };
+        let bytes = serde_json::to_vec(&settings).expect("encode");
+        let decoded: InboxSettings = serde_json::from_slice(&bytes).expect("decode");
+        assert_eq!(decoded.max_age_secs, 7 * 86_400);
+        // Legacy on-chain states encoded before `max_age_secs` existed must
+        // decode, with the field defaulted.
+        let legacy_bytes = br#"{"minimum_tier":"Min10","private":[]}"#;
+        let from_legacy: InboxSettings = serde_json::from_slice(legacy_bytes)
+            .expect("legacy settings must decode with defaulted max_age_secs");
+        assert_eq!(from_legacy.max_age_secs, DEFAULT_MAX_AGE_SECS);
+    }
+}

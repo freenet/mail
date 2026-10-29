@@ -24,6 +24,10 @@ pub mod local_state;
 mod golden {
     use super::{aft, identity, inbox, local_state};
 
+    fn dsa_signing_key(seed: [u8; 32]) -> ml_dsa::SigningKey<ml_dsa::MlDsa65> {
+        ml_dsa::SigningKey::from_seed(&seed.into())
+    }
+
     include!("golden_samples.rs");
 
     const GOLDEN: &str = include_str!("golden_v1.txt");
@@ -32,18 +36,65 @@ mod golden {
         b.iter().map(|x| format!("{x:02x}")).collect()
     }
 
-    #[test]
-    fn copies_reproduce_the_frozen_wire_bytes() {
-        let expected: Vec<(&str, &str)> = GOLDEN
+    fn unhex(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).expect("hex"))
+            .collect()
+    }
+
+    /// Compares the copies against a golden fixture in both directions: the
+    /// copies must encode each sample to the fixture's bytes, and must
+    /// decode the fixture's bytes and re-encode them unchanged.
+    fn check(golden: &str) -> Result<(), String> {
+        let expected: Vec<(&str, &str)> = golden
             .lines()
             .map(|l| l.split_once(' ').expect("name hex"))
             .collect();
         let actual = golden_samples();
-        let names: Vec<&str> = actual.iter().map(|(n, _)| *n).collect();
+        let names: Vec<&str> = actual.iter().map(|(n, ..)| *n).collect();
         let expected_names: Vec<&str> = expected.iter().map(|(n, _)| *n).collect();
-        assert_eq!(names, expected_names, "sample set changed");
-        for ((name, bytes), (_, want)) in actual.iter().zip(&expected) {
-            assert_eq!(&hex(bytes), want, "{name} drifted from the frozen crate");
+        if names != expected_names {
+            return Err(format!("sample set changed: {names:?}"));
         }
+        for ((name, bytes, codec), (_, want)) in actual.iter().zip(&expected) {
+            if hex(bytes) != *want {
+                return Err(format!("{name}: copy encodes differently"));
+            }
+            if let Some(rt) = codec {
+                let golden_bytes = unhex(want);
+                if rt(&golden_bytes) != golden_bytes {
+                    return Err(format!("{name}: copy does not decode and re-encode it"));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn copies_reproduce_the_frozen_wire_bytes() {
+        check(GOLDEN).unwrap();
+    }
+
+    #[test]
+    fn a_flipped_byte_in_the_fixture_fails_the_check() {
+        let target = GOLDEN
+            .lines()
+            .position(|l| l.starts_with("ls_msg_mark_read "))
+            .unwrap();
+        let corrupted: Vec<String> = GOLDEN
+            .lines()
+            .enumerate()
+            .map(|(i, l)| {
+                if i != target {
+                    return l.to_string();
+                }
+                let last = l.len() - 1;
+                let flipped = if &l[last..] == "0" { "1" } else { "0" };
+                format!("{}{flipped}", &l[..last])
+            })
+            .collect();
+        let err = check(&corrupted.join("\n")).unwrap_err();
+        assert!(err.starts_with("ls_msg_mark_read"), "{err}");
     }
 }

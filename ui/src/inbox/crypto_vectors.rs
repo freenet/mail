@@ -5,9 +5,60 @@
 //! signing must stay byte-identical (the deployed inbox contract verifies
 //! with rc.8), and a message encrypted by the old stack must still decrypt.
 
+//!
+//! `kem_vectors_v1.txt` adds the encapsulation direction. It comes from
+//! `wire-v1/capture` (`-- kem`), which encapsulates with ml-kem rc.2 under
+//! the fixed RNG in `kem_fixed_rng.rs`. ML-KEM encapsulation is a function
+//! of the encapsulation key and 32 random bytes, so reproducing that
+//! ciphertext and shared secret from the same RNG means every ciphertext
+//! the current crate produces is one rc.2 decapsulates to the same secret.
+
 use super::*;
+use getrandom::rand_core;
+
+include!("kem_fixed_rng.rs");
 
 const VECTORS: &str = include_str!("crypto_vectors_v1.txt");
+const KEM_VECTORS: &str = include_str!("kem_vectors_v1.txt");
+
+fn kem_vector(name: &str) -> Vec<u8> {
+    let hex = KEM_VECTORS
+        .lines()
+        .find_map(|l| l.strip_prefix(name)?.strip_prefix(' '))
+        .unwrap_or_else(|| panic!("missing vector {name}"));
+    (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+        .collect()
+}
+
+#[test]
+fn ml_kem_encapsulation_matches_rc2_under_the_same_rng() {
+    let dk = DecapsulationKey::<MlKem768>::from_seed(kem_seed().into());
+    let (ct, ss) = dk
+        .encapsulation_key()
+        .encapsulate_with_rng(&mut KemFixedRng::default());
+    let ct_bytes: &[u8] = ct.as_ref();
+    assert_eq!(ct_bytes, kem_vector("kem_ct_fixed_rng").as_slice());
+    assert_eq!(ss.as_slice(), kem_vector("kem_shared_secret").as_slice());
+}
+
+#[test]
+fn rc2_ciphertext_decapsulates_to_the_rc2_secret() {
+    let dk = DecapsulationKey::<MlKem768>::from_seed(kem_seed().into());
+    let ss = dk
+        .decapsulate_slice(&kem_vector("kem_ct_fixed_rng"))
+        .unwrap();
+    assert_eq!(ss.as_slice(), kem_vector("kem_shared_secret").as_slice());
+}
+
+#[test]
+fn hkdf_message_key_matches_hkdf_0_12() {
+    assert_eq!(
+        hkdf_derive_key(&kem_vector("kem_shared_secret")).to_vec(),
+        kem_vector("hkdf_message_key")
+    );
+}
 const DSA_SEED: [u8; 32] = [7; 32];
 const SIGNED_MSG: &[u8] = b"freenet-mail crypto vector v1";
 const ENVELOPE_PLAINTEXT: &[u8] = b"hello from the rc crates";

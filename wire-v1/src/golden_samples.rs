@@ -1,21 +1,26 @@
 // Golden wire samples for the v0.2.x message and state formats.
 //
-// This file is `include!`d in two places with the same four module names in
-// scope (`inbox`, `aft`, `identity`, `local_state`): once against the frozen
-// crates the shipped WASM was built from, to capture `golden_v1.txt`, and
-// once in this crate's tests against the copies, to prove the copies still
-// produce those bytes. Every sample is deterministic: fixed seeds, fixed
-// timestamps, and maps with at most one entry.
+// This file is `include!`d in two places, each with the four module names
+// `inbox`, `aft`, `identity` and `local_state` in scope plus a
+// `dsa_signing_key([u8; 32])` function (ml-dsa's seed API differs between
+// rc.8 and 0.1.1):
+//   * wire-v1/capture, against the frozen crates the shipped WASM was built
+//     from, to produce golden_v1.txt:
+//       cargo run --locked --manifest-path wire-v1/capture/Cargo.toml -- golden \
+//         > wire-v1/src/golden_v1.txt
+//   * this crate's tests, against the copies, to prove they still produce
+//     and accept those bytes.
+// Every sample is deterministic: fixed seeds, fixed timestamps, and maps with
+// at most one entry.
 
-fn golden_samples() -> Vec<(&'static str, Vec<u8>)> {
+fn golden_sample_bytes() -> Vec<(&'static str, Vec<u8>)> {
     use chrono::{TimeZone, Utc};
     use freenet_stdlib::prelude::{ContractInstanceId, Parameters, SecretsId, StateSummary};
     use ml_dsa::signature::Keypair;
-    use ml_dsa::{MlDsa65, SigningKey};
     use std::collections::{BTreeSet, HashMap};
 
     let ts = Utc.timestamp_opt(1_761_000_000, 0).unwrap();
-    let sk = SigningKey::<MlDsa65>::from_seed(&[7u8; 32].into());
+    let sk = dsa_signing_key([7u8; 32]);
     let vk = sk.verifying_key();
     let ek = vec![0xEE; 16];
     let mut out: Vec<(&'static str, Vec<u8>)> = Vec::new();
@@ -399,5 +404,113 @@ fn golden_samples() -> Vec<(&'static str, Vec<u8>)> {
     out.push(("ls_state", serde_json::to_vec(&state).unwrap()));
     let state = ls::LocalState::try_from(br#"{"aliases":{"bob":{}}}"#.as_slice()).unwrap();
     out.push(("ls_state_sparse", serde_json::to_vec(&state).unwrap()));
+
+    // Every variant of every serde-renamed enum, so a rename cannot hide
+    // behind a variant no other sample happens to use.
+    use ls::{Density, DeliveryState, FontSize, PermissionDecision, Theme, ThreadView};
+    let enums: [(&'static str, Vec<u8>); 7] = [
+        (
+            "ls_enum_delivery_state",
+            serde_json::to_vec(&[
+                DeliveryState::Pending,
+                DeliveryState::Delivered,
+                DeliveryState::Failed,
+            ])
+            .unwrap(),
+        ),
+        (
+            "ls_enum_theme",
+            serde_json::to_vec(&[Theme::System, Theme::Light, Theme::Dark]).unwrap(),
+        ),
+        (
+            "ls_enum_density",
+            serde_json::to_vec(&[Density::Comfortable, Density::Compact]).unwrap(),
+        ),
+        (
+            "ls_enum_font_size",
+            serde_json::to_vec(&[
+                FontSize::Small,
+                FontSize::Default,
+                FontSize::Large,
+                FontSize::Larger,
+            ])
+            .unwrap(),
+        ),
+        (
+            "ls_enum_thread_view",
+            serde_json::to_vec(&[ThreadView::Nested, ThreadView::Compact]).unwrap(),
+        ),
+        (
+            "ls_enum_permission",
+            serde_json::to_vec(&[PermissionDecision::Accept, PermissionDecision::Deny]).unwrap(),
+        ),
+        (
+            "identity_enum_kind",
+            serde_json::to_vec(&[EntryKind::Identity, EntryKind::Contact]).unwrap(),
+        ),
+    ];
+    out.extend(enums);
     out
+}
+
+/// Re-encodes `bytes` after decoding them as `T` with serde_json.
+fn json_rt<T: serde::Serialize + serde::de::DeserializeOwned>(bytes: &[u8]) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::from_slice::<T>(bytes).expect("decode")).expect("encode")
+}
+
+/// Re-encodes `bytes` after decoding them as `T` with bincode 1.
+fn bincode_rt<T: serde::Serialize + serde::de::DeserializeOwned>(bytes: &[u8]) -> Vec<u8> {
+    bincode::serialize(&bincode::deserialize::<T>(bytes).expect("decode")).expect("encode")
+}
+
+/// A golden sample: its name, its bytes, and how to decode and re-encode
+/// them (`None` for raw byte strings with no decoder: signing payloads,
+/// signatures, `Display` output).
+type GoldenSample = (&'static str, Vec<u8>, Option<fn(&[u8]) -> Vec<u8>>);
+
+fn golden_samples() -> Vec<GoldenSample> {
+    use aft::{
+        DelegateParameters, Tier, TokenAllocationRecord, TokenAllocationSummary, TokenAssignment,
+        TokenDelegateMessage, TokenDelegateParameters,
+    };
+    use local_state::{
+        Density, DeliveryState, FontSize, LocalState, LocalStateMsg, PermissionDecision, Theme,
+        ThreadView,
+    };
+    let codec = |name: &str| -> Option<fn(&[u8]) -> Vec<u8>> {
+        let f: fn(&[u8]) -> Vec<u8> = match name {
+            "aft_tiers_display" | "aft_signature_content" | "inbox_sign_payload"
+            | "inbox_settings_signature" => return None,
+            "aft_tiers_json" => json_rt::<Vec<Tier>>,
+            "aft_assignment_json" => json_rt::<TokenAssignment>,
+            "aft_record_json" => json_rt::<TokenAllocationRecord>,
+            "aft_summary" => json_rt::<TokenAllocationSummary>,
+            "aft_record_params" => json_rt::<TokenDelegateParameters>,
+            "aft_generator_params" => json_rt::<DelegateParameters>,
+            n if n.starts_with("aft_msg_") => bincode_rt::<TokenDelegateMessage>,
+            "inbox_params" => json_rt::<inbox::InboxParams>,
+            "inbox_settings" | "inbox_settings_default" => json_rt::<inbox::InboxSettings>,
+            n if n.starts_with("inbox_update_") => json_rt::<inbox::UpdateInbox>,
+            "inbox_state" => json_rt::<inbox::Inbox>,
+            n if n.starts_with("identity_msg_") => json_rt::<identity::IdentityMsg>,
+            "identity_state" | "identity_state_legacy" => {
+                json_rt::<identity::IdentityManagement>
+            }
+            "identity_enum_kind" => json_rt::<Vec<identity::EntryKind>>,
+            n if n.starts_with("ls_msg_") => json_rt::<LocalStateMsg>,
+            "ls_state" | "ls_state_sparse" => json_rt::<LocalState>,
+            "ls_enum_delivery_state" => json_rt::<Vec<DeliveryState>>,
+            "ls_enum_theme" => json_rt::<Vec<Theme>>,
+            "ls_enum_density" => json_rt::<Vec<Density>>,
+            "ls_enum_font_size" => json_rt::<Vec<FontSize>>,
+            "ls_enum_thread_view" => json_rt::<Vec<ThreadView>>,
+            "ls_enum_permission" => json_rt::<Vec<PermissionDecision>>,
+            other => panic!("golden sample {other} has no codec"),
+        };
+        Some(f)
+    };
+    golden_sample_bytes()
+        .into_iter()
+        .map(|(name, bytes)| (name, bytes, codec(name)))
+        .collect()
 }

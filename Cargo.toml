@@ -38,6 +38,8 @@ exclude = [
     "modules/antiflood-tokens/delegates/token-generator",
     "modules/identity-management",
     "modules/mail-local-state",
+    # Links the frozen crates to capture wire-v1's golden fixtures.
+    "wire-v1/capture",
 ]
 
 [workspace.package]
