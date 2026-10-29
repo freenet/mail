@@ -1,0 +1,417 @@
+//! Messages and state of the v0.2.x `identity-management` delegate
+//! (`modules/identity-management`, code hash `BbtKhHhR…`), copied verbatim
+//! minus the delegate implementation and the P-384 parameter type. The
+//! committed `identity-manager-params` bytes are passed through unchanged.
+
+use std::collections::HashMap;
+
+use freenet_stdlib::prelude::*;
+use serde::{Deserialize, Serialize};
+
+
+type Key = Vec<u8>;
+type Alias = String;
+type Extra = String;
+
+/// Discriminates between a locally-owned identity (holds private key material)
+/// and a contact (holds only public keys received via a ContactCard).
+#[derive(Deserialize, Serialize, PartialEq, Eq, Debug, Clone, Copy, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum EntryKind {
+    #[default]
+    Identity,
+    Contact,
+}
+
+#[derive(Deserialize, Serialize, PartialEq, Eq, Debug)]
+pub struct AliasInfo {
+    pub key: Key,
+    pub extra: Option<Extra>,
+    /// Defaults to `Identity` when deserialising old state that lacks the field.
+    #[serde(default)]
+    pub kind: EntryKind,
+    /// Inbox contract WASM hash this identity's inbox state was last
+    /// observed under. The UI uses this to detect when the embedded
+    /// `INBOX_CODE_HASH` has rotated (a deliberate contract bump) and
+    /// trigger a per-identity GET-old → PUT-new migration (#213). `None`
+    /// means "never observed" — UI treats that as "no migration needed,
+    /// just stamp the current hash as the baseline". Backwards-compatible
+    /// with old delegate states that lack the field via `#[serde(default)]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inbox_wasm_hash: Option<String>,
+    /// Hash this identity's inbox is being migrated FROM, if a migration
+    /// is currently in flight (#251 improvement 5). Set by the UI before
+    /// dispatching the GET against the old contract key; cleared after
+    /// the PUT under the new key succeeds. Persisting the in-flight
+    /// state lets the UI re-attempt the migration on the next session
+    /// if the GET never resolved (node offline, contract expired).
+    /// Backwards-compatible with older delegate states via
+    /// `#[serde(default)]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_migration_from: Option<String>,
+    /// AFT token-allocation-record contract WASM hash this identity's
+    /// AFT record was last observed under (#251 improvement 3). Mirrors
+    /// `inbox_wasm_hash` for the AFT side: lets the UI detect a
+    /// deliberate AFT contract bump and trigger a GET-old → PUT-new
+    /// migration so the user does not lose their anti-flood token
+    /// ledger across releases. Backwards-compatible via
+    /// `#[serde(default)]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aft_record_wasm_hash: Option<String>,
+    /// Hash this identity's AFT record is being migrated FROM, if an
+    /// AFT migration is currently in flight (#251 improvement 3 +
+    /// improvement 5). Persistent retry marker — see
+    /// `pending_migration_from` for the inbox-side rationale.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_aft_migration_from: Option<String>,
+}
+
+#[derive(Deserialize, Serialize, Default, Debug)]
+pub struct IdentityManagement {
+    identities: HashMap<Alias, AliasInfo>,
+}
+
+impl IdentityManagement {
+    pub fn is_empty(&self) -> bool {
+        self.identities.is_empty()
+    }
+
+    pub fn get_info(&self) -> impl Iterator<Item = (&Alias, &AliasInfo)> {
+        self.identities.iter()
+    }
+
+    pub fn into_info(self) -> impl Iterator<Item = (Alias, AliasInfo)> {
+        self.identities.into_iter()
+    }
+
+    pub fn remove(&mut self, alias: &str) -> Option<AliasInfo> {
+        self.identities.remove(alias)
+    }
+}
+
+impl TryFrom<&[u8]> for IdentityManagement {
+    type Error = DelegateError;
+
+    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
+        serde_json::from_slice(value).map_err(|e| DelegateError::Deser(format!("{e}")))
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub enum IdentityMsg {
+    Init,
+    CreateIdentity {
+        alias: String,
+        key: Key,
+        extra: Option<String>,
+        /// Defaults to `Identity` when absent (backwards-compatible with
+        /// senders that pre-date the contact-book feature).
+        #[serde(default)]
+        kind: Option<EntryKind>,
+    },
+    DeleteIdentity {
+        alias: String,
+    },
+    /// Stamp the WASM hash of the inbox contract this identity's state
+    /// was last observed under (#213). The UI sends this after a
+    /// successful PUT during migration so the new hash becomes the
+    /// baseline for the next deliberate contract bump. Backwards-
+    /// compatible: old senders that don't know this variant simply
+    /// don't emit it — `inbox_wasm_hash` stays `None`.
+    UpdateInboxWasmHash {
+        alias: String,
+        wasm_hash: String,
+    },
+    /// Set or clear the `pending_migration_from` marker on an identity
+    /// (#251 improvement 5). The UI stamps `Some(prior_hash)` before
+    /// dispatching the migration GET and `None` after the PUT under
+    /// the current key succeeds. On startup with a non-None marker
+    /// and `inbox_wasm_hash` still != `INBOX_CODE_HASH`, the UI
+    /// re-attempts the migration. Backwards-compatible: old senders
+    /// don't emit this variant.
+    SetPendingMigrationFrom {
+        alias: String,
+        prior_hash: Option<String>,
+    },
+    /// Stamp the WASM hash of the AFT token-allocation-record contract
+    /// this identity's record was last observed under (#251 improvement
+    /// 3). Parallel to `UpdateInboxWasmHash` for the AFT side.
+    UpdateAftRecordWasmHash {
+        alias: String,
+        wasm_hash: String,
+    },
+    /// Set or clear the `pending_aft_migration_from` marker on an
+    /// identity (#251 improvement 3 + improvement 5). Parallel to
+    /// `SetPendingMigrationFrom` for the AFT side.
+    SetPendingAftMigrationFrom {
+        alias: String,
+        prior_hash: Option<String>,
+    },
+    /// Request the current set of identities. Returns the serialized
+    /// `IdentityManagement` as an `ApplicationMessage` response.
+    GetIdentities,
+}
+
+impl TryFrom<&[u8]> for IdentityMsg {
+    type Error = DelegateError;
+
+    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
+        serde_json::from_slice(value).map_err(|e| DelegateError::Deser(format!("{e}")))
+    }
+}
+
+impl TryFrom<&IdentityMsg> for Vec<u8> {
+    type Error = DelegateError;
+
+    fn try_from(value: &IdentityMsg) -> Result<Self, Self::Error> {
+        let msg = serde_json::to_vec(&value).unwrap();
+        Ok(msg)
+    }
+}
+
+#[cfg(test)]
+mod boundary_tests {
+    //! Regression tests for the deserialization boundaries on this crate.
+    //!
+    //! `IdentityManagement` and `IdentityMsg` are reachable from network
+    //! input via the `DelegateInterface::process` path. Both used to call
+    //! `serde_json::from_slice(...).unwrap()`, which would panic the
+    //! delegate on a malformed payload. These tests pin the
+    //! `Result`-returning behavior so any future regression trips them.
+
+    use super::*;
+
+    #[test]
+    fn malformed_identity_management_bytes_returns_err() {
+        let garbage = [0xffu8; 64];
+        let result = IdentityManagement::try_from(&garbage[..]);
+        assert!(
+            matches!(result, Err(DelegateError::Deser(_))),
+            "expected Err(DelegateError::Deser), got {result:?}"
+        );
+    }
+
+    #[test]
+    fn truncated_identity_management_json_returns_err() {
+        let truncated = br#"{"identities": {"alice":"#;
+        let result = IdentityManagement::try_from(&truncated[..]);
+        assert!(
+            matches!(result, Err(DelegateError::Deser(_))),
+            "expected Err(DelegateError::Deser), got {result:?}"
+        );
+    }
+
+    #[test]
+    fn malformed_identity_msg_bytes_returns_err() {
+        let garbage = [0xffu8; 64];
+        let result = IdentityMsg::try_from(&garbage[..]).map(|_| ());
+        assert!(
+            matches!(result, Err(DelegateError::Deser(_))),
+            "expected Err(DelegateError::Deser), got {result:?}"
+        );
+    }
+
+    #[test]
+    fn empty_identity_msg_bytes_returns_err() {
+        let result = IdentityMsg::try_from(&[][..]).map(|_| ());
+        assert!(
+            matches!(result, Err(DelegateError::Deser(_))),
+            "expected Err(DelegateError::Deser), got {result:?}"
+        );
+    }
+
+    /// AliasInfo without a `kind` field must deserialise as `EntryKind::Identity`
+    /// (backwards-compat for state written before the contact-book feature).
+    #[test]
+    fn alias_info_missing_kind_defaults_to_identity() {
+        let json = br#"{"key":[1,2,3],"extra":null}"#;
+        let info: AliasInfo = serde_json::from_slice(json).expect("should deserialise");
+        assert_eq!(info.kind, EntryKind::Identity);
+    }
+
+    /// AliasInfo without an `inbox_wasm_hash` field must deserialise to
+    /// `None` (#213 backwards-compat for state written before the
+    /// migration mechanism shipped).
+    #[test]
+    fn alias_info_missing_inbox_wasm_hash_defaults_to_none() {
+        let json = br#"{"key":[1,2,3],"extra":null,"kind":"identity"}"#;
+        let info: AliasInfo = serde_json::from_slice(json).expect("should deserialise");
+        assert_eq!(info.inbox_wasm_hash, None);
+    }
+
+    /// AliasInfo with an explicit `inbox_wasm_hash` must round-trip.
+    #[test]
+    fn alias_info_with_inbox_wasm_hash_round_trips() {
+        let json = br#"{"key":[1],"extra":null,"kind":"identity","inbox_wasm_hash":"abc123"}"#;
+        let info: AliasInfo = serde_json::from_slice(json).expect("should deserialise");
+        assert_eq!(info.inbox_wasm_hash.as_deref(), Some("abc123"));
+        let reencoded = serde_json::to_vec(&info).expect("should re-serialise");
+        let decoded: AliasInfo =
+            serde_json::from_slice(&reencoded).expect("re-deserialise should succeed");
+        assert_eq!(decoded.inbox_wasm_hash.as_deref(), Some("abc123"));
+    }
+
+    /// `IdentityMsg::UpdateInboxWasmHash` round-trips through serde with
+    /// the expected JSON shape — pins the wire-format contract between
+    /// UI sender and delegate receiver (#213).
+    #[test]
+    fn update_inbox_wasm_hash_round_trips() {
+        let msg = IdentityMsg::UpdateInboxWasmHash {
+            alias: "alice".into(),
+            wasm_hash: "deadbeef".into(),
+        };
+        let bytes = serde_json::to_vec(&msg).expect("serialise");
+        let decoded: IdentityMsg = serde_json::from_slice(&bytes).expect("deserialise");
+        match decoded {
+            IdentityMsg::UpdateInboxWasmHash { alias, wasm_hash } => {
+                assert_eq!(alias, "alice");
+                assert_eq!(wasm_hash, "deadbeef");
+            }
+            other => panic!("expected UpdateInboxWasmHash, got {other:?}"),
+        }
+    }
+
+    /// AliasInfo without `pending_migration_from` must deserialise to
+    /// `None` (#251 backwards-compat).
+    #[test]
+    fn alias_info_missing_pending_migration_defaults_to_none() {
+        let json = br#"{"key":[1],"extra":null,"kind":"identity","inbox_wasm_hash":"abc"}"#;
+        let info: AliasInfo = serde_json::from_slice(json).expect("should deserialise");
+        assert_eq!(info.pending_migration_from, None);
+    }
+
+    /// `IdentityMsg::SetPendingMigrationFrom` round-trips with both
+    /// `Some` and `None` payloads (#251).
+    #[test]
+    fn set_pending_migration_round_trips() {
+        for prior in [Some("oldhash".to_string()), None] {
+            let msg = IdentityMsg::SetPendingMigrationFrom {
+                alias: "alice".into(),
+                prior_hash: prior.clone(),
+            };
+            let bytes = serde_json::to_vec(&msg).expect("serialise");
+            let decoded: IdentityMsg = serde_json::from_slice(&bytes).expect("deserialise");
+            match decoded {
+                IdentityMsg::SetPendingMigrationFrom { alias, prior_hash } => {
+                    assert_eq!(alias, "alice");
+                    assert_eq!(prior_hash, prior);
+                }
+                other => panic!("expected SetPendingMigrationFrom, got {other:?}"),
+            }
+        }
+    }
+
+    /// AliasInfo without the AFT migration fields must deserialise to
+    /// `None` (#251 improvement 3 backwards-compat).
+    #[test]
+    fn alias_info_missing_aft_migration_fields_default_to_none() {
+        let json = br#"{"key":[1],"extra":null,"kind":"identity","inbox_wasm_hash":"abc"}"#;
+        let info: AliasInfo = serde_json::from_slice(json).expect("should deserialise");
+        assert_eq!(info.aft_record_wasm_hash, None);
+        assert_eq!(info.pending_aft_migration_from, None);
+    }
+
+    /// AliasInfo with explicit AFT migration fields round-trips.
+    #[test]
+    fn alias_info_with_aft_migration_fields_round_trips() {
+        let json = br#"{"key":[1],"extra":null,"kind":"identity","aft_record_wasm_hash":"aftcur","pending_aft_migration_from":"aftprev"}"#;
+        let info: AliasInfo = serde_json::from_slice(json).expect("should deserialise");
+        assert_eq!(info.aft_record_wasm_hash.as_deref(), Some("aftcur"));
+        assert_eq!(info.pending_aft_migration_from.as_deref(), Some("aftprev"));
+        let reencoded = serde_json::to_vec(&info).expect("should re-serialise");
+        let decoded: AliasInfo =
+            serde_json::from_slice(&reencoded).expect("re-deserialise should succeed");
+        assert_eq!(decoded.aft_record_wasm_hash.as_deref(), Some("aftcur"));
+        assert_eq!(
+            decoded.pending_aft_migration_from.as_deref(),
+            Some("aftprev")
+        );
+    }
+
+    /// `IdentityMsg::UpdateAftRecordWasmHash` round-trips through serde
+    /// (#251 improvement 3 wire-format pin).
+    #[test]
+    fn update_aft_record_wasm_hash_round_trips() {
+        let msg = IdentityMsg::UpdateAftRecordWasmHash {
+            alias: "alice".into(),
+            wasm_hash: "deadbeef".into(),
+        };
+        let bytes = serde_json::to_vec(&msg).expect("serialise");
+        let decoded: IdentityMsg = serde_json::from_slice(&bytes).expect("deserialise");
+        match decoded {
+            IdentityMsg::UpdateAftRecordWasmHash { alias, wasm_hash } => {
+                assert_eq!(alias, "alice");
+                assert_eq!(wasm_hash, "deadbeef");
+            }
+            other => panic!("expected UpdateAftRecordWasmHash, got {other:?}"),
+        }
+    }
+
+    /// `IdentityMsg::SetPendingAftMigrationFrom` round-trips with both
+    /// `Some` and `None` payloads (#251 improvement 3).
+    #[test]
+    fn set_pending_aft_migration_round_trips() {
+        for prior in [Some("oldhash".to_string()), None] {
+            let msg = IdentityMsg::SetPendingAftMigrationFrom {
+                alias: "alice".into(),
+                prior_hash: prior.clone(),
+            };
+            let bytes = serde_json::to_vec(&msg).expect("serialise");
+            let decoded: IdentityMsg = serde_json::from_slice(&bytes).expect("deserialise");
+            match decoded {
+                IdentityMsg::SetPendingAftMigrationFrom { alias, prior_hash } => {
+                    assert_eq!(alias, "alice");
+                    assert_eq!(prior_hash, prior);
+                }
+                other => panic!("expected SetPendingAftMigrationFrom, got {other:?}"),
+            }
+        }
+    }
+
+    /// `IdentityMsg::CreateIdentity` without a `kind` field must deserialise
+    /// successfully (backwards-compat for senders that pre-date the field).
+    #[test]
+    fn create_identity_missing_kind_deserialises() {
+        let json = br#"{"CreateIdentity":{"alias":"alice","key":[1],"extra":null}}"#;
+        let msg: IdentityMsg = serde_json::from_slice(json).expect("should deserialise");
+        if let IdentityMsg::CreateIdentity { kind, .. } = msg {
+            assert_eq!(kind, None);
+        } else {
+            panic!("expected CreateIdentity variant");
+        }
+    }
+
+    /// Storing both Identity and Contact entries round-trips correctly.
+    #[test]
+    fn mixed_entry_kinds_round_trip() {
+        let mut mgr = IdentityManagement::default();
+        mgr.identities.insert(
+            "alice".into(),
+            AliasInfo {
+                key: vec![1],
+                extra: None,
+                kind: EntryKind::Identity,
+                inbox_wasm_hash: None,
+                pending_migration_from: None,
+                aft_record_wasm_hash: None,
+                pending_aft_migration_from: None,
+            },
+        );
+        mgr.identities.insert(
+            "bob".into(),
+            AliasInfo {
+                key: vec![2],
+                extra: Some("friend".into()),
+                kind: EntryKind::Contact,
+                inbox_wasm_hash: None,
+                pending_migration_from: None,
+                aft_record_wasm_hash: None,
+                pending_aft_migration_from: None,
+            },
+        );
+        let json = serde_json::to_vec(&mgr).unwrap();
+        let mgr2: IdentityManagement = serde_json::from_slice(&json).unwrap();
+        assert_eq!(mgr2.identities["alice"].kind, EntryKind::Identity);
+        assert_eq!(mgr2.identities["bob"].kind, EntryKind::Contact);
+    }
+}

@@ -14,8 +14,8 @@
 
 use dioxus::prelude::*;
 #[cfg(any(all(target_family = "wasm", feature = "use-node"), test))]
-use mail_local_state::IdentityAftPrefs;
-use mail_local_state::{
+use freenet_mail_wire_v1::local_state::IdentityAftPrefs;
+use freenet_mail_wire_v1::local_state::{
     Density, FontSize, GlobalSettings, IdentityPrivacyPrefs, IdentitySettings, InboxSettings,
     PermissionDecision, Theme, ThreadView,
 };
@@ -657,8 +657,8 @@ fn ScrPrivacy() -> Element {
 /// enum. Mirrors the names the `TIER_ROWS` picker writes to local
 /// state (#85). Returns `None` for unrecognized values so the
 /// caller can surface the error rather than silently defaulting.
-fn parse_tier(s: &str) -> Option<freenet_aft_interface::Tier> {
-    use freenet_aft_interface::Tier::*;
+fn parse_tier(s: &str) -> Option<freenet_mail_wire_v1::aft::Tier> {
+    use freenet_mail_wire_v1::aft::Tier::*;
     Some(match s {
         "Min1" => Min1,
         "Min5" => Min5,
@@ -691,8 +691,8 @@ const CAPACITY_AMPLE_THRESHOLD: u64 = 10_000;
 /// `TIER_ROWS` but holds the enum values (not display strings) so the
 /// AFT usage panel can compute capacity per tier from
 /// `Tier::tier_duration`.
-const ALL_TIERS: &[freenet_aft_interface::Tier] = {
-    use freenet_aft_interface::Tier::*;
+const ALL_TIERS: &[freenet_mail_wire_v1::aft::Tier] = {
+    use freenet_mail_wire_v1::aft::Tier::*;
     &[
         Min1, Min5, Min10, Min30, Hour1, Hour3, Hour6, Hour12, Day1, Day7, Day15, Day30, Day90,
         Day180, Day365,
@@ -704,8 +704,8 @@ const ALL_TIERS: &[freenet_aft_interface::Tier] = {
 /// strum-`lowercase` (`"day1"`); we want title-cased identifiers in
 /// the AFT settings screen for visual consistency with the tier
 /// picker.
-fn tier_display_name(t: freenet_aft_interface::Tier) -> &'static str {
-    use freenet_aft_interface::Tier::*;
+fn tier_display_name(t: freenet_mail_wire_v1::aft::Tier) -> &'static str {
+    use freenet_mail_wire_v1::aft::Tier::*;
     match t {
         Min1 => "Min1",
         Min5 => "Min5",
@@ -725,7 +725,7 @@ fn tier_display_name(t: freenet_aft_interface::Tier) -> &'static str {
     }
 }
 
-/// One row per real `freenet_aft_interface::Tier`. The "rate" column is
+/// One row per real `freenet_mail_wire_v1::aft::Tier`. The "rate" column is
 /// derived from the tier name (1 token per N time-unit) — there is no
 /// `tokens_per_period` getter on the enum, so the period text is encoded
 /// here rather than in `freenet-aft-interface` to keep the AFT crate from
@@ -970,7 +970,7 @@ fn ScrAft() -> Element {
     // huge integer (a Min1 tier at 365d has 525k slots — surfacing the
     // number is more noise than signal).
     let max_age_secs: u64 = max_age_days.saturating_mul(86_400);
-    let used_by_tier: std::collections::HashMap<freenet_aft_interface::Tier, usize> =
+    let used_by_tier: std::collections::HashMap<freenet_mail_wire_v1::aft::Tier, usize> =
         identity_for_alias(&alias_key)
             .map(|id| {
                 crate::aft::AftRecords::used_counts_by_tier(&id)
@@ -1801,7 +1801,7 @@ mod tests {
     #[test]
     fn permission_decision_write_path_persists_and_reads_back() {
         use crate::local_state;
-        use mail_local_state::{IdentitySettings, LocalState};
+        use freenet_mail_wire_v1::local_state::{IdentitySettings, LocalState};
 
         // Seed a clean snapshot so the test is isolated.
         let mut state = LocalState::default();
@@ -1862,7 +1862,7 @@ mod tests {
     #[test]
     fn permission_decision_remove_path_clears_entry() {
         use crate::local_state;
-        use mail_local_state::{IdentitySettings, LocalState};
+        use freenet_mail_wire_v1::local_state::{IdentitySettings, LocalState};
 
         let mut state = LocalState::default();
         let alias = "bob";

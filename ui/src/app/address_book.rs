@@ -8,8 +8,8 @@
 
 use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::OnceLock};
 
-use freenet_aft_interface::Tier;
-use freenet_email_inbox::{DEFAULT_MAX_AGE_SECS, Inbox as InboxState};
+use freenet_mail_wire_v1::aft::Tier;
+use freenet_mail_wire_v1::inbox::{DEFAULT_MAX_AGE_SECS, Inbox as InboxState};
 use freenet_stdlib::prelude::blake3;
 use ml_dsa::{MlDsa65, VerifyingKey as MlDsaVerifyingKey};
 use ml_kem::{EncapsulationKey, MlKem768};
@@ -819,7 +819,7 @@ mod tests {
     /// wrong tier and get rejected by `verify_token_policy` in the inbox contract.
     #[test]
     fn default_tier_matches_aft_prefs_default() {
-        use mail_local_state::IdentityAftPrefs;
+        use freenet_mail_wire_v1::local_state::IdentityAftPrefs;
         // IdentityAftPrefs uses String; parse the tier name for comparison.
         let prefs_tier_str = IdentityAftPrefs::default().required_tier;
         let prefs_tier: Tier = match prefs_tier_str.as_str() {
@@ -1111,9 +1111,9 @@ mod tests {
     /// internally for routing + AFT alloc.
     #[test]
     fn identity_inbox_address_round_trips_through_inbox_key_for() {
-        use ml_dsa::{KeyGen, MlDsa65, signature::Keypair as MlDsaKeypair};
+        use ml_dsa::{MlDsa65, signature::Keypair as MlDsaKeypair};
         use std::str::FromStr;
-        let sk = MlDsa65::from_seed(&[42u8; 32].into());
+        let sk = ml_dsa::SigningKey::<MlDsa65>::from_seed(&[42u8; 32].into());
         let vk = MlDsaKeypair::verifying_key(&sk);
         let vk_bytes = vk.encode().to_vec();
         let key = crate::inbox::inbox_key_for(&vk).expect("inbox_key_for");
@@ -1141,11 +1141,11 @@ mod tests {
     /// node would echo back in a GetResponse.
     #[test]
     fn is_contact_inbox_key_recognises_imported_contact() {
-        use ml_dsa::{KeyGen, MlDsa65, signature::Keypair as MlDsaKeypair};
+        use ml_dsa::{MlDsa65, signature::Keypair as MlDsaKeypair};
         reset_address_book();
 
         // Real ML-DSA-65 keypair so vk_from_bytes succeeds.
-        let sk = MlDsa65::from_seed(&[7u8; 32].into());
+        let sk = ml_dsa::SigningKey::<MlDsa65>::from_seed(&[7u8; 32].into());
         let vk_bytes = MlDsaKeypair::verifying_key(&sk).encode().to_vec();
 
         let contact = Contact {
@@ -1171,11 +1171,11 @@ mod tests {
 
     #[test]
     fn is_contact_inbox_key_returns_false_for_unrelated_key() {
-        use ml_dsa::{KeyGen, MlDsa65, signature::Keypair as MlDsaKeypair};
+        use ml_dsa::{MlDsa65, signature::Keypair as MlDsaKeypair};
         reset_address_book();
 
         // Insert one contact.
-        let sk_a = MlDsa65::from_seed(&[1u8; 32].into());
+        let sk_a = ml_dsa::SigningKey::<MlDsa65>::from_seed(&[1u8; 32].into());
         let vk_a_bytes = MlDsaKeypair::verifying_key(&sk_a).encode().to_vec();
         insert_contact(Contact {
             local_alias: "alice".into(),
@@ -1191,7 +1191,7 @@ mod tests {
         .unwrap();
 
         // Probe with a *different* keypair's inbox key — must not match.
-        let sk_b = MlDsa65::from_seed(&[2u8; 32].into());
+        let sk_b = ml_dsa::SigningKey::<MlDsa65>::from_seed(&[2u8; 32].into());
         let vk_b = MlDsaKeypair::verifying_key(&sk_b);
         let other_key = crate::inbox::inbox_key_for(&vk_b).expect("inbox_key_for");
         assert!(
@@ -1204,10 +1204,10 @@ mod tests {
     /// `lookup_by_bs58` to the same `Recipient` the alias path returns.
     #[test]
     fn lookup_by_bs58_finds_imported_contact() {
-        use ml_dsa::{KeyGen, MlDsa65, signature::Keypair as MlDsaKeypair};
+        use ml_dsa::{MlDsa65, signature::Keypair as MlDsaKeypair};
         reset_address_book();
 
-        let sk = MlDsa65::from_seed(&[9u8; 32].into());
+        let sk = ml_dsa::SigningKey::<MlDsa65>::from_seed(&[9u8; 32].into());
         let vk = MlDsaKeypair::verifying_key(&sk);
         let vk_bytes = vk.encode().to_vec();
         let inbox_key = crate::inbox::inbox_key_for(&vk).expect("inbox_key_for");
@@ -1238,10 +1238,10 @@ mod tests {
     /// a contact removed after a prior lookup must no longer resolve.
     #[test]
     fn lookup_by_bs58_cache_invalidates_on_remove_255() {
-        use ml_dsa::{KeyGen, MlDsa65, signature::Keypair as MlDsaKeypair};
+        use ml_dsa::{MlDsa65, signature::Keypair as MlDsaKeypair};
         reset_address_book();
 
-        let sk = MlDsa65::from_seed(&[11u8; 32].into());
+        let sk = ml_dsa::SigningKey::<MlDsa65>::from_seed(&[11u8; 32].into());
         let vk = MlDsaKeypair::verifying_key(&sk);
         let vk_bytes = vk.encode().to_vec();
         let addr = crate::inbox::inbox_key_for(&vk)
@@ -1292,10 +1292,10 @@ mod tests {
 
     #[test]
     fn is_contact_inbox_key_empty_book_returns_false() {
-        use ml_dsa::{KeyGen, MlDsa65, signature::Keypair as MlDsaKeypair};
+        use ml_dsa::{MlDsa65, signature::Keypair as MlDsaKeypair};
         reset_address_book();
 
-        let sk = MlDsa65::from_seed(&[3u8; 32].into());
+        let sk = ml_dsa::SigningKey::<MlDsa65>::from_seed(&[3u8; 32].into());
         let vk = MlDsaKeypair::verifying_key(&sk);
         let key = crate::inbox::inbox_key_for(&vk).expect("inbox_key_for");
         assert!(
@@ -1318,12 +1318,12 @@ mod tests {
     /// fix itself.
     #[test]
     fn lookup_misses_when_contact_imported_under_different_nickname_289() {
-        use ml_dsa::{KeyGen, MlDsa65, signature::Keypair as MlDsaKeypair};
+        use ml_dsa::{MlDsa65, signature::Keypair as MlDsaKeypair};
         reset_address_book();
 
         // Alice sends under her own alias "alice-from-work". The recipient
         // imports her contact card but labels it locally as "ally".
-        let sk = MlDsa65::from_seed(&[42u8; 32].into());
+        let sk = ml_dsa::SigningKey::<MlDsa65>::from_seed(&[42u8; 32].into());
         let vk_bytes = MlDsaKeypair::verifying_key(&sk).encode().to_vec();
         insert_contact(Contact {
             local_alias: "ally".into(),
@@ -1355,7 +1355,7 @@ mod tests {
 
     #[test]
     fn lookup_resolves_by_sender_alias_when_suggested_preserved_289() {
-        use ml_dsa::{KeyGen, MlDsa65, signature::Keypair as MlDsaKeypair};
+        use ml_dsa::{MlDsa65, signature::Keypair as MlDsaKeypair};
         reset_address_book();
 
         // Same scenario as the miss test above, but the import preserved
@@ -1363,7 +1363,7 @@ mod tests {
         // suggested_alias even though the user relabelled locally to "ally".
         // This is the #289 fix: the reply To resolves by the sender's
         // alias via the suggested_alias fallback.
-        let sk = MlDsa65::from_seed(&[42u8; 32].into());
+        let sk = ml_dsa::SigningKey::<MlDsa65>::from_seed(&[42u8; 32].into());
         let vk_bytes = MlDsaKeypair::verifying_key(&sk).encode().to_vec();
         insert_contact(Contact {
             local_alias: "ally".into(),

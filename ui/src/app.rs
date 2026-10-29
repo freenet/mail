@@ -71,7 +71,7 @@ pub(crate) enum NodeAction {
         /// `ContractType::InboxContract`; the AFT record contract id is
         /// derived from the sender's key alone. Owner can mutate later
         /// via `UpdateInboxPolicy` (#85).
-        required_tier: freenet_aft_interface::Tier,
+        required_tier: freenet_mail_wire_v1::aft::Tier,
         max_age_secs: u64,
     },
     /// Push a signed `ModifySettings` delta updating the recipient
@@ -80,7 +80,7 @@ pub(crate) enum NodeAction {
     /// `params.pub_key` before accepting.
     UpdateInboxPolicy {
         identity: Box<Identity>,
-        required_tier: freenet_aft_interface::Tier,
+        required_tier: freenet_mail_wire_v1::aft::Tier,
         max_age_secs: u64,
     },
     /// Push a signed `ModifySettings` delta updating the verified-sender
@@ -418,7 +418,7 @@ impl InboxView {
         from: &str,
         recipient_ek: EncapsulationKey<MlKem768>,
         recipient_ml_dsa_vk: ml_dsa::VerifyingKey<MlDsa65>,
-        recipient_required_tier: freenet_aft_interface::Tier,
+        recipient_required_tier: freenet_mail_wire_v1::aft::Tier,
         recipient_max_age_secs: u64,
         recipient_inbox_wasm_hash: Option<String>,
         title: &str,
@@ -493,14 +493,14 @@ impl InboxView {
                     if crate::local_state::local_set_sent_delivery_state(
                         &sender_alias,
                         &sent_id,
-                        mail_local_state::DeliveryState::Failed,
+                        freenet_mail_wire_v1::local_state::DeliveryState::Failed,
                     ) {
                         let mut client_clone = client.clone();
                         if let Err(e) = crate::local_state::set_sent_delivery_state(
                             &mut client_clone,
                             sender_alias,
                             sent_id,
-                            mail_local_state::DeliveryState::Failed,
+                            freenet_mail_wire_v1::local_state::DeliveryState::Failed,
                         )
                         .await
                         {
@@ -817,7 +817,7 @@ impl InboxView {
             crate::local_state::local_save_sent(
                 &alias,
                 "example-sent-0001",
-                mail_local_state::SentMessage {
+                freenet_mail_wire_v1::local_state::SentMessage {
                     to: "Carol".into(),
                     subject: "Re: Picnic this weekend?".into(),
                     body: "Sounds great — what should I bring?".into(),
@@ -852,24 +852,11 @@ pub(crate) struct User {
 impl User {
     #[cfg(feature = "example-data")]
     fn new() -> Self {
-        use ml_dsa::KeyGen;
 
-        let ml_dsa0 = Arc::new(MlDsa65::from_seed(&rand::random::<[u8; 32]>().into()));
-        let ml_dsa1 = Arc::new(MlDsa65::from_seed(&rand::random::<[u8; 32]>().into()));
-        // Use rand::random (getrandom 0.2 + js feature) rather than ml-kem's
-        // generate_keypair() which needs getrandom 0.4 + wasm_js on WASM.
-        let ml_kem_dk0 = DecapsulationKey::<MlKem768>::from_seed({
-            use rand::RngCore;
-            let mut seed = [0u8; 64];
-            rand::thread_rng().fill_bytes(&mut seed);
-            seed.into()
-        });
-        let ml_kem_dk1 = DecapsulationKey::<MlKem768>::from_seed({
-            use rand::RngCore;
-            let mut seed = [0u8; 64];
-            rand::thread_rng().fill_bytes(&mut seed);
-            seed.into()
-        });
+        let ml_dsa0 = Arc::new(ml_dsa::SigningKey::<MlDsa65>::from_seed(&crate::rng::random_bytes::<32>().into()));
+        let ml_dsa1 = Arc::new(ml_dsa::SigningKey::<MlDsa65>::from_seed(&crate::rng::random_bytes::<32>().into()));
+        let ml_kem_dk0 = DecapsulationKey::<MlKem768>::from_seed(crate::rng::random_bytes::<64>().into());
+        let ml_kem_dk1 = DecapsulationKey::<MlKem768>::from_seed(crate::rng::random_bytes::<64>().into());
 
         let identities = vec![
             Identity::new(
@@ -903,8 +890,8 @@ impl User {
             description: "Example contact for offline testing".into(),
             ml_dsa_vk_bytes: vec![0xAA; 1952],
             ml_kem_ek_bytes: vec![0xBB; 1184],
-            required_tier: freenet_aft_interface::Tier::Min10,
-            max_age_secs: freenet_email_inbox::DEFAULT_MAX_AGE_SECS,
+            required_tier: freenet_mail_wire_v1::aft::Tier::Min10,
+            max_age_secs: freenet_mail_wire_v1::inbox::DEFAULT_MAX_AGE_SECS,
             verified: true,
             inbox_wasm_hash: None,
         });
@@ -1047,8 +1034,8 @@ fn sort_cmp_inbox(a: &Message, b: &Message) -> std::cmp::Ordering {
 /// Drafts: newest first by `updated_at`; tie-break by UUID string descending
 /// (for stability only — UUID v4 ordering is not chronological).
 fn sort_cmp_drafts(
-    a: &(String, mail_local_state::Draft),
-    b: &(String, mail_local_state::Draft),
+    a: &(String, freenet_mail_wire_v1::local_state::Draft),
+    b: &(String, freenet_mail_wire_v1::local_state::Draft),
 ) -> std::cmp::Ordering {
     b.1.updated_at.cmp(&a.1.updated_at).then(b.0.cmp(&a.0))
 }
@@ -1056,8 +1043,8 @@ fn sort_cmp_drafts(
 /// Sent: newest first by `sent_at`; tie-break by UUID string descending
 /// (for stability only — UUID v4 ordering is not chronological).
 fn sort_cmp_sent(
-    a: &(String, mail_local_state::SentMessage),
-    b: &(String, mail_local_state::SentMessage),
+    a: &(String, freenet_mail_wire_v1::local_state::SentMessage),
+    b: &(String, freenet_mail_wire_v1::local_state::SentMessage),
 ) -> std::cmp::Ordering {
     b.1.sent_at.cmp(&a.1.sent_at).then(b.0.cmp(&a.0))
 }
@@ -1067,8 +1054,8 @@ fn sort_cmp_sent(
 /// archived map — its ordering is for render-stability only, not chronological
 /// arrival.
 fn sort_cmp_archive(
-    a: &(u64, mail_local_state::ArchivedMessage),
-    b: &(u64, mail_local_state::ArchivedMessage),
+    a: &(u64, freenet_mail_wire_v1::local_state::ArchivedMessage),
+    b: &(u64, freenet_mail_wire_v1::local_state::ArchivedMessage),
 ) -> std::cmp::Ordering {
     b.1.archived_at.cmp(&a.1.archived_at).then(b.0.cmp(&a.0))
 }
@@ -1107,7 +1094,7 @@ pub(crate) fn compose_post_send(send_succeeded: bool) -> ComposePostSend {
 /// MarkRead click time (`kept_at`). Legacy entries (pre-#229) lack
 /// `sent_at`; they fall back to `kept_at` — wrong but matches the
 /// pre-#229 behaviour and self-heals the next time the row is read.
-fn kept_render_time(kept: &mail_local_state::KeptMessage) -> chrono::DateTime<chrono::Utc> {
+fn kept_render_time(kept: &freenet_mail_wire_v1::local_state::KeptMessage) -> chrono::DateTime<chrono::Utc> {
     chrono::DateTime::from_timestamp_millis(kept.sent_at.unwrap_or(kept.kept_at))
         .unwrap_or_else(chrono::Utc::now)
 }
@@ -1119,8 +1106,8 @@ fn kept_render_time(kept: &mail_local_state::KeptMessage) -> chrono::DateTime<ch
 /// snapshots default both to empty/false and demote to `Unverified` at
 /// render time — self-heals on the next MarkRead.
 fn kept_to_message(
-    mid: mail_local_state::MessageId,
-    kept: mail_local_state::KeptMessage,
+    mid: freenet_mail_wire_v1::local_state::MessageId,
+    kept: freenet_mail_wire_v1::local_state::KeptMessage,
 ) -> Message {
     let time = kept_render_time(&kept);
     Message {
@@ -1152,7 +1139,7 @@ fn kept_to_message(
 /// `Message.id` being stable across contract-state reloads.
 fn merge_inbox_list(
     live: Vec<Message>,
-    kept: Vec<(mail_local_state::MessageId, mail_local_state::KeptMessage)>,
+    kept: Vec<(freenet_mail_wire_v1::local_state::MessageId, freenet_mail_wire_v1::local_state::KeptMessage)>,
     is_archived: impl Fn(u64) -> bool,
     is_read: impl Fn(u64) -> bool,
 ) -> Vec<Message> {
@@ -1822,9 +1809,9 @@ pub(crate) mod storybook {
         // get the Nested default.
         let view = query_param("view").unwrap_or_default();
         let thread_view = if view == "compact" {
-            mail_local_state::ThreadView::Compact
+            freenet_mail_wire_v1::local_state::ThreadView::Compact
         } else {
-            mail_local_state::ThreadView::Nested
+            freenet_mail_wire_v1::local_state::ThreadView::Nested
         };
         let mut settings = crate::local_state::global_settings();
         settings.inbox.thread_view = thread_view;
@@ -2366,8 +2353,8 @@ mod thread_grouping_tests {
     #[test]
     fn reply_prefill_resolves_to_local_label_by_vk_289() {
         use crate::app::address_book::{self, Contact};
-        use freenet_aft_interface::Tier;
-        use freenet_email_inbox::DEFAULT_MAX_AGE_SECS;
+        use freenet_mail_wire_v1::aft::Tier;
+        use freenet_mail_wire_v1::inbox::DEFAULT_MAX_AGE_SECS;
 
         address_book::clear_for_test();
 
@@ -2422,8 +2409,8 @@ mod thread_grouping_tests {
     #[test]
     fn reply_prefill_ignores_unverified_sender_vk_289() {
         use crate::app::address_book::{self, Contact};
-        use freenet_aft_interface::Tier;
-        use freenet_email_inbox::DEFAULT_MAX_AGE_SECS;
+        use freenet_mail_wire_v1::aft::Tier;
+        use freenet_mail_wire_v1::inbox::DEFAULT_MAX_AGE_SECS;
 
         address_book::clear_for_test();
 
@@ -2964,7 +2951,7 @@ const SENT_FOLD_ID_BASE: u64 = 1 << 48;
 /// (#310). `from = alias` lights up `.is-me` styling; `read = true` (own mail
 /// is never unread); `id` is stable per sent UUID and offset out of the
 /// inbox id space.
-fn sent_message_to_row(id: &str, s: &mail_local_state::SentMessage, alias: &str) -> Message {
+fn sent_message_to_row(id: &str, s: &freenet_mail_wire_v1::local_state::SentMessage, alias: &str) -> Message {
     // Stable, collision-resistant synthetic id from the sent UUID.
     let mut hash: u64 = 1469598103934665603; // FNV-1a offset basis
     for b in id.as_bytes() {
@@ -3013,19 +3000,19 @@ fn UserInbox() -> Element {
     let _local_gen = crate::local_state::GENERATION();
     let appearance = crate::local_state::global_settings().appearance;
     let theme_attr = match appearance.theme {
-        ::mail_local_state::Theme::System => "system",
-        ::mail_local_state::Theme::Light => "light",
-        ::mail_local_state::Theme::Dark => "dark",
+        ::freenet_mail_wire_v1::local_state::Theme::System => "system",
+        ::freenet_mail_wire_v1::local_state::Theme::Light => "light",
+        ::freenet_mail_wire_v1::local_state::Theme::Dark => "dark",
     };
     let density_attr = match appearance.density {
-        ::mail_local_state::Density::Comfortable => "comfortable",
-        ::mail_local_state::Density::Compact => "compact",
+        ::freenet_mail_wire_v1::local_state::Density::Comfortable => "comfortable",
+        ::freenet_mail_wire_v1::local_state::Density::Compact => "compact",
     };
     let font_size_attr = match appearance.font_size {
-        ::mail_local_state::FontSize::Small => "small",
-        ::mail_local_state::FontSize::Default => "default",
-        ::mail_local_state::FontSize::Large => "large",
-        ::mail_local_state::FontSize::Larger => "larger",
+        ::freenet_mail_wire_v1::local_state::FontSize::Small => "small",
+        ::freenet_mail_wire_v1::local_state::FontSize::Default => "default",
+        ::freenet_mail_wire_v1::local_state::FontSize::Large => "large",
+        ::freenet_mail_wire_v1::local_state::FontSize::Larger => "larger",
     };
     let serif_class = if appearance.serif_subjects {
         " serif-subjects"
@@ -3423,7 +3410,7 @@ fn MessageList() -> Element {
     } else {
         Vec::new()
     };
-    let drafts: Vec<(String, mail_local_state::Draft)> = if matches!(folder, menu::Folder::Drafts)
+    let drafts: Vec<(String, freenet_mail_wire_v1::local_state::Draft)> = if matches!(folder, menu::Folder::Drafts)
         || (matches!(folder, menu::Folder::Inbox) && inbox_settings.drafts_in_inbox)
     {
         let mut d = crate::local_state::drafts_for(&active_alias);
@@ -3434,7 +3421,7 @@ fn MessageList() -> Element {
     } else {
         Vec::new()
     };
-    let sent_msgs: Vec<(String, mail_local_state::SentMessage)> =
+    let sent_msgs: Vec<(String, freenet_mail_wire_v1::local_state::SentMessage)> =
         if matches!(folder, menu::Folder::Sent) {
             let mut s = crate::local_state::sent_for(&active_alias);
             // Newest first; tie-break by UUID string for stability only — UUID v4
@@ -3444,7 +3431,7 @@ fn MessageList() -> Element {
         } else {
             Vec::new()
         };
-    let archived_msgs: Vec<(u64, mail_local_state::ArchivedMessage)> =
+    let archived_msgs: Vec<(u64, freenet_mail_wire_v1::local_state::ArchivedMessage)> =
         if matches!(folder, menu::Folder::Archive) {
             let mut a = crate::local_state::archived_for(&active_alias);
             // Newest first; tie-break by message id for deterministic order (#137).
@@ -3533,11 +3520,11 @@ fn MessageList() -> Element {
                                 // are the user-actionable states.
                                 let (state_class, state_label): (&'static str, Option<&'static str>) =
                                     match m.delivery_state {
-                                        mail_local_state::DeliveryState::Pending =>
+                                        freenet_mail_wire_v1::local_state::DeliveryState::Pending =>
                                             ("badge badge-pending", Some("pending")),
-                                        mail_local_state::DeliveryState::Failed =>
+                                        freenet_mail_wire_v1::local_state::DeliveryState::Failed =>
                                             ("badge badge-failed", Some("failed")),
-                                        mail_local_state::DeliveryState::Delivered =>
+                                        freenet_mail_wire_v1::local_state::DeliveryState::Delivered =>
                                             ("", None),
                                     };
                                 let time_short = chrono::DateTime::from_timestamp_millis(m.sent_at)
@@ -3999,7 +3986,7 @@ fn ThreadDetail(group: crate::app::threads::ThreadGroup) -> Element {
             .unwrap_or_default();
         if !alias.is_empty() {
             for m in group.messages.iter().filter(|m| !m.read) {
-                let kept = mail_local_state::KeptMessage {
+                let kept = freenet_mail_wire_v1::local_state::KeptMessage {
                     from: m.from.to_string(),
                     title: m.title.to_string(),
                     content: m.content.to_string(),
@@ -4069,8 +4056,8 @@ fn ThreadDetail(group: crate::app::threads::ThreadGroup) -> Element {
                 class: "ft-thread-container",
                 "data-testid": testid::FM_THREAD_CONTAINER,
                 "data-thread-view": match thread_view {
-                    mail_local_state::ThreadView::Nested => "nested",
-                    mail_local_state::ThreadView::Compact => "compact",
+                    freenet_mail_wire_v1::local_state::ThreadView::Nested => "nested",
+                    freenet_mail_wire_v1::local_state::ThreadView::Compact => "compact",
                 },
                 div { class: "ft-head",
                     div { class: "ft-subj", "{subject}" }
@@ -4087,8 +4074,8 @@ fn ThreadDetail(group: crate::app::threads::ThreadGroup) -> Element {
                 }
                 div { class: "detail-scroll",
                     match thread_view {
-                        mail_local_state::ThreadView::Nested => rsx! { ThreadNested { group: group.clone() } },
-                        mail_local_state::ThreadView::Compact => rsx! { ThreadCompact { group: group.clone() } },
+                        freenet_mail_wire_v1::local_state::ThreadView::Nested => rsx! { ThreadNested { group: group.clone() } },
+                        freenet_mail_wire_v1::local_state::ThreadView::Compact => rsx! { ThreadCompact { group: group.clone() } },
                     }
                 }
                 div { class: "toolbar",
@@ -4466,7 +4453,7 @@ fn ThreadCompact(group: crate::app::threads::ThreadGroup) -> Element {
 }
 
 #[component]
-fn OpenArchivedMessage(msg_id: u64, msg: mail_local_state::ArchivedMessage) -> Element {
+fn OpenArchivedMessage(msg_id: u64, msg: freenet_mail_wire_v1::local_state::ArchivedMessage) -> Element {
     let mut menu_selection = use_context::<Signal<menu::MenuSelection>>();
     let user = use_context::<Signal<User>>();
     let client = crate::api::WEB_API_SENDER.get().unwrap();
@@ -4607,7 +4594,7 @@ fn OpenArchivedMessage(msg_id: u64, msg: mail_local_state::ArchivedMessage) -> E
 }
 
 #[component]
-fn OpenSentMessage(sent_id: String, msg: mail_local_state::SentMessage) -> Element {
+fn OpenSentMessage(sent_id: String, msg: freenet_mail_wire_v1::local_state::SentMessage) -> Element {
     let mut menu_selection = use_context::<Signal<menu::MenuSelection>>();
     let user = use_context::<Signal<User>>();
     #[cfg(feature = "use-node")]
@@ -4631,9 +4618,9 @@ fn OpenSentMessage(sent_id: String, msg: mail_local_state::SentMessage) -> Eleme
         .map(format_time_full)
         .unwrap_or_default();
     let delivery = match msg.delivery_state {
-        mail_local_state::DeliveryState::Pending => "pending",
-        mail_local_state::DeliveryState::Delivered => "delivered",
-        mail_local_state::DeliveryState::Failed => "failed",
+        freenet_mail_wire_v1::local_state::DeliveryState::Pending => "pending",
+        freenet_mail_wire_v1::local_state::DeliveryState::Delivered => "delivered",
+        freenet_mail_wire_v1::local_state::DeliveryState::Failed => "failed",
     };
 
     // #270: reply continues the conversation this sent message belonged to,
@@ -4864,7 +4851,7 @@ fn archive_message(
     post: PostMessageAction,
 ) {
     let id = msg.id;
-    let archived = mail_local_state::ArchivedMessage {
+    let archived = freenet_mail_wire_v1::local_state::ArchivedMessage {
         from: msg.from.to_string(),
         title: msg.title.to_string(),
         content: msg.content.to_string(),
@@ -5099,7 +5086,7 @@ fn OpenMessage(msg: Message) -> Element {
             .map(|id| id.alias.to_string())
             .unwrap_or_default();
         if !alias.is_empty() {
-            let kept = mail_local_state::KeptMessage {
+            let kept = freenet_mail_wire_v1::local_state::KeptMessage {
                 from: msg.from.to_string(),
                 title: msg.title.to_string(),
                 content: msg.content.to_string(),
@@ -5409,7 +5396,7 @@ fn ComposeSheet() -> Element {
         // #270: persist the conversation linkage so a reply that's autosaved
         // and reopened keeps the SAME thread_id rather than minting a fresh
         // one. None for a brand-new compose.
-        let draft = mail_local_state::Draft {
+        let draft = freenet_mail_wire_v1::local_state::Draft {
             to: to_v,
             subject: subj_v,
             body: body_v,
@@ -5696,12 +5683,12 @@ fn ComposeSheet() -> Element {
         // so we set Delivered up-front. See issue #58.
         if send_succeeded {
             #[cfg(feature = "use-node")]
-            let initial_state = mail_local_state::DeliveryState::Pending;
+            let initial_state = freenet_mail_wire_v1::local_state::DeliveryState::Pending;
             #[cfg(not(feature = "use-node"))]
-            let initial_state = mail_local_state::DeliveryState::Delivered;
+            let initial_state = freenet_mail_wire_v1::local_state::DeliveryState::Delivered;
 
             let sent_at_ms = chrono::Utc::now().timestamp_millis();
-            let sent = mail_local_state::SentMessage {
+            let sent = freenet_mail_wire_v1::local_state::SentMessage {
                 to: to_val.clone(),
                 recipient_fingerprint: recipient.fingerprint_short(),
                 recipient_fingerprint_full: recipient.fingerprint_full(),
@@ -6084,7 +6071,7 @@ mod folder_count_tests {
     /// Reset the shared local-state snapshot so deleted/archived sets don't
     /// leak between tests on the same thread.
     fn reset_state() {
-        crate::local_state::replace_snapshot(::mail_local_state::LocalState::default());
+        crate::local_state::replace_snapshot(::freenet_mail_wire_v1::local_state::LocalState::default());
     }
 
     /// Repro for #268: the Inbox badge counted unread rows that the list
@@ -6119,7 +6106,7 @@ mod folder_count_tests {
         crate::local_state::local_archive_message(
             "alice",
             11,
-            ::mail_local_state::ArchivedMessage {
+            ::freenet_mail_wire_v1::local_state::ArchivedMessage {
                 from: "bob".into(),
                 title: "t".into(),
                 content: "c".into(),
@@ -6191,7 +6178,7 @@ mod time_format_tests {
 #[cfg(test)]
 mod kept_render_time_tests {
     use super::kept_render_time;
-    use mail_local_state::KeptMessage;
+    use freenet_mail_wire_v1::local_state::KeptMessage;
 
     /// Regression for #229: the live row had time = sender's send time
     /// (9:39). After eviction the kept-path row used to render with
@@ -6248,7 +6235,7 @@ mod kept_render_time_tests {
 mod kept_to_message_tests {
     use super::kept_to_message;
     use crate::inbox::VerificationState;
-    use mail_local_state::KeptMessage;
+    use freenet_mail_wire_v1::local_state::KeptMessage;
 
     /// Regression for #240: a verified-sender row that gets evicted
     /// from the live contract must keep its `sender_vk` +
@@ -6343,8 +6330,8 @@ mod sent_fold_tests {
         body: &str,
         sent_at: i64,
         thread_id: Option<&str>,
-    ) -> mail_local_state::SentMessage {
-        mail_local_state::SentMessage {
+    ) -> freenet_mail_wire_v1::local_state::SentMessage {
+        freenet_mail_wire_v1::local_state::SentMessage {
             subject: subject.to_string(),
             body: body.to_string(),
             sent_at,
@@ -6669,7 +6656,7 @@ mod inbox_sort_tests {
 mod merge_inbox_list_tests {
     use super::{Message, merge_inbox_list};
     use chrono::{TimeZone, Utc};
-    use mail_local_state::KeptMessage;
+    use freenet_mail_wire_v1::local_state::KeptMessage;
     use std::borrow::Cow;
 
     fn live(id: u64, from: &'static str) -> Message {
@@ -6748,7 +6735,7 @@ mod merge_inbox_list_tests {
 #[cfg(test)]
 mod folder_sort_tests {
     use super::{sort_cmp_archive, sort_cmp_drafts, sort_cmp_sent};
-    use mail_local_state::{ArchivedMessage, Draft, SentMessage};
+    use freenet_mail_wire_v1::local_state::{ArchivedMessage, Draft, SentMessage};
 
     fn make_draft(id: &str, updated_at: i64) -> (String, Draft) {
         (
@@ -6773,7 +6760,7 @@ mod folder_sort_tests {
                 subject: "s".to_string(),
                 body: "b".to_string(),
                 sent_at,
-                delivery_state: mail_local_state::DeliveryState::Delivered,
+                delivery_state: freenet_mail_wire_v1::local_state::DeliveryState::Delivered,
                 ..Default::default()
             },
         )

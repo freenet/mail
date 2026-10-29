@@ -3,18 +3,24 @@ name = "identity-management"
 version = "0.0.1"
 edition = "2024"
 
+# Outside the workspace with its own Cargo.lock, like contracts/inbox: the
+# shipped WASM is frozen under published-contract/wasm/v1/, and these exact
+# pins keep this source building the generation that shipped. The client
+# speaks to it through freenet-mail-wire-v1's copy of its types.
+[workspace]
+
 [dependencies]
-anyhow = "1"
-p384 = { version = "0.13", default-features = false, features = ["serde", "pem", "pkcs8", "arithmetic"] }
-freenet-stdlib = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
+anyhow = "=1.0.104"
+p384 = { version = "=0.13.1", default-features = false, features = ["serde", "pem", "pkcs8", "arithmetic"] }
+freenet-stdlib = "=0.3.5"
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = "=1.0.149"
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
-p384 = { version = "0.13", default-features = true }
-ecdsa = "0.16"
-pico-args = "0.5"
-rand = "0.8"
+p384 = { version = "=0.13.1", default-features = true }
+ecdsa = "=0.16.9"
+pico-args = "=0.5.0"
+rand = "=0.8.5"
 
 [lib]
 crate-type = ["cdylib", "rlib"]

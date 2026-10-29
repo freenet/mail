@@ -1,0 +1,30 @@
+[package]
+name = "freenet-mail-wire-v1"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Client-side copies of the v0.2.x contract and delegate wire types"
+
+# The frozen inbox, AFT and delegate crates are pinned to freenet-stdlib 0.3.5
+# so their WASM cannot drift. This crate carries the same types on the
+# workspace's stdlib so the client links one stdlib. The wire bytes are
+# pinned by golden_v1.txt, captured through the frozen crates.
+
+[dependencies]
+bincode = { workspace = true }
+bs58 = { workspace = true }
+chrono = { workspace = true }
+freenet-stdlib = { workspace = true }
+ml-dsa = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+strum = { workspace = true }
+thiserror = { workspace = true }
+
+[features]
+# `Inbox::new` stamps the current time.
+clock = ["chrono/clock"]
+
+[dev-dependencies]
+chrono = { workspace = true, features = ["clock"] }

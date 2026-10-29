@@ -1,0 +1,8 @@
+# Applies to builds run from inside contracts/ (cargo finds config by walking
+# up from the working directory). The frozen container contract was built
+# with this flag, so its byte-equality check needs it. It lives here rather
+# than at the repo root because the UI's getrandom 0.4 must use its
+# browser backend (`wasm_js`), which this flag would replace.
+# modules/.cargo/config.toml carries the same flag for the delegate sources.
+[target.wasm32-unknown-unknown]
+rustflags = ["--cfg", "getrandom_backend=\"custom\""]

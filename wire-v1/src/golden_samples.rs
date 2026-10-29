@@ -11,11 +11,11 @@ fn golden_samples() -> Vec<(&'static str, Vec<u8>)> {
     use chrono::{TimeZone, Utc};
     use freenet_stdlib::prelude::{ContractInstanceId, Parameters, SecretsId, StateSummary};
     use ml_dsa::signature::Keypair;
-    use ml_dsa::{KeyGen, MlDsa65};
+    use ml_dsa::{MlDsa65, SigningKey};
     use std::collections::{BTreeSet, HashMap};
 
     let ts = Utc.timestamp_opt(1_761_000_000, 0).unwrap();
-    let sk = MlDsa65::from_seed(&[7u8; 32].into());
+    let sk = SigningKey::<MlDsa65>::from_seed(&[7u8; 32].into());
     let vk = sk.verifying_key();
     let ek = vec![0xEE; 16];
     let mut out: Vec<(&'static str, Vec<u8>)> = Vec::new();

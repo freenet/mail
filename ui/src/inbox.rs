@@ -6,7 +6,7 @@ use std::{
 
 use chacha20poly1305::{XChaCha20Poly1305, aead::Aead};
 use chrono::{DateTime, Utc};
-use freenet_aft_interface::{Tier, TokenAssignment, TokenAssignmentHash};
+use freenet_mail_wire_v1::aft::{Tier, TokenAssignment, TokenAssignmentHash};
 use freenet_stdlib::{
     client_api::ContractRequest,
     prelude::{
@@ -28,7 +28,7 @@ use ml_kem::{
 };
 use serde::{Deserialize, Serialize};
 
-use freenet_email_inbox::{
+use freenet_mail_wire_v1::inbox::{
     Inbox as StoredInbox, InboxParams, InboxSettings as StoredSettings, Message as StoredMessage,
     UpdateInbox,
 };
@@ -336,7 +336,7 @@ async fn fail_one_sent(
     if !crate::local_state::local_set_sent_delivery_state(
         sender_alias,
         sent_id,
-        mail_local_state::DeliveryState::Failed,
+        freenet_mail_wire_v1::local_state::DeliveryState::Failed,
     ) {
         return;
     }
@@ -344,7 +344,7 @@ async fn fail_one_sent(
         client,
         sender_alias.to_string(),
         sent_id.to_string(),
-        mail_local_state::DeliveryState::Failed,
+        freenet_mail_wire_v1::local_state::DeliveryState::Failed,
     )
     .await
     {
@@ -701,7 +701,7 @@ impl DecryptedMessage {
         client: &mut WebApiRequestClient,
         recipient_ek: EncapsulationKey<MlKem768>,
         recipient_ml_dsa_vk: MlDsaVerifyingKey<MlDsa65>,
-        recipient_required_tier: freenet_aft_interface::Tier,
+        recipient_required_tier: freenet_mail_wire_v1::aft::Tier,
         recipient_max_age_secs: u64,
         recipient_inbox_wasm_hash: Option<&str>,
         from: &Identity,
@@ -915,32 +915,6 @@ impl DecryptedMessage {
     }
 }
 
-/// Thin adapter: wraps rand 0.8's `ThreadRng` and implements rand_core 0.10's `TryRng` +
-/// `TryCryptoRng` traits so we can pass it to `encapsulate_with_rng`. This avoids pulling
-/// in getrandom 0.4 (which needs the separate `wasm_js` feature on WASM), relying instead
-/// on rand 0.8's existing WASM support via getrandom 0.2 + `js` feature.
-///
-/// `Rng` and `CryptoRng` are provided automatically via blanket impls in rand_core 0.10.
-struct Rand08Rng(rand::rngs::ThreadRng);
-
-impl rand_core::TryRng for Rand08Rng {
-    type Error = core::convert::Infallible;
-    fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
-        use rand::RngCore as _;
-        Ok(self.0.next_u32())
-    }
-    fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
-        use rand::RngCore as _;
-        Ok(self.0.next_u64())
-    }
-    fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
-        use rand::RngCore as _;
-        self.0.fill_bytes(dst);
-        Ok(())
-    }
-}
-impl rand_core::TryCryptoRng for Rand08Rng {}
-
 /// Derive a 32-byte XChaCha20-Poly1305 key from an ML-KEM shared secret using HKDF-SHA256.
 ///
 /// The context label `b"freenet-email-v1 message-key"` domain-separates this
@@ -961,19 +935,16 @@ fn hkdf_derive_key(shared_secret: &[u8]) -> [u8; 32] {
 ///
 /// The symmetric key is HKDF-SHA256(ML-KEM shared secret, info="freenet-email-v1 message-key").
 fn ml_kem_encrypt(ek: &EncapsulationKey<MlKem768>, plaintext: &[u8]) -> Result<Vec<u8>, DynError> {
-    use chacha20poly1305::aead::KeyInit;
-    use chacha20poly1305::aead::generic_array::GenericArray;
+    use chacha20poly1305::{KeyInit, XNonce};
 
-    // Use Rand08Rng (rand 0.8 ThreadRng) to avoid getrandom 0.4's wasm_js requirement.
-    let (ct, shared_secret) = ek.encapsulate_with_rng(&mut Rand08Rng(rand::thread_rng()));
+    let (ct, shared_secret) = ek.encapsulate_with_rng(&mut crate::rng::crypto_rng());
     let ct_bytes: &[u8] = ct.as_ref();
 
     let key_bytes = hkdf_derive_key(shared_secret.as_slice());
 
-    // Generate a random 192-bit nonce using rand::random (compatible with all rand versions).
-    let nonce_bytes: [u8; 24] = rand::random();
-    let chacha_nonce = GenericArray::from(nonce_bytes);
-    let cipher = XChaCha20Poly1305::new(GenericArray::from_slice(&key_bytes));
+    let nonce_bytes: [u8; 24] = crate::rng::random_bytes();
+    let chacha_nonce = XNonce::from(nonce_bytes);
+    let cipher = XChaCha20Poly1305::new(&key_bytes.into());
     let encrypted_data = cipher
         .encrypt(&chacha_nonce, plaintext)
         .map_err(|e| format!("XChaCha20 encrypt failed: {e}"))?;
@@ -990,8 +961,7 @@ fn ml_kem_decrypt(
     dk: &DecapsulationKey<MlKem768>,
     msg_content: Vec<u8>,
 ) -> Result<Vec<u8>, DynError> {
-    use chacha20poly1305::aead::KeyInit;
-    use chacha20poly1305::aead::generic_array::GenericArray;
+    use chacha20poly1305::{KeyInit, XNonce};
 
     // ML-KEM-768 ciphertext is 1088 bytes.
     const KEM_CT_LEN: usize = 1088;
@@ -1002,7 +972,7 @@ fn ml_kem_decrypt(
     }
 
     let mut cursor = Cursor::new(msg_content);
-    let mut nonce_bytes = vec![0u8; NONCE_LEN];
+    let mut nonce_bytes = [0u8; NONCE_LEN];
     cursor.read_exact(&mut nonce_bytes)?;
     let mut kem_ct_bytes = vec![0u8; KEM_CT_LEN];
     cursor.read_exact(&mut kem_ct_bytes)?;
@@ -1015,10 +985,9 @@ fn ml_kem_decrypt(
         .map_err(|_| "ML-KEM ciphertext wrong length")?;
 
     let key_bytes = hkdf_derive_key(shared_secret.as_slice());
-    let cipher = XChaCha20Poly1305::new(GenericArray::from_slice(&key_bytes));
-    let nonce = GenericArray::from_slice(&nonce_bytes);
+    let cipher = XChaCha20Poly1305::new(&key_bytes.into());
     cipher
-        .decrypt(nonce, encrypted_data.as_ref())
+        .decrypt(&XNonce::from(nonce_bytes), encrypted_data.as_ref())
         .map_err(|e| format!("XChaCha20 decrypt failed: {e}").into())
 }
 
@@ -1051,7 +1020,7 @@ impl InboxModel {
         fn get_key(identity: &Identity) -> Result<ContractKey, DynError> {
             let vk = MlDsaKeypair::verifying_key(identity.ml_dsa_signing_key.as_ref());
             let pub_key = inbox_params_pub_key_bytes(&vk);
-            let params = freenet_email_inbox::InboxParams { pub_key }
+            let params = freenet_mail_wire_v1::inbox::InboxParams { pub_key }
                 .try_into()
                 .map_err(|e| format!("{e}"))?;
             ContractKey::from_params(crate::inbox::INBOX_CODE_HASH, params)
@@ -1356,7 +1325,7 @@ impl InboxModel {
     fn settings_modify_prepare(&self) -> Result<ContractRequest<'static>, DynError> {
         let settings = self.settings.to_stored()?;
         let last_update = Utc::now();
-        let payload = freenet_email_inbox::sign_payload(
+        let payload = freenet_mail_wire_v1::inbox::sign_payload(
             &self.settings.owner_ek_bytes,
             &settings,
             last_update,
@@ -1532,7 +1501,6 @@ mod migration_logic_tests {
 
 #[cfg(test)]
 mod tests {
-    use ml_dsa::KeyGen;
 
     use freenet_stdlib::prelude::ContractCode;
 
@@ -1550,7 +1518,7 @@ mod tests {
                 settings: InternalSettings {
                     next_msg_id: 0,
                     minimum_tier: Tier::Hour1,
-                    max_age_secs: freenet_email_inbox::DEFAULT_MAX_AGE_SECS,
+                    max_age_secs: freenet_mail_wire_v1::inbox::DEFAULT_MAX_AGE_SECS,
                     allow_verified_skip_token: false,
                     verified_senders: std::collections::BTreeSet::new(),
                     ml_dsa_signing_key,
@@ -1566,13 +1534,8 @@ mod tests {
 
     #[test]
     fn remove_msg() {
-        let ml_dsa_key = Arc::new(MlDsa65::from_seed(&rand::random::<[u8; 32]>().into()));
-        let ml_kem_dk = DecapsulationKey::<MlKem768>::from_seed({
-            use rand::RngCore;
-            let mut seed = [0u8; 64];
-            rand::thread_rng().fill_bytes(&mut seed);
-            seed.into()
-        });
+        let ml_dsa_key = Arc::new(ml_dsa::SigningKey::<MlDsa65>::from_seed(&crate::rng::random_bytes::<32>().into()));
+        let ml_kem_dk = DecapsulationKey::<MlKem768>::from_seed(crate::rng::random_bytes::<64>().into());
         let mut inbox = InboxModel::new(ml_dsa_key, ml_kem_dk).unwrap();
         for id in 0..10000 {
             inbox.messages.push(MessageModel {
@@ -1591,7 +1554,7 @@ mod tests {
     }
 
     fn fresh_signing_key() -> MlDsaSigningKey<MlDsa65> {
-        MlDsa65::from_seed(&rand::random::<[u8; 32]>().into())
+        ml_dsa::SigningKey::<MlDsa65>::from_seed(&crate::rng::random_bytes::<32>().into())
     }
 
     #[test]
@@ -1644,12 +1607,7 @@ mod tests {
     }
 
     fn fresh_kem_dk() -> DecapsulationKey<MlKem768> {
-        DecapsulationKey::<MlKem768>::from_seed({
-            use rand::RngCore;
-            let mut seed = [0u8; 64];
-            rand::thread_rng().fill_bytes(&mut seed);
-            seed.into()
-        })
+        DecapsulationKey::<MlKem768>::from_seed(crate::rng::random_bytes::<64>().into())
     }
 
     /// Repro for #267: a stored message that this identity can't decrypt must
@@ -1800,12 +1758,7 @@ mod tests {
     // ─── #150 UI-side bypass helpers ──────────────────────────────────────
 
     fn make_test_inbox(ml_dsa_key: Arc<MlDsaSigningKey<MlDsa65>>) -> InboxModel {
-        let ml_kem_dk = DecapsulationKey::<MlKem768>::from_seed({
-            use rand::RngCore;
-            let mut seed = [0u8; 64];
-            rand::thread_rng().fill_bytes(&mut seed);
-            seed.into()
-        });
+        let ml_kem_dk = DecapsulationKey::<MlKem768>::from_seed(crate::rng::random_bytes::<64>().into());
         InboxModel::new(ml_dsa_key, ml_kem_dk).unwrap()
     }
 
@@ -1869,9 +1822,9 @@ mod tests {
         match request {
             freenet_stdlib::client_api::ContractRequest::Update { data, .. } => {
                 if let UpdateData::Delta(d) = data {
-                    let decoded: freenet_email_inbox::UpdateInbox =
+                    let decoded: freenet_mail_wire_v1::inbox::UpdateInbox =
                         serde_json::from_slice(&d).expect("delta must decode as UpdateInbox");
-                    if let freenet_email_inbox::UpdateInbox::ModifySettings { settings, .. } =
+                    if let freenet_mail_wire_v1::inbox::UpdateInbox::ModifySettings { settings, .. } =
                         decoded
                     {
                         assert!(
@@ -1927,9 +1880,9 @@ mod tests {
             ..
         } = request
         {
-            let decoded: freenet_email_inbox::UpdateInbox =
+            let decoded: freenet_mail_wire_v1::inbox::UpdateInbox =
                 serde_json::from_slice(&d).expect("delta decode");
-            if let freenet_email_inbox::UpdateInbox::ModifySettings { settings, .. } = decoded {
+            if let freenet_mail_wire_v1::inbox::UpdateInbox::ModifySettings { settings, .. } = decoded {
                 assert_eq!(
                     settings.verified_senders.len(),
                     vs.len(),
@@ -2002,9 +1955,9 @@ mod tests {
             ..
         } = request
         {
-            let decoded: freenet_email_inbox::UpdateInbox =
+            let decoded: freenet_mail_wire_v1::inbox::UpdateInbox =
                 serde_json::from_slice(&d).expect("delta decode");
-            if let freenet_email_inbox::UpdateInbox::ModifySettings { settings, .. } = decoded {
+            if let freenet_mail_wire_v1::inbox::UpdateInbox::ModifySettings { settings, .. } = decoded {
                 assert!(settings.allow_verified_skip_token);
                 assert!(settings.verified_senders.is_empty());
             } else {
@@ -2042,6 +1995,14 @@ mod tests {
             default.id(),
             "inbox_key_for must equal inbox_key_for_with_hash(.., INBOX_CODE_HASH)",
         );
+    }
+
+    #[cfg(feature = "use-node")]
+    #[test]
+    fn inbox_key_matches_the_v0_2_client() {
+        use crate::test_util::{frozen_fixture_vk, frozen_key, hex};
+        let key = inbox_key_for(&frozen_fixture_vk()).unwrap();
+        assert_eq!(hex(key.id().as_bytes()), frozen_key("inbox_contract"));
     }
 
     /// `bs58::encode(key.code_hash().as_ref())` must roundtrip through

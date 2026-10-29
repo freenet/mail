@@ -6,7 +6,6 @@
 //! with rc.8), and a message encrypted by the old stack must still decrypt.
 
 use super::*;
-use ml_dsa::KeyGen;
 
 const VECTORS: &str = include_str!("crypto_vectors_v1.txt");
 const DSA_SEED: [u8; 32] = [7; 32];
@@ -30,14 +29,14 @@ fn vector(name: &str) -> Vec<u8> {
 
 #[test]
 fn ml_dsa_seed_derives_the_v1_verifying_key() {
-    let sk = MlDsa65::from_seed(&DSA_SEED.into());
+    let sk = ml_dsa::SigningKey::<MlDsa65>::from_seed(&DSA_SEED.into());
     let vk = MlDsaKeypair::verifying_key(&sk);
     assert_eq!(vk.encode().to_vec(), vector("dsa_vk"));
 }
 
 #[test]
 fn ml_dsa_signature_is_byte_identical_to_v1() {
-    let sk = MlDsa65::from_seed(&DSA_SEED.into());
+    let sk = ml_dsa::SigningKey::<MlDsa65>::from_seed(&DSA_SEED.into());
     let sig: ml_dsa::Signature<MlDsa65> = MlDsaSigner::sign(&sk, SIGNED_MSG);
     assert_eq!(sig.encode().to_vec(), vector("dsa_sig"));
 }

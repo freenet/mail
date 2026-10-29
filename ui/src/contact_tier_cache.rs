@@ -17,8 +17,8 @@ use std::collections::{BTreeSet, HashMap};
 use std::sync::{LazyLock, RwLock};
 
 use chrono::{DateTime, Utc};
-use freenet_aft_interface::Tier;
-use freenet_email_inbox::InboxSettings;
+use freenet_mail_wire_v1::aft::Tier;
+use freenet_mail_wire_v1::inbox::InboxSettings;
 use freenet_stdlib::prelude::ContractKey;
 
 /// Policy fields the sender needs from the recipient's live
@@ -133,8 +133,8 @@ pub fn lookup(key: &ContractKey) -> Option<RecipientPolicy> {
 mod tests {
     use std::collections::BTreeSet;
 
-    use freenet_aft_interface::Tier;
-    use freenet_email_inbox::{DEFAULT_MAX_AGE_SECS, InboxSettings};
+    use freenet_mail_wire_v1::aft::Tier;
+    use freenet_mail_wire_v1::inbox::{DEFAULT_MAX_AGE_SECS, InboxSettings};
     use freenet_stdlib::prelude::{CodeHash, ContractInstanceId, ContractKey};
 
     use super::*;

@@ -2,7 +2,7 @@ use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::OnceLock};
 
 #[cfg(feature = "use-node")]
 use dioxus::prelude::{ReadableExt, Signal, WritableExt};
-use freenet_aft_interface::{TokenAllocationSummary, TokenDelegateMessage};
+use freenet_mail_wire_v1::aft::{TokenAllocationSummary, TokenDelegateMessage};
 use freenet_stdlib::client_api::{ClientError, ClientRequest, HostResponse};
 use futures::SinkExt;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender};
@@ -386,10 +386,15 @@ mod delegate_api {
         let key = DelegateKey::from_params(delegate_code_hash, params)?;
         let delegate = DelegateContainer::try_from((delegate_code.to_vec(), params))?;
         assert_eq!(&key, delegate.key());
+        // Nodes ignore these and derive each delegate's secret key from
+        // their own key (freenet-core #4146, shipped in v0.2.60, well below
+        // the network's 0.2.122 floor). stdlib 0.12 dropped the fixed
+        // defaults; random values keep the client from inventing a shared
+        // constant.
         let request = ClientRequest::DelegateOp(DelegateRequest::RegisterDelegate {
             delegate,
-            cipher: DelegateRequest::DEFAULT_CIPHER,
-            nonce: DelegateRequest::DEFAULT_NONCE,
+            cipher: crate::rng::random_bytes(),
+            nonce: crate::rng::random_bytes(),
         });
         client.send(request).await?;
         Ok(key)
@@ -406,7 +411,7 @@ fn decode_import_fetch(
     state: &[u8],
     key: &freenet_stdlib::prelude::ContractKey,
 ) -> contact_import::ImportFetchOutcome {
-    use freenet_email_inbox::{Inbox as InboxState, InboxParams};
+    use freenet_mail_wire_v1::inbox::{Inbox as InboxState, InboxParams};
 
     let parsed: InboxState = match serde_json::from_slice(state) {
         Ok(v) => v,
@@ -484,7 +489,7 @@ pub(crate) mod contact_import {
         Ok {
             ml_dsa_vk_bytes: Vec<u8>,
             ml_kem_ek_bytes: Vec<u8>,
-            required_tier: freenet_aft_interface::Tier,
+            required_tier: freenet_mail_wire_v1::aft::Tier,
             max_age_secs: u64,
             /// bs58-encoded inbox contract WASM code hash, captured
             /// from the GetResponse's `key.code_hash()` at import time
@@ -541,7 +546,7 @@ mod inbox_management {
     use freenet_stdlib::{client_api::ContractRequest, prelude::*};
     use ml_dsa::{MlDsa65, SigningKey as MlDsaSigningKey, signature::Keypair};
 
-    use freenet_email_inbox::{InboxParams, InboxSettings};
+    use freenet_mail_wire_v1::inbox::{InboxParams, InboxSettings};
 
     use super::*;
 
@@ -634,7 +639,7 @@ mod inbox_management {
     pub(super) async fn put_migrated_inbox(
         client: &mut WebApiRequestClient,
         identity: &crate::app::Identity,
-        parsed: freenet_email_inbox::Inbox,
+        parsed: freenet_mail_wire_v1::inbox::Inbox,
     ) -> Result<ContractKey, DynError> {
         use ml_dsa::signature::Keypair;
         let vk = Keypair::verifying_key(identity.ml_dsa_signing_key.as_ref());
@@ -672,7 +677,7 @@ mod inbox_management {
                 parsed.owner_ek_bytes
             }
         };
-        let rebuilt = freenet_email_inbox::Inbox::new(
+        let rebuilt = freenet_mail_wire_v1::inbox::Inbox::new(
             identity.ml_dsa_signing_key.as_ref(),
             parsed.settings,
             parsed.messages,
@@ -747,7 +752,7 @@ mod inbox_management {
         client: &mut WebApiRequestClient,
         ml_dsa_key: Arc<MlDsaSigningKey<MlDsa65>>,
         owner_ek_bytes: Vec<u8>,
-        required_tier: freenet_aft_interface::Tier,
+        required_tier: freenet_mail_wire_v1::aft::Tier,
         max_age_secs: u64,
     ) -> Result<ContractKey, DynError> {
         let vk = Keypair::verifying_key(ml_dsa_key.as_ref());
@@ -760,7 +765,7 @@ mod inbox_management {
         // policy so senders mint at the right tier from day one. The
         // owner can later mutate this via ModifySettings (#85).
         let state = {
-            let inbox = freenet_email_inbox::Inbox::new(
+            let inbox = freenet_mail_wire_v1::inbox::Inbox::new(
                 ml_dsa_key.as_ref(),
                 InboxSettings {
                     minimum_tier: required_tier,
@@ -818,7 +823,7 @@ mod inbox_management {
 mod token_record_management {
     use std::sync::Arc;
 
-    use freenet_aft_interface::{TokenAllocationRecord, TokenDelegateParameters};
+    use freenet_mail_wire_v1::aft::{TokenAllocationRecord, TokenDelegateParameters};
     use freenet_stdlib::{client_api::ContractRequest, prelude::*};
     use ml_dsa::{MlDsa65, SigningKey as MlDsaSigningKey, signature::Keypair};
 
@@ -963,7 +968,7 @@ mod token_record_management {
 mod token_generator_management {
     use std::sync::Arc;
 
-    use freenet_aft_interface::DelegateParameters;
+    use freenet_mail_wire_v1::aft::DelegateParameters;
     use freenet_stdlib::prelude::DelegateKey;
     use ml_dsa::{MlDsa65, SigningKey as MlDsaSigningKey, signature::Keypair};
 
@@ -981,6 +986,15 @@ mod token_generator_management {
             TOKEN_GEN_CODE_HASH,
             crate::aft::TOKEN_GENERATOR_DELEGATE_CODE_HASH
         );
+    }
+
+    #[test]
+    fn delegate_key_matches_the_v0_2_client() {
+        use crate::test_util::{frozen_key, hex};
+        let params: freenet_stdlib::prelude::Parameters =
+            DelegateParameters::new([7; 32]).try_into().unwrap();
+        let key = DelegateKey::from_params(TOKEN_GEN_CODE_HASH, &params).unwrap();
+        assert_eq!(hex(key.bytes()), frozen_key("token_generator_delegate"));
     }
 
     thread_local! {
@@ -1018,7 +1032,7 @@ mod token_generator_management {
 mod identity_management {
     use std::rc::Rc;
 
-    use ::identity_management::*;
+    use freenet_mail_wire_v1::identity::*;
     use freenet_stdlib::{client_api::DelegateRequest, prelude::*};
     use std::sync::Arc;
 
@@ -1039,16 +1053,28 @@ mod identity_management {
     const ID_MANAGER_KEY: &[u8] =
         include_bytes!("../../published-contract/wasm/v1/identity-manager-params");
 
+    /// The committed parameters, exactly as the v0.2.x client sent them. The
+    /// delegate key hashes these bytes, so they are never re-encoded.
+    fn params() -> Parameters<'static> {
+        Parameters::from(ID_MANAGER_KEY.to_vec())
+    }
+
     #[test]
     fn embedded_identity_wasm_has_the_embedded_code_hash() {
         crate::api::embedded_artifact::assert_delegate(ID_MANAGER_CODE, ID_MANAGER_CODE_HASH);
     }
 
+    #[test]
+    fn delegate_key_matches_the_v0_2_client() {
+        use crate::test_util::{frozen_key, hex};
+        let key = DelegateKey::from_params(ID_MANAGER_CODE_HASH, &params()).unwrap();
+        assert_eq!(hex(key.bytes()), frozen_key("identity_delegate"));
+    }
+
     pub(super) async fn create_delegate(
         client: &mut WebApiRequestClient,
     ) -> Result<DelegateKey, DynError> {
-        let params = IdentityParams::try_from(ID_MANAGER_KEY)?;
-        let params = params.try_into()?;
+        let params = params();
         let key =
             delegate_api::create_delegate(client, ID_MANAGER_CODE_HASH, ID_MANAGER_CODE, &params)
                 .await?;
@@ -1069,8 +1095,7 @@ mod identity_management {
     pub(super) async fn load_aliases(
         client: &mut WebApiRequestClient,
     ) -> Result<DelegateKey, DynError> {
-        let params = IdentityParams::try_from(ID_MANAGER_KEY)?;
-        let params = Parameters::try_from(params)?;
+        let params = params();
         let key = DelegateKey::from_params(ID_MANAGER_CODE_HASH, &params)?;
         crate::log::debug!("loading aliases ({key})");
         // Request identities via ApplicationMessages (GetSecretRequest was removed in stdlib 0.3)
@@ -1171,8 +1196,7 @@ mod identity_management {
         client: &mut WebApiRequestClient,
         msg: &IdentityMsg,
     ) -> Result<(), DynError> {
-        let params = IdentityParams::try_from(ID_MANAGER_KEY)?;
-        let params = Parameters::try_from(params)?;
+        let params = params();
         let delegate_key = DelegateKey::from_params(ID_MANAGER_CODE_HASH, &params)?;
         let request = DelegateRequest::ApplicationMessages {
             params,
@@ -1198,7 +1222,7 @@ mod identity_management {
             alias: alias.to_string(),
             key: serde_json::to_vec(&stored)?,
             extra: Some(description),
-            kind: Some(::identity_management::EntryKind::Identity),
+            kind: Some(freenet_mail_wire_v1::identity::EntryKind::Identity),
         };
         send_identity_msg(client, &msg).await
     }
@@ -1260,7 +1284,7 @@ mod identity_management {
             alias: contact.local_alias.to_string(),
             key: serde_json::to_vec(&stored)?,
             extra: Some(contact.description.clone()),
-            kind: Some(::identity_management::EntryKind::Contact),
+            kind: Some(freenet_mail_wire_v1::identity::EntryKind::Contact),
         };
         send_identity_msg(client, &msg).await
     }
@@ -1418,7 +1442,7 @@ mod identity_management {
             alias: new.to_string(),
             key,
             extra,
-            kind: Some(::identity_management::EntryKind::Identity),
+            kind: Some(freenet_mail_wire_v1::identity::EntryKind::Identity),
         };
         send_identity_msg(client, &create).await?;
         let delete = IdentityMsg::DeleteIdentity {
@@ -1438,7 +1462,7 @@ pub(crate) async fn node_comms(
     ab_gen: crate::app::AddressBookGen,
 ) {
     // todo don't unwrap inside this function, propagate errors to the UI somehow
-    use freenet_email_inbox::Inbox as StoredInbox;
+    use freenet_mail_wire_v1::inbox::Inbox as StoredInbox;
     use freenet_stdlib::{
         client_api::{ContractError, ContractResponse, DelegateError, ErrorKind, RequestError},
         prelude::*,
@@ -2601,7 +2625,7 @@ pub(crate) async fn node_comms(
                                         );
                                     } else {
                                         match serde_json::from_slice::<
-                                            freenet_aft_interface::TokenAllocationRecord,
+                                            freenet_mail_wire_v1::aft::TokenAllocationRecord,
                                         >(
                                             state.as_ref()
                                         ) {
@@ -2673,7 +2697,7 @@ pub(crate) async fn node_comms(
                     Some(identity) => {
                         match update {
                             UpdateData::Delta(delta) => {
-                                match serde_json::from_slice::<freenet_email_inbox::UpdateInbox>(
+                                match serde_json::from_slice::<freenet_mail_wire_v1::inbox::UpdateInbox>(
                                     delta.as_ref(),
                                 ) {
                                     Ok(parsed) => {
@@ -2789,13 +2813,13 @@ pub(crate) async fn node_comms(
                                         }
                                         UpdateData::Delta(delta) => {
                                             if let Ok(
-                                                freenet_email_inbox::UpdateInbox::ModifySettings {
+                                                freenet_mail_wire_v1::inbox::UpdateInbox::ModifySettings {
                                                     settings,
                                                     last_update,
                                                     ..
                                                 },
                                             ) = serde_json::from_slice::<
-                                                freenet_email_inbox::UpdateInbox,
+                                                freenet_mail_wire_v1::inbox::UpdateInbox,
                                             >(
                                                 delta.as_ref()
                                             ) {
@@ -2860,7 +2884,7 @@ pub(crate) async fn node_comms(
                     if crate::local_state::local_set_sent_delivery_state(
                         &sender_alias,
                         &sent_id,
-                        mail_local_state::DeliveryState::Delivered,
+                        freenet_mail_wire_v1::local_state::DeliveryState::Delivered,
                     ) {
                         let mut client_clone = client.clone();
                         let alias_async = sender_alias;
@@ -2870,7 +2894,7 @@ pub(crate) async fn node_comms(
                                 &mut client_clone,
                                 alias_async,
                                 id_async,
-                                mail_local_state::DeliveryState::Delivered,
+                                freenet_mail_wire_v1::local_state::DeliveryState::Delivered,
                             )
                             .await
                             {
@@ -2895,7 +2919,7 @@ pub(crate) async fn node_comms(
                     let summary = match TokenAllocationSummary::try_from(summary.clone()) {
                         Ok(s) => Some(s),
                         Err(_) => match serde_json::from_slice::<
-                            freenet_aft_interface::TokenAllocationRecord,
+                            freenet_mail_wire_v1::aft::TokenAllocationRecord,
                         >(bytes)
                         {
                             Ok(record) => Some(record.summarize()),
@@ -3122,9 +3146,9 @@ pub(crate) async fn node_comms(
                     match msg {
                         freenet_stdlib::prelude::OutboundDelegateMsg::ApplicationMessage(msg) => {
                             // mail-local-state delegate response (drafts + read-state, #47).
-                            // Payload is a serialized `mail_local_state::LocalState`.
+                            // Payload is a serialized `freenet_mail_wire_v1::local_state::LocalState`.
                             if is_local_state {
-                                match ::mail_local_state::LocalState::try_from(
+                                match ::freenet_mail_wire_v1::local_state::LocalState::try_from(
                                     msg.payload.as_slice(),
                                 ) {
                                     Ok(state) => {
@@ -3146,7 +3170,7 @@ pub(crate) async fn node_comms(
                             // the bytes get parsed as a `TokenDelegateMessage` and
                             // fail with a deser error.
                             if is_identities {
-                                match ::identity_management::IdentityManagement::try_from(
+                                match freenet_mail_wire_v1::identity::IdentityManagement::try_from(
                                     msg.payload.as_slice(),
                                 ) {
                                     Ok(im) => {
@@ -4090,7 +4114,7 @@ pub(crate) mod permission_pump_policy {
 #[cfg(all(target_family = "wasm", feature = "use-node"))]
 pub(crate) mod permission_pump {
     use dioxus::prelude::ReadableExt;
-    use mail_local_state::PermissionDecision;
+    use freenet_mail_wire_v1::local_state::PermissionDecision;
     use wasm_bindgen::JsCast as _;
     use wasm_bindgen::JsValue;
     use wasm_bindgen_futures::JsFuture;

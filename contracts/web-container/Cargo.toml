@@ -2,20 +2,25 @@
 name = "freenet-email-app-web"
 version = "0.0.1"
 edition = "2024"
-license.workspace = true
+license = "LGPL-3.0-or-later"
 publish = false
 
+# Outside the workspace with its own Cargo.lock, like contracts/inbox: the
+# shipped WASM is frozen as published-contract/web_container_contract.wasm,
+# and these exact pins keep this source building the generation that shipped.
+[workspace]
+
 [dependencies]
-byteorder = { workspace = true }
-ciborium = { workspace = true }
-freenet-email-core = { workspace = true }
-freenet-stdlib = { workspace = true, features = ["contract"] }
+byteorder = "=1.5.0"
+ciborium = "=0.2.2"
+freenet-email-core = { path = "../../common" }
+freenet-stdlib = { version = "=0.3.5", features = ["contract"] }
 # Fully remove `rand_core` from `ed25519-dalek` for wasm builds
-ed25519-dalek = { workspace = true, default-features = false, features = ["alloc", "serde"] }
+ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["alloc", "serde"] }
 
 [dev-dependencies]
-ed25519-dalek = { workspace = true, features = ["rand_core"] }
-rand = { workspace = true, features = ["std_rng", "getrandom"] }
+ed25519-dalek = { version = "=2.1.1", features = ["rand_core"] }
+rand = { version = "=0.8.5", features = ["std_rng", "getrandom"] }
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -27,4 +32,4 @@ freenet-main-contract = []
 trace = ["freenet-stdlib/trace"]
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-rand = { workspace = true }
+rand = { version = "=0.8.5", default-features = false }

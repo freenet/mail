@@ -2,7 +2,7 @@ use std::sync::atomic::AtomicU32;
 use std::{cell::RefCell, collections::HashMap};
 
 use chrono::{DateTime, Utc};
-use freenet_aft_interface::{
+use freenet_mail_wire_v1::aft::{
     AllocationCriteria, DelegateParameters, FailureReason, RequestNewToken, Tier,
     TokenAllocationRecord, TokenAllocationSummary, TokenAssignment, TokenDelegateMessage,
     TokenDelegateParameters,
@@ -14,7 +14,7 @@ use freenet_stdlib::prelude::{
     Parameters, State, UpdateData,
 };
 
-use freenet_email_inbox::InboxParams;
+use freenet_mail_wire_v1::inbox::InboxParams;
 
 use crate::api::{TryNodeAction, node_response_error_handling};
 use crate::inbox::MessageModel;
@@ -148,8 +148,13 @@ impl AftRecords {
     /// independent of any routing-map population order.
     pub fn record_key_for(identity: &Identity) -> Result<AftRecord, DynError> {
         use ml_dsa::signature::Keypair;
-        let vk = identity.ml_dsa_signing_key.as_ref().verifying_key();
-        let params = TokenDelegateParameters::new(&vk)
+        Self::record_key_for_vk(&identity.ml_dsa_signing_key.as_ref().verifying_key())
+    }
+
+    pub(crate) fn record_key_for_vk(
+        vk: &ml_dsa::VerifyingKey<ml_dsa::MlDsa65>,
+    ) -> Result<AftRecord, DynError> {
+        let params = TokenDelegateParameters::new(vk)
             .try_into()
             .map_err(|e| format!("{e}"))?;
         ContractKey::from_params(TOKEN_RECORD_CODE_HASH, params).map_err(|e| format!("{e}").into())
@@ -785,6 +790,14 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "use-node")]
+    #[test]
+    fn record_key_matches_the_v0_2_client() {
+        use crate::test_util::{frozen_fixture_vk, frozen_key, hex};
+        let key = AftRecords::record_key_for_vk(&frozen_fixture_vk()).unwrap();
+        assert_eq!(hex(key.id().as_bytes()), frozen_key("aft_record_contract"));
+    }
+
     /// `TokenDelegateParameters::new(&vk)` must produce byte-identical
     /// `Parameters` for a fixed verifying key. The AFT migration path
     /// (#251 improvement 3) re-derives `Parameters` at PUT time from
@@ -795,8 +808,8 @@ mod tests {
     /// across an AFT contract bump").
     #[test]
     fn token_delegate_parameters_are_deterministic_per_vk() {
-        use ml_dsa::{KeyGen, MlDsa65, signature::Keypair as MlDsaKeypair};
-        let sk = MlDsa65::from_seed(&[42u8; 32].into());
+        use ml_dsa::{MlDsa65, signature::Keypair as MlDsaKeypair};
+        let sk = ml_dsa::SigningKey::<MlDsa65>::from_seed(&[42u8; 32].into());
         let vk = MlDsaKeypair::verifying_key(&sk);
         let p1: Parameters = TokenDelegateParameters::new(&vk)
             .try_into()
@@ -831,7 +844,7 @@ mod tests {
         let token_record = fake_token_record();
         let criteria = build_recipient_criteria(
             Tier::Day1,
-            freenet_email_inbox::DEFAULT_MAX_AGE_SECS,
+            freenet_mail_wire_v1::inbox::DEFAULT_MAX_AGE_SECS,
             token_record,
         )
         .expect("legacy default criteria must be valid");

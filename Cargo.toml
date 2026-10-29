@@ -1,22 +1,20 @@
 [workspace]
 resolver = "2"
 members = [
-    "common",
-    "ui",
-    # Members: shared types (common), the UI, dev tools, and the source of
-    # the webapp contract and the two local delegates. Nothing published is
-    # built from here: the WASM those crates shipped is frozen under
+    # Members: shared types (common), the client's copy of the v0.2.x wire
+    # types (wire-v1), the UI, and dev tools. Nothing published is built
+    # from here: the WASM of every contract and delegate is frozen under
     # published-contract/, because a delegate's key (and so every secret it
     # stores) and a contract's id both derive from the WASM bytes. A rebuild
     # is never harmless; a new generation needs a migration registry row
     # (legacy_*.toml) and a new published-contract/wasm/v<N>/.
-    "contracts/web-container",
-    "modules/identity-management",
-    "modules/mail-local-state",
+    "common",
+    "ui",
+    "wire-v1",
     "tools/web-container-sign",
 ]
-# Issues #198 + #199: every on-chain CONTRACT (and the shared types
-# crates they depend on) lives outside the workspace with its own
+# Issues #198 + #199: every on-chain contract and delegate (and the shared
+# types crates they depend on) lives outside the workspace with its own
 # Cargo.lock, so workspace dep bumps cannot reach these build graphs.
 # That alone does not make a rebuild reproducible (embedded build paths
 # differ per machine, #348), so the shipped bytes are frozen under
@@ -34,9 +32,12 @@ exclude = [
     # complaining about the missing Cargo.toml when it walks the tree.
     "contracts/facade-loader",
     "contracts/inbox",
+    "contracts/web-container",
     "modules/antiflood-tokens/interfaces",
     "modules/antiflood-tokens/contracts/token-allocation-record",
     "modules/antiflood-tokens/delegates/token-generator",
+    "modules/identity-management",
+    "modules/mail-local-state",
 ]
 
 [workspace.package]
@@ -46,51 +47,38 @@ license = "LGPL-3.0-or-later"
 
 [workspace.dependencies]
 # Freenet
-freenet-stdlib = "0.3.5"
+freenet-stdlib = "0.12.1"
 # Internal
 freenet-email-core = { path = "common" }
-freenet-aft-interface = { path = "modules/antiflood-tokens/interfaces" }
-identity-management = { path = "modules/identity-management" }
-mail-local-state = { path = "modules/mail-local-state" }
-freenet-email-inbox = { path = "contracts/inbox" }
+freenet-mail-wire-v1 = { path = "wire-v1" }
 # Shared
-bincode = "1"
-bs58 = "0.5"
-# default-features = false to keep `clock` (and its js-sys/wasm-bindgen
-# pull-in) out of contract WASMs. Cargo unifies features across the
-# workspace, so any consumer that lets the default `clock` feature in
-# poisons the inbox/aft contract builds with `__wbindgen_*` imports
-# the Freenet runtime can't satisfy. Opt back into `clock`/`wasmbind`
-# at the consumer level (e.g. UI) when needed.
-chrono = { version = "0.4", default-features = false, features = ["alloc", "serde"] }
-# ML-DSA (CRYSTALS-Dilithium), NIST FIPS 204, level-3 parameter set (ML-DSA-65).
-# Replaced RSA-PKCS#1 v1.5 for inbox state-delta signatures and AFT token
-# assignments (Stage 1 + Stage 4 of issue #18). 0.1.0-rc is the latest
-# RustCrypto release; pinned here pending a 1.0. Uses rand_core 0.10 /
-# signature 3.0 internally; do not add an older `signature = "2"` workspace
-# dep — the trait versions won't match.
-ml-dsa = { version = "0.1.0-rc.8", default-features = false, features = ["alloc", "rand_core"] }
-# ML-KEM-768 (CRYSTALS-Kyber), NIST FIPS 203, level-3 parameter set.
-# Replacing RSA-PKCS#1 v1.5 key encapsulation for message content encryption. See issue #18.
-# ML-KEM without the getrandom feature — we use encapsulate_with_rng + a custom
-# RNG adapter (Rand08Rng in inbox.rs) to avoid pulling in getrandom 0.4, which
-# on wasm32-unknown-unknown needs wasm_js and conflicts with our getrandom 0.2 setup.
-ml-kem = { version = "0.3.0-rc.2", default-features = false }
-rand_core = "0.10"
-hkdf = "0.12"
-sha2 = { version = "0.10", default-features = false }
-serde = "1"
-serde_json = "1"
-strum = { version = "0.24", features = ["derive"] }
-thiserror = "2"
-wasm-bindgen = "0.2"
-dioxus = "0.7.7"
-# Web-container deps (ported from freenet-river)
-byteorder = "1.5.0"
+# Stays on bincode 1: the frozen token-generator delegate speaks bincode 1's
+# encoding, which bincode 2 and later changed.
+bincode = "1.3.3"
+bs58 = "0.5.1"
+# default-features = false keeps `clock` (and its js-sys/wasm-bindgen
+# pull-in) out of anything that does not ask for it. Opt back into
+# `clock`/`wasmbind` at the consumer level (e.g. UI) when needed.
+chrono = { version = "0.4.45", default-features = false, features = ["alloc", "serde"] }
+# ML-DSA-65 (FIPS 204) and ML-KEM-768 (FIPS 203). Every v0.2.x identity was
+# created with ml-dsa 0.1.0-rc.8 and ml-kem 0.3.0-rc.2; the known-answer
+# vectors in ui/src/inbox/crypto_vectors.rs pin that these releases derive
+# the same keys, sign the same bytes, and decrypt old messages.
+ml-dsa = { version = "0.1.1", default-features = false, features = ["alloc"] }
+ml-kem = { version = "0.3.3", default-features = false }
+getrandom = { version = "0.4.3", features = ["sys_rng"] }
+hkdf = "0.13.0"
+sha2 = { version = "0.11.1", default-features = false }
+serde = "1.0.229"
+serde_json = "1.0.154"
+strum = { version = "0.28.0", features = ["derive"] }
+thiserror = "2.0.21"
+wasm-bindgen = "0.2.129"
+dioxus = "0.7.10"
+# Web-container signer
 ciborium = "0.2.2"
 ed25519-dalek = { version = "2.1.1", default-features = false, features = ["alloc", "serde"] }
-rand = { version = "0.8.5", default-features = false }
-base64 = { version = "0.23", default-features = false, features = ["alloc"] }
+base64 = { version = "0.23.1", default-features = false, features = ["alloc"] }
 
 [profile.dev.package."*"]
 opt-level = 3

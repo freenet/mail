@@ -12,7 +12,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
 use dioxus::prelude::*;
-use mail_local_state::{
+use freenet_mail_wire_v1::local_state::{
     ArchivedMessage, DeliveryState, Draft, GlobalSettings, IdentitySettings, KeptMessage,
     LocalState, LocalStateMsg, MessageId, SentMessage,
 };
@@ -247,7 +247,6 @@ mod wire {
         client_api::DelegateRequest,
         prelude::{ApplicationMessage, DelegateKey, InboundDelegateMsg, Parameters},
     };
-    use mail_local_state::LocalStateParams;
     use std::sync::OnceLock;
 
     const CODE_HASH: &str =
@@ -261,13 +260,21 @@ mod wire {
         crate::api::embedded_artifact::assert_delegate(CODE, CODE_HASH);
     }
 
+    #[test]
+    fn delegate_key_matches_the_v0_2_client() {
+        use crate::test_util::{frozen_key, hex};
+        let key = DelegateKey::from_params(CODE_HASH, &params().unwrap()).unwrap();
+        assert_eq!(hex(key.bytes()), frozen_key("local_state_delegate"));
+    }
+
     /// Set before the delegate is registered. Used by the response handler in
     /// `api::node_comms` to recognise replies destined for this delegate.
     pub(crate) static LOCAL_STATE_KEY: OnceLock<DelegateKey> = OnceLock::new();
 
+    /// The committed parameters, exactly as the v0.2.x client sent them. The
+    /// delegate key hashes these bytes, so they are never re-encoded.
     fn params() -> Result<Parameters<'static>, DynError> {
-        let p = LocalStateParams::try_from(PARAMS)?;
-        Ok(Parameters::try_from(p)?)
+        Ok(Parameters::from(PARAMS.to_vec()))
     }
 
     thread_local! {
@@ -828,7 +835,7 @@ pub(crate) fn new_thread_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mail_local_state::KeptMessage;
+    use freenet_mail_wire_v1::local_state::KeptMessage;
 
     fn fresh_snapshot() {
         SNAPSHOT.with(|s| *s.borrow_mut() = LocalState::default());

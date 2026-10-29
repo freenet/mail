@@ -404,8 +404,8 @@ mod tests {
     fn round_trip_random_keys() {
         for _ in 0..32 {
             let keys = StoredIdentityKeys {
-                ml_dsa_seed: (0..32).map(|_| rand::random::<u8>()).collect(),
-                ml_kem_seed: (0..64).map(|_| rand::random::<u8>()).collect(),
+                ml_dsa_seed: crate::rng::random_bytes::<32>().to_vec(),
+                ml_kem_seed: crate::rng::random_bytes::<64>().to_vec(),
             };
             let token = encode(&keys).unwrap();
             assert_same_keys(&decode(&token).unwrap(), &keys);

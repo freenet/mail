@@ -1,0 +1,6 @@
+# Applies to builds run from inside modules/ (cargo finds config by walking
+# up from the working directory). Same flag and reason as
+# contracts/.cargo/config.toml: the frozen sources were built with it, and
+# it must not reach the UI, whose getrandom 0.4 needs its browser backend.
+[target.wasm32-unknown-unknown]
+rustflags = ["--cfg", "getrandom_backend=\"custom\""]

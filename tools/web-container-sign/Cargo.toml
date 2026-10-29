@@ -14,16 +14,20 @@ path = "src/main.rs"
 freenet-email-core = { workspace = true }
 ed25519-dalek = { workspace = true, default-features = false, features = ["alloc", "serde", "rand_core", "pem", "std"] }
 ciborium = { workspace = true }
+# Stays on rand 0.8: ed25519-dalek 2.x generates keys from a rand_core 0.6
+# RNG, which rand 0.9 and later no longer provide.
 rand = { version = "0.8.5", features = ["std", "std_rng"] }
-clap = { version = "4.5", features = ["derive"] }
+clap = { version = "4.6.7", features = ["derive"] }
 bs58 = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
-toml = "1.0"
-anyhow = "1"
+toml = "1.1.8"
+anyhow = "1.0.104"
 
 [dev-dependencies]
-tempfile = "3"
+tempfile = "3.27.0"
 # Integration test: feed signer output into the on-chain validator to
 # catch framing/endianness drift between signer and contract (issue #200).
 freenet-email-facade = { path = "../../contracts/facade" }
-freenet-stdlib = { workspace = true }
+# The frozen container contract's own stdlib, so the test can hand it
+# State and Parameters values. Test-only; nothing shipped links it.
+freenet-stdlib = "=0.3.5"

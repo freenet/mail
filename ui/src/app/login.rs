@@ -8,8 +8,8 @@ use std::sync::Arc;
 
 use dioxus::prelude::*;
 use freenet_stdlib::prelude::ContractKey;
-use identity_management::{EntryKind, IdentityManagement};
-use ml_dsa::{KeyGen, MlDsa65, SigningKey as MlDsaSigningKey, VerifyingKey as MlDsaVerifyingKey};
+use freenet_mail_wire_v1::identity::{EntryKind, IdentityManagement};
+use ml_dsa::{MlDsa65, SigningKey as MlDsaSigningKey, VerifyingKey as MlDsaVerifyingKey};
 use ml_kem::{DecapsulationKey, EncapsulationKey, MlKem768};
 
 use crate::DynError;
@@ -73,7 +73,7 @@ pub(crate) struct Identity {
     /// AFT tier hashed into this identity's `InboxParams` — the recipient
     /// policy senders must mint at. Frozen for the inbox lifetime
     /// because changing it rotates the contract id (#85).
-    pub required_tier: freenet_aft_interface::Tier,
+    pub required_tier: freenet_mail_wire_v1::aft::Tier,
     /// `max_age_secs` half of the recipient policy. Same lifetime
     /// constraints as `required_tier`.
     pub max_age_secs: u64,
@@ -120,8 +120,8 @@ impl Identity {
             description,
             ml_dsa_signing_key,
             ml_kem_dk,
-            freenet_aft_interface::Tier::Min10,
-            freenet_email_inbox::DEFAULT_MAX_AGE_SECS,
+            freenet_mail_wire_v1::aft::Tier::Min10,
+            freenet_mail_wire_v1::inbox::DEFAULT_MAX_AGE_SECS,
         )
     }
 
@@ -134,7 +134,7 @@ impl Identity {
         description: String,
         ml_dsa_signing_key: Arc<MlDsaSigningKey<MlDsa65>>,
         ml_kem_dk: DecapsulationKey<MlKem768>,
-        required_tier: freenet_aft_interface::Tier,
+        required_tier: freenet_mail_wire_v1::aft::Tier,
         max_age_secs: u64,
     ) -> Self {
         let vk_bytes = Self::derive_vk_bytes(ml_dsa_signing_key.as_ref());
@@ -338,8 +338,8 @@ impl Identity {
             alias: alias.clone(),
             id: existing_id.unwrap_or_else(UserId::new),
             description: description.clone(),
-            required_tier: freenet_aft_interface::Tier::Min10,
-            max_age_secs: freenet_email_inbox::DEFAULT_MAX_AGE_SECS,
+            required_tier: freenet_mail_wire_v1::aft::Tier::Min10,
+            max_age_secs: freenet_mail_wire_v1::inbox::DEFAULT_MAX_AGE_SECS,
             ml_dsa_signing_key: Arc::clone(&ml_dsa_signing_key),
             ml_kem_dk: ml_kem_dk.clone(),
             ek_bytes: ek_bytes.clone(),
@@ -513,7 +513,7 @@ impl StoredIdentityKeys {
         ml_kem_dk: &DecapsulationKey<MlKem768>,
     ) -> Self {
         // Store ML-DSA as the 32-byte seed via `SigningKey::to_seed()`.
-        // Reconstruction: `MlDsa65::from_seed(&seed)`.
+        // Reconstruction: `ml_dsa::SigningKey::<MlDsa65>::from_seed(&seed)`.
         let ml_dsa_seed = ml_dsa_signing_key.as_ref().to_seed().to_vec();
         let ml_kem_seed = ml_kem_dk
             .to_seed()
@@ -530,7 +530,7 @@ impl StoredIdentityKeys {
         use ml_dsa::Seed;
         let seed = Seed::try_from(self.ml_dsa_seed.as_slice())
             .expect("ML-DSA seed wrong length (expected 32 bytes)");
-        Arc::new(MlDsa65::from_seed(&seed))
+        Arc::new(ml_dsa::SigningKey::<MlDsa65>::from_seed(&seed))
     }
 
     pub(crate) fn ml_kem_dk(&self) -> DecapsulationKey<MlKem768> {
@@ -1510,8 +1510,8 @@ pub(super) fn CreateAliasForm() -> Element {
             ml_dsa_key: ml_dsa.clone(),
             ml_kem_ek_bytes: ek_bytes.clone(),
             contract_type: ContractType::InboxContract,
-            required_tier: freenet_aft_interface::Tier::Min10,
-            max_age_secs: freenet_email_inbox::DEFAULT_MAX_AGE_SECS,
+            required_tier: freenet_mail_wire_v1::aft::Tier::Min10,
+            max_age_secs: freenet_mail_wire_v1::inbox::DEFAULT_MAX_AGE_SECS,
         });
         actions.send(NodeAction::CreateDelegate {
             alias: alias.clone(),
@@ -1522,8 +1522,8 @@ pub(super) fn CreateAliasForm() -> Element {
             ml_dsa_key: ml_dsa.clone(),
             ml_kem_ek_bytes: ek_bytes,
             contract_type: ContractType::AFTContract,
-            required_tier: freenet_aft_interface::Tier::Min10,
-            max_age_secs: freenet_email_inbox::DEFAULT_MAX_AGE_SECS,
+            required_tier: freenet_mail_wire_v1::aft::Tier::Min10,
+            max_age_secs: freenet_mail_wire_v1::inbox::DEFAULT_MAX_AGE_SECS,
         });
         actions.send(NodeAction::CreateIdentity {
             alias,
@@ -1758,17 +1758,12 @@ fn get_keys() -> Result<IdentityKeyBundle, DynError> {
     crate::log::debug!("generating identity keypair bundle");
 
     // ML-DSA-65: generate from random 32-byte seed.
-    let ml_dsa_seed: [u8; 32] = rand::random();
-    let ml_dsa_key = Arc::new(MlDsa65::from_seed(&ml_dsa_seed.into()));
+    let ml_dsa_seed: [u8; 32] = crate::rng::random_bytes();
+    let ml_dsa_key = Arc::new(ml_dsa::SigningKey::<MlDsa65>::from_seed(&ml_dsa_seed.into()));
 
-    // ML-KEM-768: derive from random 64-byte seed via rand::random (getrandom 0.2 + js)
-    // rather than ml-kem's generate_keypair() which needs getrandom 0.4 + wasm_js on WASM.
-    let ml_kem_dk = DecapsulationKey::<MlKem768>::from_seed({
-        use rand::RngCore;
-        let mut seed = [0u8; 64];
-        rand::thread_rng().fill_bytes(&mut seed);
-        seed.into()
-    });
+    // ML-KEM-768: derive from a random 64-byte seed. The seed is what a
+    // recovery key stores, so the key is built from it explicitly.
+    let ml_kem_dk = DecapsulationKey::<MlKem768>::from_seed(crate::rng::random_bytes::<64>().into());
 
     Ok((ml_dsa_key, ml_kem_dk))
 }
@@ -2176,8 +2171,8 @@ fn ImportForm() -> Element {
                                 ml_dsa_key: ml_dsa.clone(),
                                 ml_kem_ek_bytes: ek_bytes.clone(),
                                 contract_type: ContractType::InboxContract,
-                                required_tier: freenet_aft_interface::Tier::Min10,
-                                max_age_secs: freenet_email_inbox::DEFAULT_MAX_AGE_SECS,
+                                required_tier: freenet_mail_wire_v1::aft::Tier::Min10,
+                                max_age_secs: freenet_mail_wire_v1::inbox::DEFAULT_MAX_AGE_SECS,
                             });
                             actions.send(NodeAction::CreateDelegate {
                                 alias: alias.clone(),
@@ -2188,8 +2183,8 @@ fn ImportForm() -> Element {
                                 ml_dsa_key: ml_dsa.clone(),
                                 ml_kem_ek_bytes: ek_bytes,
                                 contract_type: ContractType::AFTContract,
-                                required_tier: freenet_aft_interface::Tier::Min10,
-                                max_age_secs: freenet_email_inbox::DEFAULT_MAX_AGE_SECS,
+                                required_tier: freenet_mail_wire_v1::aft::Tier::Min10,
+                                max_age_secs: freenet_mail_wire_v1::inbox::DEFAULT_MAX_AGE_SECS,
                             });
                             actions.send(NodeAction::CreateIdentity {
                                 alias,
@@ -2352,7 +2347,7 @@ pub(super) fn ShareContactModal() -> Element {
 type FetchedKeys = (
     Vec<u8>,
     Vec<u8>,
-    freenet_aft_interface::Tier,
+    freenet_mail_wire_v1::aft::Tier,
     u64,
     Option<String>,
 );
@@ -2515,7 +2510,7 @@ pub(super) fn ImportContactForm() -> Element {
                 // `lookup_by_bs58` first so their real fingerprint shows.
                 #[cfg(not(feature = "use-node"))]
                 {
-                    use freenet_aft_interface::Tier;
+                    use freenet_mail_wire_v1::aft::Tier;
                     use freenet_stdlib::prelude::blake3;
                     let (vk_bytes, ek_bytes) = if let Some(r) =
                         crate::app::address_book::lookup_by_bs58(&card.inbox_address)
@@ -2547,7 +2542,7 @@ pub(super) fn ImportContactForm() -> Element {
                         vk_bytes,
                         ek_bytes,
                         Tier::Min10,
-                        freenet_email_inbox::DEFAULT_MAX_AGE_SECS,
+                        freenet_mail_wire_v1::inbox::DEFAULT_MAX_AGE_SECS,
                         None,
                     )));
                 }
