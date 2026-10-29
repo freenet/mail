@@ -370,7 +370,12 @@ fn create_identity(
             "generated an existing identity; retry",
         ));
     }
-    store_new_identity(s, dsa, kem, alias, description, true).map(Reply::Identity)
+    let recovery_key = recovery_key::encode(&dsa, &kem);
+    let identity = store_new_identity(s, dsa, kem, alias, description, true)?;
+    Ok(Reply::CreatedIdentity {
+        identity,
+        recovery_key,
+    })
 }
 
 /// The v2 JSON identity backup written by v0.2.x (`IdentityBackup`).

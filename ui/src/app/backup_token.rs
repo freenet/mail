@@ -27,6 +27,7 @@
 //! recovery key or the legacy v2 JSON backup file (kept readable forever).
 
 use freenet_mail_protocol::recovery_key;
+#[cfg(test)]
 use freenet_mail_protocol::{DsaSeed, KemSeed};
 
 use super::login::{IDENTITY_BACKUP_VERSION, IdentityBackup, StoredIdentityKeys};
@@ -42,6 +43,7 @@ pub(crate) use recovery_key::{PAYLOAD_LEN, TOKEN_PREFIX, TokenError};
 ///
 /// Fails only if `keys` holds seeds of the wrong length, which a
 /// `StoredIdentityKeys` built from real keys never does.
+#[cfg(test)]
 pub(crate) fn encode(keys: &StoredIdentityKeys) -> Result<String, TokenError> {
     let wrong_length = || TokenError::WrongLength {
         got: 1 + keys.ml_dsa_seed.len() + keys.ml_kem_seed.len() + 4,

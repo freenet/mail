@@ -1,31 +1,36 @@
+#[cfg(test)]
+use std::io::{Cursor, Read};
 use std::{
     cell::RefCell,
     collections::{HashMap, HashSet},
-    io::{Cursor, Read},
 };
 
+#[cfg(test)]
 use chacha20poly1305::{XChaCha20Poly1305, aead::Aead};
 use chrono::{DateTime, Utc};
 use freenet_mail_wire_v1::aft::{Tier, TokenAssignment, TokenAssignmentHash};
 use freenet_stdlib::{
     client_api::ContractRequest,
-    prelude::{
-        ContractKey, State, UpdateData,
-        blake3::{self, traits::digest::Digest},
-    },
+    prelude::{ContractKey, UpdateData, blake3},
 };
-use std::sync::Arc;
 
 use futures::FutureExt;
 use futures::future::LocalBoxFuture;
 use ml_dsa::{
-    EncodedVerifyingKey, MlDsa65, SigningKey as MlDsaSigningKey, VerifyingKey as MlDsaVerifyingKey,
-    signature::{Keypair as MlDsaKeypair, Signer as MlDsaSigner, Verifier as MlDsaVerifier},
+    EncodedVerifyingKey, MlDsa65, VerifyingKey as MlDsaVerifyingKey,
+    signature::Verifier as MlDsaVerifier,
 };
+#[cfg(test)]
+use ml_dsa::{
+    SigningKey as MlDsaSigningKey,
+    signature::{Keypair as MlDsaKeypair, Signer as MlDsaSigner},
+};
+#[cfg(test)]
 use ml_kem::{
-    DecapsulationKey, EncapsulationKey, MlKem768,
-    kem::{Decapsulate, Encapsulate, KeyExport},
+    DecapsulationKey,
+    kem::{Decapsulate, Encapsulate},
 };
+use ml_kem::{EncapsulationKey, MlKem768, kem::KeyExport};
 use serde::{Deserialize, Serialize};
 
 use freenet_mail_wire_v1::inbox::{
@@ -433,8 +438,22 @@ pub(crate) fn remove_pending_sent_ack(
 /// identity so we can sign the ciphertext with the sender's ML-DSA-65
 /// signing key when the assignment lands (#51).
 struct PendingOutgoing {
-    msg: DecryptedMessage,
+    sealed: crate::mail_delegate::ops::SealedV1,
     sender: Identity,
+}
+
+impl PendingOutgoing {
+    /// The stored message: the ciphertext and signature the delegate sealed
+    /// once at send time, so the token answer (handled in the node loop)
+    /// has nothing left to sign.
+    fn to_stored(&self, token_assignment: TokenAssignment) -> StoredMessage {
+        StoredMessage {
+            content: self.sealed.content.clone(),
+            token_assignment,
+            sender_vk: self.sealed.sender_vk.clone(),
+            signature: self.sealed.signature.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -459,12 +478,10 @@ struct InternalSettings {
     /// allowed to skip the AFT token when `allow_verified_skip_token` is
     /// `true`. Kept in sync with the contract-side `verified_senders` set.
     verified_senders: std::collections::BTreeSet<Vec<u8>>,
-    /// ML-DSA-65 signing key used to authorise modifications to the inbox
-    /// contract state (add/remove messages, settings updates). The corresponding
-    /// verifying key is embedded in `InboxParams` and becomes part of the
-    /// contract ID via `hash(wasm, params)`.
-    /// Wrapped in `Arc` because `MlDsaSigningKey` is not `Clone`.
-    ml_dsa_signing_key: Arc<MlDsaSigningKey<MlDsa65>>,
+    /// The owner's address in the mail delegate, which signs modifications
+    /// to the inbox contract state (removals, settings updates) with the key
+    /// whose verifying half is in `InboxParams`.
+    addr: freenet_mail_protocol::Addr,
     /// Owner's ML-KEM-768 encapsulation key bytes (1184), as stored in
     /// `Inbox.owner_ek_bytes` on-chain. The owner-authored inbox
     /// signature binds these (#253), so `settings_modify_prepare` must
@@ -493,12 +510,12 @@ impl InternalSettings {
     fn from_stored(
         stored_settings: StoredSettings,
         next_id: u64,
-        ml_dsa_signing_key: Arc<MlDsaSigningKey<MlDsa65>>,
+        addr: freenet_mail_protocol::Addr,
         owner_ek_bytes: Vec<u8>,
     ) -> Result<Self, DynError> {
         Ok(Self {
             next_msg_id: next_id,
-            ml_dsa_signing_key,
+            addr,
             owner_ek_bytes,
             minimum_tier: stored_settings.minimum_tier,
             max_age_secs: stored_settings.max_age_secs,
@@ -552,22 +569,6 @@ pub(crate) struct MessageModel {
 }
 
 impl MessageModel {
-    #[allow(dead_code)] // used by the to_state path (not yet implemented)
-    fn to_stored(&self, dk: &DecapsulationKey<MlKem768>) -> Result<StoredMessage, DynError> {
-        let ek = dk.encapsulation_key();
-        let decrypted_content = serde_json::to_vec(&self.content)?;
-        let content = ml_kem_encrypt(ek, &decrypted_content)?;
-        Ok::<_, DynError>(StoredMessage {
-            content,
-            token_assignment: self.token_assignment.clone(),
-            // Re-encryption path doesn't have access to the original
-            // sender's signing key. Empty sig = recipient renders as
-            // "unverified" (#51). The to_state path isn't wired up yet.
-            sender_vk: Vec::new(),
-            signature: Vec::new(),
-        })
-    }
-
     pub async fn finish_sending(
         client: &mut WebApiRequestClient,
         assignment: TokenAssignment,
@@ -592,7 +593,7 @@ impl MessageModel {
 
         if let Some(update) = pending_update {
             let token_record = assignment.token_record;
-            let stored = update.msg.to_stored(assignment, &update.sender)?;
+            let stored = update.to_stored(assignment);
             let delta = UpdateInbox::AddMessages {
                 messages: vec![stored],
             };
@@ -706,7 +707,8 @@ impl DecryptedMessage {
         recipient_inbox_wasm_hash: Option<&str>,
         from: &Identity,
     ) -> Result<(), DynError> {
-        let (hash, _) = self.assignment_hash_and_signed_content()?;
+        let sealed = self.seal(from).await?;
+        let hash: [u8; 32] = *blake3::hash(&sealed.content).as_bytes();
         crate::log::info(format!(
             "send.start_sending: from=`{}` assignment_hash={} (release-visible diagnostic for #174)",
             from.alias(),
@@ -743,9 +745,7 @@ impl DecryptedMessage {
                  from=`{}` inbox_key={inbox_key} (#273)",
                 from.alias()
             ));
-            return self
-                .finish_sending_bypass(client, inbox_key, hash, from)
-                .await;
+            return finish_sending_bypass(client, inbox_key, hash, sealed).await;
         }
         // #266: when bypass doesn't fire, surface WHICH gate failed so a
         // tester wondering "I turned the toggle on, why am I still seeing
@@ -800,7 +800,7 @@ impl DecryptedMessage {
             map.entry(inbox_key)
                 .or_insert_with(Vec::new)
                 .push(PendingOutgoing {
-                    msg: self,
+                    sealed,
                     sender: from.clone(),
                 });
         });
@@ -808,89 +808,23 @@ impl DecryptedMessage {
         Ok(())
     }
 
-    /// #273 verified-sender bypass send path. Used when `start_sending`
-    /// determined (from the recipient's observed `InboxSettings`) that
-    /// this sender may deliver without an AFT token. Builds a placeholder
-    /// `TokenAssignment` — the recipient's inbox contract skips all
-    /// token-assignment validation for verified senders
-    /// (`add_message`/`verify_token_policy` short-circuit on the
-    /// `verified_senders` allow-list, see `contracts/inbox/src/lib.rs`),
-    /// so only the `assignment_hash` is load-bearing: it must equal the
-    /// real message hash because the inbox keys + dedupes messages by it.
-    ///
-    /// The delta is sent as a bare `UpdateData::Delta` — there is no AFT
-    /// allocation record to bundle as `RelatedStateAndDelta`, and the
-    /// contract never fetches one for a bypassed message.
-    async fn finish_sending_bypass(
-        self,
-        client: &mut WebApiRequestClient,
-        inbox_key: ContractKey,
-        hash: TokenAssignmentHash,
-        from: &Identity,
-    ) -> Result<(), DynError> {
-        let placeholder = TokenAssignment {
-            tier: Tier::Min1,
-            time_slot: Utc::now(),
-            generator: Vec::new(),
-            signature: Vec::new(),
-            assignment_hash: hash,
-            token_record: *inbox_key.id(),
-        };
-        let stored = self.to_stored(placeholder, from)?;
-        let delta = UpdateInbox::AddMessages {
-            messages: vec![stored],
-        };
-        let delta_bytes = serde_json::to_vec(&delta)?;
-        let request = ContractRequest::Update {
-            key: inbox_key,
-            data: UpdateData::Delta(delta_bytes.into()),
-        };
-        client.send(request.into()).await?;
-        Ok(())
+    /// Encrypt this message to its recipient and sign the ciphertext, in the
+    /// mail delegate (the page holds no keys). Done once per send: the
+    /// assignment hash is taken from this one ciphertext, which is also the
+    /// one stored.
+    async fn seal(&self, from: &Identity) -> Result<crate::mail_delegate::ops::SealedV1, DynError> {
+        let plaintext = serde_json::to_vec(self)?;
+        let recipient_ek = self.to.first().ok_or("receiver key not found")?;
+        crate::mail_delegate::ops::seal_v1(from.addr, recipient_ek.0.clone(), plaintext)
+            .await
+            .map_err(|e| format!("could not seal the message: {e}").into())
     }
 
-    fn to_stored(
-        &self,
-        token_assignment: TokenAssignment,
-        sender: &Identity,
-    ) -> Result<StoredMessage, DynError> {
-        use ml_dsa::signature::Keypair;
-        let (_, content) = self.assignment_hash_and_signed_content()?;
-        // Detached ML-DSA-65 signature over the ciphertext (#51). The
-        // recipient verifies before decrypting; sender VK is sent
-        // alongside so the recipient can both verify and recognise the
-        // sender even if the address book has never seen this key.
-        let signing_key = sender.ml_dsa_signing_key.as_ref();
-        let sig: ml_dsa::Signature<MlDsa65> = MlDsaSigner::sign(signing_key, &content);
-        let signature = sig.encode().to_vec();
-        let sender_vk = signing_key.verifying_key().encode().to_vec();
-        Ok::<_, DynError>(StoredMessage {
-            content,
-            token_assignment,
-            sender_vk,
-            signature,
-        })
-    }
-
-    /// Decrypt a stored message for this identity. Returns `None` when the
-    /// ciphertext can't be decrypted or the plaintext doesn't deserialise —
-    /// e.g. a message in shared inbox state that was encrypted for a different
-    /// identity, or a malformed/foreign entry that arrived via a cross-node
-    /// UPDATE. Previously this `.expect()`-panicked, aborting the wasm module
-    /// and freezing the entire UI (#267); an undecryptable message in shared
-    /// state must be skipped, never fatal.
-    fn from_stored(
-        dk: &DecapsulationKey<MlKem768>,
-        msg_content: Vec<u8>,
-    ) -> Option<DecryptedMessage> {
-        let plaintext = match ml_kem_decrypt(dk, msg_content) {
-            Ok(p) => p,
-            Err(e) => {
-                crate::log::debug!("skip undecryptable inbox message: {e}");
-                return None;
-            }
-        };
-        match serde_json::from_slice(&plaintext) {
+    /// Parse a decrypted plaintext. Returns `None` when it doesn't
+    /// deserialise (a malformed or foreign entry in shared inbox state): such
+    /// a message is skipped, never fatal (#267).
+    pub(crate) fn from_plaintext(plaintext: &[u8]) -> Option<DecryptedMessage> {
+        match serde_json::from_slice(plaintext) {
             Ok(msg) => Some(msg),
             Err(e) => {
                 crate::log::debug!("skip inbox message with bad plaintext: {e}");
@@ -899,26 +833,82 @@ impl DecryptedMessage {
         }
     }
 
-    fn assignment_hash_and_signed_content(&self) -> Result<([u8; 32], Vec<u8>), DynError> {
-        let decrypted_content: Vec<u8> = serde_json::to_vec(self)?;
-
-        // The recipient's ML-KEM encapsulation key is stored in `self.to`.
-        let recipient_ek_bytes = self.to.first().ok_or("receiver key not found")?;
-        let recipient_ek = recipient_ek_bytes.to_key()?;
-
-        let content = ml_kem_encrypt(&recipient_ek, &decrypted_content)?;
-
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(&content);
-        let assignment_hash: [u8; 32] = hasher.finalize().as_slice().try_into().unwrap();
-        Ok((assignment_hash, content))
+    /// Decrypt with a local key: tests only (the page holds no keys).
+    #[cfg(test)]
+    fn from_stored(
+        dk: &DecapsulationKey<MlKem768>,
+        msg_content: Vec<u8>,
+    ) -> Option<DecryptedMessage> {
+        Self::from_plaintext(&ml_kem_decrypt(dk, msg_content).ok()?)
     }
+}
+
+/// #273 verified-sender bypass send path. Used when `start_sending`
+/// determined (from the recipient's observed `InboxSettings`) that
+/// this sender may deliver without an AFT token. Builds a placeholder
+/// `TokenAssignment` — the recipient's inbox contract skips all
+/// token-assignment validation for verified senders
+/// (`add_message`/`verify_token_policy` short-circuit on the
+/// `verified_senders` allow-list, see `contracts/inbox/src/lib.rs`),
+/// so only the `assignment_hash` is load-bearing: it must equal the
+/// real message hash because the inbox keys + dedupes messages by it.
+///
+/// The delta is sent as a bare `UpdateData::Delta` — there is no AFT
+/// allocation record to bundle as `RelatedStateAndDelta`, and the
+/// contract never fetches one for a bypassed message.
+async fn finish_sending_bypass(
+    client: &mut WebApiRequestClient,
+    inbox_key: ContractKey,
+    hash: TokenAssignmentHash,
+    sealed: crate::mail_delegate::ops::SealedV1,
+) -> Result<(), DynError> {
+    let placeholder = TokenAssignment {
+        tier: Tier::Min1,
+        time_slot: Utc::now(),
+        generator: Vec::new(),
+        signature: Vec::new(),
+        assignment_hash: hash,
+        token_record: *inbox_key.id(),
+    };
+    let stored = StoredMessage {
+        content: sealed.content,
+        token_assignment: placeholder,
+        sender_vk: sealed.sender_vk,
+        signature: sealed.signature,
+    };
+    let delta = UpdateInbox::AddMessages {
+        messages: vec![stored],
+    };
+    let delta_bytes = serde_json::to_vec(&delta)?;
+    let request = ContractRequest::Update {
+        key: inbox_key,
+        data: UpdateData::Delta(delta_bytes.into()),
+    };
+    client.send(request.into()).await?;
+    Ok(())
+}
+
+/// Have the mail delegate sign a v1 inbox authority payload for `addr` with
+/// a fresh `last_update`, returned with the signature. The timestamp is
+/// truncated to the microseconds the payload carries.
+pub(crate) async fn sign_authority(
+    addr: freenet_mail_protocol::Addr,
+    settings: &StoredSettings,
+) -> Result<(DateTime<Utc>, Box<[u8]>), DynError> {
+    let micros = Utc::now().timestamp_micros();
+    let last_update = DateTime::from_timestamp_micros(micros).ok_or("clock out of range")?;
+    let signature =
+        crate::mail_delegate::ops::sign_v1_authority(addr, serde_json::to_vec(settings)?, micros)
+            .await
+            .map_err(|e| format!("could not sign the inbox settings: {e}"))?;
+    Ok((last_update, signature.into_boxed_slice()))
 }
 
 /// Derive a 32-byte XChaCha20-Poly1305 key from an ML-KEM shared secret using HKDF-SHA256.
 ///
 /// The context label `b"freenet-email-v1 message-key"` domain-separates this
 /// key from any other use of the same shared secret (NIST SP 800-56C recommendation).
+#[cfg(test)]
 fn hkdf_derive_key(shared_secret: &[u8]) -> [u8; 32] {
     use hkdf::Hkdf;
     use sha2::Sha256;
@@ -934,6 +924,7 @@ fn hkdf_derive_key(shared_secret: &[u8]) -> [u8; 32] {
 /// Wire format: `[ 24-byte nonce | 1088-byte ML-KEM ciphertext | variable XChaCha20-Poly1305 ciphertext ]`
 ///
 /// The symmetric key is HKDF-SHA256(ML-KEM shared secret, info="freenet-email-v1 message-key").
+#[cfg(test)]
 pub(crate) fn ml_kem_encrypt(
     ek: &EncapsulationKey<MlKem768>,
     plaintext: &[u8],
@@ -960,6 +951,7 @@ pub(crate) fn ml_kem_encrypt(
 }
 
 /// Decrypt a message previously encrypted with [`ml_kem_encrypt`].
+#[cfg(test)]
 pub(crate) fn ml_kem_decrypt(
     dk: &DecapsulationKey<MlKem768>,
     msg_content: Vec<u8>,
@@ -1000,6 +992,49 @@ pub(crate) struct InboxModel {
     pub messages: Vec<MessageModel>,
     settings: InternalSettings,
     pub key: InboxContract,
+    /// Assignment hashes removed from this inbox, so a decryption still in
+    /// flight when the removal lands does not bring the message back.
+    removed: HashSet<TokenAssignmentHash>,
+}
+
+/// Messages of an inbox that the mail delegate still has to decrypt. The
+/// node loop must not wait for the delegate (it delivers the delegate's
+/// answers), so it hands these to [`decrypt_pending`] in a spawned task and
+/// adds the results with [`InboxModel::add_decrypted`].
+#[derive(Debug, Default)]
+pub(crate) struct PendingDecrypt {
+    pub addr: Option<freenet_mail_protocol::Addr>,
+    pub messages: Vec<StoredMessage>,
+}
+
+impl PendingDecrypt {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.messages.is_empty()
+    }
+}
+
+/// Decrypt `pending` in the mail delegate. Messages this identity cannot
+/// decrypt (foreign or malformed entries in shared inbox state) are skipped,
+/// never fatal (#267).
+pub(crate) async fn decrypt_pending(
+    pending: PendingDecrypt,
+) -> Result<Vec<(StoredMessage, DecryptedMessage)>, DynError> {
+    let Some(addr) = pending.addr else {
+        return Ok(Vec::new());
+    };
+    let ciphertexts = pending.messages.iter().map(|m| m.content.clone()).collect();
+    let plaintexts = crate::mail_delegate::ops::decrypt_v1(addr, ciphertexts)
+        .await
+        .map_err(|e| format!("could not decrypt inbox messages: {e}"))?;
+    Ok(pending
+        .messages
+        .into_iter()
+        .zip(plaintexts)
+        .filter_map(|(stored, plaintext)| {
+            let content = DecryptedMessage::from_plaintext(&plaintext?)?;
+            Some((stored, content))
+        })
+        .collect())
 }
 
 impl InboxModel {
@@ -1021,7 +1056,7 @@ impl InboxModel {
         }
 
         fn get_key(identity: &Identity) -> Result<ContractKey, DynError> {
-            let vk = MlDsaKeypair::verifying_key(identity.ml_dsa_signing_key.as_ref());
+            let vk = identity.ml_dsa_vk();
             let pub_key = inbox_params_pub_key_bytes(&vk);
             let params = freenet_mail_wire_v1::inbox::InboxParams { pub_key }
                 .try_into()
@@ -1064,7 +1099,7 @@ impl InboxModel {
         client: &mut WebApiRequestClient,
         id: &Identity,
     ) -> Result<ContractKey, DynError> {
-        let vk = MlDsaKeypair::verifying_key(id.ml_dsa_signing_key.as_ref());
+        let vk = id.ml_dsa_vk();
         let params = InboxParams {
             pub_key: inbox_params_pub_key_bytes(&vk),
         }
@@ -1101,152 +1136,126 @@ impl InboxModel {
         mut client: WebApiRequestClient,
         ids: &[u64],
     ) -> Result<LocalBoxFuture<'static, ()>, DynError> {
-        let mut signed: Vec<u8> = Vec::with_capacity(ids.len() * 32);
-        let mut to_rm_message_id = Vec::with_capacity(ids.len() * 32);
-        for m in &self.messages {
-            if ids.contains(&m.id) {
-                let h = &m.token_assignment.assignment_hash;
-                signed.extend(h);
-                to_rm_message_id.push(*h);
-            }
-        }
+        let hashes: Vec<TokenAssignmentHash> = self
+            .messages
+            .iter()
+            .filter(|m| ids.contains(&m.id))
+            .map(|m| m.token_assignment.assignment_hash)
+            .collect();
+        self.removed.extend(hashes.iter().copied());
         self.remove_received_message(ids);
         #[cfg(feature = "use-node")]
         {
-            let signing_key = self.settings.ml_dsa_signing_key.as_ref();
-            let ml_sig: ml_dsa::Signature<MlDsa65> = MlDsaSigner::sign(signing_key, &signed);
-            let signature: Box<[u8]> = ml_sig.encode().to_vec().into_boxed_slice();
-            let delta: UpdateInbox = UpdateInbox::RemoveMessages {
-                signature,
-                ids: to_rm_message_id,
-            };
-            let request = ContractRequest::Update {
-                key: self.key,
-                data: UpdateData::Delta(serde_json::to_vec(&delta)?.into()),
-            };
+            let addr = self.settings.addr;
+            let key = self.key;
             let f = async move {
-                let r = client.send(request.into()).await;
-                node_response_error_handling(
-                    client.into(),
-                    r.map_err(Into::into),
-                    TryNodeAction::RemoveMessages,
-                )
+                let r: Result<(), DynError> = async {
+                    // The delegate signs only strictly ascending hashes, so
+                    // the removal lists them in that order.
+                    let ids = crate::mail_delegate::ops::removal_order(hashes);
+                    let signature = crate::mail_delegate::ops::sign_v1_removal(addr, ids.clone())
+                        .await
+                        .map_err(|e| format!("could not sign the removal: {e}"))?;
+                    let delta = UpdateInbox::RemoveMessages {
+                        signature: signature.into_boxed_slice(),
+                        ids,
+                    };
+                    let request = ContractRequest::Update {
+                        key,
+                        data: UpdateData::Delta(serde_json::to_vec(&delta)?.into()),
+                    };
+                    client.send(request.into()).await?;
+                    Ok(())
+                }
                 .await;
+                node_response_error_handling(client.into(), r, TryNodeAction::RemoveMessages).await;
             };
             Ok(f.boxed_local())
         }
         #[cfg(not(feature = "use-node"))]
         {
+            let _ = (&mut client, hashes);
             Ok(async {}.boxed_local())
         }
     }
 
-    // TODO: only used when an inbox is created first time when putting the contract
-    #[allow(dead_code)]
-    fn to_state(&self) -> Result<State<'static>, DynError> {
-        let settings = self.settings.to_stored()?;
-        let messages = self
-            .messages
-            .iter()
-            .map(|_m| {
-                let dk = &self.settings.ml_dsa_signing_key;
-                // We need the ML-KEM decapsulation key to re-encrypt stored messages.
-                // During to_state the identity is available via INBOX_TO_ID; look it up.
-                // For now this path is dead (TODO comment above), so just skip re-encryption.
-                let _ = dk;
-                Err::<StoredMessage, DynError>("to_state re-encryption not implemented".into())
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let inbox = StoredInbox::new(
-            self.settings.ml_dsa_signing_key.as_ref(),
-            settings,
-            messages,
-            // #256: the model already carries the owner's ML-KEM ek on its
-            // settings (populated by `from_state` / `InboxModel::new`), so
-            // stamp it here. An empty ek produced a state importers/senders
-            // reject — they'd have no key to encapsulate to. No `INBOX_TO_ID`
-            // identity lookup is needed for the ek (only message re-encryption,
-            // still unimplemented above, needs the ML-KEM decapsulation key).
-            self.settings.owner_ek_bytes.clone(),
-        );
-        let serialized = serde_json::to_vec(&inbox)?;
-        Ok(serialized.into())
-    }
-
+    /// The model for an inbox state. Its messages are returned for the
+    /// delegate to decrypt ([`decrypt_pending`]); the model starts without
+    /// them.
     pub fn from_state(
-        ml_dsa_signing_key: Arc<MlDsaSigningKey<MlDsa65>>,
-        ml_kem_dk: DecapsulationKey<MlKem768>,
+        addr: freenet_mail_protocol::Addr,
+        owner_ek_bytes: Vec<u8>,
         state: StoredInbox,
         key: ContractKey,
-    ) -> Result<Self, DynError> {
-        let messages = state
+    ) -> Result<(Self, PendingDecrypt), DynError> {
+        let model = Self {
+            settings: InternalSettings::from_stored(state.settings, 0, addr, owner_ek_bytes)?,
+            key,
+            messages: Vec::new(),
+            removed: HashSet::new(),
+        };
+        let pending = PendingDecrypt {
+            addr: Some(addr),
+            messages: state.messages,
+        };
+        Ok((model, pending))
+    }
+
+    /// Replace this inbox with a whole new state: keeps the messages already
+    /// decrypted that the state still holds, drops the rest, and returns the
+    /// new ones to decrypt.
+    pub fn replace_state(&mut self, state: StoredInbox) -> Result<PendingDecrypt, DynError> {
+        let next = self.settings.next_msg_id;
+        self.settings = InternalSettings::from_stored(
+            state.settings,
+            next,
+            self.settings.addr,
+            self.settings.owner_ek_bytes.clone(),
+        )?;
+        let present: HashSet<TokenAssignmentHash> = state
             .messages
             .iter()
-            .enumerate()
-            .filter_map(|(id, msg)| {
-                // Skip messages this identity can't decrypt rather than
-                // aborting the whole inbox decode (#267). `id` stays the
-                // enumerate index so ids remain stable for the messages we
-                // do keep.
-                let content = DecryptedMessage::from_stored(&ml_kem_dk, msg.content.clone())?;
-                let signature_valid =
-                    verify_message_signature(&msg.content, &msg.sender_vk, &msg.signature);
-                Some(MessageModel {
-                    id: id as u64,
-                    content,
-                    token_assignment: msg.token_assignment.clone(),
-                    sender_vk: msg.sender_vk.clone(),
-                    signature_valid,
-                })
-            })
-            .collect::<Vec<_>>();
-        Ok(Self {
-            settings: InternalSettings::from_stored(
-                state.settings,
-                messages.len() as u64,
-                ml_dsa_signing_key,
-                ml_kem_dk.encapsulation_key().to_bytes().to_vec(),
-            )?,
-            key,
+            .map(|m| m.token_assignment.assignment_hash)
+            .collect();
+        self.messages
+            .retain(|m| present.contains(&m.token_assignment.assignment_hash));
+        let messages = state
+            .messages
+            .into_iter()
+            .filter(|m| !self.has_message(&m.token_assignment.assignment_hash))
+            .collect();
+        Ok(PendingDecrypt {
+            addr: Some(self.settings.addr),
             messages,
         })
     }
 
+    fn has_message(&self, hash: &TokenAssignmentHash) -> bool {
+        self.messages
+            .iter()
+            .any(|c| &c.token_assignment.assignment_hash == hash)
+    }
+
     /// Apply an `UpdateInbox` delta received via UpdateNotification (or
     /// the cross-node UPDATE_PROPAGATION path) to this in-memory model.
-    /// Decrypts AddMessages and de-dups by `token_assignment.assignment_hash`;
-    /// drops RemoveMessages by hash; ignores ModifySettings (sender-only).
-    pub fn apply_delta(&mut self, ml_kem_dk: &DecapsulationKey<MlKem768>, delta: UpdateInbox) {
+    /// Returns AddMessages entries not already present, for the delegate to
+    /// decrypt; drops RemoveMessages by hash; ignores ModifySettings
+    /// (sender-only).
+    pub fn apply_delta(&mut self, delta: UpdateInbox) -> PendingDecrypt {
+        let mut pending = PendingDecrypt {
+            addr: Some(self.settings.addr),
+            messages: Vec::new(),
+        };
         match delta {
             UpdateInbox::AddMessages { messages } => {
                 for m in messages {
-                    let hash = m.token_assignment.assignment_hash;
-                    if self
-                        .messages
-                        .iter()
-                        .any(|c| c.token_assignment.assignment_hash == hash)
-                    {
-                        continue;
+                    if !self.has_message(&m.token_assignment.assignment_hash) {
+                        pending.messages.push(m);
                     }
-                    // An undecryptable AddMessages entry (foreign / malformed,
-                    // common in a multi-node mesh) must be skipped, not fatal
-                    // (#267). Previously panicked here and froze the UI on the
-                    // UPDATE that followed a second send.
-                    let Some(content) = DecryptedMessage::from_stored(ml_kem_dk, m.content.clone())
-                    else {
-                        continue;
-                    };
-                    let signature_valid =
-                        verify_message_signature(&m.content, &m.sender_vk, &m.signature);
-                    self.add_received_message(
-                        content,
-                        m.token_assignment,
-                        m.sender_vk,
-                        signature_valid,
-                    );
                 }
             }
             UpdateInbox::RemoveMessages { ids, .. } => {
+                self.removed.extend(ids.iter().copied());
                 let drop: HashSet<TokenAssignmentHash> = HashSet::from_iter(ids);
                 self.messages
                     .retain(|m| !drop.contains(&m.token_assignment.assignment_hash));
@@ -1255,6 +1264,20 @@ impl InboxModel {
                 // Settings deltas come from this identity only; ignore on
                 // the receive path.
             }
+        }
+        pending
+    }
+
+    /// Add messages the delegate decrypted, skipping any already present or
+    /// removed while the decryption was in flight.
+    pub fn add_decrypted(&mut self, decrypted: Vec<(StoredMessage, DecryptedMessage)>) {
+        for (m, content) in decrypted {
+            let hash = m.token_assignment.assignment_hash;
+            if self.has_message(&hash) || self.removed.contains(&hash) {
+                continue;
+            }
+            let signature_valid = verify_message_signature(&m.content, &m.sender_vk, &m.signature);
+            self.add_received_message(content, m.token_assignment, m.sender_vk, signature_valid);
         }
     }
 
@@ -1290,61 +1313,62 @@ impl InboxModel {
         }
     }
 
-    /// Apply a new anti-flood policy locally and return a serialized
-    /// `ModifySettings` delta the caller must push to the inbox
-    /// contract via `client.send` outside any RefCell borrow (#85).
-    /// Only the inbox owner can mutate policy — `can_update_settings`
-    /// on the contract verifies the signature against `params.pub_key`.
+    /// Apply a new anti-flood policy locally and return a future yielding
+    /// the signed `ModifySettings` request the caller must push to the inbox
+    /// contract via `client.send`, outside any RefCell borrow (#85). Only the
+    /// inbox owner can mutate policy — `can_update_settings` on the contract
+    /// verifies the signature against `params.pub_key`.
     pub fn update_policy_prepare(
         &mut self,
         minimum_tier: Tier,
         max_age_secs: u64,
-    ) -> Result<ContractRequest<'static>, DynError> {
+    ) -> LocalBoxFuture<'static, Result<ContractRequest<'static>, DynError>> {
         self.settings.minimum_tier = minimum_tier;
         self.settings.max_age_secs = max_age_secs;
         self.settings_modify_prepare()
     }
 
     /// Apply the verified-sender bypass flag and (optionally) mutate the
-    /// `verified_senders` set, then return a signed `ModifySettings` delta
-    /// ready for dispatch to the inbox contract (#150).
+    /// `verified_senders` set, then return a future yielding the signed
+    /// `ModifySettings` request for the inbox contract (#150).
     pub fn update_verified_bypass_prepare(
         &mut self,
         allow_verified_skip_token: bool,
         verified_senders: std::collections::BTreeSet<Vec<u8>>,
-    ) -> Result<ContractRequest<'static>, DynError> {
+    ) -> LocalBoxFuture<'static, Result<ContractRequest<'static>, DynError>> {
         self.settings.allow_verified_skip_token = allow_verified_skip_token;
         self.settings.verified_senders = verified_senders;
         self.settings_modify_prepare()
     }
 
     /// Shared implementation: stamp a fresh owner-supplied `last_update`,
-    /// sign the FULL authority payload (`sign_payload(owner_ek_bytes,
-    /// settings, last_update)`), wrap in a `ModifySettings` delta, and
-    /// return the `ContractRequest::Update`. The widened signature (#253)
-    /// binds settings + last_update so a peer cannot rebroadcast a tampered
-    /// State; the host pins `last_update` and stores this signature so the
+    /// have the delegate sign the FULL authority payload
+    /// (`sign_payload(owner_ek_bytes, settings, last_update)`, with its own
+    /// encapsulation key), wrap it in a `ModifySettings` delta, and return
+    /// the `ContractRequest::Update`. The widened signature (#253) binds
+    /// settings + last_update so a peer cannot rebroadcast a tampered State;
+    /// the host pins `last_update` and stores this signature so the
     /// resulting state re-verifies.
-    fn settings_modify_prepare(&self) -> Result<ContractRequest<'static>, DynError> {
-        let settings = self.settings.to_stored()?;
-        let last_update = Utc::now();
-        let payload = freenet_mail_wire_v1::inbox::sign_payload(
-            &self.settings.owner_ek_bytes,
-            &settings,
-            last_update,
-        );
-        let signing_key = self.settings.ml_dsa_signing_key.as_ref();
-        let ml_sig: ml_dsa::Signature<MlDsa65> = MlDsaSigner::sign(signing_key, &payload);
-        let inbox_signature: Box<[u8]> = ml_sig.encode().to_vec().into_boxed_slice();
-        let delta = UpdateInbox::ModifySettings {
-            inbox_signature,
-            settings,
-            last_update,
-        };
-        Ok(ContractRequest::Update {
-            key: self.key,
-            data: UpdateData::Delta(serde_json::to_vec(&delta)?.into()),
-        })
+    fn settings_modify_prepare(
+        &self,
+    ) -> LocalBoxFuture<'static, Result<ContractRequest<'static>, DynError>> {
+        let settings = self.settings.to_stored();
+        let addr = self.settings.addr;
+        let key = self.key;
+        async move {
+            let settings = settings?;
+            let (last_update, inbox_signature) = sign_authority(addr, &settings).await?;
+            let delta = UpdateInbox::ModifySettings {
+                inbox_signature,
+                settings,
+                last_update,
+            };
+            Ok(ContractRequest::Update {
+                key,
+                data: UpdateData::Delta(serde_json::to_vec(&delta)?.into()),
+            })
+        }
+        .boxed_local()
     }
 
     pub async fn get_state(
@@ -1511,12 +1535,14 @@ mod tests {
 
     impl InboxModel {
         fn new(
-            ml_dsa_signing_key: Arc<MlDsaSigningKey<MlDsa65>>,
-            ml_kem_dk: DecapsulationKey<MlKem768>,
-        ) -> Result<Self, DynError> {
-            let vk = MlDsaKeypair::verifying_key(ml_dsa_signing_key.as_ref());
-            let params = InboxParams::from_verifying_key(&vk);
-            Ok(Self {
+            addr: freenet_mail_protocol::Addr,
+            vk_bytes: &[u8],
+            owner_ek_bytes: Vec<u8>,
+        ) -> Self {
+            let params = InboxParams {
+                pub_key: vk_bytes.to_vec(),
+            };
+            Self {
                 messages: vec![],
                 settings: InternalSettings {
                     next_msg_id: 0,
@@ -1524,25 +1550,38 @@ mod tests {
                     max_age_secs: freenet_mail_wire_v1::inbox::DEFAULT_MAX_AGE_SECS,
                     allow_verified_skip_token: false,
                     verified_senders: std::collections::BTreeSet::new(),
-                    ml_dsa_signing_key,
-                    owner_ek_bytes: ml_kem_dk.encapsulation_key().to_bytes().to_vec(),
+                    addr,
+                    owner_ek_bytes,
                 },
                 key: ContractKey::from_params_and_code(
-                    &params.try_into()?,
+                    &params.try_into().unwrap(),
                     ContractCode::from([].as_slice()),
                 ),
-            })
+                removed: HashSet::new(),
+            }
         }
+    }
+
+    /// An identity in the in-page delegate (offline builds), so signing and
+    /// decryption run through the real delegate code.
+    #[cfg(feature = "local-delegate")]
+    fn delegate_identity() -> freenet_mail_protocol::IdentityInfo {
+        let alias = format!("t{}", u32::from_le_bytes(crate::rng::random_bytes()));
+        futures::executor::block_on(crate::mail_delegate::ops::create_identity(
+            alias,
+            String::new(),
+        ))
+        .unwrap()
+        .0
     }
 
     #[test]
     fn remove_msg() {
-        let ml_dsa_key = Arc::new(ml_dsa::SigningKey::<MlDsa65>::from_seed(
-            &crate::rng::random_bytes::<32>().into(),
-        ));
-        let ml_kem_dk =
-            DecapsulationKey::<MlKem768>::from_seed(crate::rng::random_bytes::<64>().into());
-        let mut inbox = InboxModel::new(ml_dsa_key, ml_kem_dk).unwrap();
+        let mut inbox = InboxModel::new(
+            freenet_mail_protocol::Addr([1; 24]),
+            &[2; 1952],
+            vec![3; 1184],
+        );
         for id in 0..10000 {
             inbox.messages.push(MessageModel {
                 id,
@@ -1703,56 +1742,75 @@ mod tests {
         assert_eq!(back.from, "bob");
     }
 
-    /// Repro for #267 at the `from_state` level: an inbox whose stored
-    /// messages include an entry encrypted for another identity must decode
-    /// to a model that simply omits the undecryptable message, never panic.
+    /// `from_state` decrypts nothing itself: every stored message is handed
+    /// to the delegate, and the model starts without them.
     #[test]
-    fn from_state_skips_undecryptable_messages() {
-        let ml_dsa_key = Arc::new(fresh_signing_key());
-        let recipient_dk = fresh_kem_dk();
-        let foreign_dk = fresh_kem_dk();
+    fn from_state_hands_every_message_to_the_delegate() {
+        let state = StoredInbox::with_signature(
+            StoredSettings::default(),
+            vec![
+                StoredMessage {
+                    content: vec![1; 1200],
+                    token_assignment: crate::test_util::test_assignment(),
+                    sender_vk: Vec::new(),
+                    signature: Vec::new(),
+                };
+                2
+            ],
+            Utc::now(),
+            vec![3; 1184],
+            Box::new([]),
+        );
+        let addr = freenet_mail_protocol::Addr([1; 24]);
+        let key = InboxModel::new(addr, &[2; 1952], vec![3; 1184]).key;
+        let (model, pending) = InboxModel::from_state(addr, vec![3; 1184], state, key).unwrap();
+        assert!(model.messages.is_empty());
+        assert_eq!(pending.messages.len(), 2);
+        assert_eq!(pending.addr, Some(addr));
+    }
 
-        let mk_stored = |dk: &DecapsulationKey<MlKem768>, title: &str| {
+    /// Repro for #267: an inbox whose stored messages include an entry
+    /// encrypted for another identity must decode to a model that simply
+    /// omits the undecryptable message, never panic. Decryption runs in the
+    /// (in-page) delegate.
+    #[cfg(feature = "local-delegate")]
+    #[test]
+    fn decrypting_an_inbox_skips_messages_for_other_identities() {
+        let me = delegate_identity();
+        let my_ek = MlKemEncapsKey(me.ek.to_vec()).to_key().unwrap();
+        let foreign_dk = fresh_kem_dk();
+        let mk_stored = |ek: &EncapsulationKey<MlKem768>, title: &str, n: u8| {
             let msg = DecryptedMessage {
                 title: title.into(),
                 content: "body".into(),
                 from: "carol".into(),
-                to: vec![],
-                cc: vec![],
-                time: Utc::now(),
-                thread_id: None,
-                in_reply_to: None,
-                quoted_excerpt: None,
+                ..Default::default()
             };
-            let pt = serde_json::to_vec(&msg).unwrap();
+            let mut token_assignment = crate::test_util::test_assignment();
+            token_assignment.assignment_hash = [n; 32];
             StoredMessage {
-                content: ml_kem_encrypt(dk.encapsulation_key(), &pt).unwrap(),
-                token_assignment: crate::test_util::test_assignment(),
+                content: ml_kem_encrypt(ek, &serde_json::to_vec(&msg).unwrap()).unwrap(),
+                token_assignment,
                 sender_vk: Vec::new(),
                 signature: Vec::new(),
             }
         };
-
-        // One decryptable (ours) + one foreign.
-        let vk = MlDsaKeypair::verifying_key(ml_dsa_key.as_ref());
-        let params = InboxParams::from_verifying_key(&vk);
-        let state = StoredInbox::new(
-            ml_dsa_key.as_ref(),
+        let state = StoredInbox::with_signature(
             StoredSettings::default(),
             vec![
-                mk_stored(&recipient_dk, "ours"),
-                mk_stored(&foreign_dk, "foreign"),
+                mk_stored(&my_ek, "ours", 1),
+                mk_stored(foreign_dk.encapsulation_key(), "foreign", 2),
             ],
-            // owner_ek_bytes is irrelevant here: from_state doesn't verify.
-            Vec::new(),
+            Utc::now(),
+            me.ek.to_vec(),
+            Box::new([]),
         );
-        let key = ContractKey::from_params_and_code(
-            TryInto::<freenet_stdlib::prelude::Parameters>::try_into(params).unwrap(),
-            ContractCode::from([].as_slice()),
-        );
-
-        let model = InboxModel::from_state(ml_dsa_key, recipient_dk, state, key)
-            .expect("from_state must not fail on a foreign message (#267)");
+        let key = InboxModel::new(me.addr, &me.vk, me.ek.to_vec()).key;
+        let (mut model, pending) =
+            InboxModel::from_state(me.addr, me.ek.to_vec(), state, key).unwrap();
+        let decrypted = futures::executor::block_on(decrypt_pending(pending))
+            .expect("a foreign message must not fail the inbox (#267)");
+        model.add_decrypted(decrypted);
         assert_eq!(
             model.messages.len(),
             1,
@@ -1761,41 +1819,82 @@ mod tests {
         assert_eq!(model.messages[0].content.title, "ours");
     }
 
-    // ─── #150 UI-side bypass helpers ──────────────────────────────────────
-
-    fn make_test_inbox(ml_dsa_key: Arc<MlDsaSigningKey<MlDsa65>>) -> InboxModel {
-        let ml_kem_dk =
-            DecapsulationKey::<MlKem768>::from_seed(crate::rng::random_bytes::<64>().into());
-        InboxModel::new(ml_dsa_key, ml_kem_dk).unwrap()
+    /// A message removed while its decryption was in flight stays removed.
+    #[test]
+    fn a_removal_during_decryption_wins() {
+        let addr = freenet_mail_protocol::Addr([1; 24]);
+        let mut inbox = InboxModel::new(addr, &[2; 1952], vec![3; 1184]);
+        let mut stored = StoredMessage {
+            content: vec![1; 1200],
+            token_assignment: crate::test_util::test_assignment(),
+            sender_vk: Vec::new(),
+            signature: Vec::new(),
+        };
+        stored.token_assignment.assignment_hash = [9; 32];
+        let _pending = inbox.apply_delta(UpdateInbox::RemoveMessages {
+            signature: Box::new([]),
+            ids: vec![[9; 32]],
+        });
+        inbox.add_decrypted(vec![(stored, DecryptedMessage::default())]);
+        assert!(inbox.messages.is_empty());
     }
 
-    /// #256: `to_state` must carry the owner's ML-KEM ek so the produced
-    /// state advertises a usable encryption key. The dead-coded path passed
-    /// `Vec::new()`, which produces a state importers/senders reject (they
-    /// have no ek to encapsulate to). Empty inbox so the unimplemented
-    /// message-re-encryption map (which returns Err for any message) doesn't
-    /// short-circuit before the ek is stamped.
-    #[test]
-    fn to_state_carries_owner_ek_256() {
-        let sk = Arc::new(fresh_signing_key());
-        let inbox = make_test_inbox(sk);
-        assert!(
-            inbox.messages.is_empty(),
-            "test precondition: empty inbox reaches the ek-stamping path",
-        );
-        let expected_ek = inbox.settings.owner_ek_bytes.clone();
-        assert!(
-            !expected_ek.is_empty(),
-            "test precondition: the model holds a non-empty owner ek",
-        );
+    /// The signed settings request, from the in-page delegate offline. On a
+    /// node build there is no delegate in the test process, so only the
+    /// model side is checked there.
+    fn settle(
+        request: LocalBoxFuture<'static, Result<ContractRequest<'static>, DynError>>,
+    ) -> Option<ContractRequest<'static>> {
+        if cfg!(feature = "local-delegate") {
+            Some(futures::executor::block_on(request).expect("the delegate signs the change"))
+        } else {
+            None
+        }
+    }
 
-        let state = inbox.to_state().expect("to_state on empty inbox");
-        let decoded: StoredInbox = serde_json::from_slice(state.as_ref())
-            .expect("to_state output must deserialize as StoredInbox");
-        assert_eq!(
-            decoded.owner_ek_bytes, expected_ek,
-            "to_state must advertise the owner's ek, not an empty vec (#256)",
+    // ─── #150 UI-side bypass helpers ──────────────────────────────────────
+
+    fn make_test_inbox() -> InboxModel {
+        #[cfg(feature = "local-delegate")]
+        {
+            let me = delegate_identity();
+            InboxModel::new(me.addr, &me.vk, me.ek.to_vec())
+        }
+        #[cfg(not(feature = "local-delegate"))]
+        {
+            InboxModel::new(
+                freenet_mail_protocol::Addr([1; 24]),
+                &[2; 1952],
+                vec![3; 1184],
+            )
+        }
+    }
+
+    /// #256: a new inbox's state must carry the owner's ML-KEM ek, so it
+    /// advertises a usable encryption key, and the delegate's authority
+    /// signature over it must verify against the identity's key.
+    #[cfg(feature = "local-delegate")]
+    #[test]
+    fn a_new_inbox_state_carries_the_owner_ek_and_verifies_256() {
+        let me = delegate_identity();
+        let identity = crate::app::Identity::from_info(&me, crate::app::UserId::new());
+        let state = futures::executor::block_on(crate::app::identity_store::initial_inbox_state(
+            &identity,
+            Tier::Min10,
+            3600,
+        ))
+        .unwrap();
+        let decoded: StoredInbox = serde_json::from_slice(&state).unwrap();
+        assert_eq!(decoded.owner_ek_bytes, me.ek.to_vec(), "#256");
+        let raw: serde_json::Value = serde_json::from_slice(&state).unwrap();
+        let sig: Vec<u8> = serde_json::from_value(raw["inbox_signature"].clone()).unwrap();
+        let payload = freenet_mail_wire_v1::inbox::sign_payload(
+            &decoded.owner_ek_bytes,
+            &decoded.settings,
+            decoded.last_update,
         );
+        let sig = ml_dsa::Signature::<MlDsa65>::try_from(sig.as_slice()).unwrap();
+        assert!(identity.ml_dsa_vk().verify(&payload, &sig).is_ok());
     }
 
     /// `update_verified_bypass_prepare` with a single verified VK must flip
@@ -1804,16 +1903,13 @@ mod tests {
     /// correct field values.
     #[test]
     fn update_verified_bypass_prepare_sets_flag_and_returns_request() {
-        let sk = Arc::new(fresh_signing_key());
-        let vk_bytes = MlDsaKeypair::verifying_key(sk.as_ref()).encode().to_vec();
-        let mut inbox = make_test_inbox(sk);
+        let mut inbox = make_test_inbox();
+        let vk_bytes = vec![7u8; 1952];
 
         let mut vs = std::collections::BTreeSet::new();
         vs.insert(vk_bytes.clone());
 
-        let request = inbox
-            .update_verified_bypass_prepare(true, vs.clone())
-            .expect("prepare should succeed");
+        let request = settle(inbox.update_verified_bypass_prepare(true, vs.clone()));
 
         // The internal model must reflect the new state.
         assert!(
@@ -1826,6 +1922,7 @@ mod tests {
         );
 
         // The returned request must be an Update wrapping a Delta.
+        let Some(request) = request else { return };
         match request {
             freenet_stdlib::client_api::ContractRequest::Update { data, .. } => {
                 if let UpdateData::Delta(d) = data {
@@ -1859,8 +1956,7 @@ mod tests {
     /// with all of them in one `ModifySettings` delta.
     #[test]
     fn update_verified_bypass_populate_multiple_vks() {
-        let owner_sk = Arc::new(fresh_signing_key());
-        let mut inbox = make_test_inbox(owner_sk);
+        let mut inbox = make_test_inbox();
 
         // Simulate N address-book contacts.
         let mut vs = std::collections::BTreeSet::new();
@@ -1873,9 +1969,7 @@ mod tests {
             vs.insert(vk_bytes);
         }
 
-        let request = inbox
-            .update_verified_bypass_prepare(true, vs.clone())
-            .expect("prepare should succeed");
+        let request = settle(inbox.update_verified_bypass_prepare(true, vs.clone()));
 
         assert_eq!(
             inbox.settings.verified_senders.len(),
@@ -1884,6 +1978,7 @@ mod tests {
         );
 
         // Delta must also carry all of them.
+        let Some(request) = request else { return };
         if let freenet_stdlib::client_api::ContractRequest::Update {
             data: UpdateData::Delta(d),
             ..
@@ -1911,8 +2006,7 @@ mod tests {
     /// persists so it can be reused if the user toggles bypass back on.
     #[test]
     fn toggle_bypass_off_retains_verified_senders() {
-        let owner_sk = Arc::new(fresh_signing_key());
-        let mut inbox = make_test_inbox(owner_sk);
+        let mut inbox = make_test_inbox();
 
         let contact_sk = fresh_signing_key();
         let vk_bytes = MlDsaKeypair::verifying_key(&contact_sk).encode().to_vec();
@@ -1920,9 +2014,7 @@ mod tests {
         vs.insert(vk_bytes.clone());
 
         // Toggle ON — populates the set.
-        inbox
-            .update_verified_bypass_prepare(true, vs.clone())
-            .expect("prepare ON");
+        settle(inbox.update_verified_bypass_prepare(true, vs.clone()));
 
         // Toggle OFF — sends an empty-VK set to the contract but the model
         // stores whatever the caller passes. The UI contract is: when
@@ -1930,9 +2022,7 @@ mod tests {
         // re-enabling restores the same bypass list.
         //
         // Simulate the toggle-OFF flow: bypass=false but keep the same vs.
-        inbox
-            .update_verified_bypass_prepare(false, vs.clone())
-            .expect("prepare OFF");
+        settle(inbox.update_verified_bypass_prepare(false, vs.clone()));
 
         // The model retains the senders (they were passed by the caller).
         assert!(
@@ -1951,15 +2041,13 @@ mod tests {
     /// (nobody bypasses) and the model must reflect the same.
     #[test]
     fn toggle_bypass_on_empty_set_produces_correct_delta() {
-        let owner_sk = Arc::new(fresh_signing_key());
-        let mut inbox = make_test_inbox(owner_sk);
+        let mut inbox = make_test_inbox();
 
-        let request = inbox
-            .update_verified_bypass_prepare(true, Default::default())
-            .expect("prepare");
+        let request = settle(inbox.update_verified_bypass_prepare(true, Default::default()));
 
         assert!(inbox.settings.allow_verified_skip_token);
         assert!(inbox.settings.verified_senders.is_empty());
+        let Some(request) = request else { return };
 
         if let freenet_stdlib::client_api::ContractRequest::Update {
             data: UpdateData::Delta(d),

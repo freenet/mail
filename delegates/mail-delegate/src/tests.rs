@@ -80,7 +80,20 @@ fn create(env: &mut MemEnv, origin: u8, alias: &str) -> IdentityInfo {
             ui_entropy: Entropy([alias.len() as u8 + 1; 32]),
         },
     ) {
-        Ok(Reply::Identity(i)) => i,
+        Ok(Reply::CreatedIdentity {
+            identity,
+            recovery_key,
+        }) => {
+            // The key returned on creation is this identity's own.
+            let (dsa, kem) = recovery_key::decode(&recovery_key).unwrap();
+            assert_eq!(
+                freenet_mail_protocol::address::address_of(
+                    &crate::crypto::Keys::from_seeds(&dsa, &kem).vk_bytes()
+                ),
+                identity.addr
+            );
+            identity
+        }
         other => panic!("{other:?}"),
     }
 }
@@ -301,6 +314,10 @@ fn a_foreign_origin_can_neither_read_nor_change_another_namespace() {
                 }
                 Ok(Reply::Item(Some(i))) => assert_eq!(i.body.as_ref(), b"x", "{op:?}"),
                 Ok(Reply::Item(None) | Reply::Deleted | Reply::Ack { .. } | Reply::Identity(_)) => {
+                }
+                // The caller's own new identity, in its own namespace.
+                Ok(Reply::CreatedIdentity { identity, .. }) => {
+                    assert_eq!(identity.alias, "x", "{op:?}")
                 }
                 Ok(other) => panic!("{op:?} leaked {other:?}"),
             }
@@ -593,6 +610,50 @@ fn status_reports_only_the_callers_namespace() {
 }
 
 // ── Identities ──────────────────────────────────────────────────────────────
+
+#[test]
+fn the_recovery_key_comes_back_on_creation_only() {
+    let mut env = MemEnv::default();
+    let me = create(&mut env, PROD, "alice");
+    // Re-creating under the same alias is refused: no second key.
+    assert_eq!(
+        call(
+            &mut env,
+            PROD,
+            Op::CreateIdentity {
+                alias: "alice".into(),
+                description: String::new(),
+                ui_entropy: Entropy([7; 32]),
+            }
+        ),
+        Err(FailureCode::Conflict { current_gen: 0 })
+    );
+    // Importing an identity answers with its public view only, fresh or not.
+    let (dsa, kem) = fixture_seeds();
+    for _ in 0..2 {
+        match call(
+            &mut env,
+            PROD,
+            Op::ImportIdentity {
+                source: ImportSource::Seeds {
+                    dsa: dsa.clone(),
+                    kem: kem.clone(),
+                },
+                kind: ImportKind::UserRestore,
+                alias: "bob".into(),
+                description: String::new(),
+            },
+        ) {
+            Ok(Reply::Imported { .. }) => {}
+            other => panic!("{other:?}"),
+        }
+    }
+    // Listing never carries a key either.
+    match call(&mut env, PROD, Op::ListIdentities) {
+        Ok(Reply::Identities(ids)) => assert!(ids.iter().any(|i| i.addr == me.addr)),
+        other => panic!("{other:?}"),
+    }
+}
 
 #[test]
 fn identities_are_created_without_exposing_seeds() {

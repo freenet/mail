@@ -644,12 +644,10 @@ pub(crate) mod contact_import {
 
 #[cfg(feature = "use-node")]
 mod inbox_management {
-    use std::sync::Arc;
 
     use freenet_stdlib::{client_api::ContractRequest, prelude::*};
-    use ml_dsa::{MlDsa65, SigningKey as MlDsaSigningKey, signature::Keypair};
 
-    use freenet_mail_wire_v1::inbox::{InboxParams, InboxSettings};
+    use freenet_mail_wire_v1::inbox::InboxParams;
 
     use super::*;
 
@@ -744,8 +742,7 @@ mod inbox_management {
         identity: &crate::app::Identity,
         parsed: freenet_mail_wire_v1::inbox::Inbox,
     ) -> Result<ContractKey, DynError> {
-        use ml_dsa::signature::Keypair;
-        let vk = Keypair::verifying_key(identity.ml_dsa_signing_key.as_ref());
+        let vk = identity.ml_dsa_vk();
         let params: Parameters = InboxParams {
             pub_key: crate::inbox::inbox_params_pub_key_bytes(&vk),
         }
@@ -755,6 +752,7 @@ mod inbox_management {
         // (pre-#249) states that carry none. Surface a divergence so a
         // re-key is a deliberate, user-confirmed action.
         let local_ek = identity.ml_kem_ek_bytes();
+        let local_ek_for_signing = local_ek.clone();
         let owner_ek_bytes = match select_owner_ek(&parsed.owner_ek_bytes, &local_ek) {
             OwnerEkChoice::StampLocal => local_ek,
             OwnerEkChoice::UseOnChain => parsed.owner_ek_bytes,
@@ -780,11 +778,21 @@ mod inbox_management {
                 parsed.owner_ek_bytes
             }
         };
-        let rebuilt = freenet_mail_wire_v1::inbox::Inbox::new(
-            identity.ml_dsa_signing_key.as_ref(),
+        // The delegate signs with this identity's own encapsulation key
+        // only, so an inbox advertising another key cannot be re-signed.
+        if owner_ek_bytes != local_ek_for_signing {
+            return Err("the inbox advertises a different encryption key than \
+                        this identity's; it was not migrated"
+                .into());
+        }
+        let (last_update, signature) =
+            crate::inbox::sign_authority(identity.addr, &parsed.settings).await?;
+        let rebuilt = freenet_mail_wire_v1::inbox::Inbox::with_signature(
             parsed.settings,
             parsed.messages,
+            last_update,
             owner_ek_bytes,
+            signature,
         );
         let state = rebuilt.serialize()?;
         let new_key = contract_api::create_contract(client, INBOX_CODE, state, &params).await?;
@@ -809,8 +817,7 @@ mod inbox_management {
         identity: &crate::app::Identity,
         prior_hash: &str,
     ) -> Result<(), DynError> {
-        use ml_dsa::signature::Keypair;
-        let vk = Keypair::verifying_key(identity.ml_dsa_signing_key.as_ref());
+        let vk = identity.ml_dsa_vk();
         let pub_key = crate::inbox::inbox_params_pub_key_bytes(&vk);
 
         // #251 improvement 2: chained migration. Build the candidate
@@ -851,36 +858,19 @@ mod inbox_management {
         Ok(())
     }
 
+    /// PUT `identity`'s inbox with `state`, its initial state as the mail
+    /// delegate signed it (`identity_store::initial_inbox_state`).
     pub(super) async fn create_contract(
         client: &mut WebApiRequestClient,
-        ml_dsa_key: Arc<MlDsaSigningKey<MlDsa65>>,
-        owner_ek_bytes: Vec<u8>,
-        required_tier: freenet_mail_wire_v1::aft::Tier,
-        max_age_secs: u64,
+        identity: &crate::app::Identity,
+        state: Vec<u8>,
     ) -> Result<ContractKey, DynError> {
-        let vk = Keypair::verifying_key(ml_dsa_key.as_ref());
+        let vk = identity.ml_dsa_vk();
         let identity_key = vk.encode().to_vec();
         let params: Parameters = InboxParams {
             pub_key: crate::inbox::inbox_params_pub_key_bytes(&vk),
         }
         .try_into()?;
-        // Seed the initial InboxSettings with the owner's anti-flood
-        // policy so senders mint at the right tier from day one. The
-        // owner can later mutate this via ModifySettings (#85).
-        let state = {
-            let inbox = freenet_mail_wire_v1::inbox::Inbox::new(
-                ml_dsa_key.as_ref(),
-                InboxSettings {
-                    minimum_tier: required_tier,
-                    max_age_secs,
-                    private: Default::default(),
-                    ..InboxSettings::default()
-                },
-                Vec::new(),
-                owner_ek_bytes,
-            );
-            inbox.serialize()?
-        };
         let contract_key =
             contract_api::create_contract(client, INBOX_CODE, state, &params).await?;
         super::identity_management::PENDING_CONFIRMATION.with(|pend| {
@@ -924,11 +914,9 @@ mod inbox_management {
 
 #[cfg(feature = "use-node")]
 mod token_record_management {
-    use std::sync::Arc;
 
     use freenet_mail_wire_v1::aft::{TokenAllocationRecord, TokenDelegateParameters};
     use freenet_stdlib::{client_api::ContractRequest, prelude::*};
-    use ml_dsa::{MlDsa65, SigningKey as MlDsaSigningKey, signature::Keypair};
 
     use super::*;
 
@@ -972,9 +960,9 @@ mod token_record_management {
 
     pub(super) async fn create_contract(
         client: &mut WebApiRequestClient,
-        ml_dsa_key: Arc<MlDsaSigningKey<MlDsa65>>,
+        identity: &crate::app::Identity,
     ) -> Result<ContractKey, DynError> {
-        let vk = Keypair::verifying_key(ml_dsa_key.as_ref());
+        let vk = identity.ml_dsa_vk();
         let identity_key = vk.encode().to_vec();
         let params: Parameters = TokenDelegateParameters::new(&vk).try_into()?;
         let contract_key = contract_api::create_contract(
@@ -1015,7 +1003,7 @@ mod token_record_management {
         identity: &crate::app::Identity,
         parsed: TokenAllocationRecord,
     ) -> Result<ContractKey, DynError> {
-        let vk = Keypair::verifying_key(identity.ml_dsa_signing_key.as_ref());
+        let vk = identity.ml_dsa_vk();
         let params: Parameters = TokenDelegateParameters::new(&vk).try_into()?;
         let state = parsed.serialized()?;
         let new_key =
@@ -1038,7 +1026,7 @@ mod token_record_management {
         identity: &crate::app::Identity,
         prior_hash: &str,
     ) -> Result<(), DynError> {
-        let vk = Keypair::verifying_key(identity.ml_dsa_signing_key.as_ref());
+        let vk = identity.ml_dsa_vk();
         let candidates = crate::inbox::build_migration_candidates(
             prior_hash,
             crate::aft::LEGACY_TOKEN_RECORD_CODE_HASHES,
@@ -1069,11 +1057,9 @@ mod token_record_management {
 
 #[cfg(feature = "use-node")]
 mod token_generator_management {
-    use std::sync::Arc;
 
     use freenet_mail_wire_v1::aft::DelegateParameters;
     use freenet_stdlib::prelude::DelegateKey;
-    use ml_dsa::{MlDsa65, SigningKey as MlDsaSigningKey, signature::Keypair};
 
     use super::*;
 
@@ -1104,21 +1090,16 @@ mod token_generator_management {
         pub(super) static CREATED_AFT_GEN: RefCell<Vec<(Rc<str>, DelegateKey)>> = const { RefCell::new(Vec::new()) };
     }
 
+    /// Register `identity`'s v1 token-generator delegate. `aft_params` are
+    /// its parameters as the mail delegate gives them (`V1AftParams`, the
+    /// JSON `DelegateParameters`).
     pub(super) async fn create_delegate(
         client: &mut WebApiRequestClient,
-        ml_dsa_key: Arc<MlDsaSigningKey<MlDsa65>>,
+        identity: &crate::app::Identity,
+        aft_params: &[u8],
     ) -> Result<DelegateKey, DynError> {
-        let vk = Keypair::verifying_key(ml_dsa_key.as_ref());
-        let identity_key = vk.encode().to_vec();
-        // DelegateParameters stores the 32-byte ML-DSA-65 seed; the signing
-        // key is reconstructed from it inside the delegate on every invocation.
-        let seed = {
-            let seed_bytes = ml_dsa_key.as_ref().to_seed();
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(seed_bytes.as_slice());
-            arr
-        };
-        let params = DelegateParameters::new(seed).try_into()?;
+        let identity_key = identity.ml_dsa_vk_bytes();
+        let params = serde_json::from_slice::<DelegateParameters>(aft_params)?.try_into()?;
         let delegate_key =
             delegate_api::create_delegate(client, TOKEN_GEN_CODE_HASH, TOKEN_GEN_CODE, &params)
                 .await?;
@@ -1131,88 +1112,56 @@ mod token_generator_management {
     }
 }
 
+/// Identities live in the mail delegate (`app::identity_store`). This tracks
+/// a new identity until its inbox, AFT record and token-generator delegate
+/// are published, and keeps the frozen v0.2.x identity delegate's artifacts
+/// pinned for the migration from it.
 #[cfg(feature = "use-node")]
 mod identity_management {
-    use std::rc::Rc;
+    use std::cell::RefCell;
+    use std::collections::HashMap;
 
-    use freenet_mail_wire_v1::identity::*;
-    use freenet_stdlib::{client_api::DelegateRequest, prelude::*};
-    use std::sync::Arc;
-
-    use ml_dsa::{MlDsa65, SigningKey as MlDsaSigningKey};
-    use ml_kem::{DecapsulationKey, MlKem768};
+    use freenet_stdlib::prelude::{ContractKey, DelegateKey};
 
     use crate::aft::AftRecords;
     use crate::app::Identity;
-    use crate::app::login::StoredIdentityKeys;
     use crate::inbox::InboxModel;
 
     use super::*;
 
-    const ID_MANAGER_CODE_HASH: &str =
-        include_str!("../../published-contract/wasm/v1/identity_management_code_hash");
-    const ID_MANAGER_CODE: &[u8] =
-        include_bytes!("../../published-contract/wasm/v1/identity_management");
-    const ID_MANAGER_KEY: &[u8] =
-        include_bytes!("../../published-contract/wasm/v1/identity-manager-params");
+    /// The v0.2.x identity-management delegate. Not used at runtime: its data
+    /// is carried over by the migration from it.
+    #[cfg(test)]
+    mod frozen_v1 {
+        use freenet_stdlib::prelude::*;
 
-    /// The committed parameters, exactly as the v0.2.x client sent them. The
-    /// delegate key hashes these bytes, so they are never re-encoded.
-    fn params() -> Parameters<'static> {
-        Parameters::from(ID_MANAGER_KEY.to_vec())
+        const ID_MANAGER_CODE_HASH: &str =
+            include_str!("../../published-contract/wasm/v1/identity_management_code_hash");
+        const ID_MANAGER_CODE: &[u8] =
+            include_bytes!("../../published-contract/wasm/v1/identity_management");
+        const ID_MANAGER_KEY: &[u8] =
+            include_bytes!("../../published-contract/wasm/v1/identity-manager-params");
+
+        /// The committed parameters, exactly as the v0.2.x client sent them.
+        fn params() -> Parameters<'static> {
+            Parameters::from(ID_MANAGER_KEY.to_vec())
+        }
+
+        #[test]
+        fn embedded_identity_wasm_has_the_embedded_code_hash() {
+            crate::api::embedded_artifact::assert_delegate(ID_MANAGER_CODE, ID_MANAGER_CODE_HASH);
+        }
+
+        #[test]
+        fn delegate_key_matches_the_v0_2_client() {
+            use crate::test_util::{frozen_key, hex};
+            let key = DelegateKey::from_params(ID_MANAGER_CODE_HASH, &params()).unwrap();
+            assert_eq!(hex(key.bytes()), frozen_key("identity_delegate"));
+        }
     }
 
-    #[test]
-    fn embedded_identity_wasm_has_the_embedded_code_hash() {
-        crate::api::embedded_artifact::assert_delegate(ID_MANAGER_CODE, ID_MANAGER_CODE_HASH);
-    }
-
-    #[test]
-    fn delegate_key_matches_the_v0_2_client() {
-        use crate::test_util::{frozen_key, hex};
-        let key = DelegateKey::from_params(ID_MANAGER_CODE_HASH, &params()).unwrap();
-        assert_eq!(hex(key.bytes()), frozen_key("identity_delegate"));
-    }
-
-    pub(super) async fn create_delegate(
-        client: &mut WebApiRequestClient,
-    ) -> Result<DelegateKey, DynError> {
-        let params = params();
-        let key =
-            delegate_api::create_delegate(client, ID_MANAGER_CODE_HASH, ID_MANAGER_CODE, &params)
-                .await?;
-        // `Init` is idempotent in the delegate (a no-op when state exists), so
-        // calling it on every page load is safe and ensures the secret is
-        // present before the first GetIdentities/CreateIdentity request.
-        let request = DelegateRequest::ApplicationMessages {
-            params: params.clone(),
-            inbound: vec![InboundDelegateMsg::ApplicationMessage(
-                ApplicationMessage::new(Vec::<u8>::try_from(&IdentityMsg::Init)?),
-            )],
-            key: key.clone(),
-        };
-        client.send(request.into()).await?;
-        Ok(key)
-    }
-
-    pub(super) async fn load_aliases(
-        client: &mut WebApiRequestClient,
-    ) -> Result<DelegateKey, DynError> {
-        let params = params();
-        let key = DelegateKey::from_params(ID_MANAGER_CODE_HASH, &params)?;
-        crate::log::debug!("loading aliases ({key})");
-        // Request identities via ApplicationMessages (GetSecretRequest was removed in stdlib 0.3)
-        let request = DelegateRequest::ApplicationMessages {
-            params: params.clone(),
-            inbound: vec![InboundDelegateMsg::ApplicationMessage(
-                ApplicationMessage::new(Vec::<u8>::try_from(&IdentityMsg::GetIdentities)?),
-            )],
-            key: key.clone(),
-        };
-        client.send(request.into()).await?;
-        Ok(key)
-    }
-
+    /// Once all three of a new identity's contracts are published, surface
+    /// it as fully created.
     pub(super) async fn alias_creation(
         client: &mut WebApiRequestClient,
         identity_key: &[u8],
@@ -1220,122 +1169,41 @@ mod identity_management {
         user: Signal<crate::app::User>,
         mut login_controller: Signal<crate::app::LoginController>,
     ) {
-        let id = identity_management::PENDING_CONFIRMATION
-            .with(|pend| pend.borrow_mut().remove(identity_key));
-        let NewIdentity {
-            alias,
-            description,
-            ml_dsa_key,
-            ml_kem_dk,
-            inbox_key,
+        let Some(NewIdentity {
+            identity: Some(identity),
+            inbox_key: Some(inbox_key),
             aft_rec,
             ..
-        } = id.unwrap();
-
-        let alias = alias.unwrap();
-        let inbox_key = inbox_key.unwrap();
-        let ml_dsa_key = ml_dsa_key.unwrap();
-        let ml_kem_dk = ml_kem_dk.unwrap();
-
-        // TODO: in reality we should wait to confirm the identity manager delegate has been properly updated
-        // before adding the identity
-        {
-            // update alias state where appropriate
-            let identity = Identity::set_alias(
-                alias.clone(),
-                description.clone(),
-                ml_dsa_key.clone(),
-                ml_kem_dk.clone(),
-                inbox_key,
-                user,
-            );
-            crate::inbox::InboxModel::set_contract_identity(inbox_key, identity.clone());
-            token_rec_to_id.insert(aft_rec.unwrap(), identity);
-            // ALIASES is a thread-local RefCell, not a Signal — mutating it
-            // does not wake the Identities component. Bump the controller
-            // so the just-created identity shows without a page reload.
-            login_controller.write().updated = true;
+        }) = PENDING_CONFIRMATION.with(|pend| pend.borrow_mut().remove(identity_key))
+        else {
+            return;
+        };
+        let identity = Identity::set_alias(identity, inbox_key, user);
+        crate::inbox::InboxModel::set_contract_identity(inbox_key, identity.clone());
+        if let Some(aft_rec) = aft_rec {
+            token_rec_to_id.insert(aft_rec, identity);
         }
+        // ALIASES is a thread-local RefCell, not a Signal: bump the
+        // controller so the just-created identity shows without a reload.
+        login_controller.write().updated = true;
 
-        // Bootstrap the inbox + AFT-record subscriptions via GET-with-subscribe
-        // (`get_state` sets `subscribe: true`). This fetches current state AND
-        // registers this node as a subscriber/holder in one op. The previous
-        // scheme issued a standalone Subscribe first, which the node rejects
-        // when the contract isn't already cached locally ("contract WASM not
-        // cached locally") — so the inbox never loaded and the owner never
-        // held its own inbox (issue #288). The GET also surfaces any
-        // pre-existing messages as a one-shot UpdateNotification(State).
+        // Bootstrap the inbox + AFT-record subscriptions via
+        // GET-with-subscribe: a standalone Subscribe is rejected when the
+        // contract isn't cached locally (#288). The GET also surfaces any
+        // pre-existing messages.
         if let Err(e) = InboxModel::get_state(&mut client.clone(), inbox_key).await {
             crate::log::error(format!("inbox get-with-subscribe failed: {e}"), None);
         }
-        if let Err(e) = AftRecords::get_state(&mut client.clone(), aft_rec.unwrap()).await {
+        if let Some(aft_rec) = aft_rec
+            && let Err(e) = AftRecords::get_state(&mut client.clone(), aft_rec).await
+        {
             crate::log::error(format!("aft record get-with-subscribe failed: {e}"), None);
         }
-
-        match identity_management::create_alias_api_call(
-            client,
-            alias.clone(),
-            description,
-            ml_dsa_key,
-            ml_kem_dk,
-        )
-        .await
-        {
-            Ok(_) => {}
-            Err(e) => {
-                crate::log::error(
-                    format!("{e}"),
-                    Some(TryNodeAction::CreateIdentity(alias.to_string())),
-                );
-            }
-        }
-    }
-
-    /// Send a single `IdentityMsg` to the identity-management delegate.
-    /// Owns the `params` / `delegate_key` boilerplate shared by every
-    /// alias / contact CRUD path. Fire-and-forget — we do not await an
-    /// ACK from the delegate.
-    async fn send_identity_msg(
-        client: &mut WebApiRequestClient,
-        msg: &IdentityMsg,
-    ) -> Result<(), DynError> {
-        let params = params();
-        let delegate_key = DelegateKey::from_params(ID_MANAGER_CODE_HASH, &params)?;
-        let request = DelegateRequest::ApplicationMessages {
-            params,
-            inbound: vec![InboundDelegateMsg::ApplicationMessage(
-                ApplicationMessage::new(Vec::<u8>::try_from(msg)?),
-            )],
-            key: delegate_key,
-        };
-        client.send(request.into()).await?;
-        Ok(())
-    }
-
-    pub(super) async fn create_alias_api_call(
-        client: &mut WebApiRequestClient,
-        alias: Rc<str>,
-        description: String,
-        ml_dsa_key: Arc<MlDsaSigningKey<MlDsa65>>,
-        ml_kem_dk: DecapsulationKey<MlKem768>,
-    ) -> Result<(), DynError> {
-        crate::log::debug!("creating {alias}");
-        let stored = StoredIdentityKeys::new(&ml_dsa_key, &ml_kem_dk);
-        let msg = IdentityMsg::CreateIdentity {
-            alias: alias.to_string(),
-            key: serde_json::to_vec(&stored)?,
-            extra: Some(description),
-            kind: Some(freenet_mail_wire_v1::identity::EntryKind::Identity),
-        };
-        send_identity_msg(client, &msg).await
     }
 
     #[derive(Default)]
     pub(super) struct NewIdentity {
-        pub alias: Option<Rc<str>>,
-        pub description: String,
-        pub ml_dsa_key: Option<Arc<MlDsaSigningKey<MlDsa65>>>,
-        pub ml_kem_dk: Option<DecapsulationKey<MlKem768>>,
+        pub identity: Option<Identity>,
         pub created_inbox: bool,
         pub inbox_key: Option<ContractKey>,
         pub created_aft_rec: bool,
@@ -1349,162 +1217,93 @@ mod identity_management {
             self.created_inbox
                 && self.created_aft_gen
                 && self.created_aft_rec
-                && self.alias.is_some()
-                && self.ml_dsa_key.is_some()
+                && self.identity.is_some()
         }
     }
 
     thread_local! {
-        /// Keyed by the encoded ML-DSA-65 verifying key bytes (1952 bytes).
-        /// That byte string is the per-identity stable correlator now that
-        /// RSA is gone from the user-identity code path.
+        /// Keyed by the encoded ML-DSA-65 verifying key bytes (1952 bytes),
+        /// the per-identity stable correlator.
         pub(super) static PENDING_CONFIRMATION: RefCell<HashMap<Vec<u8>, NewIdentity>> = RefCell::new(HashMap::new());
     }
+}
 
-    /// Delete an own identity from the delegate. The delegate stores own
-    /// identities and contacts in the same alias-keyed map, so
-    /// `DeleteIdentity` is the right wire message regardless of kind —
-    /// the UI layer is responsible for confirmation. The inbox/AFT
-    /// contracts on-chain are not touched; without the keypair nobody can
-    /// sign deltas against them anyway, so they're effectively orphaned.
-    pub(super) async fn delete_identity_api_call(
-        client: &mut WebApiRequestClient,
-        alias: &str,
-    ) -> Result<(), DynError> {
-        crate::log::debug!("deleting own identity {alias}");
-        let msg = IdentityMsg::DeleteIdentity {
-            alias: alias.to_string(),
-        };
-        send_identity_msg(client, &msg).await
-    }
+/// Await a settings change the mail delegate signs (`prepared`), then send
+/// it. In a task: the node loop delivers the delegate's answers, so it must
+/// never wait for one.
+#[cfg(feature = "use-node")]
+fn send_signed_in_background(
+    mut client: WebApiRequestClient,
+    prepared: futures::future::LocalBoxFuture<
+        'static,
+        Result<freenet_stdlib::client_api::ContractRequest<'static>, DynError>,
+    >,
+    what: &'static str,
+) {
+    crate::app::identity_store::spawn_detached(async move {
+        match prepared.await {
+            Ok(request) => {
+                if let Err(e) = client.send(request.into()).await {
+                    crate::log::error(format!("{what} failed: {e}"), None);
+                }
+            }
+            Err(e) => crate::log::error(format!("{what}: signing failed: {e}"), None),
+        }
+    });
+}
 
-    /// Stamp the current `INBOX_CODE_HASH` on the identity-management
-    /// delegate so subsequent reloads can compare against it and detect
-    /// a deliberate contract bump (#213). Called from the migration
-    /// path after a successful PUT, and on first load to baseline the
-    /// hash (so the very first contract-bump release is detectable).
-    pub(super) async fn stamp_inbox_wasm_hash_api_call(
-        client: &mut WebApiRequestClient,
-        alias: &str,
-    ) -> Result<(), DynError> {
-        let msg = IdentityMsg::UpdateInboxWasmHash {
-            alias: alias.to_string(),
-            wasm_hash: crate::inbox::INBOX_CODE_HASH.to_string(),
-        };
-        send_identity_msg(client, &msg).await
+/// Show `identity`'s inbox `state`: replaces the settings, keeps the
+/// messages already decrypted that the state still holds, and has the mail
+/// delegate decrypt the rest in a task ([`spawn_decrypt`]).
+#[cfg(feature = "use-node")]
+fn set_inbox_state(
+    mut inboxes: crate::app::InboxesData,
+    identity: &crate::app::Identity,
+    key: freenet_stdlib::prelude::ContractKey,
+    state: freenet_mail_wire_v1::inbox::Inbox,
+) {
+    use crate::inbox::InboxModel;
+    let mut models = inboxes.0.write();
+    let pending = match models.iter().position(|e| e.borrow().key == key) {
+        Some(pos) => models[pos].borrow_mut().replace_state(state),
+        None => InboxModel::from_state(identity.addr, identity.ml_kem_ek_bytes(), state, key).map(
+            |(model, pending)| {
+                models.push(Rc::new(RefCell::new(model)));
+                pending
+            },
+        ),
+    };
+    drop(models);
+    match pending {
+        Ok(pending) => spawn_decrypt(inboxes, key, pending),
+        Err(e) => crate::log::error(format!("inbox {key}: bad state: {e}"), None),
     }
+}
 
-    /// Mark an in-flight migration on the identity-management delegate
-    /// so the next session can re-attempt the GET if this one never
-    /// resolves (#251 improvement 5).
-    pub(super) async fn set_pending_migration_api_call(
-        client: &mut WebApiRequestClient,
-        alias: &str,
-        prior_hash: &str,
-    ) -> Result<(), DynError> {
-        let msg = IdentityMsg::SetPendingMigrationFrom {
-            alias: alias.to_string(),
-            prior_hash: Some(prior_hash.to_string()),
-        };
-        send_identity_msg(client, &msg).await
+/// Decrypt `pending` in the mail delegate and add the messages to inbox
+/// `key`. Runs in a task: the node loop delivers the delegate's answers, so
+/// it must never wait for one.
+#[cfg(feature = "use-node")]
+fn spawn_decrypt(
+    inboxes: crate::app::InboxesData,
+    key: freenet_stdlib::prelude::ContractKey,
+    pending: crate::inbox::PendingDecrypt,
+) {
+    if pending.is_empty() {
+        return;
     }
-
-    /// Clear the in-flight migration marker after a successful PUT
-    /// under the current inbox key (#251 improvement 5).
-    pub(super) async fn clear_pending_migration_api_call(
-        client: &mut WebApiRequestClient,
-        alias: &str,
-    ) -> Result<(), DynError> {
-        let msg = IdentityMsg::SetPendingMigrationFrom {
-            alias: alias.to_string(),
-            prior_hash: None,
-        };
-        send_identity_msg(client, &msg).await
-    }
-
-    /// Stamp the current `TOKEN_RECORD_CODE_HASH` on the
-    /// identity-management delegate so subsequent reloads can compare
-    /// against it and detect a deliberate AFT contract bump
-    /// (#251 improvement 3). Parallel to
-    /// `stamp_inbox_wasm_hash_api_call` for the AFT side.
-    pub(super) async fn stamp_aft_record_wasm_hash_api_call(
-        client: &mut WebApiRequestClient,
-        alias: &str,
-    ) -> Result<(), DynError> {
-        let msg = IdentityMsg::UpdateAftRecordWasmHash {
-            alias: alias.to_string(),
-            wasm_hash: crate::aft::TOKEN_RECORD_CODE_HASH.to_string(),
-        };
-        send_identity_msg(client, &msg).await
-    }
-
-    /// Mark an in-flight AFT migration so the next session can re-attempt
-    /// the GET if this one never resolves
-    /// (#251 improvement 3 + improvement 5).
-    pub(super) async fn set_pending_aft_migration_api_call(
-        client: &mut WebApiRequestClient,
-        alias: &str,
-        prior_hash: &str,
-    ) -> Result<(), DynError> {
-        let msg = IdentityMsg::SetPendingAftMigrationFrom {
-            alias: alias.to_string(),
-            prior_hash: Some(prior_hash.to_string()),
-        };
-        send_identity_msg(client, &msg).await
-    }
-
-    /// Clear the in-flight AFT migration marker after a successful PUT
-    /// under the current AFT record key (#251 improvement 3).
-    pub(super) async fn clear_pending_aft_migration_api_call(
-        client: &mut WebApiRequestClient,
-        alias: &str,
-    ) -> Result<(), DynError> {
-        let msg = IdentityMsg::SetPendingAftMigrationFrom {
-            alias: alias.to_string(),
-            prior_hash: None,
-        };
-        send_identity_msg(client, &msg).await
-    }
-
-    /// Rename an own identity by replaying its keypair under a new
-    /// alias and deleting the old entry. Issue #32 — the delegate has
-    /// no atomic Rename op, so we do delete+create at the UI layer.
-    /// Same key bytes + same description, only the map key changes.
-    pub(super) async fn rename_identity_api_call(
-        client: &mut WebApiRequestClient,
-        old: &str,
-        new: &str,
-        identity: &crate::app::login::Identity,
-    ) -> Result<(), DynError> {
-        crate::log::debug!("renaming identity {old} → {new}");
-        let stored = crate::app::login::StoredIdentityKeys::new(
-            &identity.ml_dsa_signing_key,
-            &identity.ml_kem_dk,
-        );
-        let key = serde_json::to_vec(&stored)?;
-        let extra = if identity.description.is_empty() {
-            None
-        } else {
-            Some(identity.description.clone())
-        };
-        // Order matters: create-then-delete avoids leaving the
-        // identity orphaned on a crash between the two messages.
-        // The delegate accepts both alias keys briefly during the
-        // overlap; the local ALIASES update happens after both
-        // messages are accepted so the UI doesn't flicker through a
-        // half-renamed state.
-        let create = IdentityMsg::CreateIdentity {
-            alias: new.to_string(),
-            key,
-            extra,
-            kind: Some(freenet_mail_wire_v1::identity::EntryKind::Identity),
-        };
-        send_identity_msg(client, &create).await?;
-        let delete = IdentityMsg::DeleteIdentity {
-            alias: old.to_string(),
-        };
-        send_identity_msg(client, &delete).await
-    }
+    let mut inboxes = inboxes;
+    crate::app::identity_store::spawn_detached(async move {
+        match crate::inbox::decrypt_pending(pending).await {
+            Ok(decrypted) => {
+                let models = inboxes.0.write();
+                if let Some(model) = models.iter().find(|e| e.borrow().key == key) {
+                    model.borrow_mut().add_decrypted(decrypted);
+                }
+            }
+            Err(e) => crate::log::error(format!("inbox {key}: {e}"), None),
+        }
+    });
 }
 
 #[cfg(feature = "use-node")]
@@ -1523,7 +1322,6 @@ pub(crate) async fn node_comms(
         prelude::*,
     };
     use futures::StreamExt;
-    use std::sync::Arc;
 
     use crate::{
         aft::AftRecords,
@@ -1531,17 +1329,13 @@ pub(crate) async fn node_comms(
         inbox::InboxModel,
     };
 
-    // Derive the encoded-VK correlator used as PENDING_CONFIRMATION's key
-    // from a pending identity record. Expects `id.ml_dsa_key.is_some()`.
+    // The encoded-VK correlator PENDING_CONFIRMATION is keyed by. Expects
+    // `id.identity.is_some()`, which `created()` checks.
     fn identity_key_of(id: &identity_management::NewIdentity) -> Vec<u8> {
-        use ml_dsa::signature::Keypair;
-        id.ml_dsa_key
+        id.identity
             .as_ref()
-            .expect("pending identity must have ml_dsa_key before created() returns true")
-            .as_ref()
-            .verifying_key()
-            .encode()
-            .to_vec()
+            .expect("pending identity must be set before created() returns true")
+            .ml_dsa_vk_bytes()
     }
 
     let mut token_contract_to_id = HashMap::new();
@@ -1559,22 +1353,6 @@ pub(crate) async fn node_comms(
         crate::aft::AftRecords::load_all(&mut req_sender, &contracts, &mut token_contract_to_id)
             .await;
     }
-    // Register the identities delegate eagerly. Without this, the first
-    // ApplicationMessages (load_aliases / alias_creation) hits a node that
-    // has never seen this delegate, returns DelegateError::Missing, and
-    // the recovery path that registers it after the fact loses the original
-    // request — the user clicks "Create identity" and nothing happens.
-    if let Err(e) = identity_management::create_delegate(&mut req_sender).await {
-        crate::log::error(format!("identities delegate register failed: {e}"), None);
-    }
-    // Copy any entries from previous delegate hashes (`LEGACY_ID_DELEGATE_HASHES`,
-    // currently empty) into the current delegate. No-op until a future
-    // breaking change populates the slice.
-    crate::app::address_book::migrate_legacy_identities();
-    let identities_key = identity_management::load_aliases(&mut req_sender)
-        .await
-        .unwrap();
-
     // Register mail-local-state delegate (drafts + read-state, issue #47/47a).
     // Eager-register matches the identities pattern above: without it the
     // first SaveDraft / MarkRead hits a node that's never seen the delegate.
@@ -1604,8 +1382,10 @@ pub(crate) async fn node_comms(
     #[cfg(target_family = "wasm")]
     permission_pump::spawn(user);
 
-    static IDENTITIES_KEY: OnceLock<DelegateKey> = OnceLock::new();
-    IDENTITIES_KEY.set(identities_key.clone()).unwrap();
+    // Identities live in the mail delegate. Read them in a task of their own
+    // (this loop delivers the delegate's answers); the task hands them back
+    // as `NodeAction::IdentitiesLoaded`.
+    crate::app::identity_store::spawn_detached(crate::app::identity_store::load_and_report());
 
     // Contacts live in the mail delegate. Load them into the address book;
     // the call runs in its own task because this loop is what delivers the
@@ -1640,6 +1420,81 @@ pub(crate) async fn node_comms(
         });
     }
 
+    /// The identities the mail delegate holds, read at startup: restore
+    /// their runtime wiring lost on reload (inbox routing + AFT-record
+    /// subscriptions, the AFT generator delegate registration), prime the
+    /// contacts' inboxes, and dispatch the contract migrations whose markers
+    /// the loader task already recorded.
+    async fn identities_loaded(
+        client: &mut WebApiRequestClient,
+        loaded: Vec<crate::app::identity_store::LoadedIdentity>,
+        token_rec_to_id: &mut HashMap<ContractKey, Identity>,
+        user: Signal<crate::app::User>,
+        mut login_controller: Signal<crate::app::LoginController>,
+        mut ab_gen: crate::app::AddressBookGen,
+    ) {
+        let infos: Vec<_> = loaded.iter().map(|l| l.info.clone()).collect();
+        let new_ids = crate::app::Identity::set_identities(&infos, user);
+        // ALIASES is a thread_local Vec, not a Dioxus signal: bump
+        // login_controller so the Identities component re-renders, and the
+        // address-book generation so message views re-render (#143).
+        login_controller.write().updated = true;
+        let prev = *ab_gen.0.read();
+        *ab_gen.0.write() = prev.wrapping_add(1);
+        if !new_ids.is_empty() {
+            InboxModel::load_all(client, &new_ids).await;
+            AftRecords::load_all(client, &new_ids, token_rec_to_id).await;
+        }
+        for (id, l) in new_ids.iter().zip(&loaded) {
+            if let Some(params) = &l.aft_params
+                && let Err(e) =
+                    token_generator_management::create_delegate(client, id, params).await
+            {
+                crate::log::error(
+                    format!("AFT-gen re-register for `{}` failed: {e}", id.alias()),
+                    None,
+                );
+            }
+        }
+        // #191: after a reload the local node's contract store is empty, so
+        // prime every contact's inbox before the first send to it.
+        for contact in crate::app::address_book::all_contacts() {
+            prime_contact_inbox(client, &contact).await;
+        }
+        // #213 / #251: the loader recorded the markers (pending set, current
+        // hash stamped) before handing these over; dispatch the GETs.
+        for (id, l) in new_ids.iter().zip(&loaded) {
+            if let Some(prior_hash) = &l.inbox_migrate_from {
+                crate::log::info(format!(
+                    "inbox migration: detected drift for `{}` prior_hash={prior_hash} current_hash={} (#213, #251)",
+                    id.alias(),
+                    crate::inbox::INBOX_CODE_HASH,
+                ));
+                if let Err(e) = inbox_management::migrate_inbox(client, id, prior_hash).await {
+                    crate::log::error(
+                        format!("inbox migration: failed for `{}`: {e} (#213)", id.alias()),
+                        None,
+                    );
+                }
+            }
+            if let Some(prior_hash) = &l.aft_migrate_from {
+                crate::log::info(format!(
+                    "AFT migration: detected drift for `{}` prior_hash={prior_hash} current_hash={} (#251)",
+                    id.alias(),
+                    crate::aft::TOKEN_RECORD_CODE_HASH,
+                ));
+                if let Err(e) =
+                    token_record_management::migrate_aft_record(client, id, prior_hash).await
+                {
+                    crate::log::error(
+                        format!("AFT migration: failed for `{}`: {e} (#251)", id.alias()),
+                        None,
+                    );
+                }
+            }
+        }
+    }
+
     async fn handle_action(
         req: NodeAction,
         api: &WebApi,
@@ -1672,126 +1527,75 @@ pub(crate) async fn node_comms(
                     }
                 }
             }
+            NodeAction::IdentitiesLoaded { identities } => {
+                identities_loaded(
+                    &mut client,
+                    identities,
+                    _token_rec_to_id,
+                    user,
+                    login_controller,
+                    ab_gen,
+                )
+                .await;
+            }
             NodeAction::CreateIdentity {
-                alias,
-                ml_dsa_key,
-                ml_kem_dk,
-                description,
+                identity,
                 backed_up,
             } => {
-                // #185 / #186: persist the keypair to the identity-management
-                // delegate IMMEDIATELY and surface the identity in the UI
-                // BEFORE waiting on any contract PUT acks. The keypair is
-                // the canonical record; inbox + AFT contracts derive
-                // deterministically from it and can be republished later.
-                // Previously this only ran inside `alias_creation`, which
-                // was gated on three PutResponses — any one timing out on
-                // a slow real-net silently dropped the identity.
-                use ml_dsa::signature::Keypair;
-                let identity_key = ml_dsa_key.as_ref().verifying_key().encode().to_vec();
-                let ml_kem_dk_inner = *ml_kem_dk;
+                // #185 / #186: the mail delegate already holds the keys (the
+                // create or restore answered before this action was sent),
+                // so surface the identity in the UI now, BEFORE waiting on
+                // any contract PUT acks. Inbox + AFT contracts derive
+                // deterministically from the keys and can be republished.
+                let identity = *identity;
+                let alias = identity.alias.clone();
+                let identity_key = identity.ml_dsa_vk_bytes();
                 identity_management::PENDING_CONFIRMATION.with(|pend| {
                     let pend = &mut *pend.borrow_mut();
                     let pend = pend.entry(identity_key.clone()).or_default();
                     crate::log::debug!("waiting for confirmation for identity {alias}");
-                    pend.alias = Some(alias.clone());
-                    pend.description = description.clone();
-                    pend.ml_dsa_key = Some(ml_dsa_key.clone());
-                    pend.ml_kem_dk = Some(ml_kem_dk_inner.clone());
+                    pend.identity = Some(identity.clone());
                 });
-
-                // ── Step 1: persist to identity-management delegate ──
-                // Local-only operation, fast, reliable. Even if every
-                // subsequent step fails, the keys are safe and the
-                // identity is recoverable on next page load.
-                if let Err(e) = identity_management::create_alias_api_call(
-                    &mut client,
-                    alias.clone(),
-                    description.clone(),
-                    ml_dsa_key.clone(),
-                    ml_kem_dk_inner.clone(),
-                )
-                .await
-                {
-                    crate::log::error(
-                        format!("identity delegate persist failed: {e}"),
-                        Some(TryNodeAction::CreateIdentity(alias.to_string())),
-                    );
-                    crate::toast::push_toast(
-                        format!("Couldn't save identity `{alias}`: {e}"),
-                        crate::toast::ToastLevel::Error,
-                    );
-                    return;
-                }
-                // The create request went to the identity delegate without
-                // error (sent, not acknowledged: the delegate's result isn't
-                // reported back here, and this is also where the identity is
-                // surfaced in the UI). Only now record whether these keys
-                // are backed up; stamping earlier let a create that failed
-                // to send, retried under the same alias with new keys, show
-                // as backed up.
                 crate::app::login::record_backup_after_create(&alias, backed_up);
 
-                // ── Step 2: derive contract keys + populate ALIASES ──
                 // `inbox_key` is `hash(wasm, InboxParams::from(vk))` —
                 // deterministic, no network round-trip needed.
-                let inbox_key =
-                    match crate::inbox::inbox_key_for(&ml_dsa_key.as_ref().verifying_key()) {
-                        Ok(k) => k,
-                        Err(e) => {
-                            crate::log::error(
-                                format!("derive inbox_key for {alias}: {e}"),
-                                Some(TryNodeAction::CreateIdentity(alias.to_string())),
-                            );
-                            return;
-                        }
-                    };
+                let inbox_key = match crate::inbox::inbox_key_for(&identity.ml_dsa_vk()) {
+                    Ok(k) => k,
+                    Err(e) => {
+                        crate::log::error(
+                            format!("derive inbox_key for {alias}: {e}"),
+                            Some(TryNodeAction::CreateIdentity(alias.to_string())),
+                        );
+                        return;
+                    }
+                };
                 identity_management::PENDING_CONFIRMATION.with(|pend| {
                     let pend = &mut *pend.borrow_mut();
-                    if let Some(slot) = pend.get_mut(&identity_key) {
-                        // Stash the deterministic inbox_key so the
-                        // PutResponse handler matches even if the network
-                        // ack arrives before the eager set_alias below
-                        // (or never, in which case we already have the
-                        // key locally).
-                        if slot.inbox_key.is_none() {
-                            slot.inbox_key = Some(inbox_key);
-                        }
+                    if let Some(slot) = pend.get_mut(&identity_key)
+                        && slot.inbox_key.is_none()
+                    {
+                        // So the PutResponse handler matches even if the
+                        // network ack arrives before the set_alias below.
+                        slot.inbox_key = Some(inbox_key);
                     }
                 });
-                let identity = crate::app::login::Identity::set_alias(
-                    alias.clone(),
-                    description,
-                    ml_dsa_key.clone(),
-                    ml_kem_dk_inner,
-                    inbox_key,
-                    user,
-                );
-                crate::inbox::InboxModel::set_contract_identity(inbox_key, identity.clone());
-                // ALIASES is a thread_local RefCell, not a Signal —
-                // mutating it doesn't wake the Identities component.
-                // Bump the controller so the row appears without a
-                // page reload (#186 fix).
+                let identity = crate::app::login::Identity::set_alias(identity, inbox_key, user);
+                crate::inbox::InboxModel::set_contract_identity(inbox_key, identity);
+                // ALIASES is a thread_local RefCell, not a Signal: bump the
+                // controller so the row appears without a reload (#186).
                 login_controller.write().updated = true;
             }
             NodeAction::CreateContract {
-                ml_dsa_key,
-                ml_kem_ek_bytes,
-                contract_type,
                 alias,
-                required_tier,
-                max_age_secs,
+                contract_type,
+                identity,
+                inbox_state,
             } => match contract_type {
                 ContractType::InboxContract => {
                     crate::log::debug!("creating inbox contract for {alias}");
-                    match inbox_management::create_contract(
-                        &mut client,
-                        ml_dsa_key,
-                        ml_kem_ek_bytes,
-                        required_tier,
-                        max_age_secs,
-                    )
-                    .await
+                    match inbox_management::create_contract(&mut client, &identity, inbox_state)
+                        .await
                     {
                         Ok(key) => {
                             inbox_management::CREATED_INBOX.with(|k| {
@@ -1806,11 +1610,8 @@ pub(crate) async fn node_comms(
                     }
                 }
                 ContractType::AFTContract => {
-                    // AFT record contract id is derived from the sender's
-                    // ML-DSA key alone; the ek belongs to the inbox.
-                    let _ = ml_kem_ek_bytes;
                     crate::log::debug!("creating AFT record contract for {alias}");
-                    match token_record_management::create_contract(&mut client, ml_dsa_key).await {
+                    match token_record_management::create_contract(&mut client, &identity).await {
                         Ok(key) => {
                             token_record_management::CREATED_AFT_RECORD.with(|k| {
                                 crate::log::debug!("waiting AFT record contract for {alias}");
@@ -1824,9 +1625,19 @@ pub(crate) async fn node_comms(
                     }
                 }
             },
-            NodeAction::CreateDelegate { ml_dsa_key, alias } => {
+            NodeAction::CreateDelegate {
+                alias,
+                identity,
+                aft_params,
+            } => {
                 crate::log::debug!("creating AFT gen delegate for {alias}");
-                match token_generator_management::create_delegate(&mut client, ml_dsa_key).await {
+                match token_generator_management::create_delegate(
+                    &mut client,
+                    &identity,
+                    &aft_params,
+                )
+                .await
+                {
                     Ok(key) => {
                         token_generator_management::CREATED_AFT_GEN.with(|k| {
                             crate::log::debug!("waiting AFT gen delegate for {alias}");
@@ -1875,27 +1686,31 @@ pub(crate) async fn node_comms(
                     let mut model = cell.borrow_mut();
                     model.update_policy_prepare(required_tier, max_age_secs)
                 };
-                match prepared {
-                    Ok(request) => {
-                        if let Err(e) = client.send(request.into()).await {
+                // The delegate signs the change: wait for it in a task, never
+                // in this loop, which delivers the delegate's answers.
+                let alias = identity.alias.clone();
+                crate::app::identity_store::spawn_detached(async move {
+                    match prepared.await {
+                        Ok(request) => {
+                            if let Err(e) = client.send(request.into()).await {
+                                crate::log::error(
+                                    format!("UpdateInboxPolicy send failed: {e}"),
+                                    Some(TryNodeAction::SendMessage),
+                                );
+                            } else {
+                                crate::log::info(format!(
+                                    "UpdateInboxPolicy dispatched for `{alias}` tier={required_tier:?} max_age_secs={max_age_secs} (#85)"
+                                ));
+                            }
+                        }
+                        Err(e) => {
                             crate::log::error(
-                                format!("UpdateInboxPolicy send failed: {e}"),
+                                format!("UpdateInboxPolicy prepare failed: {e}"),
                                 Some(TryNodeAction::SendMessage),
                             );
-                        } else {
-                            crate::log::info(format!(
-                                "UpdateInboxPolicy dispatched for `{}` tier={required_tier:?} max_age_secs={max_age_secs} (#85)",
-                                identity.alias()
-                            ));
                         }
                     }
-                    Err(e) => {
-                        crate::log::error(
-                            format!("UpdateInboxPolicy prepare failed: {e}"),
-                            Some(TryNodeAction::SendMessage),
-                        );
-                    }
-                }
+                });
             }
             NodeAction::UpdateVerifiedBypass {
                 identity,
@@ -1932,27 +1747,31 @@ pub(crate) async fn node_comms(
                     model
                         .update_verified_bypass_prepare(allow_verified_skip_token, verified_senders)
                 };
-                match prepared {
-                    Ok(request) => {
-                        if let Err(e) = client.send(request.into()).await {
+                // The delegate signs the change: wait for it in a task, never
+                // in this loop, which delivers the delegate's answers.
+                let alias = identity.alias.clone();
+                crate::app::identity_store::spawn_detached(async move {
+                    match prepared.await {
+                        Ok(request) => {
+                            if let Err(e) = client.send(request.into()).await {
+                                crate::log::error(
+                                    format!("UpdateVerifiedBypass send failed: {e}"),
+                                    Some(TryNodeAction::SendMessage),
+                                );
+                            } else {
+                                crate::log::info(format!(
+                                    "UpdateVerifiedBypass dispatched for `{alias}` allow={allow_verified_skip_token} (#157)"
+                                ));
+                            }
+                        }
+                        Err(e) => {
                             crate::log::error(
-                                format!("UpdateVerifiedBypass send failed: {e}"),
+                                format!("UpdateVerifiedBypass prepare failed: {e}"),
                                 Some(TryNodeAction::SendMessage),
                             );
-                        } else {
-                            crate::log::info(format!(
-                                "UpdateVerifiedBypass dispatched for `{}` allow={allow_verified_skip_token} (#157)",
-                                identity.alias()
-                            ));
                         }
                     }
-                    Err(e) => {
-                        crate::log::error(
-                            format!("UpdateVerifiedBypass prepare failed: {e}"),
-                            Some(TryNodeAction::SendMessage),
-                        );
-                    }
-                }
+                });
             }
             NodeAction::CreateContact { contact } => {
                 // Stored in the mail delegate in the background; the address
@@ -2077,24 +1896,11 @@ pub(crate) async fn node_comms(
                                                 verified_senders,
                                             )
                                         };
-                                        match prepared {
-                                            Ok(request) => {
-                                                if let Err(e) = client.send(request.into()).await {
-                                                    crate::log::error(
-                                                        format!(
-                                                            "verified-bypass sync on CreateContact failed: {e}"
-                                                        ),
-                                                        None,
-                                                    );
-                                                }
-                                            }
-                                            Err(e) => {
-                                                crate::log::error(
-                                                    format!("verified-bypass prepare failed: {e}"),
-                                                    None,
-                                                );
-                                            }
-                                        }
+                                        send_signed_in_background(
+                                            client.clone(),
+                                            prepared,
+                                            "verified-bypass sync on CreateContact",
+                                        );
                                     }
                                 }
                             }
@@ -2207,26 +2013,11 @@ pub(crate) async fn node_comms(
                                         let mut model = cell.borrow_mut();
                                         model.update_verified_bypass_prepare(true, verified_senders)
                                     };
-                                    match prepared {
-                                        Ok(request) => {
-                                            if let Err(e) = client.send(request.into()).await {
-                                                crate::log::error(
-                                                    format!(
-                                                        "verified-bypass sync on DeleteContact failed: {e}"
-                                                    ),
-                                                    None,
-                                                );
-                                            }
-                                        }
-                                        Err(e) => {
-                                            crate::log::error(
-                                                format!(
-                                                    "verified-bypass prepare on delete failed: {e}"
-                                                ),
-                                                None,
-                                            );
-                                        }
-                                    }
+                                    send_signed_in_background(
+                                        client.clone(),
+                                        prepared,
+                                        "verified-bypass sync on DeleteContact",
+                                    );
                                 }
                             }
                         }
@@ -2234,57 +2025,90 @@ pub(crate) async fn node_comms(
                 }
             }
             NodeAction::RenameIdentity { old, new, identity } => {
-                match identity_management::rename_identity_api_call(
-                    &mut client,
-                    &old,
-                    &new,
-                    &identity,
-                )
-                .await
-                {
-                    Ok(()) => {
-                        crate::app::login::Identity::rename_in_place(&old, &new);
-                        login_controller.write().updated = true;
+                // The delegate renames in place (same keys, same address);
+                // wait for it in a task, never in this loop.
+                crate::app::identity_store::spawn_detached(async move {
+                    match crate::mail_delegate::ops::update_identity(
+                        identity.addr,
+                        new.to_string(),
+                        identity.description.clone(),
+                        identity.generation,
+                    )
+                    .await
+                    {
+                        Ok(info) => {
+                            crate::app::login::Identity::rename_in_place(&old, &new);
+                            crate::app::login::Identity::set_generation(
+                                &info.addr,
+                                info.generation,
+                                user,
+                            );
+                            login_controller.write().updated = true;
+                        }
+                        Err(e) => {
+                            crate::log::error(
+                                format!("failed to rename identity {old} → {new}: {e}"),
+                                None,
+                            );
+                            crate::toast::push_toast(
+                                format!("Couldn't rename `{old}`: {e}"),
+                                crate::toast::ToastLevel::Error,
+                            );
+                        }
                     }
-                    Err(e) => {
-                        crate::log::error(
-                            format!("failed to rename identity {old} → {new}: {e}"),
-                            None,
-                        );
-                    }
-                }
+                });
             }
             NodeAction::DeleteIdentity { identity } => {
-                let alias = identity.alias.clone();
-                match identity_management::delete_identity_api_call(&mut client, &alias).await {
-                    Ok(()) => {
-                        // Drop from in-memory ALIASES + User.identities so
-                        // the IdentifiersList re-renders without the row.
-                        // The on-chain inbox + AFT contracts stay put
-                        // (no delete primitive); without the keypair they
-                        // become unreachable, which is the security boundary
-                        // users actually care about.
-                        crate::app::login::Identity::remove_in_place(&alias);
-                        let mut user_w = user.write();
-                        let was_logged_in = user_w
-                            .logged_id()
-                            .map(|i| i.id == identity.id)
-                            .unwrap_or(false);
-                        user_w.identities.retain(|i| i.id != identity.id);
-                        if was_logged_in {
-                            user_w.logout();
+                // The delegate asks the user, then deletes the identity and
+                // everything it owns in bounded steps.
+                crate::app::identity_store::spawn_detached(async move {
+                    let alias = identity.alias.clone();
+                    let deleted = crate::mail_delegate::ops::delete_identity(
+                        identity.addr,
+                        identity.generation,
+                        |remaining| {
+                            crate::log::info(format!(
+                                "deleting identity `{alias}`: {remaining} items left"
+                            ))
+                        },
+                    )
+                    .await;
+                    match deleted {
+                        Ok(()) => {
+                            // Drop from in-memory ALIASES + User.identities so
+                            // the IdentifiersList re-renders without the row.
+                            // The on-chain inbox + AFT contracts stay (no
+                            // delete primitive); without the keys nobody can
+                            // sign for them.
+                            crate::app::login::Identity::remove_in_place(&alias);
+                            let mut user_w = user.write();
+                            let was_logged_in = user_w
+                                .logged_id()
+                                .map(|i| i.id == identity.id)
+                                .unwrap_or(false);
+                            user_w.identities.retain(|i| i.id != identity.id);
+                            if was_logged_in {
+                                user_w.logout();
+                            }
+                            drop(user_w);
+                            // Re-render inbox rows that had this identity
+                            // wired up as a sender.
+                            let prev = *ab_gen.0.read();
+                            ab_gen.0.set(prev.wrapping_add(1));
+                            login_controller.write().updated = true;
                         }
-                        drop(user_w);
-                        // Bump address-book generation so any inbox row that
-                        // had this identity wired up as a sender re-renders.
-                        let prev = *ab_gen.0.read();
-                        ab_gen.0.set(prev.wrapping_add(1));
-                        login_controller.write().updated = true;
+                        Err(e) => {
+                            crate::log::error(
+                                format!("failed to delete identity {alias}: {e}"),
+                                None,
+                            );
+                            crate::toast::push_toast(
+                                format!("Identity `{alias}` was not deleted: {e}"),
+                                crate::toast::ToastLevel::Error,
+                            );
+                        }
                     }
-                    Err(e) => {
-                        crate::log::error(format!("failed to delete identity {alias}: {e}"), None);
-                    }
-                }
+                });
             }
         }
     }
@@ -2295,7 +2119,7 @@ pub(crate) async fn node_comms(
         mut inboxes: InboxesData,
         mut login_controller: dioxus::prelude::Signal<crate::app::LoginController>,
         user: Signal<crate::app::User>,
-        mut ab_gen: crate::app::AddressBookGen,
+        _ab_gen: crate::app::AddressBookGen,
     ) {
         let mut client = WEB_API_SENDER.get().unwrap().clone();
         let res = match res {
@@ -2383,15 +2207,6 @@ pub(crate) async fn node_comms(
                             RequestError::ContractError(err) => {
                                 crate::log::error(format!("FIXME: {err}"), None)
                             }
-                            RequestError::DelegateError(DelegateError::Missing(key))
-                                if key == IDENTITIES_KEY.get().unwrap() =>
-                            {
-                                if let Err(e) =
-                                    identity_management::create_delegate(&mut client).await
-                                {
-                                    crate::log::error(format!("{e}"), None);
-                                }
-                            }
                             RequestError::DelegateError(error) => {
                                 // An error is the node's answer to a request. One
                                 // naming the local-state delegate answers one of its
@@ -2463,43 +2278,7 @@ pub(crate) async fn node_comms(
                             "GetResponse: StoredInbox decoded, {} messages",
                             parsed.messages.len()
                         ));
-                        let updated_model = match InboxModel::from_state(
-                            Arc::clone(&identity.ml_dsa_signing_key),
-                            identity.ml_kem_dk.clone(),
-                            parsed,
-                            key,
-                        ) {
-                            Ok(m) => m,
-                            Err(e) => {
-                                crate::log::error(
-                                    format!("GetResponse: InboxModel::from_state failed: {e}"),
-                                    None,
-                                );
-                                return;
-                            }
-                        };
-                        crate::log::info(format!(
-                            "GetResponse: InboxModel built, {} decrypted messages",
-                            updated_model.messages.len()
-                        ));
-                        let mut models = inboxes.0.write();
-                        if let Some(pos) = models.iter().position(|e| e.borrow().key == key) {
-                            crate::log::debug!(
-                                "loaded inbox {key} with {} messages",
-                                updated_model.messages.len()
-                            );
-                            *models[pos].borrow_mut() = updated_model;
-                        } else {
-                            models.push(Rc::new(RefCell::new(updated_model)));
-                            crate::log::debug!(
-                                "loaded inboxes: {keys}",
-                                keys = models
-                                    .iter()
-                                    .map(|i| format!("{}", i.borrow().key))
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
-                            );
-                        }
+                        set_inbox_state(inboxes, &identity, key, parsed);
                     }
                     _ => {
                         match token_rec_to_id.remove(&key) {
@@ -2602,13 +2381,9 @@ pub(crate) async fn node_comms(
                                     // remove the entry so the next candidate
                                     // response can retry.
                                     let alias_str = identity.alias().to_string();
-                                    let vk_key = {
-                                        use ml_dsa::signature::Keypair;
-                                        let vk = Keypair::verifying_key(
-                                            identity.ml_dsa_signing_key.as_ref(),
-                                        );
-                                        crate::inbox::inbox_params_pub_key_bytes(&vk)
-                                    };
+                                    let vk_key = crate::inbox::inbox_params_pub_key_bytes(
+                                        &identity.ml_dsa_vk(),
+                                    );
                                     let claimed = inbox_management::MIGRATED_IDENTITIES.with(|s| {
                                         let mut set = s.borrow_mut();
                                         if set.contains(&vk_key) {
@@ -2626,48 +2401,47 @@ pub(crate) async fn node_comms(
                                         match serde_json::from_slice::<StoredInbox>(state.as_ref())
                                         {
                                             Ok(parsed) => {
-                                                match inbox_management::put_migrated_inbox(
-                                                    &mut client,
-                                                    &identity,
-                                                    parsed,
-                                                )
-                                                .await
-                                                {
-                                                    Err(e) => {
-                                                        crate::log::error(
-                                                            format!(
-                                                                "inbox migration: PUT failed for `{alias_str}`: {e} (#213)"
-                                                            ),
-                                                            None,
-                                                        );
-                                                        inbox_management::MIGRATED_IDENTITIES.with(
-                                                            |s| {
-                                                                s.borrow_mut().remove(&vk_key);
-                                                            },
-                                                        );
-                                                    }
-                                                    Ok(new_key) => {
-                                                        // #260: the PUT is only
-                                                        // ENQUEUED here. Do NOT
-                                                        // clear the pending
-                                                        // marker yet — record
-                                                        // the awaited key and
-                                                        // defer the clear to the
-                                                        // `PutResponse` arm so a
-                                                        // PUT that never lands on
-                                                        // the network re-attempts
-                                                        // next session instead of
-                                                        // being silently
-                                                        // abandoned.
-                                                        inbox_management::AWAITING_MIGRATION_ACK
-                                                            .with(|a| {
-                                                                a.borrow_mut().push((
-                                                                    alias_str.clone().into(),
-                                                                    new_key,
-                                                                ));
-                                                            });
-                                                    }
-                                                }
+                                                // The delegate re-signs the
+                                                // state: wait for it in a
+                                                // task, never in this loop.
+                                                let mut client = client.clone();
+                                                crate::app::identity_store::spawn_detached(
+                                                    async move {
+                                                        match inbox_management::put_migrated_inbox(
+                                                            &mut client,
+                                                            &identity,
+                                                            parsed,
+                                                        )
+                                                        .await
+                                                        {
+                                                            Err(e) => {
+                                                                crate::log::error(
+                                                                    format!(
+                                                                        "inbox migration: PUT failed for `{alias_str}`: {e} (#213)"
+                                                                    ),
+                                                                    None,
+                                                                );
+                                                                inbox_management::MIGRATED_IDENTITIES
+                                                                .with(|s| {
+                                                                    s.borrow_mut().remove(&vk_key);
+                                                                });
+                                                            }
+                                                            Ok(new_key) => {
+                                                                // #260: the PUT is only
+                                                                // enqueued; the marker is
+                                                                // cleared when its
+                                                                // `PutResponse` lands.
+                                                                inbox_management::AWAITING_MIGRATION_ACK
+                                                                .with(|a| {
+                                                                    a.borrow_mut().push((
+                                                                        alias_str.clone().into(),
+                                                                        new_key,
+                                                                    ));
+                                                                });
+                                                            }
+                                                        }
+                                                    },
+                                                );
                                             }
                                             Err(e) => {
                                                 crate::log::error(
@@ -2695,13 +2469,9 @@ pub(crate) async fn node_comms(
                                     // Mirrors the inbox-migration arm
                                     // above.
                                     let alias_str = identity.alias().to_string();
-                                    let vk_key = {
-                                        use ml_dsa::signature::Keypair;
-                                        let vk = Keypair::verifying_key(
-                                            identity.ml_dsa_signing_key.as_ref(),
-                                        );
-                                        crate::inbox::inbox_params_pub_key_bytes(&vk)
-                                    };
+                                    let vk_key = crate::inbox::inbox_params_pub_key_bytes(
+                                        &identity.ml_dsa_vk(),
+                                    );
                                     let claimed = token_record_management::MIGRATED_AFT_IDENTITIES
                                         .with(|s| {
                                             let mut set = s.borrow_mut();
@@ -2799,12 +2569,10 @@ pub(crate) async fn node_comms(
                                         if let Some(pos) =
                                             models.iter().position(|e| e.borrow().key == key)
                                         {
-                                            let mut inbox = models[pos].borrow_mut();
-                                            inbox.apply_delta(&identity.ml_kem_dk, parsed);
-                                            crate::log::debug!(
-                                                "applied delta to inbox {key} -> {} messages",
-                                                inbox.messages.len()
-                                            );
+                                            let pending =
+                                                models[pos].borrow_mut().apply_delta(parsed);
+                                            drop(models);
+                                            spawn_decrypt(inboxes, key, pending);
                                         } else {
                                             // Notification raced GetResponse: a
                                             // Delta on its own can't materialise
@@ -2827,26 +2595,14 @@ pub(crate) async fn node_comms(
                                 }
                             }
                             UpdateData::State(state) => {
-                                let delta: StoredInbox =
-                                    serde_json::from_slice(state.as_ref()).unwrap();
-                                let updated_model = InboxModel::from_state(
-                                    Arc::clone(&identity.ml_dsa_signing_key),
-                                    identity.ml_kem_dk.clone(),
-                                    delta,
-                                    key,
-                                )
-                                .unwrap();
-                                let mut models = inboxes.0.write();
-                                if let Some(pos) = models.iter().position(|e| e.borrow().key == key)
-                                {
-                                    let mut inbox = models[pos].borrow_mut();
-                                    *inbox = updated_model;
-                                    crate::log::debug!(
-                                        "updated inbox {key} (whole state) with {} messages",
-                                        inbox.messages.len()
-                                    );
-                                } else {
-                                    models.push(Rc::new(RefCell::new(updated_model)));
+                                match serde_json::from_slice::<StoredInbox>(state.as_ref()) {
+                                    Ok(parsed) => set_inbox_state(inboxes, &identity, key, parsed),
+                                    Err(e) => crate::log::error(
+                                        format!(
+                                            "UpdateNotification: bad inbox state for {key}: {e}"
+                                        ),
+                                        None,
+                                    ),
                                 }
                             }
                             _ => unreachable!(),
@@ -3125,25 +2881,12 @@ pub(crate) async fn node_comms(
                     // toast if the clear lands; if it fails the marker stays
                     // set (re-attempted next session), so a "migrated"
                     // toast would over-promise.
-                    match identity_management::clear_pending_migration_api_call(&mut client, &alias)
-                        .await
-                    {
-                        Ok(()) => {
-                            crate::toast::push_toast(
-                                format!(
-                                    "Inbox `{alias}` migrated to the new contract id after webapp upgrade."
-                                ),
-                                crate::toast::ToastLevel::Info,
-                            );
-                        }
-                        Err(e) => {
-                            crate::log::error(
-                                format!(
-                                    "inbox migration: clear pending marker for `{alias}` failed: {e} — will retry next session (#260)"
-                                ),
-                                None,
-                            );
-                        }
+                    if let Some(id) = crate::app::login::Identity::get_alias(&alias) {
+                        crate::app::identity_store::migration_landed(
+                            id.addr,
+                            alias.to_string(),
+                            false,
+                        );
                     }
                     return;
                 }
@@ -3152,28 +2895,12 @@ pub(crate) async fn node_comms(
                     .with(|a| take_awaiting_ack(&mut a.borrow_mut(), &contract_key));
                 if let Some(alias) = awaiting_aft {
                     // #260: same deferred-clear discipline as the inbox branch.
-                    match identity_management::clear_pending_aft_migration_api_call(
-                        &mut client,
-                        &alias,
-                    )
-                    .await
-                    {
-                        Ok(()) => {
-                            crate::toast::push_toast(
-                                format!(
-                                    "Token ledger `{alias}` migrated to the new contract id after webapp upgrade."
-                                ),
-                                crate::toast::ToastLevel::Info,
-                            );
-                        }
-                        Err(e) => {
-                            crate::log::error(
-                                format!(
-                                    "AFT migration: clear pending marker for `{alias}` failed: {e} — will retry next session (#260)"
-                                ),
-                                None,
-                            );
-                        }
+                    if let Some(id) = crate::app::login::Identity::get_alias(&alias) {
+                        crate::app::identity_store::migration_landed(
+                            id.addr,
+                            alias.to_string(),
+                            true,
+                        );
                     }
                 }
             }
@@ -3211,9 +2938,7 @@ pub(crate) async fn node_comms(
                     // the delegate has run it: a write is stored from here.
                     crate::local_state::note_answer(true);
                 }
-                if values.is_empty() && &key == IDENTITIES_KEY.get().unwrap() {
-                    // no-op: see comment above
-                } else if values.is_empty() && is_local_state_empty {
+                if values.is_empty() && is_local_state_empty {
                     // Empty local-state response (e.g. SaveDraft / DeleteDraft /
                     // MarkRead acks) — no AFT-gen lookup needed.
                 } else if values.is_empty() {
@@ -3251,7 +2976,6 @@ pub(crate) async fn node_comms(
                         }
                     }
                 }
-                let is_identities = &key == IDENTITIES_KEY.get().unwrap();
                 let is_local_state = crate::local_state::LOCAL_STATE_KEY
                     .get()
                     .is_some_and(|k| k == &key);
@@ -3282,402 +3006,6 @@ pub(crate) async fn node_comms(
                             // shows previously-created aliases. Without this branch
                             // the bytes get parsed as a `TokenDelegateMessage` and
                             // fail with a deser error.
-                            if is_identities {
-                                match freenet_mail_wire_v1::identity::IdentityManagement::try_from(
-                                    msg.payload.as_slice(),
-                                ) {
-                                    Ok(im) => {
-                                        // #213 migration: snapshot each
-                                        // identity's recorded
-                                        // `inbox_wasm_hash` before
-                                        // `set_aliases` consumes the
-                                        // IdentityManagement. The
-                                        // migration block below compares
-                                        // these against the embedded
-                                        // INBOX_CODE_HASH to detect a
-                                        // deliberate contract bump.
-                                        let recorded_inbox_hashes: std::collections::HashMap<
-                                            String,
-                                            Option<String>,
-                                        > = im
-                                            .get_info()
-                                            .map(|(alias, info)| {
-                                                (alias.clone(), info.inbox_wasm_hash.clone())
-                                            })
-                                            .collect();
-                                        // #251 improvement 5: snapshot
-                                        // the persistent pending-migration
-                                        // marker per identity. If set and
-                                        // the current INBOX_CODE_HASH
-                                        // still differs from the recorded
-                                        // hash, the previous session's
-                                        // GET never resolved — re-attempt.
-                                        let recorded_pending_migrations: std::collections::HashMap<
-                                            String,
-                                            Option<String>,
-                                        > = im
-                                            .get_info()
-                                            .map(|(alias, info)| {
-                                                (alias.clone(), info.pending_migration_from.clone())
-                                            })
-                                            .collect();
-                                        // #251 improvement 3: same snapshots
-                                        // for the AFT-record side. Mirrored
-                                        // shape so the migration loop below
-                                        // can reuse `select_migrate_from`
-                                        // verbatim.
-                                        let recorded_aft_hashes: std::collections::HashMap<
-                                            String,
-                                            Option<String>,
-                                        > = im
-                                            .get_info()
-                                            .map(|(alias, info)| {
-                                                (alias.clone(), info.aft_record_wasm_hash.clone())
-                                            })
-                                            .collect();
-                                        let recorded_pending_aft_migrations: std::collections::HashMap<
-                                            String,
-                                            Option<String>,
-                                        > = im
-                                            .get_info()
-                                            .map(|(alias, info)| {
-                                                (
-                                                    alias.clone(),
-                                                    info.pending_aft_migration_from.clone(),
-                                                )
-                                            })
-                                            .collect();
-                                        let new_ids = crate::app::Identity::set_aliases(im, user);
-                                        // ALIASES is a thread_local Vec, not a
-                                        // Dioxus signal — bump login_controller
-                                        // so the Identities component re-renders.
-                                        login_controller.write().updated = true;
-                                        // Bump generation so MessageList / OpenMessage
-                                        // re-render after identity-switch / re-hydrate
-                                        // populates the address book with contacts (#143).
-                                        let prev = *ab_gen.0.read();
-                                        *ab_gen.0.write() = prev.wrapping_add(1);
-                                        // Restore runtime wiring lost on reload:
-                                        // INBOX_TO_ID + AFT-record subscriptions
-                                        // (load_all does both), and AFT-gen
-                                        // delegate registration on this session
-                                        // (so assign_token finds it).
-                                        if !new_ids.is_empty() {
-                                            InboxModel::load_all(&mut client, &new_ids).await;
-                                            AftRecords::load_all(
-                                                &mut client,
-                                                &new_ids,
-                                                token_rec_to_id,
-                                            )
-                                            .await;
-                                            for id in &new_ids {
-                                                if let Err(e) =
-                                                    token_generator_management::create_delegate(
-                                                        &mut client,
-                                                        Arc::clone(&id.ml_dsa_signing_key),
-                                                    )
-                                                    .await
-                                                {
-                                                    crate::log::error(
-                                                        format!(
-                                                            "AFT-gen re-register for `{}` failed: {e}",
-                                                            id.alias()
-                                                        ),
-                                                        None,
-                                                    );
-                                                }
-                                            }
-                                        }
-                                        // #191: rehydrate path also needs to prime
-                                        // every restored contact's inbox contract.
-                                        // CreateContact primes on first import, but
-                                        // contacts persisted in the identity-management
-                                        // delegate come back via `set_aliases` →
-                                        // `insert_contact` without round-tripping the
-                                        // CreateContact handler. After a page reload
-                                        // the local node's contract store is empty,
-                                        // so the first send to a known contact would
-                                        // fail with "missing contract parameters".
-                                        // #251 improvement 4: derive under the
-                                        // contact's advertised WASM hash so
-                                        // cross-version contacts prime under
-                                        // their real on-chain id, not a ghost
-                                        // key under the sender's
-                                        // `INBOX_CODE_HASH`.
-                                        for contact in crate::app::address_book::all_contacts() {
-                                            prime_contact_inbox(&mut client, &contact).await;
-                                        }
-                                        // #213 inbox migration: detect a
-                                        // deliberate contract bump (the
-                                        // baked-in INBOX_CODE_HASH no
-                                        // longer matches the hash this
-                                        // identity's inbox was last
-                                        // observed under) and stamp the
-                                        // current hash on the delegate.
-                                        // A full GET-old → PUT-new
-                                        // migration is implemented in
-                                        // `inbox_management::migrate_inbox`;
-                                        // this dispatch is fire-and-
-                                        // forget per identity. First-time
-                                        // load (`None` recorded) just
-                                        // stamps the current hash as the
-                                        // baseline so the NEXT bump can
-                                        // detect drift.
-                                        for id in &new_ids {
-                                            let alias_str = id.alias().to_string();
-                                            let prior = recorded_inbox_hashes
-                                                .get(&alias_str)
-                                                .cloned()
-                                                .flatten();
-                                            let pending_marker = recorded_pending_migrations
-                                                .get(&alias_str)
-                                                .cloned()
-                                                .flatten();
-                                            // #251 improvement 5: drift
-                                            // selection (prior vs pending
-                                            // marker vs current) is a pure
-                                            // helper in `inbox.rs` so the
-                                            // precedence rules can be
-                                            // unit-tested.
-                                            let migrate_from = crate::inbox::select_migrate_from(
-                                                prior.as_deref(),
-                                                pending_marker.as_deref(),
-                                                crate::inbox::INBOX_CODE_HASH,
-                                            );
-                                            match migrate_from {
-                                                Some(prior_hash) => {
-                                                    crate::log::info(format!(
-                                                        "inbox migration: detected drift for `{}` \
-                                                         prior_hash={} current_hash={} pending={} (#213, #251)",
-                                                        alias_str,
-                                                        prior_hash,
-                                                        crate::inbox::INBOX_CODE_HASH,
-                                                        pending_marker.is_some()
-                                                    ));
-                                                    // Stamp the pending
-                                                    // marker BEFORE
-                                                    // dispatching the GET
-                                                    // so a crash mid-flow
-                                                    // still allows the
-                                                    // next session to
-                                                    // recover (#251).
-                                                    if let Err(e) = identity_management::set_pending_migration_api_call(
-                                                        &mut client,
-                                                        &alias_str,
-                                                        &prior_hash,
-                                                    )
-                                                    .await
-                                                    {
-                                                        crate::log::error(
-                                                            format!(
-                                                                "inbox migration: mark pending failed for `{alias_str}`: {e} (#251)"
-                                                            ),
-                                                            None,
-                                                        );
-                                                    }
-                                                    if let Err(e) = inbox_management::migrate_inbox(
-                                                        &mut client,
-                                                        id,
-                                                        &prior_hash,
-                                                    )
-                                                    .await
-                                                    {
-                                                        crate::log::error(
-                                                            format!(
-                                                                "inbox migration: failed for `{alias_str}`: {e} (#213)"
-                                                            ),
-                                                            None,
-                                                        );
-                                                    }
-                                                    // Stamp the current
-                                                    // hash so drift
-                                                    // doesn't keep firing
-                                                    // each session even
-                                                    // when the GET never
-                                                    // resolves. The
-                                                    // pending marker is
-                                                    // the source of truth
-                                                    // for retry — it's
-                                                    // cleared only on
-                                                    // successful PUT.
-                                                    if let Err(e) = identity_management::stamp_inbox_wasm_hash_api_call(
-                                                        &mut client,
-                                                        &alias_str,
-                                                    )
-                                                    .await
-                                                    {
-                                                        crate::log::error(
-                                                            format!(
-                                                                "inbox migration: stamp failed for `{alias_str}`: {e} (#213)"
-                                                            ),
-                                                            None,
-                                                        );
-                                                    }
-                                                }
-                                                None => {
-                                                    // No drift OR first
-                                                    // observation. Baseline
-                                                    // the current hash if
-                                                    // we haven't yet.
-                                                    if prior.is_none()
-                                                        && let Err(e) = identity_management::stamp_inbox_wasm_hash_api_call(
-                                                            &mut client,
-                                                            &alias_str,
-                                                        )
-                                                        .await
-                                                    {
-                                                        crate::log::error(
-                                                            format!(
-                                                                "inbox migration: baseline stamp failed for `{alias_str}`: {e} (#213)"
-                                                            ),
-                                                            None,
-                                                        );
-                                                    }
-                                                    // #251 improvement 5
-                                                    // cleanup: clear stale
-                                                    // pending marker if
-                                                    // prior == current
-                                                    // but a leftover
-                                                    // marker survived.
-                                                    if pending_marker.is_some()
-                                                        && let Err(e) = identity_management::clear_pending_migration_api_call(
-                                                            &mut client,
-                                                            &alias_str,
-                                                        )
-                                                        .await
-                                                    {
-                                                        crate::log::error(
-                                                            format!(
-                                                                "inbox migration: clear stale pending marker for `{alias_str}` failed: {e} (#251)"
-                                                            ),
-                                                            None,
-                                                        );
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        // #251 improvement 3: AFT record
-                                        // migration. Same shape as the
-                                        // inbox loop above but against
-                                        // `TOKEN_RECORD_CODE_HASH` and
-                                        // the AFT-side AliasInfo fields.
-                                        // The two migrations run
-                                        // independently because the
-                                        // contracts rotate independently
-                                        // (separate `[dependencies]`
-                                        // blocks under
-                                        // contracts/inbox/ vs
-                                        // modules/antiflood-tokens/).
-                                        for id in &new_ids {
-                                            let alias_str = id.alias().to_string();
-                                            let prior = recorded_aft_hashes
-                                                .get(&alias_str)
-                                                .cloned()
-                                                .flatten();
-                                            let pending_marker = recorded_pending_aft_migrations
-                                                .get(&alias_str)
-                                                .cloned()
-                                                .flatten();
-                                            let migrate_from = crate::inbox::select_migrate_from(
-                                                prior.as_deref(),
-                                                pending_marker.as_deref(),
-                                                crate::aft::TOKEN_RECORD_CODE_HASH,
-                                            );
-                                            match migrate_from {
-                                                Some(prior_hash) => {
-                                                    crate::log::info(format!(
-                                                        "AFT migration: detected drift for `{}` \
-                                                         prior_hash={} current_hash={} pending={} (#251)",
-                                                        alias_str,
-                                                        prior_hash,
-                                                        crate::aft::TOKEN_RECORD_CODE_HASH,
-                                                        pending_marker.is_some()
-                                                    ));
-                                                    if let Err(e) = identity_management::set_pending_aft_migration_api_call(
-                                                        &mut client,
-                                                        &alias_str,
-                                                        &prior_hash,
-                                                    )
-                                                    .await
-                                                    {
-                                                        crate::log::error(
-                                                            format!(
-                                                                "AFT migration: mark pending failed for `{alias_str}`: {e} (#251)"
-                                                            ),
-                                                            None,
-                                                        );
-                                                    }
-                                                    if let Err(e) =
-                                                        token_record_management::migrate_aft_record(
-                                                            &mut client,
-                                                            id,
-                                                            &prior_hash,
-                                                        )
-                                                        .await
-                                                    {
-                                                        crate::log::error(
-                                                            format!(
-                                                                "AFT migration: failed for `{alias_str}`: {e} (#251)"
-                                                            ),
-                                                            None,
-                                                        );
-                                                    }
-                                                    if let Err(e) = identity_management::stamp_aft_record_wasm_hash_api_call(
-                                                        &mut client,
-                                                        &alias_str,
-                                                    )
-                                                    .await
-                                                    {
-                                                        crate::log::error(
-                                                            format!(
-                                                                "AFT migration: stamp failed for `{alias_str}`: {e} (#251)"
-                                                            ),
-                                                            None,
-                                                        );
-                                                    }
-                                                }
-                                                None => {
-                                                    if prior.is_none()
-                                                        && let Err(e) = identity_management::stamp_aft_record_wasm_hash_api_call(
-                                                            &mut client,
-                                                            &alias_str,
-                                                        )
-                                                        .await
-                                                    {
-                                                        crate::log::error(
-                                                            format!(
-                                                                "AFT migration: baseline stamp failed for `{alias_str}`: {e} (#251)"
-                                                            ),
-                                                            None,
-                                                        );
-                                                    }
-                                                    if pending_marker.is_some()
-                                                        && let Err(e) = identity_management::clear_pending_aft_migration_api_call(
-                                                            &mut client,
-                                                            &alias_str,
-                                                        )
-                                                        .await
-                                                    {
-                                                        crate::log::error(
-                                                            format!(
-                                                                "AFT migration: clear stale pending marker for `{alias_str}` failed: {e} (#251)"
-                                                            ),
-                                                            None,
-                                                        );
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                    Err(e) => {
-                                        crate::log::error(
-                                            format!("identities delegate response deser: {e}"),
-                                            None,
-                                        );
-                                    }
-                                }
-                                continue;
-                            }
                             let token = match TokenDelegateMessage::try_from(msg.payload.as_slice())
                             {
                                 Ok(r) => r,
@@ -3839,23 +3167,28 @@ pub(crate) async fn node_comms(
                             "own inbox not found on the network (key={key}, alias=`{}`) — re-PUTting to self-heal (#288)",
                             identity.alias()
                         ));
-                        if let Err(e) = inbox_management::create_contract(
-                            &mut client.clone(),
-                            identity.ml_dsa_signing_key.clone(),
-                            identity.ml_kem_ek_bytes(),
-                            identity.required_tier,
-                            identity.max_age_secs,
-                        )
-                        .await
-                        {
-                            crate::log::error(
-                                format!(
-                                    "own-inbox re-PUT failed for `{}`: {e} (#288)",
-                                    identity.alias()
-                                ),
-                                None,
-                            );
-                        }
+                        let mut client = client.clone();
+                        crate::app::identity_store::spawn_detached(async move {
+                            let put = async {
+                                let state = crate::app::identity_store::initial_inbox_state(
+                                    &identity,
+                                    identity.required_tier,
+                                    identity.max_age_secs,
+                                )
+                                .await?;
+                                inbox_management::create_contract(&mut client, &identity, state)
+                                    .await
+                            };
+                            if let Err(e) = put.await {
+                                crate::log::error(
+                                    format!(
+                                        "own-inbox re-PUT failed for `{}`: {e} (#288)",
+                                        identity.alias()
+                                    ),
+                                    None,
+                                );
+                            }
+                        });
                     }
                     NotFoundRoute::OwnAftRecord => {
                         // Same self-heal shape for the identity's
@@ -3865,11 +3198,9 @@ pub(crate) async fn node_comms(
                             "own AFT record not found on the network (key={key}, alias=`{}`) — re-PUTting to self-heal (#288)",
                             identity.alias()
                         ));
-                        if let Err(e) = token_record_management::create_contract(
-                            &mut client.clone(),
-                            identity.ml_dsa_signing_key.clone(),
-                        )
-                        .await
+                        if let Err(e) =
+                            token_record_management::create_contract(&mut client.clone(), &identity)
+                                .await
                         {
                             crate::log::error(
                                 format!(

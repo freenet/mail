@@ -448,13 +448,10 @@ fn ScrAccount() -> Element {
             }
         }
     };
-    let backup_panel: Option<(Result<String, String>, Vec<String>)> = if backup_open {
-        user.read().logged_id().map(|active| {
-            (
-                crate::app::login::recovery_key_for(active),
-                crate::app::login::fingerprint_word_vec(active),
-            )
-        })
+    let backup_panel: Option<(freenet_mail_protocol::Addr, Vec<String>)> = if backup_open {
+        user.read()
+            .logged_id()
+            .map(|active| (active.addr, crate::app::login::fingerprint_word_vec(active)))
     } else {
         None
     };
@@ -475,35 +472,27 @@ fn ScrAccount() -> Element {
             p { class: "fm-set-lede",
                 "Identity-scoped settings. These follow this identity across devices once sync lands. Switch the active identity in the sidebar to edit a different one."
             }
-            if let Some((token, words)) = backup_panel {
+            if let Some((addr, words)) = backup_panel {
                 Card {
                     title: "Recovery key",
                     sub: "Both private keys for this identity, as one line of text.",
                     div { class: "bk-card-body",
-                        match token {
-                            Ok(token) => rsx! {
-                                crate::app::backup_panel::BackupKeyPanel {
-                                    // Keyed by identity: a different identity
-                                    // gets a fresh panel (hidden key, no
-                                    // stale "Copied"), never this one's state.
-                                    key: "{panel_key}",
-                                    token,
-                                    alias: alias_for_panel.clone(),
-                                    words,
-                                    saved: false,
-                                    scroll_request: *backup_scroll.read(),
-                                    on_exported: move |_| {},
-                                    on_saved: {
-                                        let alias = alias_for_panel.clone();
-                                        move |_| {
-                                            crate::app::login::mark_backed_up(&alias);
-                                            backup_for.set(None);
-                                        }
-                                    },
+                        crate::app::backup_panel::ExportedKeyPanel {
+                            // Keyed by identity: a different identity gets a
+                            // fresh panel (hidden key, no stale "Copied"),
+                            // never this one's state.
+                            key: "{panel_key}",
+                            addr,
+                            alias: alias_for_panel.clone(),
+                            words,
+                            saved: false,
+                            scroll_request: *backup_scroll.read(),
+                            on_saved: {
+                                let alias = alias_for_panel.clone();
+                                move |_| {
+                                    crate::app::login::mark_backed_up(&alias);
+                                    backup_for.set(None);
                                 }
-                            },
-                            Err(e) => rsx! {
-                                p { class: "bk-status err", "Couldn't build a recovery key for this identity: {e}" }
                             },
                         }
                         div { class: "bk-actions",

@@ -118,6 +118,8 @@ pub(crate) const FM_RESTORE_ERROR: &str = "fm-restore-error";
 pub(crate) const FM_RESTORE_ALIAS: &str = "fm-restore-alias";
 pub(crate) const FM_RESTORE_EXISTING: &str = "fm-restore-existing";
 pub(crate) const FM_BACKUP_MODAL: &str = "fm-backup-modal";
+/// Shown while the delegate's prompt to reveal a recovery key is open.
+pub(crate) const FM_BACKUP_WAITING: &str = "fm-backup-waiting";
 pub(crate) const FM_BACKUP_PANEL: &str = "fm-backup-panel";
 pub(crate) const FM_BACKUP_ENTRY_TITLE: &str = "fm-backup-entry-title";
 pub(crate) const FM_BACKUP_KEY: &str = "fm-backup-key";
@@ -252,6 +254,7 @@ mod tests {
             ("fmRestoreAlias", super::FM_RESTORE_ALIAS),
             ("fmRestoreExisting", super::FM_RESTORE_EXISTING),
             ("fmBackupModal", super::FM_BACKUP_MODAL),
+            ("fmBackupWaiting", super::FM_BACKUP_WAITING),
             ("fmBackupPanel", super::FM_BACKUP_PANEL),
             ("fmBackupEntryTitle", super::FM_BACKUP_ENTRY_TITLE),
             ("fmBackupKey", super::FM_BACKUP_KEY),

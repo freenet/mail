@@ -122,6 +122,10 @@ dt "origin gate refuses delegate callers" "$D/handlers.rs" \
     'Some(MessageOrigin::Delegate(_)) => Err(DelegateError::Other(' \
     'Some(MessageOrigin::Delegate(_)) => Ok(Origin([1; 32])), Some(MessageOrigin::Delegate(_)) => Err(DelegateError::Other(' \
     origin_gate_truth_table,delegate_and_unattested_callers_change_nothing
+dt "creation returns the new identity's own recovery key" "$D/handlers.rs" \
+    'let recovery_key = recovery_key::encode(&dsa, &kem);' \
+    'let recovery_key = recovery_key::encode(&dsa, &KemSeed([0; 64]));' \
+    the_recovery_key_comes_back_on_creation_only
 dt "compare-and-swap refuses a stale writer" "$D/handlers.rs" \
     'Some(g) => g == current_gen,' 'Some(_) => true,' cas_refuses_a_stale_writer_and_accepts_the_current_one
 dt "origins get separate namespaces" "$D/store.rs" \

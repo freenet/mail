@@ -147,8 +147,7 @@ impl AftRecords {
     /// authoritative source of truth for "is this my own AFT record" —
     /// independent of any routing-map population order.
     pub fn record_key_for(identity: &Identity) -> Result<AftRecord, DynError> {
-        use ml_dsa::signature::Keypair;
-        Self::record_key_for_vk(&identity.ml_dsa_signing_key.as_ref().verifying_key())
+        Self::record_key_for_vk(&identity.ml_dsa_vk())
     }
 
     pub(crate) fn record_key_for_vk(
@@ -439,24 +438,21 @@ impl AftRecords {
         generator_id: &Identity,
         assignment_hash: [u8; 32],
     ) -> Result<DelegateKey, DynError> {
-        use ml_dsa::signature::Keypair;
-
         static REQUEST_ID: AtomicU32 = AtomicU32::new(0);
 
-        // AFT token signing now reuses the identity's ML-DSA-65 key. The
-        // delegate stores the 32-byte seed; the generator-identity in
-        // TokenAssignment is the encoded verifying key bytes.
-        let sender_vk = generator_id.ml_dsa_signing_key.as_ref().verifying_key();
-        let seed_bytes = {
-            let s = generator_id.ml_dsa_signing_key.as_ref().to_seed();
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(s.as_slice());
-            arr
-        };
-        let token_params: Parameters = DelegateParameters::new(seed_bytes)
+        // AFT token signing reuses the identity's ML-DSA-65 key. The v1
+        // token-generator delegate's parameters carry its seed, so the mail
+        // delegate hands them out for this transitional path only
+        // (`V1AftParams`, removed with the anti-flood tokens); the
+        // generator-identity in TokenAssignment is the encoded verifying key.
+        let sender_vk = generator_id.ml_dsa_vk();
+        let params_json = crate::mail_delegate::ops::v1_aft_params(generator_id.addr)
+            .await
+            .map_err(|e| format!("could not get the token generator parameters: {e}"))?;
+        let delegate_params: DelegateParameters = serde_json::from_slice(&params_json)?;
+        let token_params: Parameters = serde_json::from_slice::<DelegateParameters>(&params_json)?
             .try_into()
-            .map_err(|e| format!("{e}"))
-            .unwrap();
+            .map_err(|e| format!("{e}"))?;
         let delegate_key = DelegateKey::from_params(
             crate::aft::TOKEN_GENERATOR_DELEGATE_CODE_HASH,
             &token_params,
@@ -471,7 +467,6 @@ impl AftRecords {
         .try_into()?;
         let inbox_code_hash = recipient_inbox_wasm_hash.unwrap_or(crate::inbox::INBOX_CODE_HASH);
         let inbox_key = ContractKey::from_params(inbox_code_hash, inbox_params.clone())?;
-        let delegate_params = DelegateParameters::new(seed_bytes);
 
         let record_params = TokenDelegateParameters::new(&sender_vk);
         let token_record: ContractInstanceId = ContractKey::from_params(

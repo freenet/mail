@@ -154,6 +154,7 @@ fn reply_name(reply: &Reply) -> &'static str {
         Reply::Profile(_) => "Profile",
         Reply::ExportedSecrets { .. } => "ExportedSecrets",
         Reply::Continue { .. } => "Continue",
+        Reply::CreatedIdentity { .. } => "CreatedIdentity",
     }
 }
 

@@ -111,13 +111,16 @@ mod tests {
 
     #[test]
     fn identities_round_trip_through_the_in_page_delegate() {
-        let Reply::Identity(created) = block_on(call(Op::CreateIdentity {
+        let Reply::CreatedIdentity {
+            identity: created, ..
+        } = block_on(call(Op::CreateIdentity {
             alias: "local-test".into(),
             description: String::new(),
             ui_entropy: Entropy([9; 32]),
         }))
-        .unwrap() else {
-            panic!("expected Identity");
+        .unwrap()
+        else {
+            panic!("expected CreatedIdentity");
         };
         let Reply::Identities(all) = block_on(call(Op::ListIdentities)).unwrap() else {
             panic!("expected Identities");
@@ -127,15 +130,20 @@ mod tests {
 
     #[test]
     fn an_export_prompt_is_answered_and_returns_the_key() {
-        let Reply::Identity(id) = block_on(call(Op::CreateIdentity {
+        let Reply::CreatedIdentity {
+            identity: id,
+            recovery_key,
+        } = block_on(call(Op::CreateIdentity {
             alias: "export-test".into(),
             description: String::new(),
             ui_entropy: Entropy([8; 32]),
         }))
-        .unwrap() else {
-            panic!("expected Identity");
+        .unwrap()
+        else {
+            panic!("expected CreatedIdentity");
         };
+        // A later reveal is the consented export, and gives the same key.
         let reply = block_on(call(Op::ExportRecoveryKey { addr: id.addr })).unwrap();
-        assert!(matches!(reply, Reply::RecoveryKey(k) if k.starts_with("fmail-key-1:")));
+        assert!(matches!(reply, Reply::RecoveryKey(k) if k == recovery_key));
     }
 }

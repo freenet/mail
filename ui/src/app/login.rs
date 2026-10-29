@@ -7,13 +7,11 @@ use std::{
 use std::sync::Arc;
 
 use dioxus::prelude::*;
-use freenet_mail_wire_v1::identity::{EntryKind, IdentityManagement};
 use freenet_stdlib::prelude::ContractKey;
 use ml_dsa::{MlDsa65, SigningKey as MlDsaSigningKey, VerifyingKey as MlDsaVerifyingKey};
 use ml_kem::{DecapsulationKey, EncapsulationKey, MlKem768};
 
-use crate::DynError;
-use crate::app::{ContractType, User, UserId};
+use crate::app::{User, UserId};
 use crate::clipboard::{CopyOutcome, copy_text};
 use crate::testid;
 
@@ -55,17 +53,10 @@ thread_local! {
     });
 }
 
-/// A user identity holding ML-DSA-65 + ML-KEM-768 keypairs.
-///
-/// - `ml_dsa_signing_key`: ML-DSA-65 signing key. The verifying key is embedded
-///   in `InboxParams` and determines the inbox contract ID. The same key is
-///   used by the AFT token subsystem to sign token assignments (reuse
-///   decision logged in Stage 4 of #18). Wrapped in `Arc` because
-///   `MlDsaSigningKey` is intentionally not `Clone` (secret key hygiene);
-///   `Arc` gives us cheap logical clones without copying the key material.
-/// - `ml_kem_dk`: ML-KEM-768 decapsulation key. The encapsulation key is
-///   published so senders can encrypt messages to this identity.
-#[derive(Debug)]
+/// A user identity. Its private keys live in the mail delegate, which signs
+/// and decrypts for it; the page holds only the delegate address of the
+/// identity and its public keys.
+#[derive(Debug, Clone)]
 pub(crate) struct Identity {
     pub alias: Rc<str>,
     pub id: UserId,
@@ -77,78 +68,37 @@ pub(crate) struct Identity {
     /// `max_age_secs` half of the recipient policy. Same lifetime
     /// constraints as `required_tier`.
     pub max_age_secs: u64,
-    /// ML-DSA-65 signing key for inbox state authorisation and AFT token signing.
-    pub ml_dsa_signing_key: Arc<MlDsaSigningKey<MlDsa65>>,
-    /// ML-KEM-768 decapsulation key for message decryption.
-    pub ml_kem_dk: DecapsulationKey<MlKem768>,
-    /// Cached encoded ML-KEM-768 encapsulation key bytes (1184 bytes), computed
-    /// once at construction. Avoids re-deriving from `ml_kem_dk` on every read,
-    /// which surfaced as a fingerprint mismatch (#100): two reads from the same
-    /// logical identity could return different bytes after `Clone`, so the
-    /// share-modal six-word display and the encoded contact token disagreed.
+    /// The identity's address in the mail delegate, which holds its keys.
+    pub addr: freenet_mail_protocol::Addr,
+    /// False for an identity carried over from older data until the user
+    /// confirms it is theirs (a UI hint, not a security boundary). Only the
+    /// migration from v0.2.x delegates imports unconfirmed identities; the
+    /// confirm prompt lands with it.
+    #[allow(dead_code)]
+    pub confirmed: bool,
+    /// The delegate record's generation, for compare-and-swap on rename,
+    /// confirm and delete.
+    pub generation: u64,
+    /// Encoded ML-KEM-768 encapsulation key bytes (1184 bytes).
     ek_bytes: Vec<u8>,
-    /// Cached encoded ML-DSA-65 verifying key bytes (1952 bytes), computed once
-    /// at construction. Same rationale as `ek_bytes` — keeps the public-key
-    /// view of the identity stable across clones and call sites.
+    /// Encoded ML-DSA-65 verifying key bytes (1952 bytes).
     vk_bytes: Vec<u8>,
 }
 
 impl Identity {
-    fn derive_vk_bytes(ml_dsa_signing_key: &MlDsaSigningKey<MlDsa65>) -> Vec<u8> {
-        use ml_dsa::signature::Keypair;
-        ml_dsa_signing_key.verifying_key().encode().to_vec()
-    }
-
-    fn derive_ek_bytes(ml_kem_dk: &DecapsulationKey<MlKem768>) -> Vec<u8> {
-        use ml_kem::kem::KeyExport;
-        ml_kem_dk.encapsulation_key().to_bytes().to_vec()
-    }
-
-    /// Build an `Identity` with derived `vk_bytes` / `ek_bytes` cached. Use this
-    /// instead of the struct literal so the public-key views are computed once
-    /// and stay consistent across clones (#100).
-    pub(crate) fn new(
-        alias: Rc<str>,
-        id: UserId,
-        description: String,
-        ml_dsa_signing_key: Arc<MlDsaSigningKey<MlDsa65>>,
-        ml_kem_dk: DecapsulationKey<MlKem768>,
-    ) -> Self {
-        Self::new_with_policy(
-            alias,
-            id,
-            description,
-            ml_dsa_signing_key,
-            ml_kem_dk,
-            freenet_mail_wire_v1::aft::Tier::Min10,
-            freenet_mail_wire_v1::inbox::DEFAULT_MAX_AGE_SECS,
-        )
-    }
-
-    /// Construct an `Identity` with explicit anti-flood policy. The
-    /// policy is part of `InboxParams`, so picking it here determines
-    /// the inbox contract id and cannot change later (#85).
-    pub(crate) fn new_with_policy(
-        alias: Rc<str>,
-        id: UserId,
-        description: String,
-        ml_dsa_signing_key: Arc<MlDsaSigningKey<MlDsa65>>,
-        ml_kem_dk: DecapsulationKey<MlKem768>,
-        required_tier: freenet_mail_wire_v1::aft::Tier,
-        max_age_secs: u64,
-    ) -> Self {
-        let vk_bytes = Self::derive_vk_bytes(ml_dsa_signing_key.as_ref());
-        let ek_bytes = Self::derive_ek_bytes(&ml_kem_dk);
+    /// An identity as the mail delegate describes it.
+    pub(crate) fn from_info(info: &freenet_mail_protocol::IdentityInfo, id: UserId) -> Self {
         Self {
-            alias,
+            alias: info.alias.as_str().into(),
             id,
-            description,
-            required_tier,
-            max_age_secs,
-            ml_dsa_signing_key,
-            ml_kem_dk,
-            ek_bytes,
-            vk_bytes,
+            description: info.description.clone(),
+            required_tier: freenet_mail_wire_v1::aft::Tier::Min10,
+            max_age_secs: freenet_mail_wire_v1::inbox::DEFAULT_MAX_AGE_SECS,
+            addr: info.addr,
+            confirmed: info.confirmed,
+            generation: info.generation,
+            ek_bytes: info.ek.to_vec(),
+            vk_bytes: info.vk.to_vec(),
         }
     }
 
@@ -159,26 +109,10 @@ impl Identity {
         self.vk_bytes.clone()
     }
 
-    /// Encoded ML-KEM-768 encapsulation key bytes (1184 bytes). Public key half
-    /// of `ml_kem_dk`; senders use it to encrypt to this identity.
+    /// Encoded ML-KEM-768 encapsulation key bytes (1184 bytes); senders
+    /// use it to encrypt to this identity.
     pub(crate) fn ml_kem_ek_bytes(&self) -> Vec<u8> {
         self.ek_bytes.clone()
-    }
-}
-
-impl Clone for Identity {
-    fn clone(&self) -> Self {
-        Self {
-            alias: self.alias.clone(),
-            id: self.id,
-            description: self.description.clone(),
-            required_tier: self.required_tier,
-            max_age_secs: self.max_age_secs,
-            ml_dsa_signing_key: Arc::clone(&self.ml_dsa_signing_key),
-            ml_kem_dk: self.ml_kem_dk.clone(),
-            ek_bytes: self.ek_bytes.clone(),
-            vk_bytes: self.vk_bytes.clone(),
-        }
     }
 }
 
@@ -192,146 +126,66 @@ impl PartialEq for Identity {
 impl Eq for Identity {}
 
 impl Identity {
+    /// Replace the identity list with the identities the mail delegate
+    /// holds. Returns them, with the `UserId` each has in `user.identities`.
     #[must_use]
-    pub(crate) fn set_aliases(
-        mut new_aliases: IdentityManagement,
+    pub(crate) fn set_identities(
+        infos: &[freenet_mail_protocol::IdentityInfo],
         mut user: Signal<crate::app::User>,
     ) -> Vec<Self> {
-        ALIASES.with(|aliases| {
-            let aliases = &mut *aliases.borrow_mut();
-            let mut to_add = Vec::new();
-            for alias in &*aliases {
-                // just modify and avoid creating a new id
-                if let Some(info) = new_aliases.remove(&alias.alias)
-                    && info.kind == EntryKind::Identity
-                {
-                    let id = alias
-                        .clone()
-                        .with_description(info.extra.unwrap_or_default());
-                    crate::app::address_book::register_identity(&id);
-                    to_add.push(id);
+        let mut identities = Vec::with_capacity(infos.len());
+        for info in infos {
+            let alias: Rc<str> = info.alias.as_str().into();
+            // Dedup user.identities by alias, reusing the slot's UserId: it
+            // must stay equal to the slot index that `set_logged_id` asserts
+            // against (#114).
+            let existing_id = user
+                .read()
+                .identities
+                .iter()
+                .find(|i| i.alias == alias)
+                .map(|i| i.id);
+            let identity = Identity::from_info(info, existing_id.unwrap_or_else(UserId::new));
+            {
+                let mut user_w = user.write();
+                if let Some(slot) = user_w.identities.iter_mut().find(|i| i.alias == alias) {
+                    *slot = identity.clone();
+                } else {
+                    user_w.identities.push(identity.clone());
                 }
             }
-            let mut identities = Vec::new();
-            new_aliases
-                .into_info()
-                .for_each(|(alias, info)| match info.kind {
-                    EntryKind::Identity => {
-                        let stored: StoredIdentityKeys = match serde_json::from_slice(&info.key) {
-                            Ok(s) => s,
-                            Err(e) => {
-                                crate::log::error(
-                                    format!("skipping identity {alias}: bad key bytes: {e}"),
-                                    None,
-                                );
-                                return;
-                            }
-                        };
-                        let ml_dsa_signing_key = stored.ml_dsa_signing_key();
-                        let ml_kem_dk = stored.ml_kem_dk();
-                        let alias: Rc<str> = alias.into();
-                        // Dedup user.identities by alias name. ALIASES is
-                        // rebuilt wholesale (see `*aliases = to_add` below),
-                        // but user.identities is a Signal Vec that only
-                        // gets appended — without this guard a delegate
-                        // echo after `set_alias` doubles the row. When
-                        // replacing, reuse the existing slot's UserId so
-                        // it stays consistent with the slot index that
-                        // `set_logged_id` asserts against. See #114.
-                        let existing_id = user
-                            .read()
-                            .identities
-                            .iter()
-                            .find(|i| i.alias == alias)
-                            .map(|i| i.id);
-                        let id = existing_id.unwrap_or_else(UserId::new);
-                        let identity = Identity::new(
-                            alias.clone(),
-                            id,
-                            String::default(),
-                            Arc::clone(&ml_dsa_signing_key),
-                            ml_kem_dk.clone(),
-                        );
-                        {
-                            let mut user_w = user.write();
-                            if let Some(slot) =
-                                user_w.identities.iter_mut().find(|i| i.alias == alias)
-                            {
-                                *slot = identity.clone();
-                            } else {
-                                user_w.identities.push(identity.clone());
-                            }
-                        }
-                        let full = Identity::new(
-                            alias.clone(),
-                            id,
-                            info.extra.unwrap_or_default(),
-                            ml_dsa_signing_key,
-                            ml_kem_dk,
-                        );
-                        crate::app::address_book::register_identity(&full);
-                        to_add.push(full);
-                        identities.push(identity);
-                    }
-                    // Contacts are stored in the mail delegate now
-                    // (`contact_store`); those still in this v0.2.x delegate
-                    // are carried over by the migration from it.
-                    EntryKind::Contact => {}
-                });
-            *aliases = to_add;
-            identities
-        })
+            crate::app::address_book::register_identity(&identity);
+            identities.push(identity);
+        }
+        ALIASES.with(|aliases| *aliases.borrow_mut() = identities.clone());
+        identities
     }
 
-    fn with_description(mut self, desc: String) -> Self {
-        self.description = desc;
-        self
-    }
-
+    /// Add (or replace, by alias) one identity the mail delegate created or
+    /// restored, and route its inbox to it.
     pub(crate) fn set_alias(
-        alias: Rc<str>,
-        description: String,
-        ml_dsa_signing_key: Arc<MlDsaSigningKey<MlDsa65>>,
-        ml_kem_dk: DecapsulationKey<MlKem768>,
+        mut identity: Identity,
         inbox_key: ContractKey,
         mut user: Signal<crate::app::User>,
     ) -> Identity {
-        let vk_bytes = Identity::derive_vk_bytes(ml_dsa_signing_key.as_ref());
-        let ek_bytes = Identity::derive_ek_bytes(&ml_kem_dk);
-        // Dedup by alias name. If a stale GetIdentities echo (or
-        // example-data seeding) already populated `alias`, replace
-        // the entry in place instead of pushing a duplicate. The
-        // delegate is single-valued per alias name (HashMap insert
-        // overwrites), so the old VK is already gone server-side —
-        // surfacing two rows in the UI is the bug. See #114.
-        //
-        // CRITICAL: when replacing, reuse the existing slot's UserId.
+        // Replace in place by alias, reusing the slot's UserId:
         // `User::set_logged_id` asserts `id.0 < identities.len()` and
-        // `logged_id()` indexes by `id.0`, so the UserId has to match
-        // the slot index. Generating a fresh `UserId::new()` and then
-        // replacing slot 0 produces UserId(N) where N >= len() and
-        // panics on subsequent login. See #81 followup verification.
+        // `logged_id()` indexes by `id.0` (#81, #114).
         let existing_id = user
             .read()
             .identities
             .iter()
-            .find(|i| i.alias == alias)
+            .find(|i| i.alias == identity.alias)
             .map(|i| i.id);
-        let identity = Identity {
-            alias: alias.clone(),
-            id: existing_id.unwrap_or_else(UserId::new),
-            description: description.clone(),
-            required_tier: freenet_mail_wire_v1::aft::Tier::Min10,
-            max_age_secs: freenet_mail_wire_v1::inbox::DEFAULT_MAX_AGE_SECS,
-            ml_dsa_signing_key: Arc::clone(&ml_dsa_signing_key),
-            ml_kem_dk: ml_kem_dk.clone(),
-            ek_bytes: ek_bytes.clone(),
-            vk_bytes: vk_bytes.clone(),
-        };
+        identity.id = existing_id.unwrap_or_else(UserId::new);
         crate::inbox::InboxModel::set_contract_identity(inbox_key, identity.clone());
         {
             let mut user_w = user.write();
-            if let Some(slot) = user_w.identities.iter_mut().find(|i| i.alias == alias) {
+            if let Some(slot) = user_w
+                .identities
+                .iter_mut()
+                .find(|i| i.alias == identity.alias)
+            {
                 *slot = identity.clone();
             } else {
                 user_w.identities.push(identity.clone());
@@ -339,22 +193,11 @@ impl Identity {
         }
         ALIASES.with(|aliases| {
             let aliases = &mut *aliases.borrow_mut();
-            let full = Identity {
-                alias: alias.clone(),
-                id: identity.id,
-                description,
-                required_tier: identity.required_tier,
-                max_age_secs: identity.max_age_secs,
-                ml_dsa_signing_key,
-                ml_kem_dk,
-                ek_bytes,
-                vk_bytes,
-            };
-            crate::app::address_book::register_identity(&full);
-            if let Some(slot) = aliases.iter_mut().find(|a| a.alias == alias) {
-                *slot = full;
+            crate::app::address_book::register_identity(&identity);
+            if let Some(slot) = aliases.iter_mut().find(|a| a.alias == identity.alias) {
+                *slot = identity.clone();
             } else {
-                aliases.push(full);
+                aliases.push(identity.clone());
             }
         });
         identity
@@ -385,15 +228,21 @@ impl Identity {
     /// Senders use this to encrypt messages.
     #[allow(dead_code)]
     pub(crate) fn ml_kem_ek(&self) -> EncapsulationKey<MlKem768> {
-        self.ml_kem_dk.encapsulation_key().clone()
+        crate::inbox::MlKemEncapsKey(self.ek_bytes.clone())
+            .to_key()
+            .expect("the delegate returns a valid encapsulation key")
     }
 
     /// Return the ML-DSA-65 verifying (public) key for this identity.
     /// Used to compute the inbox contract ID.
     #[allow(dead_code)]
     pub(crate) fn ml_dsa_vk(&self) -> MlDsaVerifyingKey<MlDsa65> {
-        use ml_dsa::signature::Keypair;
-        self.ml_dsa_signing_key.as_ref().verifying_key()
+        let encoded: ml_dsa::EncodedVerifyingKey<MlDsa65> = self
+            .vk_bytes
+            .as_slice()
+            .try_into()
+            .expect("the delegate returns a valid verifying key");
+        MlDsaVerifyingKey::<MlDsa65>::decode(&encoded)
     }
 
     /// Reverse-lookup: find the alias whose ML-KEM encapsulation key matches.
@@ -403,10 +252,7 @@ impl Identity {
             let aliases = &*aliases.borrow();
             aliases
                 .iter()
-                .find(|a| {
-                    use ml_kem::kem::KeyExport;
-                    a.ml_kem_dk.encapsulation_key().to_bytes().as_slice() == ek_bytes
-                })
+                .find(|a| a.ek_bytes == ek_bytes)
                 .map(|a| a.alias.clone())
         })
     }
@@ -423,6 +269,27 @@ impl Identity {
                 aliases.push(identity);
             }
         });
+    }
+
+    /// Record a new delegate generation for the identity at `addr`.
+    pub(crate) fn set_generation(
+        addr: &freenet_mail_protocol::Addr,
+        generation: u64,
+        mut user: Signal<crate::app::User>,
+    ) {
+        ALIASES.with(|aliases| {
+            for a in aliases.borrow_mut().iter_mut().filter(|a| &a.addr == addr) {
+                a.generation = generation;
+            }
+        });
+        for i in user
+            .write()
+            .identities
+            .iter_mut()
+            .filter(|i| &i.addr == addr)
+        {
+            i.generation = generation;
+        }
     }
 
     /// Rewrite the entry whose alias is `old` to use `new`, in place.
@@ -491,6 +358,7 @@ pub(crate) struct StoredIdentityKeys {
 use serde::{Deserialize, Serialize};
 
 impl StoredIdentityKeys {
+    #[cfg(test)]
     pub(crate) fn new(
         ml_dsa_signing_key: &Arc<MlDsaSigningKey<MlDsa65>>,
         ml_kem_dk: &DecapsulationKey<MlKem768>,
@@ -541,12 +409,6 @@ pub(crate) struct IdentityBackup {
     pub alias: String,
     pub description: String,
     pub keys: StoredIdentityKeys,
-}
-
-/// Recovery key (`fmail-key-1:...`) for an identity's private keys.
-pub(crate) fn recovery_key_for(identity: &Identity) -> Result<String, String> {
-    let keys = StoredIdentityKeys::new(&identity.ml_dsa_signing_key, &identity.ml_kem_dk);
-    super::backup_token::encode(&keys).map_err(|e| e.to_string())
 }
 
 /// Fingerprint words of an identity as owned strings (the shape
@@ -1341,7 +1203,7 @@ fn BackupKeyModal(
     on_saved: EventHandler<()>,
     on_close: EventHandler<()>,
 ) -> Element {
-    let token = recovery_key_for(&identity);
+    let addr = identity.addr;
     let words = fingerprint_word_vec(&identity);
     // Close on a backdrop click only when the press also STARTED on the
     // backdrop. Selecting the key by hand and releasing the mouse outside
@@ -1368,26 +1230,16 @@ fn BackupKeyModal(
                     button { class: "modal-x", onclick: move |_| on_close.call(()), "✕" }
                 }
                 div { class: "modal-body",
-                    match token {
-                        Ok(token) => rsx! {
-                            crate::app::backup_panel::BackupKeyPanel {
-                                token,
-                                alias: alias_str.clone(),
-                                words,
-                                saved,
-                                on_exported: move |_| {},
-                                on_saved: {
-                                    let alias = alias_str.clone();
-                                    move |_| {
-                                        mark_backed_up(&alias);
-                                        on_saved.call(());
-                                    }
-                                },
-                            }
-                        },
-                        Err(e) => rsx! {
-                            div { class: "info fm-error",
-                                "Couldn't build a recovery key for this identity: {e}"
+                    crate::app::backup_panel::ExportedKeyPanel {
+                        addr,
+                        alias: alias_str.clone(),
+                        words,
+                        saved,
+                        on_saved: {
+                            let alias = alias_str.clone();
+                            move |_| {
+                                mark_backed_up(&alias);
+                                on_saved.call(());
                             }
                         },
                     }
@@ -1408,7 +1260,7 @@ fn BackupKeyModal(
 pub(super) fn CreateAliasForm() -> Element {
     let mut create_alias_form = use_context::<Signal<CreateAlias>>();
     let mut login_controller = use_context::<Signal<LoginController>>();
-    let actions = use_coroutine_handle::<NodeAction>();
+    let _actions = use_coroutine_handle::<NodeAction>();
 
     if login_controller.read().updated {
         login_controller.write().updated = false;
@@ -1417,14 +1269,10 @@ pub(super) fn CreateAliasForm() -> Element {
     let mut login_error = use_signal(String::new);
     let mut alias_input = use_signal(String::new);
     let mut description = use_signal(String::new);
-    // Reveal stage: hold the freshly-generated keypair + its fingerprint
-    // until the user explicitly continues. This gives them a beat to back
-    // up before the keys are persisted via NodeAction::CreateIdentity.
-    type PendingIdentity = (
-        Arc<MlDsaSigningKey<MlDsa65>>,
-        DecapsulationKey<MlKem768>,
-        [&'static str; 6],
-    );
+    // Reveal stage: the identity the mail delegate just created, its
+    // recovery key (returned this once) and its fingerprint, held until the
+    // user continues, so they can back it up before the inbox is published.
+    type PendingIdentity = (Identity, zeroize::Zeroizing<String>, [&'static str; 6]);
     let mut pending: Signal<Option<PendingIdentity>> = use_signal(|| None);
     // True once the recovery key has left the browser (copied, downloaded
     // or confirmed saved) during this creation flow, so we can warn before
@@ -1441,6 +1289,8 @@ pub(super) fn CreateAliasForm() -> Element {
     let mut backup_panel_open = use_signal(|| false);
     // When true, show the orphan-keyfile confirmation dialog.
     let mut discard_confirm_open = use_signal(|| false);
+    // While the delegate creates the identity.
+    let mut creating = use_signal(|| false);
 
     let submit = move |_| {
         let alias_str = alias_input.read().trim().to_string();
@@ -1454,66 +1304,48 @@ pub(super) fn CreateAliasForm() -> Element {
             ));
             return;
         }
-        match get_keys() {
-            Ok((ml_dsa, ml_kem)) => {
-                use ml_dsa::signature::Keypair;
-                use ml_kem::kem::KeyExport;
-                let vk_bytes: Vec<u8> = ml_dsa.as_ref().verifying_key().encode().to_vec();
-                let ek_bytes: Vec<u8> = ml_kem.encapsulation_key().to_bytes().to_vec();
-                let words = crate::app::address_book::fingerprint_words(&vk_bytes, &ek_bytes);
-                pending.set(Some((ml_dsa, ml_kem, words)));
-                login_error.set(String::new());
-                backup_taken.set(false);
-                backup_confirmed.set(false);
-                copy_tracker.write().reset();
-                backup_panel_open.set(false);
-            }
-            Err(e) => {
-                login_error.set(format!("Failed to generate keys: {e:?}"));
-            }
+        if *creating.read() {
+            return;
         }
+        creating.set(true);
+        login_error.set(String::new());
+        let desc_val = description.read().clone();
+        spawn(async move {
+            match crate::mail_delegate::ops::create_identity(alias_str, desc_val).await {
+                Ok((info, recovery_key)) => {
+                    let identity = Identity::from_info(&info, UserId(0));
+                    let words = crate::app::address_book::fingerprint_words(
+                        &identity.ml_dsa_vk_bytes(),
+                        &identity.ml_kem_ek_bytes(),
+                    );
+                    pending.set(Some((identity, recovery_key, words)));
+                    backup_taken.set(false);
+                    backup_confirmed.set(false);
+                    copy_tracker.write().reset();
+                    backup_panel_open.set(false);
+                }
+                Err(e) => login_error.set(format!("Couldn't create the identity: {e}")),
+            }
+            creating.set(false);
+        });
     };
 
     let confirm = move |_| {
-        let alias_str = alias_input.read().trim().to_string();
-        let desc_val = description.read().clone();
-        let Some((ml_dsa, ml_kem, _words)) = pending.write().take() else {
+        let Some((identity, _key, _words)) = pending.write().take() else {
             return;
         };
         // Not stamped here: the node action stamps it once the create
         // request has gone to the node (see `record_backup_after_create`).
         let backed_up = *backup_confirmed.read();
-        let alias: Rc<str> = alias_str.into();
-        let ek_bytes = {
-            use ml_kem::kem::KeyExport;
-            ml_kem.encapsulation_key().to_bytes().to_vec()
-        };
-        actions.send(NodeAction::CreateContract {
-            alias: alias.clone(),
-            ml_dsa_key: ml_dsa.clone(),
-            ml_kem_ek_bytes: ek_bytes.clone(),
-            contract_type: ContractType::InboxContract,
-            required_tier: freenet_mail_wire_v1::aft::Tier::Min10,
-            max_age_secs: freenet_mail_wire_v1::inbox::DEFAULT_MAX_AGE_SECS,
-        });
-        actions.send(NodeAction::CreateDelegate {
-            alias: alias.clone(),
-            ml_dsa_key: ml_dsa.clone(),
-        });
-        actions.send(NodeAction::CreateContract {
-            alias: alias.clone(),
-            ml_dsa_key: ml_dsa.clone(),
-            ml_kem_ek_bytes: ek_bytes,
-            contract_type: ContractType::AFTContract,
-            required_tier: freenet_mail_wire_v1::aft::Tier::Min10,
-            max_age_secs: freenet_mail_wire_v1::inbox::DEFAULT_MAX_AGE_SECS,
-        });
-        actions.send(NodeAction::CreateIdentity {
-            alias,
-            ml_dsa_key: ml_dsa,
-            ml_kem_dk: Box::new(ml_kem),
-            description: desc_val,
-            backed_up,
+        crate::app::identity_store::spawn_detached(async move {
+            let alias = identity.alias.clone();
+            if let Err(e) = crate::app::identity_store::publish(identity, backed_up).await {
+                crate::log::error(format!("publishing identity `{alias}` failed: {e}"), None);
+                crate::toast::push_toast(
+                    format!("Couldn't publish identity `{alias}`: {e}"),
+                    crate::toast::ToastLevel::Error,
+                );
+            }
         });
         create_alias_form.write().0 = false;
     };
@@ -1526,9 +1358,31 @@ pub(super) fn CreateAliasForm() -> Element {
         create_alias_form.write().0 = false;
     };
 
+    // The delegate already holds a created identity: discarding it deletes it
+    // there (the delegate asks the user to confirm).
+    let mut forget_pending = move || {
+        if let Some((identity, _, _)) = pending.write().take() {
+            crate::app::identity_store::spawn_detached(async move {
+                let deleted = crate::mail_delegate::ops::delete_identity(
+                    identity.addr,
+                    identity.generation,
+                    |_| {},
+                )
+                .await;
+                if let Err(e) = deleted {
+                    crate::log::error(
+                        format!("discarding identity `{}` failed: {e}", identity.alias),
+                        None,
+                    );
+                }
+            });
+        }
+    };
+
     // Real discard: unconditionally clear state and close the form.
+    let mut forget = forget_pending;
     let do_discard = move |_| {
-        pending.set(None);
+        forget();
         backup_taken.set(false);
         backup_confirmed.set(false);
         copy_tracker.write().reset();
@@ -1545,7 +1399,7 @@ pub(super) fn CreateAliasForm() -> Element {
         if *backup_taken.read() || copy_tracker.read().possibly_exported() {
             discard_confirm_open.set(true);
         } else {
-            pending.set(None);
+            forget_pending();
             alias_input.set(String::new());
             description.set(String::new());
             create_alias_form.write().0 = false;
@@ -1560,10 +1414,10 @@ pub(super) fn CreateAliasForm() -> Element {
     // Recovery key for the pending keypair, built only while the panel is
     // open so the secret isn't rendered into the DOM unless asked for.
     let pending_token: Option<Result<String, String>> = if *backup_panel_open.read() {
-        pending.read().as_ref().map(|(ml_dsa, ml_kem, _)| {
-            super::backup_token::encode(&StoredIdentityKeys::new(ml_dsa, ml_kem))
-                .map_err(|e| e.to_string())
-        })
+        pending
+            .read()
+            .as_ref()
+            .map(|(_, key, _)| Ok(key.as_str().to_string()))
     } else {
         None
     };
@@ -1718,40 +1572,14 @@ pub(super) fn CreateAliasForm() -> Element {
                     button {
                         class: "btn btn-primary btn-lg",
                         "data-testid": testid::FM_CREATE_SUBMIT,
+                        disabled: *creating.read(),
                         onclick: submit,
-                        "Generate"
+                        if *creating.read() { "Generating…" } else { "Generate" }
                     }
                 }
             }
         }
     }
-}
-
-/// Bundle of keypairs generated together at identity creation time.
-/// ML-DSA-65 + ML-KEM-768 are the two PQ primitives held by every identity.
-type IdentityKeyBundle = (Arc<MlDsaSigningKey<MlDsa65>>, DecapsulationKey<MlKem768>);
-
-/// Generate a fresh identity keypair bundle:
-/// - ML-DSA-65 signing key (inbox contract ownership + AFT token signing)
-/// - ML-KEM-768 decapsulation key (message encryption)
-///
-/// Importing an existing identity is handled by the separate `ImportForm`
-/// (`IdentityBackup` JSON round-trip), not this function.
-fn get_keys() -> Result<IdentityKeyBundle, DynError> {
-    crate::log::debug!("generating identity keypair bundle");
-
-    // ML-DSA-65: generate from random 32-byte seed.
-    let ml_dsa_seed: [u8; 32] = crate::rng::random_bytes();
-    let ml_dsa_key = Arc::new(ml_dsa::SigningKey::<MlDsa65>::from_seed(
-        &ml_dsa_seed.into(),
-    ));
-
-    // ML-KEM-768: derive from a random 64-byte seed. The seed is what a
-    // recovery key stores, so the key is built from it explicitly.
-    let ml_kem_dk =
-        DecapsulationKey::<MlKem768>::from_seed(crate::rng::random_bytes::<64>().into());
-
-    Ok((ml_dsa_key, ml_kem_dk))
 }
 
 #[allow(non_snake_case)]
@@ -1847,7 +1675,7 @@ fn is_typed_edit(evt: &Event<FormData>, prev_chars: usize, new_chars: usize) -> 
 fn ImportForm() -> Element {
     let mut import_id_form = use_context::<Signal<ImportId>>();
     let mut import_backup_form = use_context::<Signal<ImportBackup>>();
-    let actions = use_coroutine_handle::<NodeAction>();
+    let _actions = use_coroutine_handle::<NodeAction>();
     let mut parsed_backup: Signal<Option<IdentityBackup>> = use_signal(|| None);
     let mut paste_text = use_signal(String::new);
     // Name of the uploaded file the current input came from, if any.
@@ -2144,45 +1972,54 @@ fn ImportForm() -> Element {
                                 return;
                             }
                             restore_error.set(String::new());
-                            let alias: Rc<str> = alias_str.into();
                             let desc_val = description.read().clone();
-                            let ml_dsa = backup.keys.ml_dsa_signing_key();
-                            let ml_kem = backup.keys.ml_kem_dk();
-                            let ek_bytes = {
-                                use ml_kem::kem::KeyExport;
-                                ml_kem.encapsulation_key().to_bytes().to_vec()
+                            let seeds = (
+                                <[u8; 32]>::try_from(backup.keys.ml_dsa_seed.as_slice()),
+                                <[u8; 64]>::try_from(backup.keys.ml_kem_seed.as_slice()),
+                            );
+                            let (Ok(dsa), Ok(kem)) = seeds else {
+                                restore_error.set("This backup's keys have the wrong length.".into());
+                                return;
                             };
-                            actions.send(NodeAction::CreateContract {
-                                alias: alias.clone(),
-                                ml_dsa_key: ml_dsa.clone(),
-                                ml_kem_ek_bytes: ek_bytes.clone(),
-                                contract_type: ContractType::InboxContract,
-                                required_tier: freenet_mail_wire_v1::aft::Tier::Min10,
-                                max_age_secs: freenet_mail_wire_v1::inbox::DEFAULT_MAX_AGE_SECS,
+                            let source = freenet_mail_protocol::ImportSource::Seeds {
+                                dsa: freenet_mail_protocol::DsaSeed(dsa),
+                                kem: freenet_mail_protocol::KemSeed(kem),
+                            };
+                            // The mail delegate stores the keys; then the
+                            // identity's contracts are published.
+                            spawn(async move {
+                                let imported = crate::mail_delegate::ops::import_identity(
+                                    source,
+                                    freenet_mail_protocol::ImportKind::UserRestore,
+                                    alias_str,
+                                    desc_val,
+                                )
+                                .await;
+                                match imported {
+                                    Ok((info, _already_present)) => {
+                                        let identity = Identity::from_info(&info, UserId(0));
+                                        // Restored from a recovery key or
+                                        // backup file, so the user
+                                        // demonstrably holds one.
+                                        crate::app::identity_store::spawn_detached(async move {
+                                            let alias = identity.alias.clone();
+                                            if let Err(e) =
+                                                crate::app::identity_store::publish(identity, true).await
+                                            {
+                                                crate::toast::push_toast(
+                                                    format!("Couldn't publish identity `{alias}`: {e}"),
+                                                    crate::toast::ToastLevel::Error,
+                                                );
+                                            }
+                                        });
+                                        import_backup_form.write().0 = false;
+                                        import_id_form.write().0 = false;
+                                    }
+                                    Err(e) => {
+                                        restore_error.set(format!("Couldn't restore the identity: {e}"));
+                                    }
+                                }
                             });
-                            actions.send(NodeAction::CreateDelegate {
-                                alias: alias.clone(),
-                                ml_dsa_key: ml_dsa.clone(),
-                            });
-                            actions.send(NodeAction::CreateContract {
-                                alias: alias.clone(),
-                                ml_dsa_key: ml_dsa.clone(),
-                                ml_kem_ek_bytes: ek_bytes,
-                                contract_type: ContractType::AFTContract,
-                                required_tier: freenet_mail_wire_v1::aft::Tier::Min10,
-                                max_age_secs: freenet_mail_wire_v1::inbox::DEFAULT_MAX_AGE_SECS,
-                            });
-                            actions.send(NodeAction::CreateIdentity {
-                                alias,
-                                ml_dsa_key: ml_dsa,
-                                ml_kem_dk: Box::new(ml_kem),
-                                description: desc_val,
-                                // Restored from a recovery key or backup
-                                // file, so the user demonstrably holds one.
-                                backed_up: true,
-                            });
-                            import_backup_form.write().0 = false;
-                            import_id_form.write().0 = false;
                         }
                     },
                     "Restore"

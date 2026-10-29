@@ -1,7 +1,6 @@
 #[cfg(feature = "example-data")]
 use std::collections::HashMap;
 use std::fmt::Display;
-use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::{borrow::Cow, cell::RefCell, rc::Rc};
 
@@ -10,8 +9,8 @@ use dioxus::prelude::*;
 use freenet_stdlib::prelude::ContractKey;
 use futures::FutureExt;
 use futures::future::LocalBoxFuture;
-use ml_dsa::{MlDsa65, SigningKey as MlDsaSigningKey};
-use ml_kem::{DecapsulationKey, EncapsulationKey, MlKem768};
+use ml_dsa::MlDsa65;
+use ml_kem::{EncapsulationKey, MlKem768};
 use wasm_bindgen::JsValue;
 
 pub(crate) use login::{Identity, LoginController};
@@ -31,6 +30,7 @@ pub(crate) mod backup_token;
 // its tests run against the in-page delegate.
 #[cfg_attr(not(feature = "use-node"), allow(dead_code))]
 pub(crate) mod contact_store;
+pub(crate) mod identity_store;
 pub(crate) mod login;
 pub(crate) mod settings;
 
@@ -47,36 +47,32 @@ thread_local! {
 #[derive(Clone, Debug)]
 pub(crate) enum NodeAction {
     LoadMessages(Box<Identity>),
+    /// The identities the mail delegate holds, read at startup in a task
+    /// (`identity_store::load_and_report`): restore their inboxes, AFT
+    /// records and token-generator delegates, and run the contract
+    /// migrations.
+    IdentitiesLoaded {
+        identities: Vec<identity_store::LoadedIdentity>,
+    },
+    /// Surface an identity the mail delegate just created or restored. Its
+    /// keys are already in the delegate; the contracts are published by the
+    /// `CreateContract` / `CreateDelegate` actions sent with it
+    /// (`identity_store::publish`).
     CreateIdentity {
-        alias: Rc<str>,
-        ml_dsa_key: Arc<MlDsaSigningKey<MlDsa65>>,
-        ml_kem_dk: Box<DecapsulationKey<MlKem768>>,
-        description: String,
-        /// Whether a backup of THESE keys is known to exist (the user
-        /// confirmed "I've saved it" while creating, or restored from a
-        /// recovery key / backup file). Recorded only after the create
-        /// request has been sent to the node without error; see
+        identity: Box<Identity>,
+        /// Whether a backup of this identity's keys is known to exist (the
+        /// user confirmed "I've saved it" while creating, or restored from a
+        /// recovery key / backup file); see
         /// `login::record_backup_after_create`.
         backed_up: bool,
     },
     CreateContract {
         alias: Rc<str>,
         contract_type: ContractType,
-        /// ML-DSA-65 signing key used for both inbox ownership and AFT
-        /// token signing (same key serves both subsystems post-Stage-4).
-        ml_dsa_key: Arc<MlDsaSigningKey<MlDsa65>>,
-        /// ML-KEM-768 encapsulation key bytes for the inbox owner. Stamped
-        /// into the inbox state's `owner_ek_bytes` field so senders can
-        /// recover the recipient's encryption key by Get-ing the inbox.
-        /// Ignored for `ContractType::AFTContract`.
-        ml_kem_ek_bytes: Vec<u8>,
-        /// Initial recipient anti-flood policy seeded into the inbox's
-        /// `InboxSettings` at creation. Only consulted for
-        /// `ContractType::InboxContract`; the AFT record contract id is
-        /// derived from the sender's key alone. Owner can mutate later
-        /// via `UpdateInboxPolicy` (#85).
-        required_tier: freenet_mail_wire_v1::aft::Tier,
-        max_age_secs: u64,
+        identity: Box<Identity>,
+        /// The signed initial inbox state (the delegate signs it). Empty for
+        /// `ContractType::AFTContract`, whose record starts empty.
+        inbox_state: Vec<u8>,
     },
     /// Push a signed `ModifySettings` delta updating the recipient
     /// anti-flood policy on the inbox contract owned by `identity`
@@ -99,8 +95,10 @@ pub(crate) enum NodeAction {
     },
     CreateDelegate {
         alias: Rc<str>,
-        /// ML-DSA-65 signing key used by the AFT token-generator delegate.
-        ml_dsa_key: Arc<MlDsaSigningKey<MlDsa65>>,
+        identity: Box<Identity>,
+        /// The v1 token-generator delegate's parameters, from the mail
+        /// delegate (`V1AftParams`).
+        aft_params: Vec<u8>,
     },
     /// Store a new contact in the identity-management delegate.
     CreateContact {
@@ -195,7 +193,7 @@ pub(crate) fn app() -> Element {
     #[cfg(all(feature = "use-node", not(feature = "no-sync")))]
     {
         let _ = toast;
-        let _sync: Coroutine<NodeAction> = use_coroutine(move |rx| {
+        let sync: Coroutine<NodeAction> = use_coroutine(move |rx| {
             let login_controller = login_controller;
             let user = user;
             let fut = crate::api::node_comms(rx, login_controller, user, inbox_data, ab_gen)
@@ -203,6 +201,7 @@ pub(crate) fn app() -> Element {
             let _ = wasm_bindgen_futures::future_to_promise(fut);
             async {}.boxed_local()
         });
+        identity_store::set_action_sender(sync);
     }
     #[cfg(any(not(feature = "use-node"), feature = "no-sync"))]
     {
@@ -211,7 +210,7 @@ pub(crate) fn app() -> Element {
         let mut login_ctl = login_controller;
         let mut ab_gen = ab_gen;
         let mut user_sig = user;
-        let _sync: Coroutine<NodeAction> =
+        let sync: Coroutine<NodeAction> =
             use_coroutine(move |mut rx: UnboundedReceiver<NodeAction>| async move {
                 use futures::StreamExt;
                 while let Some(action) = rx.next().await {
@@ -242,25 +241,18 @@ pub(crate) fn app() -> Element {
                         // way the example-data seeding does, so the create
                         // and restore flows end in a usable identity (and
                         // are testable in Playwright) without a node.
+                        // The in-page delegate already holds the identity.
                         #[cfg(feature = "example-data")]
                         NodeAction::CreateIdentity {
-                            alias,
-                            ml_dsa_key,
-                            ml_kem_dk,
-                            description,
+                            identity,
                             backed_up,
                         } => {
-                            if Identity::get_alias(&alias).is_none() {
+                            if Identity::get_alias(&identity.alias).is_none() {
                                 // UserId must equal the slot index
                                 // (`User::set_logged_id` indexes by it).
-                                let id = UserId(user_sig.read().identities.len());
-                                let identity = Identity::new(
-                                    alias.clone(),
-                                    id,
-                                    description,
-                                    ml_dsa_key,
-                                    *ml_kem_dk,
-                                );
+                                let mut identity = *identity;
+                                identity.id = UserId(user_sig.read().identities.len());
+                                let alias = identity.alias.clone();
                                 Identity::register_example(identity.clone());
                                 user_sig.write().identities.push(identity);
                                 login::record_backup_after_create(&alias, backed_up);
@@ -296,6 +288,7 @@ pub(crate) fn app() -> Element {
                     }
                 }
             });
+        identity_store::set_action_sender(sync);
     }
     #[allow(unused_variables)]
     let actions = use_coroutine_handle::<NodeAction>();
@@ -857,33 +850,19 @@ pub(crate) struct User {
 impl User {
     #[cfg(feature = "example-data")]
     fn new() -> Self {
-        let ml_dsa0 = Arc::new(ml_dsa::SigningKey::<MlDsa65>::from_seed(
-            &crate::rng::random_bytes::<32>().into(),
-        ));
-        let ml_dsa1 = Arc::new(ml_dsa::SigningKey::<MlDsa65>::from_seed(
-            &crate::rng::random_bytes::<32>().into(),
-        ));
-        let ml_kem_dk0 =
-            DecapsulationKey::<MlKem768>::from_seed(crate::rng::random_bytes::<64>().into());
-        let ml_kem_dk1 =
-            DecapsulationKey::<MlKem768>::from_seed(crate::rng::random_bytes::<64>().into());
-
-        let identities = vec![
-            Identity::new(
-                "address1".into(),
-                UserId(0),
-                "Mock identity (example-data)".into(),
-                ml_dsa0,
-                ml_kem_dk0,
-            ),
-            Identity::new(
-                "address2".into(),
-                UserId(1),
-                "Mock identity (example-data)".into(),
-                ml_dsa1,
-                ml_kem_dk1,
-            ),
-        ];
+        // The in-page delegate holds the example identities' keys, as a
+        // node's would. It answers synchronously, so this needs no executor
+        // beyond polling once.
+        let create = |alias: &str, id: usize| {
+            let (info, _key) =
+                futures::executor::block_on(crate::mail_delegate::ops::create_identity(
+                    alias.into(),
+                    "Mock identity (example-data)".into(),
+                ))
+                .expect("the in-page delegate creates the example identities");
+            Identity::from_info(&info, UserId(id))
+        };
+        let identities = vec![create("address1", 0), create("address2", 1)];
         // Register with the shared ALIASES store so IdentifiersList
         // (which reads from ALIASES, not User.identities) sees them.
         for id in &identities {

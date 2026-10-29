@@ -259,6 +259,25 @@ impl Inbox {
         }
     }
 
+    /// An inbox state whose `inbox_signature` was produced elsewhere (the
+    /// mail delegate signs [`sign_payload`] for the owner). The caller must
+    /// sign exactly `sign_payload(&owner_ek_bytes, &settings, last_update)`.
+    pub fn with_signature(
+        settings: InboxSettings,
+        messages: Vec<Message>,
+        last_update: DateTime<Utc>,
+        owner_ek_bytes: Vec<u8>,
+        inbox_signature: Signature,
+    ) -> Self {
+        Self {
+            settings,
+            messages,
+            last_update,
+            owner_ek_bytes,
+            inbox_signature,
+        }
+    }
+
     pub fn serialize(&self) -> Result<Vec<u8>, ContractError> {
         serde_json::to_vec(self).map_err(|err| ContractError::Deser(format!("{err}")))
     }

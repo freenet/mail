@@ -62,6 +62,7 @@
   "fmRestoreAlias": "fm-restore-alias",
   "fmRestoreExisting": "fm-restore-existing",
   "fmBackupModal": "fm-backup-modal",
+  "fmBackupWaiting": "fm-backup-waiting",
   "fmBackupPanel": "fm-backup-panel",
   "fmBackupEntryTitle": "fm-backup-entry-title",
   "fmBackupKey": "fm-backup-key",

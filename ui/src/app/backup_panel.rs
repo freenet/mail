@@ -177,6 +177,50 @@ pub(crate) fn copy_report<G>(
     }
 }
 
+/// [`BackupKeyPanel`] for an existing identity, whose key the mail delegate
+/// reveals only after the user approves its prompt. The key is held by this
+/// component's resource, so it is dropped (and zeroized) when the panel
+/// closes.
+#[component]
+pub(crate) fn ExportedKeyPanel(
+    addr: freenet_mail_protocol::Addr,
+    alias: String,
+    words: Vec<String>,
+    saved: bool,
+    on_saved: EventHandler<()>,
+    #[props(default)] scroll_request: u32,
+) -> Element {
+    let token = use_resource(move || async move {
+        crate::mail_delegate::ops::export_recovery_key(addr)
+            .await
+            .map_err(|e| e.to_string())
+    });
+    match &*token.read() {
+        None => rsx! {
+            div { class: "info",
+                "data-testid": crate::testid::FM_BACKUP_WAITING,
+                "Approve showing the recovery key in the prompt from your Freenet node."
+            }
+        },
+        Some(Ok(token)) => rsx! {
+            BackupKeyPanel {
+                token: token.as_str().to_string(),
+                alias: alias.clone(),
+                words: words.clone(),
+                saved,
+                scroll_request,
+                on_exported: move |_| {},
+                on_saved: move |_| on_saved.call(()),
+            }
+        },
+        Some(Err(e)) => rsx! {
+            div { class: "info fm-error",
+                "Couldn't show the recovery key for this identity: {e}"
+            }
+        },
+    }
+}
+
 #[component]
 pub(crate) fn BackupKeyPanel(
     /// The recovery key (`fmail-key-1:...`).

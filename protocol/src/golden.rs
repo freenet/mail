@@ -59,6 +59,7 @@ fn reply_name(reply: &Reply) -> &'static str {
         Reply::Profile(_) => "reply_profile",
         Reply::ExportedSecrets { .. } => "reply_exported_secrets",
         Reply::Continue { .. } => "reply_continue",
+        Reply::CreatedIdentity { .. } => "reply_created_identity",
     }
 }
 
@@ -253,6 +254,10 @@ fn replies() -> Vec<Reply> {
             session: None,
         },
         Reply::Continue { remaining: 12 },
+        Reply::CreatedIdentity {
+            identity: identity(),
+            recovery_key: "fmail-key-1:x".into(),
+        },
     ]
 }
 

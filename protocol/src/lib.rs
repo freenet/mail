@@ -386,6 +386,15 @@ pub enum Reply {
     Continue {
         remaining: u32,
     },
+    /// The answer to `CreateIdentity`: the new identity and its
+    /// `fmail-key-1:` recovery key. This is the one time a recovery key
+    /// leaves the delegate without a prompt, so the new identity can be
+    /// backed up as it is made; every later reveal is a consented
+    /// `ExportRecoveryKey`.
+    CreatedIdentity {
+        identity: IdentityInfo,
+        recovery_key: String,
+    },
 }
 
 /// Encode `value` as CBOR.

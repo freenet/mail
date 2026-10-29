@@ -24,17 +24,22 @@ pub(crate) async fn list_identities() -> Result<Vec<IdentityInfo>, CallError> {
     }
 }
 
+/// Create an identity. Its recovery key comes back this once, so it can be
+/// backed up as it is made; later reveals are consented exports.
 pub(crate) async fn create_identity(
     alias: String,
     description: String,
-) -> Result<IdentityInfo, CallError> {
+) -> Result<(IdentityInfo, zeroize::Zeroizing<String>), CallError> {
     let op = Op::CreateIdentity {
         alias,
         description,
         ui_entropy: Entropy(nonzero_entropy()),
     };
     match call(op).await? {
-        Reply::Identity(info) => Ok(info),
+        Reply::CreatedIdentity {
+            identity,
+            recovery_key,
+        } => Ok((identity, zeroize::Zeroizing::new(recovery_key))),
         other => Err(unexpected(&other)),
     }
 }

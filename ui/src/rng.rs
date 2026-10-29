@@ -1,6 +1,7 @@
 //! Randomness from the platform CSPRNG: `crypto.getRandomValues` in the
 //! browser (getrandom's `wasm_js` backend), the OS generator natively.
 
+#[cfg(test)]
 use getrandom::{SysRng, rand_core::UnwrapErr};
 
 /// `N` random bytes. Panics if the platform generator is unavailable, as
@@ -13,6 +14,7 @@ pub(crate) fn random_bytes<const N: usize>() -> [u8; N] {
 
 /// The platform generator as a `rand_core` crypto RNG, for APIs that take
 /// one (ML-KEM encapsulation).
+#[cfg(test)]
 pub(crate) fn crypto_rng() -> UnwrapErr<SysRng> {
     UnwrapErr(SysRng)
 }

@@ -730,25 +730,6 @@ pub fn vk_from_bytes(bytes: &[u8]) -> Result<MlDsaVerifyingKey<MlDsa65>, String>
 
 // ── Migration scaffolding ─────────────────────────────────────────────────────
 
-/// Hashes of identity-management delegate wasm builds that pre-date this
-/// release. Empty for now — no production data existed before v1. Populate
-/// when a future breaking change bumps the wasm hash again, so the next
-/// release can find and migrate identities stored under the prior hash.
-pub const LEGACY_ID_DELEGATE_HASHES: &[&str] = &[];
-
-/// Walk `LEGACY_ID_DELEGATE_HASHES` and copy entries from any legacy delegate
-/// into the current one. Wired into the app startup path; currently a
-/// no-op because the slice is empty. When future hashes are added, the
-/// implementation should issue a `GetIdentities` request per legacy hash
-/// and, on response, re-issue `CreateIdentity` against the current
-/// delegate for each entry found.
-pub fn migrate_legacy_identities() {
-    for _hash in LEGACY_ID_DELEGATE_HASHES {
-        // Placeholder: issue GetIdentities to the legacy delegate and
-        // upsert results into the current delegate.
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

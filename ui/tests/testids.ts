@@ -67,6 +67,7 @@ interface TestIds {
   fmRestoreAlias: string;
   fmRestoreExisting: string;
   fmBackupModal: string;
+  fmBackupWaiting: string;
   fmBackupPanel: string;
   fmBackupEntryTitle: string;
   fmBackupKey: string;
