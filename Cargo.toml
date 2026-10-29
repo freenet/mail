@@ -56,7 +56,7 @@ freenet-mail-wire-v1 = { path = "wire-v1" }
 # Shared
 # Stays on bincode 1: the frozen token-generator delegate speaks bincode 1's
 # encoding, which bincode 2 and later changed.
-bincode = "1.3.3"
+bincode = "3.0.0"
 bs58 = "0.5.1"
 # default-features = false keeps `clock` (and its js-sys/wasm-bindgen
 # pull-in) out of anything that does not ask for it. Opt back into
