@@ -47,6 +47,16 @@ failure of any preflight check.
 
 Before running `scripts/release.sh`:
 
+### 0. No release freeze
+
+While `.release-freeze` exists at the repository root, nothing may be
+published: `scripts/check-release-freeze.sh` exits 3, and `release.sh`
+and the `publish-email`, `publish-container` and `publish-production`
+tasks run it before anything else. The file says why the freeze is in
+place; removing it is part of the change that ends the reason for it.
+`scripts/release-freeze_test.sh` (CI) tests the gate without ever running
+a release.
+
 ### 1. Production key (one-time)
 
 Generate the ed25519 keypair that signs every release:

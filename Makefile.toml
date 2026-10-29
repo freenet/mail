@@ -435,7 +435,7 @@ fdev --port "$PORT" publish \
 
 [tasks.publish-container]
 description = "Publish (PUT) the container contract to the live Freenet network — ONE-TIME prod publish only"
-dependencies = ["build-container", "sign-container-state"]
+dependencies = ["check-release-freeze", "build-container", "sign-container-state"]
 script_runner = "bash"
 script = '''
 set -euo pipefail
@@ -791,9 +791,16 @@ fdev --port "$PORT" publish \
     --webapp-metadata "$ROOT/target/webapp/webapp.metadata"
 '''
 
+[tasks.check-release-freeze]
+description = "Refuse while .release-freeze exists (first step of every production publish)"
+script_runner = "bash"
+script = '''
+"${CARGO_MAKE_WORKING_DIRECTORY}/scripts/check-release-freeze.sh"
+'''
+
 [tasks.publish-email]
 description = "Publish the production build of the webapp to Freenet"
-dependencies = ["sign-webapp", "verify-published-contract"]
+dependencies = ["check-release-freeze", "sign-webapp", "verify-published-contract"]
 script_runner = "bash"
 script = '''
 set -euo pipefail
@@ -818,6 +825,7 @@ dependencies = [
 [tasks.publish-production]
 description = "End-to-end PRODUCTION publish: build → sign with prod key → verify the committed snapshot → publish-email"
 dependencies = [
+    "check-release-freeze",
     "build",
     "publish-email",
 ]

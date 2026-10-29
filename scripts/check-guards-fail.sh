@@ -40,6 +40,7 @@ protocol_tests() {
     cargo test --manifest-path "$STAGE/Cargo.toml" -p freenet-mail-protocol
 }
 candidate_check() { "$STAGE/scripts/check-delegate-candidate.sh"; }
+freeze_tests() { "$STAGE/scripts/release-freeze_test.sh"; }
 
 failures=0
 
@@ -57,6 +58,7 @@ baseline() { # name command...
 }
 baseline "delegate tests" delegate_tests
 baseline "protocol tests" protocol_tests
+baseline "release freeze tests" freeze_tests
 [ "$WASM" -eq 1 ] && baseline "candidate check" candidate_check
 if [ "$failures" -ne 0 ]; then
     echo "the guards fail without any regression applied; nothing below would mean anything"
@@ -213,6 +215,17 @@ guard "protocol encoding is pinned" "$STAGE/protocol/src/lib.rs" \
     NotFound,' 'pub enum FailureCode {
     #[serde(rename = "Missing")]
     NotFound,' "tests:golden_every_variant_encodes_to_its_pinned_bytes" protocol_tests
+guard "release.sh runs the freeze gate" "$STAGE/scripts/release.sh" \
+    '"$REPO_ROOT/scripts/check-release-freeze.sh"
+' 'true
+' "not ok - release.sh runs the gate" freeze_tests
+guard "the production publish task runs the freeze gate" "$STAGE/Makefile.toml" \
+    'dependencies = ["check-release-freeze", "sign-webapp", "verify-published-contract"]' \
+    'dependencies = ["sign-webapp", "verify-published-contract"]' \
+    "not ok - publish-email runs check-release-freeze first" freeze_tests
+guard "the freeze override needs the test flag" "$STAGE/scripts/check-release-freeze.sh" \
+    'if [ "${RELEASE_FREEZE_TEST:-}" = "1" ]; then' 'if true; then' \
+    "not ok - RELEASE_FREEZE_FILE without the test flag does not lift the freeze" freeze_tests
 if [ "$WASM" -eq 1 ]; then
     guard "the candidate is the source's build" "$D/store.rs" \
         'pub const MAX_PENDING_PROMPTS: usize = 4;' 'pub const MAX_PENDING_PROMPTS: usize = 5;' \
