@@ -120,30 +120,15 @@ jobs:
       # Issue #199: every other contract and delegate source (and the
       # shared aft-interface crate) also lives OUTSIDE the workspace with
       # its own Cargo.lock, so dep churn can't rotate their wasm bytes.
-      # Same gating treatment. --locked fails a lockfile that no longer
-      # matches its manifest (contracts/web-container follows common/'s
-      # versions, so a root bump can leave it stale).
-      - name: Lint + test out-of-workspace contracts (issue #199)
-        run: |
-          for crate in \
-            modules/antiflood-tokens/interfaces \
-            contracts/inbox \
-            contracts/web-container \
-            modules/antiflood-tokens/contracts/token-allocation-record \
-            modules/antiflood-tokens/delegates/token-generator \
-            modules/identity-management \
-            modules/mail-local-state
-          do
-            echo "::group::$crate"
-            (cd "$crate" && cargo fmt -- --check \
-              && cargo clippy --locked --all-targets -- -D warnings \
-              && cargo test --locked)
-            echo "::endgroup::"
-          done
-          # Inbox host-side integration tests (the lockfile-isolated
-          # test-inbox target) — already covered by `cargo make test-inbox`
-          # above but kept explicit here to flag if that target ever drifts.
-          (cd contracts/inbox && cargo test --features contract --test integration)
+      # `cargo make clippy` and `cargo make test` above already cover them
+      # through scripts/check-excluded-crates.sh; fmt is checked here.
+      - name: Format check out-of-workspace crates (issue #199)
+        run: scripts/check-excluded-crates.sh fmt
+
+      # wire-v1's golden and KEM fixtures must reproduce from the frozen
+      # crates, so a fixture cannot be edited to match a drifted copy.
+      - name: Re-capture golden fixtures through the frozen crates
+        run: cargo make check-golden-capture
 
   ui-playwright-tests:
     runs-on: ubicloud-standard-8

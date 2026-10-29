@@ -850,9 +850,18 @@ RUST_BACKTRACE=1 RUST_LOG=freenet=debug,freenet_core=debug,info \
 '''
 
 [tasks.test]
-description = "Run all tests"
+description = "Run all tests: the workspace, then every out-of-workspace crate"
+dependencies = ["test-workspace", "test-excluded"]
+
+[tasks.test-workspace]
+description = "Run the workspace's tests"
 command = "cargo"
 args = ["test", "--workspace"]
+
+[tasks.test-excluded]
+description = "Run the tests of every crate outside the workspace (own Cargo.lock each)"
+command = "scripts/check-excluded-crates.sh"
+args = ["test"]
 
 [tasks.test-inbox]
 description = "Run inbox contract integration tests (host build). Issue #199: inbox is outside the workspace."
@@ -864,9 +873,30 @@ cargo test --features contract --test integration
 '''
 
 [tasks.clippy]
-description = "Run clippy on all packages"
+description = "Run clippy on the workspace and every out-of-workspace crate"
+dependencies = ["clippy-workspace", "clippy-excluded"]
+
+[tasks.clippy-workspace]
+description = "Run clippy on the workspace"
 command = "cargo"
 args = ["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"]
+
+[tasks.clippy-excluded]
+description = "Run clippy on every crate outside the workspace (own Cargo.lock each)"
+command = "scripts/check-excluded-crates.sh"
+args = ["clippy"]
+
+[tasks.check-golden-capture]
+description = "Re-capture wire-v1's golden and KEM fixtures through the frozen crates and fail on any difference"
+script_runner = "bash"
+script = '''
+set -euo pipefail
+cd "${CARGO_MAKE_WORKING_DIRECTORY}"
+capture() { cargo run -q --locked --manifest-path wire-v1/capture/Cargo.toml -- "$1"; }
+diff <(capture golden) wire-v1/src/golden_v1.txt
+diff <(capture kem) ui/src/inbox/kem_vectors_v1.txt
+echo "golden and KEM fixtures reproduce from the frozen crates"
+'''
 
 # ─── Playwright E2E tests ────────────────────────────────────────────────────
 

@@ -65,11 +65,13 @@ updates:
       default-days: 7
     # Set explicitly: omitting this caps at 5 and silently withholds the rest.
     open-pull-requests-limit: 50
-    # This workspace reaches a contract/delegate crate: a bump here can move a
-    # contract address. Labelled so that shows on the PR, not just in this file.
+    # The root workspace holds only the client, its wire-type copies and the
+    # signer; every contract and delegate crate is excluded with its own
+    # lockfile, and every shipped WASM is a frozen artifact. A bump here cannot
+    # move a contract address. It can still change the client's wire bytes,
+    # which wire-v1's golden tests catch.
     labels:
       - "dependencies"
-      - "contract-rekey-risk"
     groups:
       cargo-minor-and-patch:
         patterns:

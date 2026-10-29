@@ -22,6 +22,7 @@ trap 'rm -r -- "$OUT"' EXIT
 # <crate dir> <kind> <features> <output name>
 CRATES=(
     "contracts/inbox contract contract freenet_email_inbox"
+    "contracts/web-container contract freenet-main-contract,contract freenet_email_app_web"
     "modules/antiflood-tokens/contracts/token-allocation-record contract freenet-main-contract freenet_token_allocation_record"
     "modules/antiflood-tokens/delegates/token-generator delegate freenet-main-delegate freenet_token_generator"
     "modules/identity-management delegate freenet-main-delegate,contract identity_management"

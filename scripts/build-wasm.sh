@@ -54,8 +54,8 @@ REMAPS=(
     "--remap-path-prefix=$REPO_ROOT=/build"
     "--remap-path-prefix=$BUILD_TARGET=/target"
 )
-# Env RUSTFLAGS replaces .cargo/config.toml's target rustflags, so repeat the
-# one flag that file sets.
+# Env RUSTFLAGS replaces the target rustflags from contracts/.cargo/ and
+# modules/.cargo/config.toml, so repeat the one flag those files set.
 FLAGS=(--cfg 'getrandom_backend="custom"' "${REMAPS[@]}")
 export CARGO_ENCODED_RUSTFLAGS
 CARGO_ENCODED_RUSTFLAGS="$(printf '%s\x1f' "${FLAGS[@]}")"

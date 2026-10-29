@@ -50,7 +50,9 @@ fn kem() {
 
     let seed: [u8; 64] = std::array::from_fn(|i| i as u8);
     let dk = DecapsulationKey::<MlKem768>::from_seed(seed.into());
-    let (ct, ss) = dk.encapsulation_key().encapsulate_with_rng(&mut KemFixedRng::default());
+    let (ct, ss) = dk
+        .encapsulation_key()
+        .encapsulate_with_rng(&mut KemFixedRng::default());
     let ct_bytes: &[u8] = ct.as_ref();
     let back = dk.decapsulate_slice(ct_bytes).expect("decapsulate");
     assert_eq!(back.as_slice(), ss.as_slice());

@@ -128,8 +128,10 @@ peers; used by `publish-email-test`/`publish-all`/tests) vs. `freenet network`
 ### Testing
 
 ```bash
-cargo test --workspace              # All tests
-cargo make test-inbox               # Inbox contract tests (outside the workspace, needs --features contract)
+cargo make test                     # All tests: the workspace, then every out-of-workspace crate
+cargo make clippy                   # Clippy on the same set
+cargo make test-inbox               # Inbox contract integration tests (needs --features contract)
+cargo make check-golden-capture     # Re-capture wire-v1's fixtures through the frozen crates
 cargo make test-ui-playwright       # Playwright E2E tests (build + serve + test)
 cargo make test-ui-playwright-setup # One-time: install Playwright browsers
 ```
@@ -359,7 +361,11 @@ All of these are listed in `[workspace.exclude]`. Each has its own
 doesn't panic.
 
 Net effect: bumping a workspace dep (dioxus, ml-kem) cannot reach the
-inbox or AFT build graphs. That does not make a rebuild reproducible
+inbox, AFT or delegate build graphs. The webapp contract is the exception:
+its `common/` path-dep follows root workspace bumps, so its lockfile can
+need refreshing (`--locked` in `scripts/check-excluded-crates.sh` flags
+that). What protects every deployed contract, that one included, is that
+the shipped bytes are frozen. Lockfile isolation does not make a rebuild reproducible
 (embedded build paths, #348), which is why the shipped bytes are frozen
 under `published-contract/wasm/v1/` and the UI embeds those, never a fresh
 build. A deliberate rotation (e.g. a contract bugfix that needs a data
