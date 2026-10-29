@@ -126,6 +126,7 @@ FIXTURES=(
     ui/src/inbox/crypto_vectors_v1.txt
     ui/src/inbox/kem_vectors_v1.txt
     ui/src/register_defaults_v1.txt
+    protocol/src/golden_v1.txt
 )
 for fixture in "${FIXTURES[@]}"; do
     git cat-file -e "$BASE:$fixture" 2>/dev/null || continue

@@ -137,6 +137,13 @@ Bump it first:
 fi
 echo "  ✓ Cargo.toml workspace version = $VERSION"
 
+# From v0.3.0 the release ships the mail delegate: it must be the frozen
+# build (published-contract/wasm/v2/), built without the v1-transition
+# feature, and the UI must embed that rather than the unfrozen candidate.
+scripts/check-release-delegate.sh "$VERSION" \
+    || die "the mail delegate is not ready to ship (see above)"
+echo "  ✓ mail delegate release check"
+
 # Production key
 KEY_FILE="${WEB_CONTAINER_KEY_FILE:-$HOME/.config/freenet-email/web-container-keys.toml}"
 if [ ! -f "$KEY_FILE" ]; then

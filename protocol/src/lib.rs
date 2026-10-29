@@ -12,6 +12,9 @@ pub mod address;
 pub mod fixed_bytes;
 pub mod recovery_key;
 
+#[cfg(test)]
+mod golden;
+
 use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
 
