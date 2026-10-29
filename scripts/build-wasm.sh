@@ -66,7 +66,10 @@ mkdir -p "$STAGE"
 trap 'rm -r -- "$STAGE"' EXIT
 # Tracked and untracked-but-not-ignored files, as they are on disk; from a
 # source export with no git metadata, everything but target/ and build/.
-if git -C "$REPO_ROOT" rev-parse --is-inside-work-tree > /dev/null 2>&1; then
+# Only when REPO_ROOT is itself the top of a work tree: a copy of the source
+# placed inside another checkout (e.g. under its ignored target/) is not that
+# checkout, and its ignored location would make ls-files list nothing.
+if [ "$(git -C "$REPO_ROOT" rev-parse --show-toplevel 2> /dev/null || true)" = "$REPO_ROOT" ]; then
     (cd "$REPO_ROOT" && git ls-files -z --cached --others --exclude-standard \
         | tar --null --ignore-failed-read -T - -cf -) | tar -xf - -C "$STAGE"
 else
