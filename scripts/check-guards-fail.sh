@@ -222,7 +222,7 @@ guard "release.sh runs the freeze gate" "$STAGE/scripts/release.sh" \
 guard "the production publish task runs the freeze gate" "$STAGE/Makefile.toml" \
     'dependencies = ["check-release-freeze", "sign-webapp", "verify-published-contract"]' \
     'dependencies = ["sign-webapp", "verify-published-contract"]' \
-    "not ok - publish-email runs check-release-freeze first" freeze_tests
+    "not ok - publish-email does not run check-release-freeze first" freeze_tests
 guard "the freeze override needs the test flag" "$STAGE/scripts/check-release-freeze.sh" \
     'if [ "${RELEASE_FREEZE_TEST:-}" = "1" ]; then' 'if true; then' \
     "not ok - RELEASE_FREEZE_FILE without the test flag does not lift the freeze" freeze_tests
