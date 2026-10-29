@@ -143,13 +143,42 @@ pub(crate) async fn delete_draft(alias: String, id: String) -> Result<(), DynErr
     delete(item).await.map_err(boxed)
 }
 
+thread_local! {
+    /// Delivery states that arrived before their Sent item was stored;
+    /// `save_sent` writes the latest one with the item.
+    static EARLY_DELIVERY: RefCell<HashMap<(String, String), DeliveryState>> =
+        RefCell::new(HashMap::new());
+}
+
+/// The state to store with a Sent item: a delivery state that arrived
+/// while it was being saved wins over the one it was saved with, unless
+/// that one is already terminal.
+fn sent_with_early_delivery(alias: &str, id: &str, mut sent: SentMessage) -> SentMessage {
+    let early =
+        EARLY_DELIVERY.with(|e| e.borrow_mut().remove(&(alias.to_string(), id.to_string())));
+    if let Some(state) = early
+        && !super::delivery_state_is_terminal(sent.delivery_state)
+    {
+        sent.delivery_state = state;
+    }
+    sent
+}
+
 pub(crate) async fn save_sent(
     alias: String,
     id: String,
     sent: SentMessage,
 ) -> Result<(), DynError> {
     let item = item(ItemKind::Sent, Some(owner(&alias)?), uuid_id(&id)?);
-    put(item, json(&sent)).await.map_err(boxed)
+    let sent = sent_with_early_delivery(&alias, &id, sent);
+    put(item, json(&sent)).await.map_err(boxed)?;
+    // A state that arrived while that write was in flight found no item
+    // yet; apply it now that the item is stored.
+    let late = EARLY_DELIVERY.with(|e| e.borrow_mut().remove(&(alias.clone(), id.clone())));
+    match late {
+        Some(state) => Box::pin(set_sent_delivery_state(alias, id, state)).await,
+        None => Ok(()),
+    }
 }
 
 pub(crate) async fn delete_sent(alias: String, id: String) -> Result<(), DynError> {
@@ -165,8 +194,15 @@ pub(crate) async fn set_sent_delivery_state(
     state: DeliveryState,
 ) -> Result<(), DynError> {
     let item = item(ItemKind::Sent, Some(owner(&alias)?), uuid_id(&id)?);
+    let key = (alias.clone(), id.clone());
     ops::put_item_merged(item, |stored| {
-        let mut sent: SentMessage = serde_json::from_slice(stored?).ok()?;
+        let Some(stored) = stored else {
+            // The Sent item is not stored yet (`save_sent` still running):
+            // hand the state to it rather than dropping it.
+            EARLY_DELIVERY.with(|e| e.borrow_mut().insert(key.clone(), state));
+            return None;
+        };
+        let mut sent: SentMessage = serde_json::from_slice(stored).ok()?;
         if super::delivery_state_is_terminal(sent.delivery_state) {
             return None;
         }
@@ -387,6 +423,30 @@ pub(crate) async fn load(identities: &[(String, Addr)]) -> Result<LocalState, Ca
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_delivery_state_that_beat_its_sent_item_is_saved_with_it() {
+        EARLY_DELIVERY.with(|e| {
+            e.borrow_mut()
+                .insert(("ed-a".into(), "s1".into()), DeliveryState::Delivered)
+        });
+        let saved = sent_with_early_delivery("ed-a", "s1", SentMessage::default());
+        assert_eq!(saved.delivery_state, DeliveryState::Delivered);
+        // Used once.
+        let again = sent_with_early_delivery("ed-a", "s1", SentMessage::default());
+        assert_eq!(again.delivery_state, DeliveryState::Pending);
+        // A terminal state being saved is not overridden.
+        EARLY_DELIVERY.with(|e| {
+            e.borrow_mut()
+                .insert(("ed-a".into(), "s2".into()), DeliveryState::Delivered)
+        });
+        let failed = SentMessage {
+            delivery_state: DeliveryState::Failed,
+            ..SentMessage::default()
+        };
+        let kept = sent_with_early_delivery("ed-a", "s2", failed);
+        assert_eq!(kept.delivery_state, DeliveryState::Failed);
+    }
 
     #[test]
     fn a_message_id_is_its_ciphertexts_hash_and_is_remembered_in_full() {
