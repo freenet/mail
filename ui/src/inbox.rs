@@ -934,7 +934,10 @@ fn hkdf_derive_key(shared_secret: &[u8]) -> [u8; 32] {
 /// Wire format: `[ 24-byte nonce | 1088-byte ML-KEM ciphertext | variable XChaCha20-Poly1305 ciphertext ]`
 ///
 /// The symmetric key is HKDF-SHA256(ML-KEM shared secret, info="freenet-email-v1 message-key").
-fn ml_kem_encrypt(ek: &EncapsulationKey<MlKem768>, plaintext: &[u8]) -> Result<Vec<u8>, DynError> {
+pub(crate) fn ml_kem_encrypt(
+    ek: &EncapsulationKey<MlKem768>,
+    plaintext: &[u8],
+) -> Result<Vec<u8>, DynError> {
     use chacha20poly1305::{KeyInit, XNonce};
 
     let (ct, shared_secret) = ek.encapsulate_with_rng(&mut crate::rng::crypto_rng());
@@ -957,7 +960,7 @@ fn ml_kem_encrypt(ek: &EncapsulationKey<MlKem768>, plaintext: &[u8]) -> Result<V
 }
 
 /// Decrypt a message previously encrypted with [`ml_kem_encrypt`].
-fn ml_kem_decrypt(
+pub(crate) fn ml_kem_decrypt(
     dk: &DecapsulationKey<MlKem768>,
     msg_content: Vec<u8>,
 ) -> Result<Vec<u8>, DynError> {

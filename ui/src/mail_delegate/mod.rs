@@ -25,6 +25,7 @@ use futures::channel::oneshot;
 pub(crate) mod local;
 #[cfg(feature = "use-node")]
 pub(crate) mod node;
+pub(crate) mod ops;
 
 /// Why a call did not produce a reply.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -91,7 +92,7 @@ pub(crate) fn new_request(op: Op) -> Request {
 /// whose caller already gave up (timed out) is dropped.
 pub(crate) fn deliver(payload: &[u8]) -> bool {
     let Ok(response) = from_cbor::<Response>(payload) else {
-        crate::log::error("undecodable mail-delegate response".to_string(), None);
+        crate::log::error("undecodable mail-delegate response", None);
         return false;
     };
     let waiter = PENDING.with(|p| p.borrow_mut().remove(&response.request_id));

@@ -1,0 +1,527 @@
+//! Typed operations over [`super::call`]: one function per thing the UI asks
+//! the mail delegate, each matching the replies that operation can return
+//! and nothing else (a reply of another kind is a protocol mismatch, not a
+//! result).
+//!
+//! These must be awaited from a spawned task, never from inside the node
+//! loop (`api::node_comms`): that loop is what delivers the delegate's
+//! answers, so awaiting one there would wait forever.
+
+use freenet_mail_protocol::{
+    Addr, Entropy, FailureCode, Hash32, IdentityInfo, ImportKind, ImportSource, Item, ItemKind,
+    ItemRef, MAX_DECRYPT_BATCH, Op, Reply,
+};
+use serde_bytes::ByteBuf;
+
+use super::{CallError, call, call_ack, unexpected};
+
+// ── Identities ─────────────────────────────────────────────────────────────
+
+pub(crate) async fn list_identities() -> Result<Vec<IdentityInfo>, CallError> {
+    match call(Op::ListIdentities).await? {
+        Reply::Identities(ids) => Ok(ids),
+        other => Err(unexpected(&other)),
+    }
+}
+
+pub(crate) async fn create_identity(
+    alias: String,
+    description: String,
+) -> Result<IdentityInfo, CallError> {
+    let op = Op::CreateIdentity {
+        alias,
+        description,
+        ui_entropy: Entropy(nonzero_entropy()),
+    };
+    match call(op).await? {
+        Reply::Identity(info) => Ok(info),
+        other => Err(unexpected(&other)),
+    }
+}
+
+/// Import an identity. Never overwrites: an address already stored comes
+/// back unchanged with `already_present`.
+pub(crate) async fn import_identity(
+    source: ImportSource,
+    kind: ImportKind,
+    alias: String,
+    description: String,
+) -> Result<(IdentityInfo, bool), CallError> {
+    let op = Op::ImportIdentity {
+        source,
+        kind,
+        alias,
+        description,
+    };
+    match call(op).await? {
+        Reply::Imported {
+            identity,
+            already_present,
+        } => Ok((identity, already_present)),
+        other => Err(unexpected(&other)),
+    }
+}
+
+pub(crate) async fn update_identity(
+    addr: Addr,
+    alias: String,
+    description: String,
+    expected_gen: u64,
+) -> Result<IdentityInfo, CallError> {
+    let op = Op::UpdateIdentity {
+        addr,
+        alias,
+        description,
+        expected_gen,
+    };
+    match call(op).await? {
+        Reply::Identity(info) => Ok(info),
+        other => Err(unexpected(&other)),
+    }
+}
+
+pub(crate) async fn confirm_identity(
+    addr: Addr,
+    expected_gen: u64,
+) -> Result<IdentityInfo, CallError> {
+    match call(Op::ConfirmIdentity { addr, expected_gen }).await? {
+        Reply::Identity(info) => Ok(info),
+        other => Err(unexpected(&other)),
+    }
+}
+
+/// Delete an identity and everything it owns. The delegate asks the user
+/// once, then deletes in bounded pages: repeat the same request on
+/// `Continue` (without asking again) until `Deleted`. `progress` hears how
+/// much is left after each page.
+pub(crate) async fn delete_identity(
+    addr: Addr,
+    expected_gen: u64,
+    mut progress: impl FnMut(u32),
+) -> Result<(), CallError> {
+    // A full identity is about 17k items at 256 per page; the bound only
+    // stops a delegate that never finishes from looping forever.
+    for _ in 0..1_000 {
+        match call(Op::DeleteIdentity { addr, expected_gen }).await? {
+            Reply::Deleted => return Ok(()),
+            Reply::Continue { remaining } => progress(remaining),
+            other => return Err(unexpected(&other)),
+        }
+    }
+    Err(CallError::Unknown(
+        "identity deletion did not finish".into(),
+    ))
+}
+
+// ── Stored items ───────────────────────────────────────────────────────────
+
+pub(crate) async fn get_item(item: ItemRef) -> Result<Option<Item>, CallError> {
+    match call(Op::GetItem { item }).await? {
+        Reply::Item(item) => Ok(item),
+        other => Err(unexpected(&other)),
+    }
+}
+
+/// Every item of one kind (and owner), paging until the delegate has no
+/// more.
+pub(crate) async fn list_all_items(
+    kind: ItemKind,
+    owner: Option<Addr>,
+) -> Result<Vec<Item>, CallError> {
+    let mut out: Vec<Item> = Vec::new();
+    let mut after = None;
+    loop {
+        let op = Op::ListItems {
+            kind,
+            owner,
+            after: after.clone(),
+            limit: 256,
+        };
+        let (items, more) = match call(op).await? {
+            Reply::Items { items, more } => (items, more),
+            other => return Err(unexpected(&other)),
+        };
+        let last = items.last().map(|i| ByteBuf::from(i.item.id.clone()));
+        out.extend(items);
+        match (more, last) {
+            (true, Some(last)) => after = Some(last),
+            _ => return Ok(out),
+        }
+    }
+}
+
+/// Write `body`: `expected_gen` `None` creates only, `Some(g)` is a
+/// compare-and-swap against generation `g`. Returns the new generation.
+pub(crate) async fn put_item(
+    item: ItemRef,
+    body: Vec<u8>,
+    expected_gen: Option<u64>,
+) -> Result<u64, CallError> {
+    call_ack(Op::PutItem {
+        item,
+        body: ByteBuf::from(body),
+        expected_gen,
+    })
+    .await
+}
+
+pub(crate) async fn delete_item(item: ItemRef, expected_gen: u64) -> Result<(), CallError> {
+    match call(Op::DeleteItem { item, expected_gen }).await? {
+        Reply::Deleted | Reply::Ack { .. } => Ok(()),
+        other => Err(unexpected(&other)),
+    }
+}
+
+/// How many times a merged write retries after losing a compare-and-swap.
+pub(crate) const MERGE_RETRIES: u32 = 3;
+
+/// Read-merge-write one item: `merge` gets the stored body (`None` when
+/// absent) and returns the body to store, or `None` to leave it as it is.
+/// On a lost compare-and-swap (another tab wrote first) the item is read
+/// again and merged again, up to [`MERGE_RETRIES`] times with a growing
+/// pause, then the conflict is returned to the caller.
+pub(crate) async fn put_item_merged(
+    item: ItemRef,
+    mut merge: impl FnMut(Option<&[u8]>) -> Option<Vec<u8>>,
+) -> Result<Option<u64>, CallError> {
+    let mut attempt = 0;
+    loop {
+        let current = get_item(item.clone()).await?;
+        let (stored, generation) = match &current {
+            Some(i) => (Some(i.body.as_slice()), i.generation),
+            None => (None, 0),
+        };
+        let Some(body) = merge(stored) else {
+            return Ok(None);
+        };
+        match put_item(item.clone(), body, Some(generation)).await {
+            Ok(generation) => return Ok(Some(generation)),
+            Err(e)
+                if matches!(e.code(), Some(FailureCode::Conflict { .. }))
+                    && attempt < MERGE_RETRIES =>
+            {
+                attempt += 1;
+                pause_ms(50 * 2u32.pow(attempt)).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+// ── v1 inbox crypto (transitional) ─────────────────────────────────────────
+
+/// Decrypt v1 ciphertexts addressed to `addr`, in batches the delegate
+/// accepts. Each entry is the plaintext, or `None` for a ciphertext that is
+/// not this identity's (or is malformed): such a message is skipped, never
+/// fatal.
+pub(crate) async fn decrypt_v1(
+    addr: Addr,
+    ciphertexts: Vec<Vec<u8>>,
+) -> Result<Vec<Option<Vec<u8>>>, CallError> {
+    let mut out = Vec::with_capacity(ciphertexts.len());
+    for chunk in ciphertexts.chunks(MAX_DECRYPT_BATCH) {
+        let op = Op::DecryptV1 {
+            addr,
+            ciphertexts: chunk.iter().cloned().map(ByteBuf::from).collect(),
+        };
+        let results = match call(op).await? {
+            Reply::Decrypted(results) => results,
+            other => return Err(unexpected(&other)),
+        };
+        if results.len() != chunk.len() {
+            return Err(CallError::Unknown(format!(
+                "decrypted {} of {} ciphertexts",
+                results.len(),
+                chunk.len()
+            )));
+        }
+        out.extend(results.into_iter().map(|r| r.ok().map(ByteBuf::into_vec)));
+    }
+    Ok(out)
+}
+
+/// A v1 message sealed by the delegate: the ciphertext for the recipient,
+/// the sender's ML-DSA signature over it, and the sender's verifying key.
+#[derive(Clone, Debug)]
+pub(crate) struct SealedV1 {
+    pub content: Vec<u8>,
+    pub signature: Vec<u8>,
+    pub sender_vk: Vec<u8>,
+}
+
+pub(crate) async fn seal_v1(
+    addr: Addr,
+    recipient_ek: Vec<u8>,
+    plaintext: Vec<u8>,
+) -> Result<SealedV1, CallError> {
+    let op = Op::SealV1Message {
+        addr,
+        recipient_ek: ByteBuf::from(recipient_ek),
+        plaintext: ByteBuf::from(plaintext),
+        ui_entropy: Entropy(nonzero_entropy()),
+    };
+    match call(op).await? {
+        Reply::SealedV1 {
+            content,
+            signature,
+            sender_vk,
+        } => Ok(SealedV1 {
+            content: content.into_vec(),
+            signature: signature.into_vec(),
+            sender_vk: sender_vk.into_vec(),
+        }),
+        other => Err(unexpected(&other)),
+    }
+}
+
+/// Sign a v1 inbox authority payload (a new inbox state or a settings
+/// change).
+pub(crate) async fn sign_v1_authority(
+    addr: Addr,
+    settings_json: Vec<u8>,
+    last_update_micros: i64,
+) -> Result<Vec<u8>, CallError> {
+    let op = Op::SignV1Authority {
+        addr,
+        settings_json: ByteBuf::from(settings_json),
+        last_update_micros,
+    };
+    signature(op).await
+}
+
+/// The removal payload order the delegate signs: strictly ascending,
+/// without duplicates.
+pub(crate) fn removal_order(mut hashes: Vec<[u8; 32]>) -> Vec<[u8; 32]> {
+    hashes.sort_unstable();
+    hashes.dedup();
+    hashes
+}
+
+/// Sign a v1 `RemoveMessages` payload. The delegate signs only hashes in
+/// ascending order, so the hashes are sorted here; send the removal with
+/// [`removal_order`]'s order, which is what the signature covers.
+pub(crate) async fn sign_v1_removal(
+    addr: Addr,
+    hashes: Vec<[u8; 32]>,
+) -> Result<Vec<u8>, CallError> {
+    let op = Op::SignV1Removal {
+        addr,
+        assignment_hashes: removal_order(hashes).into_iter().map(Hash32).collect(),
+    };
+    signature(op).await
+}
+
+async fn signature(op: Op) -> Result<Vec<u8>, CallError> {
+    match call(op).await? {
+        Reply::Signature(sig) => Ok(sig.into_vec()),
+        other => Err(unexpected(&other)),
+    }
+}
+
+/// The v1 token-generator delegate's parameters for `addr`.
+pub(crate) async fn v1_aft_params(addr: Addr) -> Result<Vec<u8>, CallError> {
+    match call(Op::V1AftParams { addr }).await? {
+        Reply::AftParams(params) => Ok(params.into_vec()),
+        other => Err(unexpected(&other)),
+    }
+}
+
+// ── Exports (the delegate asks the user) ───────────────────────────────────
+
+pub(crate) async fn export_recovery_key(
+    addr: Addr,
+) -> Result<zeroize::Zeroizing<String>, CallError> {
+    match call(Op::ExportRecoveryKey { addr }).await? {
+        Reply::RecoveryKey(key) => Ok(zeroize::Zeroizing::new(key)),
+        other => Err(unexpected(&other)),
+    }
+}
+
+pub(crate) async fn export_profile(addr: Addr) -> Result<zeroize::Zeroizing<Vec<u8>>, CallError> {
+    match call(Op::ExportProfile { addr }).await? {
+        Reply::Profile(profile) => Ok(zeroize::Zeroizing::new(profile.into_vec())),
+        other => Err(unexpected(&other)),
+    }
+}
+
+/// Withdraw a remembered "Always allow" for exports.
+pub(crate) async fn revoke_export_grant() -> Result<(), CallError> {
+    match call(Op::RevokeExportGrant).await? {
+        Reply::Ack { .. } | Reply::Deleted => Ok(()),
+        other => Err(unexpected(&other)),
+    }
+}
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+
+/// 32 random bytes that are not all zero (the delegate refuses all-zero
+/// entropy, the signature of a platform generator that wrote nothing).
+fn nonzero_entropy() -> [u8; 32] {
+    loop {
+        let bytes: [u8; 32] = crate::rng::random_bytes();
+        if bytes != [0; 32] {
+            return bytes;
+        }
+    }
+}
+
+async fn pause_ms(ms: u32) {
+    #[cfg(target_family = "wasm")]
+    gloo_timers::future::TimeoutFuture::new(ms).await;
+    #[cfg(not(target_family = "wasm"))]
+    let _ = ms;
+}
+
+#[cfg(all(test, feature = "local-delegate", not(feature = "use-node")))]
+mod tests {
+    //! Run against the real delegate code (the offline backend), so these
+    //! pin the UI's side of the protocol to what the delegate does, and the
+    //! delegate's v1 crypto to the UI's own v1 implementation.
+
+    use super::*;
+    use freenet_mail_protocol::{DsaSeed, KemSeed};
+
+    fn block_on<F: std::future::Future>(f: F) -> F::Output {
+        futures::executor::block_on(f)
+    }
+
+    /// An identity imported from known seeds, with the UI-side keys for the
+    /// same seeds.
+    fn imported(alias: &str, seed: u8) -> (IdentityInfo, crate::app::login::StoredIdentityKeys) {
+        let dsa = [seed; 32];
+        let kem = [seed.wrapping_add(1); 64];
+        let (info, _) = block_on(import_identity(
+            ImportSource::Seeds {
+                dsa: DsaSeed(dsa),
+                kem: KemSeed(kem),
+            },
+            ImportKind::UserRestore,
+            alias.into(),
+            String::new(),
+        ))
+        .unwrap();
+        let keys = crate::app::login::StoredIdentityKeys {
+            ml_dsa_seed: dsa.to_vec(),
+            ml_kem_seed: kem.to_vec(),
+        };
+        (info, keys)
+    }
+
+    #[test]
+    fn the_delegate_decrypts_what_the_v1_client_encrypts() {
+        use ml_kem::kem::KeyExport;
+        let (info, keys) = imported("decrypt-interop", 11);
+        let ek = keys.ml_kem_dk().encapsulation_key().clone();
+        assert_eq!(ek.to_bytes().to_vec(), info.ek.to_vec());
+        let ct = crate::inbox::ml_kem_encrypt(&ek, b"hello from v0.2").unwrap();
+        let out = block_on(decrypt_v1(
+            info.addr,
+            vec![ct, b"not a ciphertext".to_vec()],
+        ))
+        .unwrap();
+        assert_eq!(out[0].as_deref(), Some(&b"hello from v0.2"[..]));
+        assert_eq!(out[1], None);
+    }
+
+    #[test]
+    fn the_v1_client_opens_and_verifies_what_the_delegate_seals() {
+        let (sender, _) = imported("seal-sender", 21);
+        let (recipient, recipient_keys) = imported("seal-recipient", 31);
+        let sealed = block_on(seal_v1(
+            sender.addr,
+            recipient.ek.to_vec(),
+            b"hello to v0.2".to_vec(),
+        ))
+        .unwrap();
+        assert_eq!(sealed.sender_vk, sender.vk.to_vec());
+        let plain =
+            crate::inbox::ml_kem_decrypt(&recipient_keys.ml_kem_dk(), sealed.content.clone())
+                .unwrap();
+        assert_eq!(plain, b"hello to v0.2");
+        assert!(crate::inbox::verify_message_signature(
+            &sealed.content,
+            &sealed.sender_vk,
+            &sealed.signature
+        ));
+    }
+
+    #[test]
+    fn a_merged_write_creates_then_merges() {
+        let item = ItemRef {
+            kind: ItemKind::GlobalSettings,
+            owner: None,
+            id: Vec::new(),
+        };
+        let first = block_on(put_item_merged(item.clone(), |stored| {
+            assert!(stored.is_none());
+            Some(b"a".to_vec())
+        }))
+        .unwrap();
+        let second = block_on(put_item_merged(item.clone(), |stored| {
+            let mut body = stored.unwrap().to_vec();
+            body.extend_from_slice(b"b");
+            Some(body)
+        }))
+        .unwrap();
+        assert!(second > first);
+        let stored = block_on(get_item(item.clone())).unwrap().unwrap();
+        assert_eq!(stored.body.as_slice(), b"ab");
+        // A merge with nothing to change writes nothing.
+        assert_eq!(block_on(put_item_merged(item, |_| None)).unwrap(), None);
+    }
+
+    #[test]
+    fn a_stale_write_loses_its_compare_and_swap() {
+        let item = ItemRef {
+            kind: ItemKind::GlobalSettings,
+            owner: None,
+            id: Vec::new(),
+        };
+        let generation = block_on(put_item_merged(item.clone(), |_| Some(b"x".to_vec())))
+            .unwrap()
+            .unwrap();
+        let stale = block_on(put_item(
+            item,
+            b"y".to_vec(),
+            Some(generation.saturating_sub(1)),
+        ));
+        assert!(matches!(
+            stale.unwrap_err().code(),
+            Some(FailureCode::Conflict { .. })
+        ));
+    }
+
+    #[test]
+    fn removal_hashes_go_out_ascending_and_distinct() {
+        assert_eq!(
+            removal_order(vec![[3; 32], [1; 32], [3; 32], [2; 32]]),
+            vec![[1; 32], [2; 32], [3; 32]]
+        );
+    }
+
+    #[test]
+    fn deleting_an_identity_finishes_and_it_is_gone() {
+        let (info, _) = imported("delete-me", 41);
+        let mut pages = 0;
+        block_on(delete_identity(info.addr, info.generation, |_| pages += 1)).unwrap();
+        let ids = block_on(list_identities()).unwrap();
+        assert!(ids.iter().all(|i| i.addr != info.addr));
+    }
+
+    #[test]
+    fn importing_twice_never_overwrites() {
+        let (first, _) = imported("import-once", 51);
+        let (again, already) = block_on(import_identity(
+            ImportSource::Seeds {
+                dsa: DsaSeed([51; 32]),
+                kem: KemSeed([52; 64]),
+            },
+            ImportKind::UserRestore,
+            "a different alias".into(),
+            String::new(),
+        ))
+        .unwrap();
+        assert!(already);
+        assert_eq!(again.alias, first.alias);
+    }
+}

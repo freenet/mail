@@ -20,6 +20,9 @@ pub(crate) mod inbox;
 pub(crate) mod legacy_registry;
 pub(crate) mod local_state;
 pub(crate) mod log;
+// TEMPORARY: the UI's call sites move over in the following commits of
+// this PR; remove this allow before it leaves draft.
+#[allow(dead_code)]
 pub(crate) mod mail_delegate;
 pub(crate) mod rng;
 #[cfg(test)]
