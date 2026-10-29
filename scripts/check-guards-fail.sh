@@ -132,10 +132,13 @@ guard "an interrupted delete is finished by its retry" "$D/handlers.rs" \
         s.index_remove(&ix, &item.id)?;' 'finish that now.' "$TEST_FAILED" delegate_tests
 guard "a request for an unknown operation gets a typed answer" "$D/handlers.rs" \
     'FailureCode::UnknownOperation,' 'FailureCode::BadInput,' "$TEST_FAILED" delegate_tests
+# A rename that still compiles: only the pinned bytes can catch it. (A new
+# variant is caught earlier, by the wildcard-free match in golden.rs, at
+# compile time.)
 guard "protocol encoding is pinned" "$STAGE/protocol/src/lib.rs" \
     'pub enum FailureCode {
     NotFound,' 'pub enum FailureCode {
-    Gone,
+    #[serde(rename = "Missing")]
     NotFound,' "$TEST_FAILED" protocol_tests
 if [ "$WASM" -eq 1 ]; then
     guard "the candidate is the source's build" "$D/store.rs" \
