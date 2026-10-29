@@ -2,13 +2,15 @@
 resolver = "2"
 members = [
     # Members: shared types (common), the client's copy of the v0.2.x wire
-    # types (wire-v1), the UI, and dev tools. Nothing published is built
+    # types (wire-v1), the UI-delegate protocol (protocol), the UI, and dev
+    # tools. Nothing published is built
     # from here: the WASM of every contract and delegate is frozen under
     # published-contract/, because a delegate's key (and so every secret it
     # stores) and a contract's id both derive from the WASM bytes. A rebuild
     # is never harmless; a new generation needs a migration registry row
     # (legacy_*.toml) and a new published-contract/wasm/v<N>/.
     "common",
+    "protocol",
     "ui",
     "wire-v1",
     "tools/web-container-sign",
@@ -38,6 +40,10 @@ exclude = [
     "modules/antiflood-tokens/delegates/token-generator",
     "modules/identity-management",
     "modules/mail-local-state",
+    # The unified mail delegate: a new generation, built only by
+    # scripts/build-wasm.sh, its candidate WASM committed under
+    # published-contract/candidate/ until the v0.3.0 release freezes it.
+    "delegates/mail-delegate",
     # Links the frozen crates to capture wire-v1's golden fixtures.
     "wire-v1/capture",
 ]
@@ -53,11 +59,14 @@ freenet-stdlib = "0.12.1"
 # Internal
 freenet-email-core = { path = "common" }
 freenet-mail-wire-v1 = { path = "wire-v1" }
+freenet-mail-protocol = { path = "protocol" }
 # Shared
 # Stays on bincode 1: the frozen token-generator delegate speaks bincode 1's
 # encoding, which bincode 2 and later changed.
 bincode = "1.3.3"
 bs58 = "0.5.1"
+blake3 = { version = "1.8.7", default-features = false }
+serde_bytes = "0.11.19"
 # default-features = false keeps `clock` (and its js-sys/wasm-bindgen
 # pull-in) out of anything that does not ask for it. Opt back into
 # `clock`/`wasmbind` at the consumer level (e.g. UI) when needed.

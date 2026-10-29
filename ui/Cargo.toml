@@ -33,6 +33,7 @@ wasm-bindgen-futures = "0.4.79"
 gloo-timers = { version = "0.4.0", features = ["futures"] }
 
 freenet-mail-wire-v1 = { workspace = true, features = ["clock"] }
+freenet-mail-protocol = { workspace = true }
 freenet-stdlib = { workspace = true, features = ["net"] }
 uuid = { version = "1.29.0", features = ["v4", "js"] }
 

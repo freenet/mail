@@ -1,0 +1,19 @@
+[package]
+name = "freenet-mail-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Messages between the Freenet Mail UI and the mail delegate, and the recovery-key codec"
+
+# Shared by the UI (a workspace member) and the mail delegate (outside the
+# workspace, built against its own Cargo.lock). Keep it free of freenet-stdlib
+# and of anything that needs randomness: the delegate's WASM must not link a
+# getrandom backend.
+[dependencies]
+blake3 = { workspace = true }
+bs58 = { workspace = true }
+ciborium = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_bytes = { workspace = true }
+sha2 = { workspace = true }

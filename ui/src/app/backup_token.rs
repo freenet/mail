@@ -26,182 +26,47 @@
 //! [`parse_backup`] is the single entry point for restore: it accepts a
 //! recovery key or the legacy v2 JSON backup file (kept readable forever).
 
-use sha2::{Digest, Sha256};
+use freenet_mail_protocol::recovery_key;
+use freenet_mail_protocol::{DsaSeed, KemSeed};
 
 use super::login::{IDENTITY_BACKUP_VERSION, IdentityBackup, StoredIdentityKeys};
 
-/// Full prefix of a current recovery key, including the separator.
-pub(crate) const TOKEN_PREFIX: &str = "fmail-key-1:";
-/// Prefix stem shared by every recovery-key version. Used to tell "a
-/// recovery key from a newer build" apart from "not a recovery key".
-const PREFIX_STEM: &str = "fmail-key-";
-/// Version byte inside the payload. Mirrors the `1` in the prefix.
-const PAYLOAD_VERSION: u8 = 1;
-const ML_DSA_SEED_LEN: usize = 32;
-const ML_KEM_SEED_LEN: usize = 64;
-const CHECKSUM_LEN: usize = 4;
-/// Version byte + both seeds.
-const BODY_LEN: usize = 1 + ML_DSA_SEED_LEN + ML_KEM_SEED_LEN;
-/// Decoded payload length: body + checksum.
-const PAYLOAD_LEN: usize = BODY_LEN + CHECKSUM_LEN;
-/// Longest whitespace-stripped input `decode` will try to base58-decode. A
-/// real key is ~150 characters; base58 decoding is quadratic and runs on
-/// every keystroke in the restore form, so anything far longer is rejected
-/// up front rather than decoded.
-const MAX_TOKEN_CHARS: usize = 512;
-
-/// Why a pasted recovery key was rejected. Each variant maps to a message a
-/// user can act on (see the `Display` impl).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum TokenError {
-    /// Nothing but whitespace.
-    Empty,
-    /// Doesn't start with `fmail-key-`: some other kind of text.
-    WrongPrefix,
-    /// A recovery key, but from a format version this build doesn't know.
-    UnknownVersion(String),
-    /// A character outside the base58 alphabet (often `0`, `O`, `I`, `l`).
-    BadBase58,
-    /// Decoded to the wrong number of bytes: truncated or has extra text.
-    WrongLength { got: usize },
-    /// Far longer than any recovery key; not decoded at all.
-    TooLong,
-    /// Right length, wrong checksum: a character was changed.
-    BadChecksum,
-}
-
-impl std::fmt::Display for TokenError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            TokenError::Empty => write!(f, "Paste your recovery key first."),
-            TokenError::WrongPrefix => write!(
-                f,
-                "This isn't a Freenet Mail recovery key. Recovery keys start with \
-                 \"{TOKEN_PREFIX}\"."
-            ),
-            TokenError::UnknownVersion(v) => write!(
-                f,
-                "This recovery key uses format version {v}, which this version of \
-                 Freenet Mail can't read. Update the app and try again."
-            ),
-            TokenError::BadBase58 => write!(
-                f,
-                "This recovery key contains a character that can't appear in one. \
-                 Copy it again from your password manager rather than retyping it."
-            ),
-            TokenError::WrongLength { got } => {
-                let expected = PAYLOAD_LEN;
-                if *got < expected {
-                    write!(
-                        f,
-                        "This recovery key is too short. Part of it is missing; copy \
-                         the whole line again."
-                    )
-                } else {
-                    write!(
-                        f,
-                        "This recovery key is too long. Extra text was pasted with it; \
-                         copy just the key."
-                    )
-                }
-            }
-            TokenError::TooLong => write!(
-                f,
-                "This is much longer than a recovery key. Paste just the line that \
-                 starts with \"{TOKEN_PREFIX}\"."
-            ),
-            TokenError::BadChecksum => write!(
-                f,
-                "This recovery key doesn't check out: at least one character is \
-                 wrong. Copy it again from your password manager."
-            ),
-        }
-    }
-}
-
-fn checksum(body: &[u8]) -> [u8; CHECKSUM_LEN] {
-    let mut h = Sha256::new();
-    h.update(TOKEN_PREFIX.as_bytes());
-    h.update(body);
-    let digest = h.finalize();
-    let mut out = [0u8; CHECKSUM_LEN];
-    out.copy_from_slice(&digest[..CHECKSUM_LEN]);
-    out
-}
+// The format itself lives in freenet-mail-protocol, shared with the mail
+// delegate, so there is exactly one implementation of `fmail-key-1:`.
+#[cfg(test)]
+use recovery_key::{MAX_TOKEN_CHARS, checksum};
+use recovery_key::{ML_DSA_SEED_LEN, ML_KEM_SEED_LEN};
+pub(crate) use recovery_key::{PAYLOAD_LEN, TOKEN_PREFIX, TokenError};
 
 /// Encode an identity's seeds as a recovery key.
 ///
 /// Fails only if `keys` holds seeds of the wrong length, which a
 /// `StoredIdentityKeys` built from real keys never does.
 pub(crate) fn encode(keys: &StoredIdentityKeys) -> Result<String, TokenError> {
-    if keys.ml_dsa_seed.len() != ML_DSA_SEED_LEN || keys.ml_kem_seed.len() != ML_KEM_SEED_LEN {
-        return Err(TokenError::WrongLength {
-            got: 1 + keys.ml_dsa_seed.len() + keys.ml_kem_seed.len() + CHECKSUM_LEN,
-        });
-    }
-    let mut payload = Vec::with_capacity(PAYLOAD_LEN);
-    payload.push(PAYLOAD_VERSION);
-    payload.extend_from_slice(&keys.ml_dsa_seed);
-    payload.extend_from_slice(&keys.ml_kem_seed);
-    let sum = checksum(&payload);
-    payload.extend_from_slice(&sum);
-    Ok(format!(
-        "{TOKEN_PREFIX}{}",
-        bs58::encode(payload).into_string()
-    ))
-}
-
-/// Decode a recovery key back into the identity's seeds.
-///
-/// Tolerates what password managers, notes apps and chat apps do to pasted
-/// text: all whitespace is removed first (leading/trailing, CR/LF line
-/// wrapping, spaces, tabs), wherever it appears, and the `fmail-key-1:`
-/// prefix is matched case-insensitively (phones auto-capitalise it). The
-/// base58 payload stays case-sensitive: case is meaningful there.
-pub(crate) fn decode(text: &str) -> Result<StoredIdentityKeys, TokenError> {
-    let compact: String = text.chars().filter(|c| !c.is_whitespace()).collect();
-    if compact.is_empty() {
-        return Err(TokenError::Empty);
-    }
-    if compact.len() > MAX_TOKEN_CHARS {
-        return Err(TokenError::TooLong);
-    }
-    let Some(encoded) = strip_prefix_ignore_case(&compact, TOKEN_PREFIX) else {
-        // Distinguish a newer-format key from unrelated text.
-        if let Some(rest) = strip_prefix_ignore_case(&compact, PREFIX_STEM)
-            && let Some((version, _)) = rest.split_once(':')
-            && !version.is_empty()
-            && version.chars().all(|c| c.is_ascii_digit())
-        {
-            return Err(TokenError::UnknownVersion(version.to_string()));
-        }
-        return Err(TokenError::WrongPrefix);
+    let wrong_length = || TokenError::WrongLength {
+        got: 1 + keys.ml_dsa_seed.len() + keys.ml_kem_seed.len() + 4,
     };
-    let payload = bs58::decode(encoded)
-        .into_vec()
-        .map_err(|_| TokenError::BadBase58)?;
-    if payload.len() != PAYLOAD_LEN {
-        return Err(TokenError::WrongLength { got: payload.len() });
-    }
-    let (body, sum) = payload.split_at(BODY_LEN);
-    if checksum(body) != sum {
-        return Err(TokenError::BadChecksum);
-    }
-    if body[0] != PAYLOAD_VERSION {
-        return Err(TokenError::UnknownVersion(body[0].to_string()));
-    }
-    let (ml_dsa_seed, ml_kem_seed) = body[1..].split_at(ML_DSA_SEED_LEN);
-    Ok(StoredIdentityKeys {
-        ml_dsa_seed: ml_dsa_seed.to_vec(),
-        ml_kem_seed: ml_kem_seed.to_vec(),
-    })
+    let dsa: [u8; ML_DSA_SEED_LEN] = keys
+        .ml_dsa_seed
+        .as_slice()
+        .try_into()
+        .map_err(|_| wrong_length())?;
+    let kem: [u8; ML_KEM_SEED_LEN] = keys
+        .ml_kem_seed
+        .as_slice()
+        .try_into()
+        .map_err(|_| wrong_length())?;
+    Ok(recovery_key::encode(&DsaSeed(dsa), &KemSeed(kem)))
 }
 
-/// `s` without `prefix`, comparing the prefix ASCII-case-insensitively.
-fn strip_prefix_ignore_case<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
-    let head = s.get(..prefix.len())?;
-    head.eq_ignore_ascii_case(prefix)
-        .then(|| &s[prefix.len()..])
+/// Decode a recovery key back into the identity's seeds. See
+/// [`recovery_key::decode`] for what it tolerates.
+pub(crate) fn decode(text: &str) -> Result<StoredIdentityKeys, TokenError> {
+    let (dsa, kem) = recovery_key::decode(text)?;
+    Ok(StoredIdentityKeys {
+        ml_dsa_seed: dsa.0.to_vec(),
+        ml_kem_seed: kem.0.to_vec(),
+    })
 }
 
 /// Whether restore input that failed to parse could still become valid by

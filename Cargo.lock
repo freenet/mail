@@ -1541,6 +1541,7 @@ dependencies = [
  "chacha20poly1305",
  "chrono",
  "dioxus",
+ "freenet-mail-protocol",
  "freenet-mail-wire-v1",
  "freenet-migrate-build",
  "freenet-stdlib 0.12.1",
@@ -1582,6 +1583,18 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "freenet-mail-protocol"
+version = "0.2.7"
+dependencies = [
+ "blake3",
+ "bs58",
+ "ciborium",
+ "serde",
+ "serde_bytes",
+ "sha2 0.11.1",
 ]
 
 [[package]]
@@ -3381,6 +3394,16 @@ dependencies = [
  "js-sys",
  "serde",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "serde_bytes"
+version = "0.11.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a5d440709e79d88e51ac01c4b72fc6cb7314017bb7da9eeff678aa94c10e3ea8"
+dependencies = [
+ "serde",
+ "serde_core",
 ]
 
 [[package]]
