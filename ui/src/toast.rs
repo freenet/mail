@@ -117,7 +117,26 @@ pub(crate) type ToastQueue = Signal<Vec<Toast>>;
 /// Returns the [`ToastId`] assigned to the new toast; callers that want to
 /// dismiss it early can pass the id to [`dismiss_toast`].
 pub(crate) fn push_toast(message: impl Into<String>, level: ToastLevel) -> ToastId {
-    push_toast_to(use_context::<ToastQueue>(), message, level)
+    // Outside a component scope (a detached task) there is no context to
+    // read, and reading it panicked the task, silently losing the toast.
+    // Such a caller should use `push_toast_detached`; this falls back to
+    // the root queue and says so.
+    let in_scope = dioxus::core::Runtime::try_current()
+        .and_then(|rt| rt.try_current_scope_id())
+        .is_some();
+    if in_scope && let Some(queue) = dioxus::core::try_consume_context::<ToastQueue>() {
+        return push_toast_to(queue, message, level);
+    }
+    let message = message.into();
+    crate::log::error(
+        format!("push_toast called outside a component; using the root queue: {message}"),
+        None,
+    );
+    debug_assert!(
+        !in_scope,
+        "push_toast in a scope with no toast queue: {message}"
+    );
+    push_toast_detached(message, level).unwrap_or_else(ToastId::next)
 }
 
 thread_local! {
@@ -289,6 +308,13 @@ pub(crate) fn ToastView() -> Element {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn push_toast_outside_a_component_does_not_panic() {
+        // No Dioxus runtime at all here, as in a detached task with no
+        // scope: `use_context` panicked in this situation.
+        let _ = push_toast("from a detached task", ToastLevel::Error);
+    }
 
     #[test]
     fn toast_id_is_monotonically_increasing() {

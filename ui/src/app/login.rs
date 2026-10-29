@@ -1355,7 +1355,7 @@ pub(super) fn CreateAliasForm() -> Element {
             let alias = identity.alias.clone();
             if let Err(e) = crate::app::identity_store::publish(identity, backed_up).await {
                 crate::log::error(format!("publishing identity `{alias}` failed: {e}"), None);
-                crate::toast::push_toast(
+                crate::toast::push_toast_detached(
                     format!("Couldn't publish identity `{alias}`: {e}"),
                     crate::toast::ToastLevel::Error,
                 );
@@ -2020,7 +2020,7 @@ fn ImportForm() -> Element {
                                             if let Err(e) =
                                                 crate::app::identity_store::publish(identity, true).await
                                             {
-                                                crate::toast::push_toast(
+                                                crate::toast::push_toast_detached(
                                                     format!("Couldn't publish identity `{alias}`: {e}"),
                                                     crate::toast::ToastLevel::Error,
                                                 );
