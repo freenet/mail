@@ -1,0 +1,7 @@
+Releases are frozen until the v0.3.0 chain is complete.
+
+The UI now talks only to the unified mail delegate. It does not read the
+identities, contacts or local state kept by the v0.2.x delegates until the
+migration from those delegates lands, so a release from this tree would
+show existing users an empty app. scripts/release.sh refuses to run while
+this file exists; the v0.3.0 release removes it.

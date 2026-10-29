@@ -75,6 +75,15 @@ confirm() {
 
 echo "═══ Preflight ══════════════════════════════════════════════════════"
 
+# Release freeze. While a release would ship an incomplete migration (see
+# the file's text), nothing may be published from this tree.
+FREEZE_FILE="${RELEASE_FREEZE_FILE:-$REPO_ROOT/.release-freeze}"
+if [ -e "$FREEZE_FILE" ]; then
+    echo "error: releases are frozen ($FREEZE_FILE exists):" >&2
+    sed 's/^/  /' "$FREEZE_FILE" >&2
+    exit 3
+fi
+
 # Git state
 CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
 if [ "$CURRENT_BRANCH" != "main" ]; then

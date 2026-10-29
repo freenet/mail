@@ -130,6 +130,10 @@ jobs:
       - name: Re-capture golden fixtures through the frozen crates
         run: cargo make check-golden-capture
 
+      # scripts/release.sh must refuse to run while .release-freeze exists.
+      - name: Release freeze stops release.sh
+        run: scripts/release-freeze_test.sh
+
   ui-playwright-tests:
     runs-on: ubicloud-standard-8
     needs: build-and-test
