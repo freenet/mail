@@ -1554,7 +1554,9 @@ pub(crate) async fn node_comms(
     // delegate's answers.
     {
         let (mut login_controller, mut ab_gen) = (login_controller, ab_gen);
-        dioxus::prelude::spawn(async move {
+        // spawn_forever: this loop can be polled with no scope on the stack,
+        // where a scoped `spawn` panics (empty scope stack).
+        let _task = dioxus::core::spawn_forever(async move {
             match crate::app::contact_store::load_all().await {
                 Ok(contacts) => {
                     for contact in contacts {
