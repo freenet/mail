@@ -165,17 +165,38 @@ test.describe("Live node E2E", () => {
         "identity persists across reload",
       ).toBeVisible({ timeout: 30_000 });
 
-      // ── Step 3: assert the identities came from the mail delegate ──
-      // After the reload the identity list is read back from the mail
-      // delegate (its keys never leave it). Probe via gateway log.
+      // ── Step 3: the identity was created by the mail delegate ─────
+      // The page holds no seeds, so the identity that survived the reload
+      // above can only live in the unified mail delegate. Prove that
+      // delegate's own code ran on this node: the first time a node runs a
+      // delegate it compiles the module and logs "Module cache miss —
+      // compiling" with the code hash (info level, freenet >= 0.2.151).
+      // Fresh iso nodes start with an empty module cache, so the line is
+      // always there, and it names exactly the candidate the UI embeds.
+      // (A UI `log::info` line would not do: in the browser it goes to the
+      // console only, never to the gateway log.)
+      const candidateHash = fs
+        .readFileSync(
+          path.join(
+            __dirname,
+            "..",
+            "..",
+            "published-contract",
+            "candidate",
+            "mail_delegate_code_hash",
+          ),
+          "utf8",
+        )
+        .trim();
+      expect(candidateHash, "candidate code hash is committed").not.toBe("");
       await expect
         .poll(
           () =>
-            grepLog(/identities loaded from the mail delegate: count=[1-9]\d*/),
+            logHasLineWith(GW_LOG_DIR, ["Module cache miss", candidateHash]),
           {
             message:
-              "expected gateway log to show the identities loaded from " +
-              "the mail delegate after the reload",
+              "expected the gateway to compile and run the mail delegate " +
+              `(code hash ${candidateHash})`,
             timeout: 30_000,
           },
         )
@@ -2334,6 +2355,35 @@ function coreRelayBugDetected(): boolean {
   const sig =
     /relay_update_broadcast_error|relay_update_streaming_broadcast_error|missing contract parameters|failed to claim (?:stream from )?orphan/;
   return grepLog(sig) || grepPeerLog(sig);
+}
+
+/**
+ * True if one line of a gateway log file contains every needle
+ * (case-insensitive). Reads whole files, unlike `grepLogDir`'s tail
+ * window, so it finds lines written early in the run.
+ */
+function logHasLineWith(dir: string, needles: string[]): boolean {
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return false;
+  }
+  const want = needles.map((n) => n.toLowerCase());
+  for (const ent of entries) {
+    if (!ent.isFile() || !ent.name.startsWith("freenet.")) continue;
+    let text: string;
+    try {
+      text = fs.readFileSync(path.join(dir, ent.name), "utf8");
+    } catch {
+      continue;
+    }
+    for (const line of text.split("\n")) {
+      const l = line.toLowerCase();
+      if (want.every((n) => l.includes(n))) return true;
+    }
+  }
+  return false;
 }
 
 function grepLogDir(dir: string, re: RegExp): boolean {
