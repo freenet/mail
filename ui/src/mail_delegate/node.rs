@@ -65,55 +65,119 @@ pub(crate) fn note_registration_answer() {
     });
 }
 
+/// End a registration attempt: `Done` if it was sent, otherwise back to
+/// `NotStarted` so the next request tries again. Wakes every waiter, which
+/// then looks at the new state.
+fn settle(sent: bool) {
+    let waiters = REGISTRATION.with(|r| {
+        let next = if sent {
+            Registration::Done
+        } else {
+            Registration::NotStarted
+        };
+        match std::mem::replace(&mut *r.borrow_mut(), next) {
+            Registration::Waiting { waiters, .. } => waiters,
+            _ => Vec::new(),
+        }
+    });
+    for waiter in waiters {
+        let _ = waiter.send(());
+    }
+}
+
+/// Settles the attempt as failed if the task registering is dropped before
+/// it finishes (a cancelled scoped task), so nothing waits on it forever.
+struct Attempt {
+    settled: bool,
+}
+
+impl Attempt {
+    fn finish(mut self, sent: bool) {
+        self.settled = true;
+        settle(sent);
+    }
+}
+
+impl Drop for Attempt {
+    fn drop(&mut self) {
+        if !self.settled {
+            settle(false);
+        }
+    }
+}
+
+/// How long a request waits for another task's registration attempt before
+/// giving up with an error (the outcome is then unknown, never "absent").
+const REGISTER_WAIT_TIMEOUT_MS: u32 = 2 * REGISTER_ACK_TIMEOUT_MS + 5_000;
+
 /// Register the delegate unless this page load already has, and wait until
-/// the node answered (or the timeout passed).
+/// the node answered (or the timeout passed). A failed attempt is retried by
+/// the next request.
 async fn ensure_registered() -> Result<(), String> {
     enum Next {
         Ready,
         Wait(oneshot::Receiver<()>),
         Register(oneshot::Receiver<()>),
     }
-    let next = REGISTRATION.with(|r| {
-        let mut r = r.borrow_mut();
-        match &mut *r {
-            Registration::Done => Next::Ready,
-            Registration::Waiting { waiters, .. } => {
-                let (tx, rx) = oneshot::channel();
-                waiters.push(tx);
-                Next::Wait(rx)
-            }
-            Registration::NotStarted => {
-                let (ack, rx) = oneshot::channel();
-                *r = Registration::Waiting {
-                    ack: Some(ack),
-                    waiters: Vec::new(),
-                };
-                Next::Register(rx)
-            }
-        }
-    });
-    match next {
-        Next::Ready => Ok(()),
-        Next::Wait(rx) => {
-            let _ = rx.await;
-            Ok(())
-        }
-        Next::Register(ack) => {
-            let sent = register().await;
-            if sent.is_ok() {
-                wait_for_ack(ack).await;
-            }
-            let waiters = REGISTRATION.with(|r| {
-                match std::mem::replace(&mut *r.borrow_mut(), Registration::Done) {
-                    Registration::Waiting { waiters, .. } => waiters,
-                    _ => Vec::new(),
+    loop {
+        let next = REGISTRATION.with(|r| {
+            let mut r = r.borrow_mut();
+            match &mut *r {
+                Registration::Done => Next::Ready,
+                Registration::Waiting { waiters, .. } => {
+                    let (tx, rx) = oneshot::channel();
+                    waiters.push(tx);
+                    Next::Wait(rx)
                 }
-            });
-            for waiter in waiters {
-                let _ = waiter.send(());
+                Registration::NotStarted => {
+                    let (ack, rx) = oneshot::channel();
+                    *r = Registration::Waiting {
+                        ack: Some(ack),
+                        waiters: Vec::new(),
+                    };
+                    Next::Register(rx)
+                }
             }
-            sent
+        });
+        match next {
+            Next::Ready => return Ok(()),
+            Next::Wait(rx) => {
+                if !wait_or_timeout(rx, REGISTER_WAIT_TIMEOUT_MS).await {
+                    return Err("the mail delegate's registration did not complete".into());
+                }
+                // Look again: it may have succeeded, or failed and be ours
+                // to retry.
+            }
+            Next::Register(ack) => {
+                let attempt = Attempt { settled: false };
+                let sent = register().await;
+                if sent.is_ok() {
+                    wait_for_ack(ack).await;
+                }
+                attempt.finish(sent.is_ok());
+                return sent;
+            }
         }
+    }
+}
+
+/// Whether `rx` was answered (or its sender dropped) within `ms`.
+async fn wait_or_timeout(rx: oneshot::Receiver<()>, ms: u32) -> bool {
+    #[cfg(target_family = "wasm")]
+    {
+        use futures::FutureExt;
+        let mut rx = rx.fuse();
+        let mut timer = gloo_timers::future::TimeoutFuture::new(ms).fuse();
+        futures::select! {
+            _ = rx => true,
+            _ = timer => false,
+        }
+    }
+    #[cfg(not(target_family = "wasm"))]
+    {
+        let _ = ms;
+        let _ = rx.await;
+        true
     }
 }
 
@@ -190,6 +254,37 @@ mod tests {
     fn the_key_has_empty_parameters() {
         let container = DelegateContainer::try_from((CODE.to_vec(), &params())).unwrap();
         assert_eq!(container.key(), key());
+    }
+
+    fn state() -> &'static str {
+        REGISTRATION.with(|r| match &*r.borrow() {
+            Registration::NotStarted => "not started",
+            Registration::Waiting { .. } => "waiting",
+            Registration::Done => "done",
+        })
+    }
+
+    #[test]
+    fn a_failed_registration_is_retried_by_the_next_request() {
+        REGISTRATION.with(|r| *r.borrow_mut() = Registration::NotStarted);
+        // No node connection in a unit test, so sending the registration
+        // fails.
+        assert!(futures::executor::block_on(ensure_registered()).is_err());
+        assert_eq!(state(), "not started");
+    }
+
+    #[test]
+    fn a_cancelled_registration_wakes_its_waiters_and_can_be_retried() {
+        let (tx, mut rx) = oneshot::channel();
+        REGISTRATION.with(|r| {
+            *r.borrow_mut() = Registration::Waiting {
+                ack: None,
+                waiters: vec![tx],
+            }
+        });
+        drop(Attempt { settled: false });
+        assert_eq!(state(), "not started");
+        assert_eq!(rx.try_recv(), Ok(Some(())));
     }
 
     #[test]
