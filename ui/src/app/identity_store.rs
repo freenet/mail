@@ -163,6 +163,23 @@ pub(crate) async fn load_and_report() {
             return;
         }
     };
+    // Drafts, sent, read marks and settings for these identities. Loaded
+    // before the identities are announced, so the views they open start
+    // from what is stored.
+    #[cfg(feature = "use-node")]
+    {
+        let owners: Vec<(String, Addr)> = infos.iter().map(|i| (i.alias.clone(), i.addr)).collect();
+        match crate::local_state::load(&owners).await {
+            Ok(state) => crate::local_state::replace_snapshot(state),
+            Err(e) => {
+                crate::log::error(format!("loading local mail state failed: {e}"), None);
+                crate::toast::push_toast(
+                    format!("Couldn't load your drafts, sent mail and settings: {e}"),
+                    crate::toast::ToastLevel::Error,
+                );
+            }
+        }
+    }
     let mut loaded = Vec::with_capacity(infos.len());
     for info in infos {
         loaded.push(prepare(info).await);

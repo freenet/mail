@@ -427,7 +427,7 @@ pub(crate) mod embedded_artifact {
 }
 
 #[cfg(feature = "use-node")]
-pub(crate) use delegate_api::{V0_2_CIPHER, V0_2_NONCE, create_delegate};
+pub(crate) use delegate_api::{V0_2_CIPHER, V0_2_NONCE};
 
 #[cfg(feature = "use-node")]
 mod delegate_api {
@@ -1318,7 +1318,7 @@ pub(crate) async fn node_comms(
     // todo don't unwrap inside this function, propagate errors to the UI somehow
     use freenet_mail_wire_v1::inbox::Inbox as StoredInbox;
     use freenet_stdlib::{
-        client_api::{ContractError, ContractResponse, DelegateError, ErrorKind, RequestError},
+        client_api::{ContractError, ContractResponse, ErrorKind, RequestError},
         prelude::*,
     };
     use futures::StreamExt;
@@ -1353,22 +1353,9 @@ pub(crate) async fn node_comms(
         crate::aft::AftRecords::load_all(&mut req_sender, &contracts, &mut token_contract_to_id)
             .await;
     }
-    // Register mail-local-state delegate (drafts + read-state, issue #47/47a).
-    // Eager-register matches the identities pattern above: without it the
-    // first SaveDraft / MarkRead hits a node that's never seen the delegate.
-    match crate::local_state::register_and_init(&mut req_sender).await {
-        Ok(key) => {
-            // Pull initial snapshot. The DelegateResponse handler below
-            // routes the reply by `key` into `local_state::replace_snapshot`.
-            if let Err(e) = crate::local_state::fetch_all(&mut req_sender, &key).await {
-                crate::log::error(format!("local-state initial fetch failed: {e}"), None);
-            }
-            let _ = crate::local_state::LOCAL_STATE_KEY.set(key);
-        }
-        Err(e) => {
-            crate::log::error(format!("local-state delegate register failed: {e}"), None);
-        }
-    }
+    // Local mail state (drafts, sent, read marks, settings) lives in the
+    // mail delegate; it is loaded with the identities
+    // (`identity_store::load_and_report`).
 
     WEB_API_SENDER.set(req_sender).unwrap();
 
@@ -2168,8 +2155,7 @@ pub(crate) async fn node_comms(
                                         ),
                                         crate::toast::ToastLevel::Error,
                                     );
-                                    crate::inbox::fail_pending_sent_for_inbox(&mut client, *key)
-                                        .await;
+                                    crate::inbox::fail_pending_sent_for_inbox(*key);
                                 }
                             }
                             RequestError::ContractError(ContractError::Get { key, cause }) => {
@@ -2212,25 +2198,6 @@ pub(crate) async fn node_comms(
                                 crate::log::error(format!("FIXME: {err}"), None)
                             }
                             RequestError::DelegateError(error) => {
-                                // An error is the node's answer to a request. One
-                                // naming the local-state delegate answers one of its
-                                // requests; one naming no delegate might have.
-                                let named = match &error {
-                                    DelegateError::RegisterError(key)
-                                    | DelegateError::Missing(key) => Some(key),
-                                    DelegateError::MissingSecret { key, .. } => Some(key),
-                                    _ => None,
-                                };
-                                match named {
-                                    Some(key)
-                                        if crate::local_state::LOCAL_STATE_KEY.get()
-                                            == Some(key) =>
-                                    {
-                                        crate::local_state::note_answer(false)
-                                    }
-                                    Some(_) => {}
-                                    None => crate::local_state::note_unattributed_error(),
-                                }
                                 crate::log::error(
                                     format!("received delegate request error: {error}"),
                                     None,
@@ -2740,12 +2707,10 @@ pub(crate) async fn node_comms(
                         &sent_id,
                         freenet_mail_wire_v1::local_state::DeliveryState::Delivered,
                     ) {
-                        let mut client_clone = client.clone();
                         let alias_async = sender_alias;
                         let id_async = sent_id;
                         wasm_bindgen_futures::spawn_local(async move {
                             if let Err(e) = crate::local_state::set_sent_delivery_state(
-                                &mut client_clone,
                                 alias_async,
                                 id_async,
                                 freenet_mail_wire_v1::local_state::DeliveryState::Delivered,
@@ -2934,18 +2899,7 @@ pub(crate) async fn node_comms(
                 // delegate executor. The identities reload path is dead until the
                 // Phase 1 restore lands; for now, just ignore empty responses on
                 // the identities key.
-                let is_local_state_empty = crate::local_state::LOCAL_STATE_KEY
-                    .get()
-                    .is_some_and(|k| k == &key);
-                if is_local_state_empty {
-                    // Every local-state request gets exactly this answer once
-                    // the delegate has run it: a write is stored from here.
-                    crate::local_state::note_answer(true);
-                }
-                if values.is_empty() && is_local_state_empty {
-                    // Empty local-state response (e.g. SaveDraft / DeleteDraft /
-                    // MarkRead acks) — no AFT-gen lookup needed.
-                } else if values.is_empty() {
+                if values.is_empty() {
                     let found = token_generator_management::CREATED_AFT_GEN.with(|keys| {
                         let pos = keys.borrow().iter().position(|(_, k)| k == &key);
                         if let Some(pos) = pos {
@@ -2980,30 +2934,9 @@ pub(crate) async fn node_comms(
                         }
                     }
                 }
-                let is_local_state = crate::local_state::LOCAL_STATE_KEY
-                    .get()
-                    .is_some_and(|k| k == &key);
                 for msg in values {
                     match msg {
                         freenet_stdlib::prelude::OutboundDelegateMsg::ApplicationMessage(msg) => {
-                            // mail-local-state delegate response (drafts + read-state, #47).
-                            // Payload is a serialized `freenet_mail_wire_v1::local_state::LocalState`.
-                            if is_local_state {
-                                match ::freenet_mail_wire_v1::local_state::LocalState::try_from(
-                                    msg.payload.as_slice(),
-                                ) {
-                                    Ok(state) => {
-                                        crate::local_state::replace_snapshot(state);
-                                    }
-                                    Err(e) => {
-                                        crate::log::error(
-                                            format!("local-state delegate response deser: {e}"),
-                                            None,
-                                        );
-                                    }
-                                }
-                                continue;
-                            }
                             // Identities-delegate response: payload is a serialized
                             // `IdentityManagement` (HashMap<alias, AliasInfo>). Restore
                             // it into the user's identity list so the login screen
@@ -3079,11 +3012,7 @@ pub(crate) async fn node_comms(
                                     );
                                     let drained = AftRecords::drain_pending_for_delegate(&key);
                                     for (inbox_key, _hash) in drained {
-                                        crate::inbox::fail_pending_sent_for_inbox(
-                                            &mut client,
-                                            inbox_key,
-                                        )
-                                        .await;
+                                        crate::inbox::fail_pending_sent_for_inbox(inbox_key);
                                     }
                                 }
                                 TokenDelegateMessage::RequestNewToken(_) => {
@@ -3322,8 +3251,7 @@ pub(crate) async fn node_comms(
                 // away rather than waiting out the longer send-sweep window
                 // (#288 review): an AFT stall is terminal for that send.
                 for inbox in aft_failed_inboxes {
-                    let mut aft_client = WEB_API_SENDER.get().unwrap().clone();
-                    crate::inbox::fail_pending_sent_for_inbox(&mut aft_client, inbox).await;
+                    crate::inbox::fail_pending_sent_for_inbox(inbox);
                 }
 
                 // #288 "no terminal reply at all": a send whose recipient
@@ -3332,14 +3260,11 @@ pub(crate) async fn node_comms(
                 // the request was silently dropped) would otherwise leave
                 // the Sent row spinning Pending forever. Fail rows older
                 // than `PENDING_SENT_TIMEOUT_SECS` and toast once.
-                let mut sweep_client = WEB_API_SENDER.get().unwrap().clone();
                 let now_ms = chrono::Utc::now().timestamp_millis();
                 let expired_sends = crate::inbox::expire_stale_pending_sent(
-                    &mut sweep_client,
                     crate::inbox::PENDING_SENT_TIMEOUT_SECS,
                     now_ms,
-                )
-                .await;
+                );
                 if !expired_sends.is_empty() {
                     crate::toast::push_toast(
                         format!(

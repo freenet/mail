@@ -1,11 +1,14 @@
-//! UI-side mirror of the `mail-local-state` delegate.
+//! UI-side mirror of the local mail state the mail delegate stores (drafts,
+//! sent, kept and archived messages, read/deleted marks, settings).
 //!
-//! Holds the most recent `LocalState` snapshot returned by the delegate, plus
-//! a Dioxus signal generation counter that components subscribe to so they
-//! re-render when drafts / read-state / kept messages change.
+//! Holds a `LocalState` snapshot, loaded once per page from the delegate's
+//! items (`items::load`) and patched optimistically by every change, plus a
+//! Dioxus signal generation counter that components subscribe to so they
+//! re-render when drafts / read-state / kept messages change. Each change is
+//! also written to the delegate as items owned by the identity's address
+//! (`items`), acknowledged per request.
 //!
-//! Per-device only (issue #47, 47a). The delegate stash is keyed by a single
-//! P-384 secret committed at build time; per-alias scoping happens inside the
+//! Per-device only (issue #47, 47a); per-alias scoping happens inside the
 //! `LocalState` value (`AliasState` keyed by alias string).
 
 use std::cell::RefCell;
@@ -14,7 +17,7 @@ use std::collections::{HashMap, HashSet};
 use dioxus::prelude::*;
 use freenet_mail_wire_v1::local_state::{
     ArchivedMessage, DeliveryState, Draft, GlobalSettings, IdentitySettings, KeptMessage,
-    LocalState, LocalStateMsg, MessageId, SentMessage,
+    LocalState, MessageId, SentMessage,
 };
 
 thread_local! {
@@ -233,21 +236,44 @@ pub(crate) fn global_settings() -> GlobalSettings {
     SNAPSHOT.with(|s| s.borrow().global_settings().clone())
 }
 
-mod write_tracker;
-pub(crate) use write_tracker::Stored;
-#[cfg(feature = "use-node")]
-use write_tracker::WriteTracker;
+mod items;
+pub(crate) use items::{
+    archive_message, delete_draft, delete_message, delete_sent, load, mark_read, message_id_for,
+    save_draft, save_sent, set_sent_delivery_state,
+};
+// `unarchive_message` is wired but unused until #60 (true unarchive).
+#[allow(unused_imports)]
+pub(crate) use items::unarchive_message;
 
-#[cfg(feature = "use-node")]
-mod wire {
-    use super::*;
-    use crate::DynError;
-    use crate::api::WebApiRequestClient;
-    use freenet_stdlib::{
-        client_api::DelegateRequest,
-        prelude::{ApplicationMessage, DelegateKey, InboundDelegateMsg, Parameters},
-    };
-    use std::sync::OnceLock;
+/// Whether a local-state write is stored: acknowledged by the mail
+/// delegate (`Yes`), refused (`Failed`), or unanswered (`Unknown`, never
+/// "absent": the write may still have landed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Stored {
+    Yes,
+    Failed,
+    Unknown,
+}
+
+impl Stored {
+    /// The outcome of a write from its result.
+    pub(crate) fn of(result: &Result<(), crate::DynError>) -> Self {
+        match result {
+            Ok(()) => Stored::Yes,
+            Err(e) => match e.downcast_ref::<crate::mail_delegate::CallError>() {
+                Some(crate::mail_delegate::CallError::Unknown(_)) => Stored::Unknown,
+                _ => Stored::Failed,
+            },
+        }
+    }
+}
+
+/// The v0.2.x local-state delegate this build no longer talks to. Its key
+/// is pinned so the migration from it (B3) addresses exactly the delegate
+/// v0.2.x users have.
+#[cfg(all(test, feature = "use-node"))]
+mod legacy {
+    use freenet_stdlib::prelude::{DelegateKey, Parameters};
 
     const CODE_HASH: &str =
         include_str!("../../published-contract/wasm/v1/mail_local_state_code_hash");
@@ -263,282 +289,11 @@ mod wire {
     #[test]
     fn delegate_key_matches_the_v0_2_client() {
         use crate::test_util::{frozen_key, hex};
-        let key = DelegateKey::from_params(CODE_HASH, &params().unwrap()).unwrap();
+        let params = Parameters::from(PARAMS.to_vec());
+        let key = DelegateKey::from_params(CODE_HASH, &params).unwrap();
         assert_eq!(hex(key.bytes()), frozen_key("local_state_delegate"));
     }
-
-    /// Set before the delegate is registered. Used by the response handler in
-    /// `api::node_comms` to recognise replies destined for this delegate.
-    pub(crate) static LOCAL_STATE_KEY: OnceLock<DelegateKey> = OnceLock::new();
-
-    /// The committed parameters, exactly as the v0.2.x client sent them. The
-    /// delegate key hashes these bytes, so they are never re-encoded.
-    fn params() -> Result<Parameters<'static>, DynError> {
-        Ok(Parameters::from(PARAMS.to_vec()))
-    }
-
-    thread_local! {
-        /// Requests to the local-state delegate the node has not answered
-        /// yet. A write the UI applied optimistically is lost if the page
-        /// reloads before the node answers it (#286), so nothing may be
-        /// reported done before then. See [`super::write_tracker`].
-        static WRITES: RefCell<WriteTracker> = RefCell::new(WriteTracker::default());
-    }
-
-    /// The request's kind, for logs. Never the payload: it can hold drafts.
-    fn kind(msg: &LocalStateMsg) -> &'static str {
-        match msg {
-            LocalStateMsg::Init => "Init",
-            LocalStateMsg::SaveDraft { .. } => "SaveDraft",
-            LocalStateMsg::DeleteDraft { .. } => "DeleteDraft",
-            LocalStateMsg::MarkRead { .. } => "MarkRead",
-            LocalStateMsg::SaveSent { .. } => "SaveSent",
-            LocalStateMsg::DeleteSent { .. } => "DeleteSent",
-            LocalStateMsg::SetSentDeliveryState { .. } => "SetSentDeliveryState",
-            LocalStateMsg::ArchiveMessage { .. } => "ArchiveMessage",
-            LocalStateMsg::UnarchiveMessage { .. } => "UnarchiveMessage",
-            LocalStateMsg::DeleteMessage { .. } => "DeleteMessage",
-            LocalStateMsg::SetIdentitySettings { .. } => "SetIdentitySettings",
-            LocalStateMsg::SetGlobalSettings { .. } => "SetGlobalSettings",
-            LocalStateMsg::GetAll => "GetAll",
-        }
-    }
-
-    fn count_sent(kind: &str) {
-        let unanswered = WRITES.with(|w| w.borrow_mut().sent());
-        crate::log::info(format!("local-state {kind} sent ({unanswered} unanswered)"));
-    }
-
-    /// Send a local-state request and count it until the node answers.
-    async fn send_counted(
-        client: &mut WebApiRequestClient,
-        request: DelegateRequest<'static>,
-        msg: &LocalStateMsg,
-    ) -> Result<(), DynError> {
-        count_sent(kind(msg));
-        if let Err(e) = client.send(request.into()).await {
-            // It never reached the node, so nothing will answer it.
-            WRITES.with(|w| w.borrow_mut().unsent());
-            return Err(e.into());
-        }
-        Ok(())
-    }
-
-    /// The node answered a local-state request: with a `DelegateResponse`
-    /// (`ok`), or with an error naming this delegate.
-    pub(crate) fn note_answer(ok: bool) {
-        let unanswered = WRITES.with(|w| w.borrow_mut().answered(ok));
-        let how = if ok {
-            "answered"
-        } else {
-            "answered with an error"
-        };
-        crate::log::info(format!("local-state {how} ({unanswered} unanswered)"));
-    }
-
-    /// The node reported a delegate error that names no delegate.
-    pub(crate) fn note_unattributed_error() {
-        WRITES.with(|w| w.borrow_mut().unattributed_error());
-    }
-
-    /// Whether every local-state request sent so far was stored: waits for
-    /// the node's answers, or for `timeout`.
-    pub(crate) async fn writes_stored(timeout: impl std::future::Future<Output = ()>) -> Stored {
-        let wait = WRITES.with(|w| w.borrow_mut().wait());
-        super::write_tracker::stored_or_timeout(wait, timeout).await
-    }
-
-    pub(crate) async fn register_and_init(
-        client: &mut WebApiRequestClient,
-    ) -> Result<DelegateKey, DynError> {
-        let params = params()?;
-        // Known before anything is sent, so the response handler recognises
-        // every answer, the first included.
-        let key = DelegateKey::from_params(CODE_HASH, &params)?;
-        let _ = LOCAL_STATE_KEY.set(key.clone());
-        // The node answers the registration too (an empty `DelegateResponse`
-        // for this key), so it is counted like every other request.
-        count_sent("RegisterDelegate");
-        if let Err(e) = crate::api::create_delegate(client, CODE_HASH, CODE, &params).await {
-            WRITES.with(|w| w.borrow_mut().unsent());
-            return Err(e);
-        }
-        // Init is idempotent in the delegate.
-        let request = DelegateRequest::ApplicationMessages {
-            params: params.clone(),
-            inbound: vec![InboundDelegateMsg::ApplicationMessage(
-                ApplicationMessage::new(Vec::<u8>::try_from(&LocalStateMsg::Init)?),
-            )],
-            key: key.clone(),
-        };
-        send_counted(client, request, &LocalStateMsg::Init).await?;
-        Ok(key)
-    }
-
-    pub(crate) async fn fetch_all(
-        client: &mut WebApiRequestClient,
-        key: &DelegateKey,
-    ) -> Result<(), DynError> {
-        let params = params()?;
-        let request = DelegateRequest::ApplicationMessages {
-            params,
-            inbound: vec![InboundDelegateMsg::ApplicationMessage(
-                ApplicationMessage::new(Vec::<u8>::try_from(&LocalStateMsg::GetAll)?),
-            )],
-            key: key.clone(),
-        };
-        send_counted(client, request, &LocalStateMsg::GetAll).await
-    }
-
-    async fn send_msg(
-        client: &mut WebApiRequestClient,
-        msg: &LocalStateMsg,
-    ) -> Result<(), DynError> {
-        let key = match LOCAL_STATE_KEY.get() {
-            Some(k) => k.clone(),
-            None => return Err("local-state delegate not yet registered".into()),
-        };
-        let params = params()?;
-        let request = DelegateRequest::ApplicationMessages {
-            params,
-            inbound: vec![InboundDelegateMsg::ApplicationMessage(
-                ApplicationMessage::new(Vec::<u8>::try_from(msg)?),
-            )],
-            key,
-        };
-        send_counted(client, request, msg).await
-    }
-
-    pub(crate) async fn save_draft(
-        client: &mut WebApiRequestClient,
-        alias: String,
-        id: String,
-        draft: Draft,
-    ) -> Result<(), DynError> {
-        send_msg(client, &LocalStateMsg::SaveDraft { alias, id, draft }).await
-    }
-
-    pub(crate) async fn delete_draft(
-        client: &mut WebApiRequestClient,
-        alias: String,
-        id: String,
-    ) -> Result<(), DynError> {
-        send_msg(client, &LocalStateMsg::DeleteDraft { alias, id }).await
-    }
-
-    pub(crate) async fn mark_read(
-        client: &mut WebApiRequestClient,
-        alias: String,
-        msg_id: MessageId,
-        kept: KeptMessage,
-    ) -> Result<(), DynError> {
-        send_msg(
-            client,
-            &LocalStateMsg::MarkRead {
-                alias,
-                msg_id,
-                kept,
-            },
-        )
-        .await
-    }
-
-    pub(crate) async fn archive_message(
-        client: &mut WebApiRequestClient,
-        alias: String,
-        msg_id: MessageId,
-        archived: ArchivedMessage,
-    ) -> Result<(), DynError> {
-        send_msg(
-            client,
-            &LocalStateMsg::ArchiveMessage {
-                alias,
-                msg_id,
-                archived,
-            },
-        )
-        .await
-    }
-
-    #[allow(dead_code)] // Wired for #60 (true unarchive); unused until then.
-    pub(crate) async fn unarchive_message(
-        client: &mut WebApiRequestClient,
-        alias: String,
-        msg_id: MessageId,
-    ) -> Result<(), DynError> {
-        send_msg(client, &LocalStateMsg::UnarchiveMessage { alias, msg_id }).await
-    }
-
-    pub(crate) async fn delete_message(
-        client: &mut WebApiRequestClient,
-        alias: String,
-        msg_id: MessageId,
-    ) -> Result<(), DynError> {
-        send_msg(client, &LocalStateMsg::DeleteMessage { alias, msg_id }).await
-    }
-
-    pub(crate) async fn save_sent(
-        client: &mut WebApiRequestClient,
-        alias: String,
-        id: String,
-        sent: SentMessage,
-    ) -> Result<(), DynError> {
-        send_msg(client, &LocalStateMsg::SaveSent { alias, id, sent }).await
-    }
-
-    pub(crate) async fn delete_sent(
-        client: &mut WebApiRequestClient,
-        alias: String,
-        id: String,
-    ) -> Result<(), DynError> {
-        send_msg(client, &LocalStateMsg::DeleteSent { alias, id }).await
-    }
-
-    pub(crate) async fn set_sent_delivery_state(
-        client: &mut WebApiRequestClient,
-        alias: String,
-        id: String,
-        state: DeliveryState,
-    ) -> Result<(), DynError> {
-        send_msg(
-            client,
-            &LocalStateMsg::SetSentDeliveryState { alias, id, state },
-        )
-        .await
-    }
-
-    pub(crate) async fn set_identity_settings(
-        client: &mut WebApiRequestClient,
-        alias: String,
-        settings: IdentitySettings,
-    ) -> Result<(), DynError> {
-        send_msg(
-            client,
-            &LocalStateMsg::SetIdentitySettings { alias, settings },
-        )
-        .await
-    }
-
-    pub(crate) async fn set_global_settings(
-        client: &mut WebApiRequestClient,
-        settings: GlobalSettings,
-    ) -> Result<(), DynError> {
-        send_msg(client, &LocalStateMsg::SetGlobalSettings { settings }).await
-    }
 }
-
-#[cfg(feature = "use-node")]
-pub(crate) use wire::delete_sent;
-#[cfg(feature = "use-node")]
-pub(crate) use wire::{
-    LOCAL_STATE_KEY, archive_message, delete_draft, delete_message, fetch_all, mark_read,
-    note_answer, note_unattributed_error, register_and_init, save_draft, save_sent,
-    set_sent_delivery_state, writes_stored,
-};
-// `unarchive_message` is wired but unused until later phases.
-#[cfg(feature = "use-node")]
-#[allow(unused_imports)]
-pub(crate) use wire::unarchive_message;
 
 // Optimistic local mutations: patch `SNAPSHOT` immediately so the UI
 // re-renders without waiting for the delegate roundtrip.
@@ -764,10 +519,9 @@ pub(crate) fn local_set_global_settings(settings: GlobalSettings) {
 
 /// Apply a per-identity settings change everywhere: optimistically patch the
 /// in-memory snapshot for an immediate UI re-render, then (under `use-node`)
-/// fire-and-forget the delegate dispatch so the value persists. Errors from
-/// the dispatch are logged via `crate::log` but don't fail the call — the
-/// local snapshot is the source of truth for the current session and the
-/// delegate write is best-effort.
+/// persist the fields that changed. Another tab may have changed other fields
+/// meanwhile; only this change's fields are written over what is stored
+/// (`items::set_identity_settings`). A failed write is logged and reported.
 ///
 /// Safe to call from outside the Dioxus runtime (the `api.rs` node loop
 /// calls it when an identity is created): the snapshot bump is already
@@ -776,44 +530,34 @@ pub(crate) fn local_set_global_settings(settings: GlobalSettings) {
 /// needs a current scope and would also cancel the write if the calling
 /// component unmounted first.
 pub(crate) fn persist_identity_settings(alias: String, settings: IdentitySettings) {
+    let before = identity_settings_for(&alias);
     local_set_identity_settings(&alias, settings.clone());
     #[cfg(feature = "use-node")]
-    {
-        let Some(client) = crate::api::WEB_API_SENDER.get() else {
-            return;
-        };
-        let mut client = client.clone();
-        wasm_bindgen_futures::spawn_local(async move {
-            if let Err(e) = wire::set_identity_settings(&mut client, alias, settings).await {
-                crate::log::error(format!("set_identity_settings failed: {e}"), None);
-            }
-        });
-    }
+    wasm_bindgen_futures::spawn_local(async move {
+        if let Err(e) = items::set_identity_settings(alias, before, settings).await {
+            crate::log::local_state_failure("save identity settings", e);
+        }
+    });
     #[cfg(not(feature = "use-node"))]
     {
-        let _ = (alias, settings);
+        let _ = (alias, before, settings);
     }
 }
 
 /// Apply a global settings change everywhere; same shape as
 /// [`persist_identity_settings`].
 pub(crate) fn persist_global_settings(settings: GlobalSettings) {
+    let before = global_settings();
     local_set_global_settings(settings.clone());
     #[cfg(feature = "use-node")]
-    {
-        let Some(client) = crate::api::WEB_API_SENDER.get() else {
-            return;
-        };
-        let mut client = client.clone();
-        dioxus::prelude::spawn(async move {
-            if let Err(e) = wire::set_global_settings(&mut client, settings).await {
-                crate::log::error(format!("set_global_settings failed: {e}"), None);
-            }
-        });
-    }
+    wasm_bindgen_futures::spawn_local(async move {
+        if let Err(e) = items::set_global_settings(before, settings).await {
+            crate::log::local_state_failure("save settings", e);
+        }
+    });
     #[cfg(not(feature = "use-node"))]
     {
-        let _ = settings;
+        let _ = (before, settings);
     }
 }
 

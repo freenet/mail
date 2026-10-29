@@ -307,10 +307,7 @@ pub(crate) fn take_next_pending_sent_ack(inbox_key: &InboxContract) -> Option<(S
 /// and the user must see that, instead of a Pending spinner that never
 /// resolves (#85).
 #[cfg(feature = "use-node")]
-pub(crate) async fn fail_pending_sent_for_inbox(
-    client: &mut crate::api::WebApiRequestClient,
-    inbox_key: InboxContract,
-) {
+pub(crate) fn fail_pending_sent_for_inbox(inbox_key: InboxContract) {
     let entries: Vec<(String, String)> = PENDING_SENT_ACK.with(|m| {
         let mut map = m.borrow_mut();
         match map.remove(&inbox_key) {
@@ -319,7 +316,7 @@ pub(crate) async fn fail_pending_sent_for_inbox(
         }
     });
     for (sender_alias, sent_id) in entries {
-        fail_one_sent(client, &sender_alias, &sent_id).await;
+        fail_one_sent(&sender_alias, &sent_id);
     }
     PENDING_INBOXES_UPDATE.with(|m| {
         m.borrow_mut().remove(&inbox_key);
@@ -327,14 +324,13 @@ pub(crate) async fn fail_pending_sent_for_inbox(
 }
 
 /// Flip a single Sent row to `Failed`, both in the in-memory local stash
-/// and via the local-state delegate so the change survives reload. Shared
-/// by `fail_pending_sent_for_inbox` (#85/#288) and `expire_stale_pending_sent`.
+/// and in the mail delegate so the change survives reload. Shared by
+/// `fail_pending_sent_for_inbox` (#85/#288) and `expire_stale_pending_sent`.
+///
+/// Both run on the node loop, which delivers the delegate's answers, so the
+/// delegate write runs in a detached task: awaiting it here would deadlock.
 #[cfg(feature = "use-node")]
-async fn fail_one_sent(
-    client: &mut crate::api::WebApiRequestClient,
-    sender_alias: &str,
-    sent_id: &str,
-) {
+fn fail_one_sent(sender_alias: &str, sent_id: &str) {
     // Skip the delegate write when the row was already terminal — the local
     // guard suppressed the in-memory flip, and persisting again would let a
     // stale value clobber the true terminal state on reload (#288).
@@ -345,19 +341,21 @@ async fn fail_one_sent(
     ) {
         return;
     }
-    if let Err(e) = crate::local_state::set_sent_delivery_state(
-        client,
-        sender_alias.to_string(),
-        sent_id.to_string(),
-        freenet_mail_wire_v1::local_state::DeliveryState::Failed,
-    )
-    .await
-    {
-        crate::log::error(
-            format!("set_sent_delivery_state(Failed) for {sender_alias}/{sent_id}: {e}"),
-            None,
-        );
-    }
+    let (sender_alias, sent_id) = (sender_alias.to_string(), sent_id.to_string());
+    wasm_bindgen_futures::spawn_local(async move {
+        if let Err(e) = crate::local_state::set_sent_delivery_state(
+            sender_alias.clone(),
+            sent_id.clone(),
+            freenet_mail_wire_v1::local_state::DeliveryState::Failed,
+        )
+        .await
+        {
+            crate::log::error(
+                format!("set_sent_delivery_state(Failed) for {sender_alias}/{sent_id}: {e}"),
+                None,
+            );
+        }
+    });
 }
 
 /// Pure step of the stale-send sweep: remove every pending entry older
@@ -394,13 +392,9 @@ fn drain_stale_pending_sent(timeout_secs: i64, now_ms: i64) -> Vec<(String, Stri
 /// Returns the `(sender_alias, sent_id)` pairs that were expired so the
 /// caller can toast the user.
 #[cfg(feature = "use-node")]
-pub(crate) async fn expire_stale_pending_sent(
-    client: &mut crate::api::WebApiRequestClient,
-    timeout_secs: i64,
-    now_ms: i64,
-) -> Vec<(String, String)> {
-    // Drain the stale entries out of the map first (sync borrow), then do
-    // the async delegate writes without holding the RefCell across await.
+pub(crate) fn expire_stale_pending_sent(timeout_secs: i64, now_ms: i64) -> Vec<(String, String)> {
+    // Drain the stale entries out of the map first (sync borrow); the
+    // delegate writes run detached (`fail_one_sent`).
     let stale = drain_stale_pending_sent(timeout_secs, now_ms);
     for (sender_alias, sent_id) in &stale {
         crate::log::error(
@@ -409,7 +403,7 @@ pub(crate) async fn expire_stale_pending_sent(
             ),
             Some(crate::api::TryNodeAction::SendMessage),
         );
-        fail_one_sent(client, sender_alias, sent_id).await;
+        fail_one_sent(sender_alias, sent_id);
     }
     stale
 }
@@ -458,9 +452,6 @@ impl PendingOutgoing {
 
 #[derive(Debug, Clone)]
 struct InternalSettings {
-    /// This id is used for internal handling of the inbox and is not persistent
-    /// or unique across sessions.
-    next_msg_id: u64,
     /// AFT tier the recipient demands from incoming senders. Mutable
     /// via the Settings UI (#85): `update_settings_at_store` signs a
     /// `ModifySettings` delta with `ml_dsa_signing_key` and pushes it
@@ -509,12 +500,10 @@ impl InboxSummary {
 impl InternalSettings {
     fn from_stored(
         stored_settings: StoredSettings,
-        next_id: u64,
         addr: freenet_mail_protocol::Addr,
         owner_ek_bytes: Vec<u8>,
     ) -> Result<Self, DynError> {
         Ok(Self {
-            next_msg_id: next_id,
             addr,
             owner_ek_bytes,
             minimum_tier: stored_settings.minimum_tier,
@@ -1189,7 +1178,7 @@ impl InboxModel {
         key: ContractKey,
     ) -> Result<(Self, PendingDecrypt), DynError> {
         let model = Self {
-            settings: InternalSettings::from_stored(state.settings, 0, addr, owner_ek_bytes)?,
+            settings: InternalSettings::from_stored(state.settings, addr, owner_ek_bytes)?,
             key,
             messages: Vec::new(),
             removed: HashSet::new(),
@@ -1205,10 +1194,8 @@ impl InboxModel {
     /// decrypted that the state still holds, drops the rest, and returns the
     /// new ones to decrypt.
     pub fn replace_state(&mut self, state: StoredInbox) -> Result<PendingDecrypt, DynError> {
-        let next = self.settings.next_msg_id;
         self.settings = InternalSettings::from_stored(
             state.settings,
-            next,
             self.settings.addr,
             self.settings.owner_ek_bytes.clone(),
         )?;
@@ -1277,26 +1264,36 @@ impl InboxModel {
                 continue;
             }
             let signature_valid = verify_message_signature(&m.content, &m.sender_vk, &m.signature);
-            self.add_received_message(content, m.token_assignment, m.sender_vk, signature_valid);
+            // The id is the ciphertext's hash, not the message's position:
+            // read, kept, archived and deleted marks stay attached to the
+            // right message across reloads and however the inbox reorders.
+            let id = crate::local_state::message_id_for(&m.content);
+            self.add_received_message(
+                id,
+                content,
+                m.token_assignment,
+                m.sender_vk,
+                signature_valid,
+            );
         }
     }
 
     /// This only affects in-memory messages, changes are not persisted.
     fn add_received_message(
         &mut self,
+        id: u64,
         content: DecryptedMessage,
         token_assignment: TokenAssignment,
         sender_vk: Vec<u8>,
         signature_valid: bool,
     ) {
         self.messages.push(MessageModel {
-            id: self.settings.next_msg_id,
+            id,
             content,
             token_assignment,
             sender_vk,
             signature_valid,
         });
-        self.settings.next_msg_id += 1;
     }
 
     /// This only affects in-memory messages, changes are not persisted.
@@ -1545,7 +1542,6 @@ mod tests {
             Self {
                 messages: vec![],
                 settings: InternalSettings {
-                    next_msg_id: 0,
                     minimum_tier: Tier::Hour1,
                     max_age_secs: freenet_mail_wire_v1::inbox::DEFAULT_MAX_AGE_SECS,
                     allow_verified_skip_token: false,

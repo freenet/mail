@@ -492,18 +492,14 @@ impl InboxView {
                         &sender_alias,
                         &sent_id,
                         freenet_mail_wire_v1::local_state::DeliveryState::Failed,
-                    ) {
-                        let mut client_clone = client.clone();
-                        if let Err(e) = crate::local_state::set_sent_delivery_state(
-                            &mut client_clone,
-                            sender_alias,
-                            sent_id,
-                            freenet_mail_wire_v1::local_state::DeliveryState::Failed,
-                        )
-                        .await
-                        {
-                            crate::log::local_state_failure("update delivery state", e);
-                        }
+                    ) && let Err(e) = crate::local_state::set_sent_delivery_state(
+                        sender_alias,
+                        sent_id,
+                        freenet_mail_wire_v1::local_state::DeliveryState::Failed,
+                    )
+                    .await
+                    {
+                        crate::log::local_state_failure("update delivery state", e);
                     }
                 }
             };
@@ -3997,7 +3993,6 @@ fn ThreadDetail(group: crate::app::threads::ThreadGroup) -> Element {
                 crate::local_state::local_mark_read(&alias, m.id, kept.clone());
                 #[cfg(feature = "use-node")]
                 {
-                    let mut client_clone = client.clone();
                     let alias_for_send = alias.clone();
                     let mid = m.id;
                     // spawn_forever: opening a message then immediately
@@ -4006,13 +4001,8 @@ fn ThreadDetail(group: crate::app::threads::ThreadGroup) -> Element {
                     // write, so the message resurfaced as unread on reload
                     // (#286 read-state variant).
                     let _task = dioxus_core::spawn_forever(async move {
-                        if let Err(e) = crate::local_state::mark_read(
-                            &mut client_clone,
-                            alias_for_send,
-                            mid,
-                            kept,
-                        )
-                        .await
+                        if let Err(e) =
+                            crate::local_state::mark_read(alias_for_send, mid, kept).await
                         {
                             crate::log::local_state_failure("mark thread message read", e);
                         }
@@ -4458,7 +4448,6 @@ fn OpenArchivedMessage(
 ) -> Element {
     let mut menu_selection = use_context::<Signal<menu::MenuSelection>>();
     let user = use_context::<Signal<User>>();
-    let client = crate::api::WEB_API_SENDER.get().unwrap();
 
     let from = msg.from.clone();
     let from_initial = from.chars().next().unwrap_or('·').to_string();
@@ -4541,7 +4530,6 @@ fn OpenArchivedMessage(
                             crate::local_state::local_delete_message(&delete_alias, msg_id);
                             #[cfg(feature = "use-node")]
                             {
-                                let mut c = client.clone();
                                 let a = delete_alias.clone();
                                 // spawn_forever: at_inbox_list() below
                                 // navigates away and unmounts this view, which
@@ -4549,22 +4537,8 @@ fn OpenArchivedMessage(
                                 // DeleteMessage delegate write committed —
                                 // message returns after reload (#286).
                                 confirm_when_stored(
-                                    async move {
-                                        match crate::local_state::delete_message(
-                                            &mut c, a, msg_id,
-                                        )
-                                        .await
-                                        {
-                                            Ok(()) => true,
-                                            Err(e) => {
-                                                crate::log::error(
-                                                    format!("delete_message failed: {e}"),
-                                                    None,
-                                                );
-                                                false
-                                            }
-                                        }
-                                    },
+                                    "delete_message",
+                                    crate::local_state::delete_message(a, msg_id),
                                     &CONFIRM_DELETE,
                                 );
                             }
@@ -4602,8 +4576,6 @@ fn OpenSentMessage(
 ) -> Element {
     let mut menu_selection = use_context::<Signal<menu::MenuSelection>>();
     let user = use_context::<Signal<User>>();
-    #[cfg(feature = "use-node")]
-    let client = crate::api::WEB_API_SENDER.get().unwrap();
     let delete_alias = user
         .read()
         .logged_id()
@@ -4739,7 +4711,6 @@ fn OpenSentMessage(
                             crate::local_state::local_delete_sent(&delete_alias, &sent_id);
                             #[cfg(feature = "use-node")]
                             {
-                                let mut c = client.clone();
                                 let a = delete_alias.clone();
                                 let id = sent_id.clone();
                                 // spawn_forever: at_inbox_list() below unmounts
@@ -4747,19 +4718,8 @@ fn OpenSentMessage(
                                 // the DeleteSent delegate write committed, so the
                                 // row would return after reload (mirrors #286).
                                 confirm_when_stored(
-                                    async move {
-                                        match crate::local_state::delete_sent(&mut c, a, id).await
-                                        {
-                                            Ok(()) => true,
-                                            Err(e) => {
-                                                crate::log::error(
-                                                    format!("delete_sent failed: {e}"),
-                                                    None,
-                                                );
-                                                false
-                                            }
-                                        }
-                                    },
+                                    "delete_sent",
+                                    crate::local_state::delete_sent(a, id),
                                     &CONFIRM_DELETE,
                                 );
                             }
@@ -4869,7 +4829,6 @@ fn archive_message(
         crate::local_state::local_archive_message(alias, id, archived.clone());
         #[cfg(feature = "use-node")]
         {
-            let mut c = client.clone();
             let a = alias.to_string();
             let ar = archived.clone();
             // spawn_forever: the caller runs post.apply() right after this,
@@ -4877,15 +4836,8 @@ fn archive_message(
             // cancel the ArchiveMessage delegate write on unmount, so the
             // archived message bounced back to the Inbox after reload (#286).
             confirm_when_stored(
-                async move {
-                    match crate::local_state::archive_message(&mut c, a, id, ar).await {
-                        Ok(()) => true,
-                        Err(e) => {
-                            crate::log::local_state_failure("archive message", e);
-                            false
-                        }
-                    }
-                },
+                "archive message",
+                crate::local_state::archive_message(a, id, ar),
                 &CONFIRM_ARCHIVE,
             );
         }
@@ -4921,7 +4873,6 @@ fn delete_message(
         crate::local_state::local_delete_message(alias, id);
         #[cfg(feature = "use-node")]
         {
-            let mut c = client.clone();
             let a = alias.to_string();
             // spawn_forever: the caller runs post.apply() right after this,
             // which navigates away and unmounts the message view. A bare
@@ -4929,15 +4880,8 @@ fn delete_message(
             // unmount, so the deletion never committed to the node and the
             // message returned after reload (#286).
             confirm_when_stored(
-                async move {
-                    match crate::local_state::delete_message(&mut c, a, id).await {
-                        Ok(()) => true,
-                        Err(e) => {
-                            crate::log::error(format!("delete_message failed: {e}"), None);
-                            false
-                        }
-                    }
-                },
+                "delete_message",
+                crate::local_state::delete_message(a, id),
                 &CONFIRM_DELETE,
             );
         }
@@ -4985,18 +4929,12 @@ const CONFIRM_ARCHIVE: Confirmation = Confirmation {
     unconfirmed: "Couldn't confirm the archive was saved; the message may be lost after a reload",
 };
 
-/// How long to wait for the node to answer before saying the write could not
-/// be confirmed.
-#[cfg(feature = "use-node")]
-const CONFIRM_TIMEOUT_MS: u32 = 20_000;
-
 /// Run a local-state `write` and confirm it only once it is stored. `pending`
-/// shows from now until the node has answered every local-state request sent
-/// so far, then `done`. The UI applies the change at once, but until the node
-/// answers, a reload loses it (#286), so `done` must not appear before then.
-/// A failed write, or an error answer, shows `failed`; no answer within
-/// [`CONFIRM_TIMEOUT_MS`], or one that cannot be attributed, `unconfirmed`.
-/// Runs as one task so the outcome cannot overtake the write.
+/// shows from now until the mail delegate has acknowledged the write, then
+/// `done`. The UI applies the change at once, but until the delegate
+/// acknowledges it a reload loses it (#286), so `done` must not appear before
+/// then. A write the delegate refuses shows `failed`; one it never answers,
+/// `unconfirmed`. Runs as one task so the outcome cannot overtake the write.
 ///
 /// `spawn_forever`: the caller navigates away and unmounts the view right
 /// after this, which would cancel a bare `spawn()` before the write is sent.
@@ -5004,7 +4942,8 @@ const CONFIRM_TIMEOUT_MS: u32 = 20_000;
 /// task runs outside the component tree, where `use_context` cannot find it.
 #[cfg(feature = "use-node")]
 fn confirm_when_stored(
-    write: impl std::future::Future<Output = bool> + 'static,
+    what: &'static str,
+    write: impl std::future::Future<Output = Result<(), crate::DynError>> + 'static,
     say: &'static Confirmation,
 ) {
     use crate::local_state::Stored;
@@ -5012,12 +4951,15 @@ fn confirm_when_stored(
     let toasts = use_context::<crate::toast::ToastQueue>();
     let pending = push_sticky_toast_to(toasts, say.pending, ToastLevel::Info);
     let _task = dioxus_core::spawn_forever(async move {
-        let outcome = if write.await {
-            let timeout = gloo_timers::future::TimeoutFuture::new(CONFIRM_TIMEOUT_MS);
-            crate::local_state::writes_stored(timeout).await
-        } else {
-            Stored::Failed
-        };
+        // The delegate acknowledges each write itself, and a call it never
+        // answers ends as `Unknown` (never assumed either way). The write is
+        // never raced against a timer: dropping it midway would leave a
+        // multi-step write half done.
+        let result = write.await;
+        if let Err(e) = &result {
+            crate::log::error(format!("{what} failed: {e}"), None);
+        }
+        let outcome = Stored::of(&result);
         dismiss_toast_in(toasts, pending);
         match outcome {
             Stored::Yes => push_toast_to(toasts, say.done, ToastLevel::Success),
@@ -5103,20 +5045,14 @@ fn OpenMessage(msg: Message) -> Element {
             crate::local_state::local_mark_read(&alias, msg.id, kept.clone());
             #[cfg(feature = "use-node")]
             {
-                let mut client_clone = client.clone();
                 let alias_for_send = alias.clone();
                 // spawn_forever: same as the group-open path — navigating
                 // away right after opening unmounts this view and a bare
                 // spawn() would cancel the MarkRead write, resurfacing the
                 // message as unread on reload (#286 read-state variant).
                 let _task = dioxus_core::spawn_forever(async move {
-                    if let Err(e) = crate::local_state::mark_read(
-                        &mut client_clone,
-                        alias_for_send,
-                        msg.id,
-                        kept,
-                    )
-                    .await
+                    if let Err(e) =
+                        crate::local_state::mark_read(alias_for_send, msg.id, kept).await
                     {
                         crate::log::local_state_failure("mark message read", e);
                     }
@@ -5419,7 +5355,6 @@ fn ComposeSheet() -> Element {
         autosave_token.set(my_token);
         #[cfg(feature = "use-node")]
         {
-            let mut client_clone = client.clone();
             let alias = alias_for_save.clone();
             let token_signal = autosave_token;
             spawn(async move {
@@ -5427,9 +5362,7 @@ fn ComposeSheet() -> Element {
                 if *token_signal.read() != my_token {
                     return;
                 }
-                if let Err(e) =
-                    crate::local_state::save_draft(&mut client_clone, alias, id, draft).await
-                {
+                if let Err(e) = crate::local_state::save_draft(alias, id, draft).await {
                     crate::log::local_state_failure("save draft", e);
                 }
             });
@@ -5471,7 +5404,6 @@ fn ComposeSheet() -> Element {
         crate::local_state::local_delete_draft(&alias_for_delete, &id);
         #[cfg(feature = "use-node")]
         {
-            let mut client_clone = client.clone();
             let alias = alias_for_delete.clone();
             // spawn_forever: delete_draft_now fires on Send, which navigates
             // away and unmounts this component. A bare spawn() would cancel
@@ -5479,8 +5411,7 @@ fn ComposeSheet() -> Element {
             // persisted on the node — it then reappears (and the sent message
             // re-derives as a Draft) after reload (#286).
             let _task = dioxus_core::spawn_forever(async move {
-                if let Err(e) = crate::local_state::delete_draft(&mut client_clone, alias, id).await
-                {
+                if let Err(e) = crate::local_state::delete_draft(alias, id).await {
                     crate::log::local_state_failure("delete draft", e);
                 }
             });
@@ -5731,7 +5662,6 @@ fn ComposeSheet() -> Element {
 
             #[cfg(feature = "use-node")]
             {
-                let mut client_clone = client.clone();
                 let alias_async = sender_alias.clone();
                 let id_async = sent_id.clone();
                 // spawn_forever, not spawn: the send handler navigates away
@@ -5741,13 +5671,7 @@ fn ComposeSheet() -> Element {
                 // wire — the message persisted only in the in-session
                 // snapshot and re-derived as a Draft after reload (#286).
                 let _task = dioxus_core::spawn_forever(async move {
-                    if let Err(e) = crate::local_state::save_sent(
-                        &mut client_clone,
-                        alias_async,
-                        id_async,
-                        sent,
-                    )
-                    .await
+                    if let Err(e) = crate::local_state::save_sent(alias_async, id_async, sent).await
                     {
                         crate::log::local_state_failure("save sent message", e);
                     }
