@@ -272,6 +272,7 @@ pub(crate) fn app() -> Element {
                             {
                                 Ok(generation) => {
                                     Identity::rename_in_place(&old, &new);
+                                    crate::local_state::rename_alias(&old, &new);
                                     login::Identity::set_generation(
                                         &identity.addr,
                                         generation,
@@ -305,6 +306,7 @@ pub(crate) fn app() -> Element {
                                 continue;
                             }
                             Identity::remove_in_place(&identity.alias);
+                            crate::local_state::forget_alias(&identity.alias);
                             let mut user_w = user_sig.write();
                             let was_logged_in = user_w
                                 .logged_id()

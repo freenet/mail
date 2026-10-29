@@ -245,6 +245,33 @@ pub(crate) fn is_deleted(alias: &str, id: MessageId) -> bool {
     SNAPSHOT.with(|s| s.borrow().is_deleted(alias, id))
 }
 
+/// Drop everything cached for `alias` (its identity was deleted), so an
+/// identity later created under the same alias starts empty instead of
+/// inheriting the old one's drafts, sent mail and settings.
+pub(crate) fn forget_alias(alias: &str) {
+    SNAPSHOT.with(|s| {
+        s.borrow_mut().aliases_mut().remove(alias);
+    });
+    DELETED_DRAFTS.with(|t| t.borrow_mut().retain(|(a, _)| a != alias));
+    PENDING_KEPT.with(|t| t.borrow_mut().retain(|(a, _), _| a != alias));
+    OPTIMISTIC_SENT.with(|t| t.borrow_mut().retain(|(a, _), _| a != alias));
+    OPTIMISTIC_ARCHIVED.with(|t| t.borrow_mut().retain(|(a, _), _| a != alias));
+    DELETED_MESSAGES.with(|t| t.borrow_mut().retain(|(a, _)| a != alias));
+    READ_SENT.with(|t| t.borrow_mut().retain(|(a, _)| a != alias));
+    bump();
+}
+
+/// Move what is cached for `old` to `new` (the identity was renamed).
+pub(crate) fn rename_alias(old: &str, new: &str) {
+    SNAPSHOT.with(|s| {
+        let mut s = s.borrow_mut();
+        if let Some(state) = s.aliases_mut().remove(old) {
+            s.aliases_mut().insert(new.to_string(), state);
+        }
+    });
+    bump();
+}
+
 thread_local! {
     /// Messages whose read mark this page has already sent to the delegate.
     static READ_SENT: RefCell<HashSet<(String, MessageId)>> = RefCell::new(HashSet::new());
@@ -689,6 +716,24 @@ mod tests {
     /// single kept entry, not duplicates. The live UI path runs
     /// `OpenMessage` on every render, which re-fires `local_mark_read`
     /// — that must be a no-op on second call.
+    #[test]
+    fn a_new_identity_under_a_deleted_alias_starts_empty() {
+        fresh_snapshot();
+        local_save_draft("fa-alice", "d1", Draft::default());
+        assert_eq!(drafts_for("fa-alice").len(), 1);
+        forget_alias("fa-alice");
+        assert!(drafts_for("fa-alice").is_empty());
+    }
+
+    #[test]
+    fn a_rename_keeps_the_identitys_state() {
+        fresh_snapshot();
+        local_save_draft("rn-old", "d1", Draft::default());
+        rename_alias("rn-old", "rn-new");
+        assert!(drafts_for("rn-old").is_empty());
+        assert_eq!(drafts_for("rn-new").len(), 1);
+    }
+
     #[test]
     fn a_read_mark_is_sent_once_and_never_after_a_delete() {
         fresh_snapshot();

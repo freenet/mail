@@ -2033,6 +2033,7 @@ pub(crate) async fn node_comms(
                     {
                         Ok(generation) => {
                             crate::app::login::Identity::rename_in_place(&old, &new);
+                            crate::local_state::rename_alias(&old, &new);
                             crate::app::login::Identity::set_generation(
                                 &identity.addr,
                                 generation,
@@ -2074,6 +2075,7 @@ pub(crate) async fn node_comms(
                             // delete primitive); without the keys nobody can
                             // sign for them.
                             crate::app::login::Identity::remove_in_place(&alias);
+                            crate::local_state::forget_alias(&alias);
                             let mut user_w = user.write();
                             let was_logged_in = user_w
                                 .logged_id()
