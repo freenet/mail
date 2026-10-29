@@ -300,6 +300,64 @@ mod notfound_routing {
     }
 }
 
+/// #191: prime a contact's inbox contract on this node (GET with subscribe),
+/// so the first send to a known contact after a reload does not fail for
+/// lack of the contract's parameters. Derived under the contact's advertised
+/// WASM hash (#251 improvement 4), so a cross-version contact primes under
+/// its real id.
+#[cfg(feature = "use-node")]
+pub(crate) async fn prime_contact_inbox(
+    client: &mut WebApiRequestClient,
+    contact: &crate::app::address_book::Contact,
+) {
+    match crate::app::address_book::vk_from_bytes(&contact.ml_dsa_vk_bytes) {
+        Ok(vk) => {
+            let code_hash = contact
+                .inbox_wasm_hash
+                .as_deref()
+                .unwrap_or(crate::inbox::INBOX_CODE_HASH);
+            match crate::inbox::inbox_key_for_with_hash(&vk, code_hash) {
+                Ok(inbox_key) => {
+                    let req = freenet_stdlib::client_api::ContractRequest::Get {
+                        key: inbox_key.into(),
+                        return_contract_code: true,
+                        subscribe: true,
+                        blocking_subscribe: false,
+                    };
+                    if let Err(e) = client.send(req.into()).await {
+                        crate::log::error(
+                            format!(
+                                "rehydrate prime contact inbox {inbox_key} for {} failed: {e}",
+                                contact.local_alias
+                            ),
+                            None,
+                        );
+                    } else {
+                        crate::log::info(format!(
+                            "rehydrate primed contact inbox {inbox_key} for {} (#191)",
+                            contact.local_alias
+                        ));
+                    }
+                }
+                Err(e) => crate::log::error(
+                    format!(
+                        "rehydrate derive inbox_key for contact {}: {e}",
+                        contact.local_alias
+                    ),
+                    None,
+                ),
+            }
+        }
+        Err(e) => crate::log::error(
+            format!(
+                "rehydrate decode ml_dsa_vk for contact {}: {e}",
+                contact.local_alias
+            ),
+            None,
+        ),
+    }
+}
+
 #[cfg(feature = "use-node")]
 mod contract_api {
     use freenet_stdlib::{client_api::ContractRequest, prelude::*};
@@ -1559,7 +1617,13 @@ pub(crate) async fn node_comms(
         let _task = dioxus::core::spawn_forever(async move {
             match crate::app::contact_store::load_all().await {
                 Ok(contacts) => {
+                    let mut client = WEB_API_SENDER.get().cloned();
                     for contact in contacts {
+                        // #191: contacts arrive here after a reload, so prime
+                        // their inboxes as the rehydrate path does.
+                        if let Some(client) = client.as_mut() {
+                            prime_contact_inbox(client, &contact).await;
+                        }
                         if let Err(e) = crate::app::address_book::insert_contact(contact) {
                             crate::log::error(
                                 format!("address book rejected stored contact: {e}"),
@@ -3341,58 +3405,7 @@ pub(crate) async fn node_comms(
                                         // key under the sender's
                                         // `INBOX_CODE_HASH`.
                                         for contact in crate::app::address_book::all_contacts() {
-                                            match crate::app::address_book::vk_from_bytes(
-                                                &contact.ml_dsa_vk_bytes,
-                                            ) {
-                                                Ok(vk) => {
-                                                    let code_hash = contact
-                                                        .inbox_wasm_hash
-                                                        .as_deref()
-                                                        .unwrap_or(crate::inbox::INBOX_CODE_HASH);
-                                                    match crate::inbox::inbox_key_for_with_hash(
-                                                        &vk, code_hash,
-                                                    ) {
-                                                        Ok(inbox_key) => {
-                                                            let req = freenet_stdlib::client_api::ContractRequest::Get {
-                                                                key: inbox_key.into(),
-                                                                return_contract_code: true,
-                                                                subscribe: true,
-                                                                blocking_subscribe: false,
-                                                            };
-                                                            if let Err(e) =
-                                                                client.send(req.into()).await
-                                                            {
-                                                                crate::log::error(
-                                                                    format!(
-                                                                        "rehydrate prime contact inbox {inbox_key} for {} failed: {e}",
-                                                                        contact.local_alias
-                                                                    ),
-                                                                    None,
-                                                                );
-                                                            } else {
-                                                                crate::log::info(format!(
-                                                                    "rehydrate primed contact inbox {inbox_key} for {} (#191)",
-                                                                    contact.local_alias
-                                                                ));
-                                                            }
-                                                        }
-                                                        Err(e) => crate::log::error(
-                                                            format!(
-                                                                "rehydrate derive inbox_key for contact {}: {e}",
-                                                                contact.local_alias
-                                                            ),
-                                                            None,
-                                                        ),
-                                                    }
-                                                }
-                                                Err(e) => crate::log::error(
-                                                    format!(
-                                                        "rehydrate decode ml_dsa_vk for contact {}: {e}",
-                                                        contact.local_alias
-                                                    ),
-                                                    None,
-                                                ),
-                                            }
+                                            prime_contact_inbox(&mut client, &contact).await;
                                         }
                                         // #213 inbox migration: detect a
                                         // deliberate contract bump (the
