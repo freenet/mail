@@ -369,7 +369,7 @@ pub(crate) mod embedded_artifact {
 }
 
 #[cfg(feature = "use-node")]
-pub(crate) use delegate_api::create_delegate;
+pub(crate) use delegate_api::{V0_2_CIPHER, V0_2_NONCE, create_delegate};
 
 #[cfg(feature = "use-node")]
 mod delegate_api {
@@ -3127,6 +3127,25 @@ pub(crate) async fn node_comms(
                             );
                         }
                     }
+                }
+            }
+            HostResponse::DelegateResponse { key, values }
+                if &key == crate::mail_delegate::node::key() =>
+            {
+                // The mail delegate answers every request with exactly one
+                // response carrying its id; anything else for its key is the
+                // node's answer to the registration.
+                let mut delivered = false;
+                for msg in values {
+                    if let freenet_stdlib::prelude::OutboundDelegateMsg::ApplicationMessage(app) =
+                        msg
+                    {
+                        crate::mail_delegate::deliver(&app.payload);
+                        delivered = true;
+                    }
+                }
+                if !delivered {
+                    crate::mail_delegate::node::note_registration_answer();
                 }
             }
             HostResponse::DelegateResponse { key, values } => {

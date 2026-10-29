@@ -1540,6 +1540,7 @@ dependencies = [
  "bs58",
  "chacha20poly1305",
  "chrono",
+ "ciborium",
  "dioxus",
  "freenet-mail-protocol",
  "freenet-mail-wire-v1",
@@ -1549,10 +1550,12 @@ dependencies = [
  "getrandom 0.4.3",
  "gloo-timers 0.4.0",
  "hkdf",
+ "mail-delegate",
  "ml-dsa",
  "ml-kem",
  "serde",
  "serde-wasm-bindgen",
+ "serde_bytes",
  "serde_json",
  "sha2 0.11.1",
  "tracing",
@@ -1561,6 +1564,7 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
+ "zeroize",
 ]
 
 [[package]]
@@ -1614,6 +1618,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "freenet-migrate"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f8a9080605f4d95ccad29ea82487956818867271a5e83bfe3e55ef31f4f54a5a"
+dependencies = [
+ "blake3",
+ "bs58",
+ "ciborium",
+ "ed25519-dalek",
+ "freenet-scaffold",
+ "freenet-stdlib 0.12.1",
+ "serde",
+ "serde_with",
+]
+
+[[package]]
 name = "freenet-migrate-build"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1623,6 +1643,26 @@ dependencies = [
  "bs58",
  "serde",
  "toml 0.8.23",
+]
+
+[[package]]
+name = "freenet-scaffold"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ff8840a95aa4b4499cf8532d9c74814339647d39c4b537a55b540445a439b56f"
+dependencies = [
+ "freenet-scaffold-macro",
+ "serde",
+]
+
+[[package]]
+name = "freenet-scaffold-macro"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "99c6d26e7ce019d8eba883b307ee55dd1d10c85ccc9bec72b069bdf07c50a87d"
+dependencies = [
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -2512,6 +2552,28 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "mail-delegate"
+version = "0.3.0"
+dependencies = [
+ "blake3",
+ "chacha20poly1305",
+ "chrono",
+ "ciborium",
+ "freenet-mail-protocol",
+ "freenet-mail-wire-v1",
+ "freenet-migrate",
+ "freenet-stdlib 0.12.1",
+ "hkdf",
+ "ml-dsa",
+ "ml-kem",
+ "rand_core 0.10.1",
+ "serde",
+ "serde_bytes",
+ "serde_json",
+ "sha2 0.11.1",
 ]
 
 [[package]]
