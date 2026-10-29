@@ -40,6 +40,11 @@ expect fail "the committed candidate (built with v1-transition) is refused" \
 expect fail "a UI embedding the candidate is refused" 0.3.0 --wasm "$TMP/clean.wasm" --ui-dir "$TMP/ui-candidate"
 expect fail "a missing frozen delegate is refused" 0.3.1 --wasm "$TMP/missing" --ui-dir "$TMP/ui-clean"
 expect fail "a pre-release of 0.3.0 is checked too" 0.3.0-rc.1 --wasm "$TMP/missing" --ui-dir "$TMP/ui-clean"
+# Versions compare numerically, not as text (no sort -V: macOS lacks it).
+expect fail "0.10.0 is after 0.3.0" 0.10.0 --wasm "$TMP/missing" --ui-dir "$TMP/ui-clean"
+expect fail "1.0.0 is after 0.3.0" 1.0.0 --wasm "$TMP/missing" --ui-dir "$TMP/ui-clean"
+expect pass "0.2.99 is before 0.3.0" 0.2.99 --wasm "$TMP/missing" --ui-dir "$TMP/ui-candidate"
+expect fail "a malformed version is refused" 0.3 --wasm "$TMP/clean.wasm" --ui-dir "$TMP/ui-clean"
 
 [ "$failures" -eq 0 ] || { echo "$failures failure(s)"; exit 1; }
 echo "all check-release-delegate tests pass"

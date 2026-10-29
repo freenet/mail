@@ -129,6 +129,8 @@ pub enum FailureCode {
     Busy,
     Internal,
     UnsupportedVersion,
+    /// The request's operation is not one this delegate knows (a newer UI).
+    UnknownOperation,
 }
 
 /// What kind of stored item. Each kind has its own key space, so an identity,
@@ -373,6 +375,23 @@ pub fn to_cbor<T: Serialize>(value: &T) -> Result<Vec<u8>, String> {
     let mut out = Vec::new();
     ciborium::ser::into_writer(value, &mut out).map_err(|e| e.to_string())?;
     Ok(out)
+}
+
+/// A request with its operation still undecoded. A delegate decodes this
+/// first, so a request from a newer UI (another protocol version, or an
+/// operation this build does not know) still gets a typed failure carrying
+/// its id instead of an undecodable message.
+#[derive(Clone, Debug, Deserialize)]
+pub struct RequestEnvelope {
+    pub version: u16,
+    pub request_id: RequestId,
+    pub op: ciborium::Value,
+}
+
+impl RequestEnvelope {
+    pub fn op(&self) -> Result<Op, String> {
+        self.op.deserialized().map_err(|e| e.to_string())
+    }
 }
 
 /// Decode CBOR into `T`.

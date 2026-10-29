@@ -32,9 +32,30 @@ while [ $# -gt 0 ]; do
     esac
 done
 
+# Whether dotted version $1 is lower than $2. Plain bash, because release.sh
+# also runs on macOS, whose BSD sort has no -V.
+version_lt() {
+    local IFS=.
+    local -a a b
+    read -r -a a <<< "$1"
+    read -r -a b <<< "$2"
+    local i x y
+    for i in 0 1 2; do
+        x="${a[i]:-0}"
+        y="${b[i]:-0}"
+        if ((10#$x < 10#$y)); then return 0; fi
+        if ((10#$x > 10#$y)); then return 1; fi
+    done
+    return 1
+}
+
 # Strip any pre-release suffix, then compare as versions.
 base="${VERSION%%-*}"
-if [ "$(printf '%s\n%s\n' "$base" 0.3.0 | sort -V | head -1)" != 0.3.0 ]; then
+if ! [[ "$base" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "error: '$VERSION' is not a version" >&2
+    exit 2
+fi
+if version_lt "$base" 0.3.0; then
     echo "ok: $VERSION predates the mail delegate"
     exit 0
 fi

@@ -72,8 +72,18 @@ pub mod mem {
         pub rng_counter: u64,
         /// When set, every write fails (a host refusing a write).
         pub fail_writes: bool,
+        /// When set, writes and removals of keys containing this text fail.
+        pub fail_keys_containing: Option<String>,
         pub now: Option<u64>,
         pub contracts: BTreeMap<[u8; 32], Vec<u8>>,
+    }
+
+    impl MemEnv {
+        fn fails(&self, key: &[u8]) -> bool {
+            self.fail_keys_containing
+                .as_ref()
+                .is_some_and(|t| String::from_utf8_lossy(key).contains(t.as_str()))
+        }
     }
 
     impl Env for MemEnv {
@@ -81,14 +91,14 @@ pub mod mem {
             self.secrets.get(key).cloned()
         }
         fn set(&mut self, key: &[u8], value: &[u8]) -> bool {
-            if self.fail_writes {
+            if self.fail_writes || self.fails(key) {
                 return false;
             }
             self.secrets.insert(key.to_vec(), value.to_vec());
             true
         }
         fn remove(&mut self, key: &[u8]) -> bool {
-            self.secrets.remove(key).is_some()
+            !self.fails(key) && self.secrets.remove(key).is_some()
         }
         fn host_random(&mut self) -> [u8; 32] {
             self.rng_counter += 1;

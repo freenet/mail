@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::handlers::{
     OpResult, delete_identity_now, export_for_successor, export_profile, export_recovery_key,
-    require_identity, respond, response_msg,
+    is_partly_deleted, require_identity, respond, response_msg,
 };
 use crate::store::{
     EXPORT_GRANT, MAX_PENDING_PROMPTS, PROMPT_INDEX, PROMPT_SEQ, PROMPT_TTL_SECS, Space, fail,
@@ -108,6 +108,15 @@ pub fn request(s: &mut Space<'_>, request_id: RequestId, op: Op) -> Vec<Outbound
             Err(fail(FailureCode::Internal, "not a consented operation")),
         );
     };
+    // An approved deletion that removed the record and then failed: only
+    // bookkeeping is left, so finish it without asking again.
+    if let Op::DeleteIdentity { addr, expected_gen } = &op {
+        match is_partly_deleted(s, addr) {
+            Ok(true) => return respond(request_id, delete_identity_now(s, addr, *expected_gen)),
+            Ok(false) => {}
+            Err(f) => return respond(request_id, Err(f)),
+        }
+    }
     if let Err(f) = precheck(s, &op) {
         return respond(request_id, Err(f));
     }

@@ -4,7 +4,7 @@ use freenet_mail_protocol::address::address_of;
 use freenet_mail_protocol::{
     Addr, DsaSeed, Entropy, Failure, FailureCode, Hash32, IdentityInfo, ImportKind, ImportSource,
     Item, ItemKind, ItemRef, KemSeed, MAX_DECRYPT_BATCH, MAX_ITEM_BYTES, MAX_REMOVAL_BATCH,
-    MAX_RESPONSE_BYTES, Op, PROTOCOL_VERSION, Reply, Request, RequestId, Response, Status,
+    MAX_RESPONSE_BYTES, Op, PROTOCOL_VERSION, Reply, RequestEnvelope, RequestId, Response, Status,
     recovery_key, to_cbor,
 };
 use freenet_stdlib::prelude::{
@@ -41,9 +41,11 @@ pub fn process(
                     "cannot process an already processed message".into(),
                 ));
             }
-            let request: Request = freenet_mail_protocol::from_cbor(&app.payload)
+            // The envelope first: a request this build cannot fully decode
+            // (a newer version or operation) still has an id to answer.
+            let envelope: RequestEnvelope = freenet_mail_protocol::from_cbor(&app.payload)
                 .map_err(|e| DelegateError::Deser(format!("request: {e}")))?;
-            handle_request(&mut Space::new(env, origin), request)
+            handle_request(&mut Space::new(env, origin), envelope)
         }
         InboundDelegateMsg::UserResponse(answer) => {
             let origin = check_origin(origin.as_ref())?;
@@ -100,7 +102,7 @@ pub fn response_msg(request_id: RequestId, result: OpResult) -> OutboundDelegate
 
 fn handle_request(
     s: &mut Space<'_>,
-    request: Request,
+    request: RequestEnvelope,
 ) -> Result<Vec<OutboundDelegateMsg>, DelegateError> {
     let id = request.request_id;
     if request.version != PROTOCOL_VERSION {
@@ -115,7 +117,19 @@ fn handle_request(
             )),
         ));
     }
-    let result = match request.op {
+    let op = match request.op() {
+        Ok(op) => op,
+        Err(e) => {
+            return Ok(respond(
+                id,
+                Err(fail(
+                    FailureCode::UnknownOperation,
+                    format!("this delegate does not know the operation: {e}"),
+                )),
+            ));
+        }
+    };
+    let result = match op {
         // These ask the user first, so the answer may come later.
         op @ (Op::ExportRecoveryKey { .. }
         | Op::ExportProfile { .. }
@@ -461,6 +475,7 @@ fn update_identity(
 /// Delete an identity and everything it owns. Runs after the user approved.
 pub fn delete_identity_now(s: &mut Space<'_>, addr: &Addr, expected_gen: u64) -> OpResult {
     let Some((generation, _)) = load_identity(s, addr)? else {
+        remove_identity_data(s, addr)?;
         return Ok(Reply::Deleted);
     };
     if generation != expected_gen {
@@ -471,6 +486,21 @@ pub fn delete_identity_now(s: &mut Space<'_>, addr: &Addr, expected_gen: u64) ->
             "stale generation",
         ));
     }
+    remove_identity_data(s, addr)?;
+    Ok(Reply::Deleted)
+}
+
+/// Whether `addr` is still in the identity index although its record is
+/// gone: a deletion that removed the record and then failed.
+pub fn is_partly_deleted(s: &Space<'_>, addr: &Addr) -> Result<bool, Failure> {
+    Ok(load_identity(s, addr)?.is_none() && s.index(IDENTITY_INDEX)?.1.contains(&addr.0[..]))
+}
+
+/// Remove an identity's items, their indexes, its record and its index
+/// entry, in that order. Idempotent: rerunning it after a failure part way
+/// through finishes the job, and a record is only removed once everything
+/// it owns is.
+fn remove_identity_data(s: &mut Space<'_>, addr: &Addr) -> Result<(), Failure> {
     for kind in ALL_KINDS.into_iter().filter(|k| store::shape(*k).0) {
         let ix = index_rel(kind, Some(addr));
         let (_, ids) = s.index(&ix)?;
@@ -484,8 +514,7 @@ pub fn delete_identity_now(s: &mut Space<'_>, addr: &Addr, expected_gen: u64) ->
         s.del(&ix)?;
     }
     s.del(&identity_rel(addr))?;
-    s.index_remove(IDENTITY_INDEX, &addr.0)?;
-    Ok(Reply::Deleted)
+    s.index_remove(IDENTITY_INDEX, &addr.0)
 }
 
 // ── Items ───────────────────────────────────────────────────────────────────
@@ -573,7 +602,11 @@ fn put_item(
 fn delete_item(s: &mut Space<'_>, item: ItemRef, expected_gen: u64) -> OpResult {
     check_item(s, &item)?;
     let rel = item_rel(&item);
+    let ix = index_rel(item.kind, item.owner.as_ref());
     let Some((generation, _)) = s.read(&rel)? else {
+        // Already gone. If an earlier delete removed the record but failed
+        // to update the index, finish that now.
+        s.index_remove(&ix, &item.id)?;
         return Ok(Reply::Deleted);
     };
     if generation != expected_gen {
@@ -584,8 +617,10 @@ fn delete_item(s: &mut Space<'_>, item: ItemRef, expected_gen: u64) -> OpResult 
             "stale generation",
         ));
     }
+    // Record first, index entry last: a failure in between leaves an index
+    // entry with no record, which readers skip and a retry removes.
     s.del(&rel)?;
-    s.index_remove(&index_rel(item.kind, item.owner.as_ref()), &item.id)?;
+    s.index_remove(&ix, &item.id)?;
     Ok(Reply::Deleted)
 }
 

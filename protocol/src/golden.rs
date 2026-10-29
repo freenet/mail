@@ -70,6 +70,7 @@ fn failure_name(code: &FailureCode) -> &'static str {
         FailureCode::Busy => "failure_busy",
         FailureCode::Internal => "failure_internal",
         FailureCode::UnsupportedVersion => "failure_unsupported_version",
+        FailureCode::UnknownOperation => "failure_unknown_operation",
     }
 }
 
@@ -267,6 +268,7 @@ fn samples() -> Vec<(String, Vec<u8>)> {
         FailureCode::Busy,
         FailureCode::Internal,
         FailureCode::UnsupportedVersion,
+        FailureCode::UnknownOperation,
     ] {
         let f = Failure {
             code,
@@ -372,6 +374,42 @@ fn golden_bytes_decode_and_re_encode_unchanged() {
         let bytes = unhex(golden(reply_name(&reply)).unwrap());
         assert_eq!(from_cbor::<Reply>(&bytes).unwrap(), reply);
     }
+}
+
+#[test]
+fn a_request_with_an_unknown_operation_still_yields_its_id() {
+    // A future UI's request: same envelope, an operation this build lacks.
+    #[derive(serde::Serialize)]
+    enum FutureOp {
+        Teleport { to: u8 },
+    }
+    #[derive(serde::Serialize)]
+    struct FutureRequest {
+        version: u16,
+        request_id: RequestId,
+        op: FutureOp,
+    }
+    let bytes = to_cbor(&FutureRequest {
+        version: PROTOCOL_VERSION,
+        request_id: RequestId([9; 16]),
+        op: FutureOp::Teleport { to: 1 },
+    })
+    .unwrap();
+    assert!(from_cbor::<Request>(&bytes).is_err());
+    let env: RequestEnvelope = from_cbor(&bytes).unwrap();
+    assert_eq!(
+        (env.version, env.request_id),
+        (PROTOCOL_VERSION, RequestId([9; 16]))
+    );
+    assert!(env.op().is_err());
+    // A current request decodes the same either way.
+    let req = Request {
+        version: PROTOCOL_VERSION,
+        request_id: RequestId([1; 16]),
+        op: Op::GetStatus,
+    };
+    let env: RequestEnvelope = from_cbor(&to_cbor(&req).unwrap()).unwrap();
+    assert_eq!(env.op().unwrap(), Op::GetStatus);
 }
 
 #[test]

@@ -1,5 +1,7 @@
 //! Behaviour through the delegate's entry point, over an in-memory host.
 
+mod resilience;
+
 use freenet_mail_protocol::{
     Addr, DsaSeed, Entropy, FailureCode, Hash32, IdentityInfo, ImportKind, ImportSource, ItemKind,
     ItemRef, KemSeed, Op, PROTOCOL_VERSION, Reply, Request, RequestId, Response, from_cbor,
