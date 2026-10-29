@@ -85,6 +85,9 @@ pub(crate) async fn update_identity(
     }
 }
 
+// Used by the confirm-identity prompt, which lands with the migration that
+// can import unconfirmed identities.
+#[allow(dead_code)]
 pub(crate) async fn confirm_identity(
     addr: Addr,
     expected_gen: u64,
@@ -342,6 +345,8 @@ pub(crate) async fn export_recovery_key(
     }
 }
 
+// The JSON profile export has no UI yet (the recovery key covers backups).
+#[allow(dead_code)]
 pub(crate) async fn export_profile(addr: Addr) -> Result<zeroize::Zeroizing<Vec<u8>>, CallError> {
     match call(Op::ExportProfile { addr }).await? {
         Reply::Profile(profile) => Ok(zeroize::Zeroizing::new(profile.into_vec())),
