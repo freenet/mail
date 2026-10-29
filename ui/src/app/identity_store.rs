@@ -41,6 +41,40 @@ pub(crate) fn spawn_detached(fut: impl std::future::Future<Output = ()> + 'stati
     let _task = dioxus::core::spawn_forever(fut);
 }
 
+/// Delete an identity and everything it owns from the mail delegate (which
+/// asks the user first), showing how much is left while a large one is
+/// deleted page by page. A small identity finishes in one step and never
+/// shows it. Used by the node and the offline builds alike.
+pub(crate) async fn delete_with_progress(
+    addr: Addr,
+    generation: u64,
+    alias: &str,
+) -> Result<(), crate::mail_delegate::CallError> {
+    let mut progress: Option<crate::toast::ToastId> = None;
+    let deleted = ops::delete_identity(addr, generation, |remaining| {
+        let text = deletion_progress_text(alias, remaining);
+        crate::log::info(text.clone());
+        match progress {
+            Some(id) => crate::toast::update_toast_detached(id, text),
+            None => {
+                progress =
+                    crate::toast::push_sticky_toast_detached(text, crate::toast::ToastLevel::Info)
+            }
+        }
+    })
+    .await;
+    if let Some(id) = progress {
+        crate::toast::dismiss_toast_detached(id);
+    }
+    deleted
+}
+
+/// What the user sees while a large identity is deleted page by page.
+fn deletion_progress_text(alias: &str, remaining: u32) -> String {
+    let items = if remaining == 1 { "item" } else { "items" };
+    format!("Deleting identity `{alias}`… {remaining} {items} left")
+}
+
 /// Contract-migration markers for one identity (#213, #251). Stored in the
 /// identity's `IdentitySettings` item under `"migration"`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -352,6 +386,18 @@ pub(crate) async fn publish(identity: Identity, backed_up: bool) -> Result<(), D
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deletion_progress_names_the_identity_and_what_is_left() {
+        assert_eq!(
+            deletion_progress_text("alice", 744),
+            "Deleting identity `alice`… 744 items left"
+        );
+        assert_eq!(
+            deletion_progress_text("bob", 1),
+            "Deleting identity `bob`… 1 item left"
+        );
+    }
 
     #[test]
     fn markers_round_trip_and_keep_other_settings() {

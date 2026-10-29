@@ -146,4 +146,48 @@ mod tests {
         let reply = block_on(call(Op::ExportRecoveryKey { addr: id.addr })).unwrap();
         assert!(matches!(reply, Reply::RecoveryKey(k) if k == recovery_key));
     }
+
+    /// The UI's delete loop against the real delegate: an identity owning
+    /// more than one page of items reports what is left after each page, and
+    /// is gone at the end, with its items.
+    #[test]
+    fn deleting_a_large_identity_reports_progress_until_it_is_gone() {
+        let Reply::CreatedIdentity { identity: id, .. } = block_on(call(Op::CreateIdentity {
+            alias: "delete-progress-test".into(),
+            description: String::new(),
+            ui_entropy: Entropy([7; 32]),
+        }))
+        .unwrap() else {
+            panic!("expected CreatedIdentity");
+        };
+        for i in 0u32..300 {
+            let mut item_id = [0u8; 16];
+            item_id[..4].copy_from_slice(&i.to_le_bytes());
+            let item = freenet_mail_protocol::ItemRef {
+                kind: freenet_mail_protocol::ItemKind::Flags,
+                owner: Some(id.addr),
+                id: item_id.to_vec(),
+            };
+            block_on(super::super::ops::put_item(item, b"{}".to_vec(), None)).unwrap();
+        }
+        let mut reports = Vec::new();
+        block_on(super::super::ops::delete_identity(
+            id.addr,
+            id.generation,
+            |left| reports.push(left),
+        ))
+        .unwrap();
+        assert!(!reports.is_empty(), "more than a page reports progress");
+        assert!(
+            reports.windows(2).all(|w| w[1] < w[0]),
+            "what is left only goes down: {reports:?}"
+        );
+        let Reply::Identities(all) = block_on(call(Op::ListIdentities)).unwrap() else {
+            panic!("expected Identities");
+        };
+        assert!(
+            all.iter().all(|i| i.addr != id.addr),
+            "the identity is gone"
+        );
+    }
 }

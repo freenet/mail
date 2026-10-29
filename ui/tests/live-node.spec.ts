@@ -2186,6 +2186,84 @@ test.describe("Live node E2E", () => {
       }
     },
   );
+
+  test("two tabs changing different settings keep both (compare-and-swap merge)", async ({
+    browser,
+  }) => {
+    // Settings live in the mail delegate on the node, shared by every tab.
+    // Each tab writes only the fields it changed, over compare-and-swap, so
+    // a tab holding an older copy must not undo another tab's change.
+    const stopPump = startPermissionPump();
+    const ctx = await browser.newContext();
+    const run = `${Date.now().toString(36)}${test.info().repeatEachIndex}`;
+    const alias = `settab${run}`;
+    const openSettingsScreen = async (
+      page: import("@playwright/test").Page,
+      screen: string,
+    ) => {
+      const app = page.frameLocator("iframe#app");
+      await expect(app.locator(".brand-name").first()).toContainText(APP_NAME, {
+        timeout: 60_000,
+      });
+      await app
+        .locator(
+          `[data-testid="fm-id-row"][data-alias="${alias}"] [data-testid="fm-id-open"]`,
+        )
+        .first()
+        .click();
+      await app.locator('[data-testid="fm-settings-btn"]').click();
+      await app
+        .locator(`[data-testid="fm-settings-nav-item"][data-screen="${screen}"]`)
+        .click();
+      return app;
+    };
+    try {
+      const tabA = await ctx.newPage();
+      await tabA.goto("");
+      await createIdentity(tabA, alias);
+      // Tab B loads now, so its copy of the settings predates tab A's change.
+      const tabB = await ctx.newPage();
+      await tabB.goto("");
+      const appB = await openSettingsScreen(tabB, "appearance");
+      const appA = await openSettingsScreen(tabA, "inbox");
+
+      await appA.locator('[data-testid="fm-thread-view-select"]').selectOption("compact");
+      await appB
+        .locator(".fm-row-set", { hasText: "Color theme" })
+        .locator("select")
+        .selectOption("dark");
+
+      // A fresh tab must see both changes. A write that replaced the whole
+      // record would leave one of them missing for good.
+      const tabC = await ctx.newPage();
+      await expect
+        .poll(
+          async () => {
+            await tabC.goto("");
+            const inbox = await openSettingsScreen(tabC, "inbox");
+            // The stored settings load just after the identities appear, so
+            // give each value time to settle before reading it.
+            const viewSelect = inbox.locator('[data-testid="fm-thread-view-select"]');
+            await expect(viewSelect).toHaveValue("compact", { timeout: 15_000 }).catch(() => {});
+            const view = await viewSelect.inputValue();
+            await inbox
+              .locator('[data-testid="fm-settings-nav-item"][data-screen="appearance"]')
+              .click();
+            const themeSelect = inbox
+              .locator(".fm-row-set", { hasText: "Color theme" })
+              .locator("select");
+            await expect(themeSelect).toHaveValue("dark", { timeout: 15_000 }).catch(() => {});
+            const theme = await themeSelect.inputValue();
+            return `${view}/${theme}`;
+          },
+          { timeout: 90_000, intervals: [1_000] },
+        )
+        .toBe("compact/dark");
+    } finally {
+      await ctx.close().catch(() => {});
+      stopPump();
+    }
+  });
 });
 
 async function composeAndSend(

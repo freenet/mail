@@ -851,12 +851,17 @@ RUST_BACKTRACE=1 RUST_LOG=freenet=debug,freenet_core=debug,info \
 
 [tasks.test]
 description = "Run all tests: the workspace, then every out-of-workspace crate"
-dependencies = ["test-workspace", "test-excluded"]
+dependencies = ["test-workspace", "test-ui-offline", "test-excluded"]
 
 [tasks.test-workspace]
 description = "Run the workspace's tests"
 command = "cargo"
 args = ["test", "--workspace"]
+
+[tasks.test-ui-offline]
+description = "Run the UI's tests in the offline build, which runs the real mail delegate in the page"
+command = "cargo"
+args = ["test", "-p", "freenet-email-ui", "--lib", "--no-default-features", "--features", "example-data,no-sync"]
 
 [tasks.test-excluded]
 description = "Run the tests of every crate outside the workspace (own Cargo.lock each)"

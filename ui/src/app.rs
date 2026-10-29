@@ -268,6 +268,22 @@ pub(crate) fn app() -> Element {
                             login_ctl.write().updated = true;
                         }
                         NodeAction::DeleteIdentity { identity } => {
+                            // The in-page delegate holds the identity, as a
+                            // node's would: delete it there first, through
+                            // the same paged deletion the node build uses.
+                            if let Err(e) = identity_store::delete_with_progress(
+                                identity.addr,
+                                identity.generation,
+                                &identity.alias,
+                            )
+                            .await
+                            {
+                                crate::toast::push_toast_detached(
+                                    format!("Identity `{}` was not deleted: {e}", identity.alias),
+                                    crate::toast::ToastLevel::Error,
+                                );
+                                continue;
+                            }
                             Identity::remove_in_place(&identity.alias);
                             let mut user_w = user_sig.write();
                             let was_logged_in = user_w
