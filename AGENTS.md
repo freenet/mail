@@ -45,6 +45,37 @@ files and the procedure for adding a generation.
   change what ships until the UI's includes point at a new generation.
   Clippy and tests still cover that source.
 
+### The mail delegate (next generation)
+
+`delegates/mail-delegate` is the single delegate that replaces identity
+management and local state. It holds every private key and signs and
+decrypts on the UI's behalf. The UI does not talk to it yet. The UI and the
+delegate speak the CBOR protocol in `protocol/` (`freenet-mail-protocol`),
+which also holds the `fmail-key-1:` recovery-key codec.
+
+- **Origin gate:** only an attested web-app origin is served, and it names
+  the namespace (`o/<origin hex>/`) every key lives in.
+- **Compare-and-swap:** each item is its own secret, with a generation that
+  is checked on every write. Generations come from a per-origin counter, so
+  they are never reused.
+- **Responses:** every request gets exactly one response, and writes are
+  acknowledged.
+- **Consent:** only exports prompt the user.
+- **Migration:** `ExportForSuccessor` is freenet-migrate's export handler,
+  scoped to the caller's namespace.
+- **Storage limit:** the host caps key enumeration for the whole delegate (4096
+  keys), so the delegate keeps a delegate-wide budget (`store::KEY_BUDGET`).
+- **Randomness:** never add `getrandom` or `rand` to it. Randomness is the
+  host's `rand_bytes` mixed with entropy the UI sends.
+
+Its WASM is committed as a candidate under `published-contract/candidate/`.
+It is not frozen yet, so the bytes may change, but
+`scripts/check-delegate-candidate.sh` (CI `check-drift`) fails unless they
+are exactly what the source builds. After changing the delegate,
+`protocol/` or `wire-v1/`, rebuild the candidate as
+`published-contract/candidate/README.md` describes. The v0.3.0 release
+freezes it into `published-contract/wasm/v2/`.
+
 The `legacy_*.toml` registries are validated by `ui/build.rs`
 (`freenet-migrate-build`; an empty registry fails the build) and pinned by
 `ui/src/legacy_registry.rs`. They are not read at runtime yet: the inbox and
