@@ -7,6 +7,8 @@
 //!     > wire-v1/src/golden_v1.txt
 //! cargo run --locked --manifest-path wire-v1/capture/Cargo.toml -- kem \
 //!     > ui/src/inbox/kem_vectors_v1.txt
+//! cargo run --locked --manifest-path wire-v1/capture/Cargo.toml -- defaults \
+//!     > ui/src/register_defaults_v1.txt
 //! ```
 //!
 //! CI runs both and fails if the output differs from the committed files.
@@ -31,7 +33,7 @@ fn hex(bytes: &[u8]) -> String {
 fn golden() {
     for (name, bytes, codec) in golden_samples() {
         if let Some(rt) = codec {
-            assert_eq!(rt(&bytes), bytes, "{name} does not round-trip");
+            assert_eq!(rt(&bytes).unwrap(), bytes, "{name} does not round-trip");
         }
         println!("{name} {}", hex(&bytes));
     }
@@ -65,12 +67,21 @@ fn kem() {
     println!("hkdf_message_key {}", hex(&okm));
 }
 
+/// The cipher and nonce every v0.2.x client sent with RegisterDelegate:
+/// stdlib 0.3.5's defaults, which stdlib 0.12 no longer has.
+fn defaults() {
+    use freenet_stdlib::client_api::DelegateRequest;
+    println!("register_cipher {}", hex(&DelegateRequest::DEFAULT_CIPHER));
+    println!("register_nonce {}", hex(&DelegateRequest::DEFAULT_NONCE));
+}
+
 fn main() {
     match std::env::args().nth(1).as_deref() {
         Some("golden") => golden(),
         Some("kem") => kem(),
+        Some("defaults") => defaults(),
         _ => {
-            eprintln!("usage: wire-v1-capture golden|kem");
+            eprintln!("usage: wire-v1-capture golden|kem|defaults");
             std::process::exit(2);
         }
     }

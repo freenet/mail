@@ -427,6 +427,23 @@ mod delegate_api {
         assert_eq!(cipher, V0_2_CIPHER);
         assert_eq!(nonce, V0_2_NONCE);
     }
+
+    /// `register_defaults_v1.txt` is stdlib 0.3.5's own DEFAULT_CIPHER and
+    /// DEFAULT_NONCE, printed by `wire-v1/capture -- defaults`.
+    #[test]
+    fn v0_2_cipher_and_nonce_are_stdlib_0_3_5s_defaults() {
+        use crate::test_util::hex;
+        let fixture = include_str!("register_defaults_v1.txt");
+        let field = |name: &str| {
+            fixture
+                .lines()
+                .find_map(|l| l.strip_prefix(name)?.strip_prefix(' '))
+                .unwrap()
+                .to_string()
+        };
+        assert_eq!(hex(&V0_2_CIPHER), field("register_cipher"));
+        assert_eq!(hex(&V0_2_NONCE), field("register_nonce"));
+    }
 }
 
 /// Decode an import-fetch `GetResponse` into an

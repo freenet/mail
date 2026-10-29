@@ -454,19 +454,21 @@ fn golden_sample_bytes() -> Vec<(&'static str, Vec<u8>)> {
 }
 
 /// Re-encodes `bytes` after decoding them as `T` with serde_json.
-fn json_rt<T: serde::Serialize + serde::de::DeserializeOwned>(bytes: &[u8]) -> Vec<u8> {
-    serde_json::to_vec(&serde_json::from_slice::<T>(bytes).expect("decode")).expect("encode")
+fn json_rt<T: serde::Serialize + serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    let value = serde_json::from_slice::<T>(bytes).map_err(|e| format!("decode: {e}"))?;
+    serde_json::to_vec(&value).map_err(|e| format!("encode: {e}"))
 }
 
 /// Re-encodes `bytes` after decoding them as `T` with bincode 1.
-fn bincode_rt<T: serde::Serialize + serde::de::DeserializeOwned>(bytes: &[u8]) -> Vec<u8> {
-    bincode::serialize(&bincode::deserialize::<T>(bytes).expect("decode")).expect("encode")
+fn bincode_rt<T: serde::Serialize + serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    let value = bincode::deserialize::<T>(bytes).map_err(|e| format!("decode: {e}"))?;
+    bincode::serialize(&value).map_err(|e| format!("encode: {e}"))
 }
 
 /// A golden sample: its name, its bytes, and how to decode and re-encode
 /// them (`None` for raw byte strings with no decoder: signing payloads,
 /// signatures, `Display` output).
-type Codec = fn(&[u8]) -> Vec<u8>;
+type Codec = fn(&[u8]) -> Result<Vec<u8>, String>;
 type GoldenSample = (&'static str, Vec<u8>, Option<Codec>);
 
 fn golden_samples() -> Vec<GoldenSample> {

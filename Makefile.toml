@@ -895,6 +895,7 @@ cd "${CARGO_MAKE_WORKING_DIRECTORY}"
 capture() { cargo run -q --locked --manifest-path wire-v1/capture/Cargo.toml -- "$1"; }
 diff <(capture golden) wire-v1/src/golden_v1.txt
 diff <(capture kem) ui/src/inbox/kem_vectors_v1.txt
+diff <(capture defaults) ui/src/register_defaults_v1.txt
 echo "golden and KEM fixtures reproduce from the frozen crates"
 '''
 

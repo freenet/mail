@@ -115,12 +115,39 @@ while IFS= read -r registry; do
     fi
 done <<< "$registries"
 
+# Fixtures captured from the frozen crates and the v0.2.x crypto stack.
+# check-golden-capture proves they reproduce from the frozen sources, but a
+# PR could edit a frozen source and its fixture together; these are what the
+# deployed contracts and delegates actually speak, so existing lines are
+# append-only too.
+FIXTURES=(
+    wire-v1/src/golden_v1.txt
+    ui/src/frozen_keys_v1.txt
+    ui/src/inbox/crypto_vectors_v1.txt
+    ui/src/inbox/kem_vectors_v1.txt
+    ui/src/register_defaults_v1.txt
+)
+for fixture in "${FIXTURES[@]}"; do
+    git cat-file -e "$BASE:$fixture" 2>/dev/null || continue
+    if ! git cat-file -e "HEAD:$fixture" 2>/dev/null; then
+        echo "FAIL: fixture $fixture was removed since $BASE" >&2
+        failed=1
+        continue
+    fi
+    lost="$(missing_lines "$(git show "$BASE:$fixture")" "$(git show "HEAD:$fixture")")"
+    if [ -n "$lost" ]; then
+        echo "FAIL: lines of $fixture were removed or changed since $BASE:" >&2
+        printf '%s\n' "$lost" | cut -c1-100 | sed 's/^/  /' >&2
+        failed=1
+    fi
+done
+
 if [ "$failed" -ne 0 ]; then
     echo "" >&2
     echo "Shipped artifacts are the keys users' data lives under and never change," >&2
-    echo "and registry rows are append-only. A new generation goes in a new" >&2
+    echo "and registry rows and captured fixtures are append-only. A new generation goes in a new" >&2
     echo "published-contract/wasm/v<N>/ directory with new registry rows" >&2
     echo "(see published-contract/README.md)." >&2
     exit 1
 fi
-echo "ok: no frozen artifact or registry row changed since $(git rev-parse --short "$BASE")"
+echo "ok: no frozen artifact, registry row or fixture line changed since $(git rev-parse --short "$BASE")"

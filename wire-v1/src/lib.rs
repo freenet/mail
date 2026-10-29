@@ -62,11 +62,17 @@ mod golden {
                 return Err(format!("{name}: copy encodes differently"));
             }
             if let Some(rt) = codec {
-                let golden_bytes = unhex(want);
-                if rt(&golden_bytes) != golden_bytes {
-                    return Err(format!("{name}: copy does not decode and re-encode it"));
-                }
+                check_decodes(name, *rt, &unhex(want))?;
             }
+        }
+        Ok(())
+    }
+
+    /// The copy must decode `golden` and re-encode it unchanged.
+    fn check_decodes(name: &str, codec: Codec, golden: &[u8]) -> Result<(), String> {
+        let reencoded = codec(golden).map_err(|e| format!("{name}: {e}"))?;
+        if reencoded != golden {
+            return Err(format!("{name}: copy re-encodes it differently"));
         }
         Ok(())
     }
@@ -74,6 +80,22 @@ mod golden {
     #[test]
     fn copies_reproduce_the_frozen_wire_bytes() {
         check(GOLDEN).unwrap();
+    }
+
+    #[test]
+    fn undecodable_fixture_bytes_are_an_error_not_a_panic() {
+        let (name, _, codec) = golden_samples()
+            .into_iter()
+            .find(|(n, ..)| *n == "ls_msg_mark_read")
+            .unwrap();
+        let err = check_decodes(name, codec.unwrap(), b"{not json").unwrap_err();
+        assert!(err.starts_with("ls_msg_mark_read: decode:"), "{err}");
+        let (name, _, codec) = golden_samples()
+            .into_iter()
+            .find(|(n, ..)| *n == "aft_msg_denied")
+            .unwrap();
+        let err = check_decodes(name, codec.unwrap(), &[0xff; 3]).unwrap_err();
+        assert!(err.starts_with("aft_msg_denied: decode:"), "{err}");
     }
 
     #[test]

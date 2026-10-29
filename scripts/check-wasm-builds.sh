@@ -34,8 +34,8 @@ for row in "${CRATES[@]}"; do
 done
 # The webapp contract is an fdev "webapp" package, so fdev would package the
 # UI rather than compile the contract. Build it with cargo from its own
-# directory, which is also how contracts/.cargo/config.toml's getrandom flag
-# reaches it.
+# directory. (Its wasm graph has no getrandom, so the getrandom flag in
+# contracts/.cargo/config.toml does not affect it.)
 echo "== contracts/web-container"
 (cd contracts/web-container \
     && CARGO_TARGET_DIR="$OUT/web-container-target" \
