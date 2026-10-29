@@ -74,6 +74,7 @@
   "fmBackupSavedNote": "fm-backup-saved-note",
   "fmSettingsBackup": "fm-settings-backup",
   "fmSettingsBackupBanner": "fm-settings-backup-banner",
+  "fmSettingsRevokeExport": "fm-settings-revoke-export",
   "fmIdRow": "fm-id-row",
   "fmIdOpen": "fm-id-open",
   "fmIdCreate": "fm-id-create",

@@ -609,6 +609,18 @@ fn ScrAccount() -> Element {
                         }
                     },
                 }
+                SettingRow {
+                    label: "Remembered export permission",
+                    help: "If you chose \"Always allow\" when exporting a recovery key, revoke it so every export asks again.",
+                    control: rsx! {
+                        button {
+                            class: "fm-btn-secondary",
+                            "data-testid": testid::FM_SETTINGS_REVOKE_EXPORT,
+                            onclick: move |_| revoke_export_grant(),
+                            "Revoke"
+                        }
+                    },
+                }
             }
         }
     }
@@ -1668,6 +1680,23 @@ fn ScrAdvanced() -> Element {
             }
         }
     }
+}
+
+/// Withdraw a remembered "Always allow" for exports, in a task that outlives
+/// this view, and say how it went.
+fn revoke_export_grant() {
+    let _task = dioxus::core::spawn_forever(async move {
+        use crate::toast::{ToastLevel, push_toast_detached};
+        match crate::mail_delegate::ops::revoke_export_grant().await {
+            Ok(()) => {
+                push_toast_detached("Exports will ask for permission again", ToastLevel::Success);
+            }
+            Err(e) => {
+                crate::log::error(format!("revoking the export permission failed: {e}"), None);
+                push_toast_detached("Couldn't revoke the export permission", ToastLevel::Error);
+            }
+        }
+    });
 }
 
 #[cfg(test)]

@@ -177,6 +177,7 @@ pub(crate) fn app() -> Element {
     // toasts without an extra Signal thread-local.
     use_context_provider(|| crate::toast::ToastQueue::new(Vec::new()));
     let toast = use_context::<crate::toast::ToastQueue>();
+    crate::toast::set_root_queue(toast);
     // Modal signals lifted to the root so that both the login pane
     // (IdentifiersList) and the inbox (UserInbox → Settings → Contacts)
     // can open these modals. Fixes #158.

@@ -122,7 +122,7 @@ pub(crate) fn remove_in_background(alias: String, vk: Vec<u8>) {
 
 fn report(what: &str, e: &CallError) {
     crate::log::error(format!("{what}: {e}"), None);
-    crate::toast::push_toast(
+    crate::toast::push_toast_detached(
         match e {
             CallError::Unknown(_) => format!("{what}: no answer from your node"),
             CallError::Failed(_) => what.to_string(),

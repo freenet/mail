@@ -130,6 +130,7 @@ pub(crate) const FM_BACKUP_SAVED: &str = "fm-backup-saved";
 pub(crate) const FM_BACKUP_SAVED_NOTE: &str = "fm-backup-saved-note";
 pub(crate) const FM_SETTINGS_BACKUP: &str = "fm-settings-backup";
 pub(crate) const FM_SETTINGS_BACKUP_BANNER: &str = "fm-settings-backup-banner";
+pub(crate) const FM_SETTINGS_REVOKE_EXPORT: &str = "fm-settings-revoke-export";
 
 // Identity rows
 pub(crate) const FM_ID_ROW: &str = "fm-id-row";
@@ -263,6 +264,7 @@ mod tests {
             ("fmBackupSavedNote", super::FM_BACKUP_SAVED_NOTE),
             ("fmSettingsBackup", super::FM_SETTINGS_BACKUP),
             ("fmSettingsBackupBanner", super::FM_SETTINGS_BACKUP_BANNER),
+            ("fmSettingsRevokeExport", super::FM_SETTINGS_REVOKE_EXPORT),
             ("fmIdRow", super::FM_ID_ROW),
             ("fmIdOpen", super::FM_ID_OPEN),
             ("fmIdCreate", super::FM_ID_CREATE),

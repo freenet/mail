@@ -120,6 +120,28 @@ pub(crate) fn push_toast(message: impl Into<String>, level: ToastLevel) -> Toast
     push_toast_to(use_context::<ToastQueue>(), message, level)
 }
 
+thread_local! {
+    /// The app root's queue, for tasks that run outside the component tree.
+    static ROOT_QUEUE: std::cell::Cell<Option<ToastQueue>> = const { std::cell::Cell::new(None) };
+}
+
+/// Remember the app root's queue (set where the root provides it).
+pub(crate) fn set_root_queue(queue: ToastQueue) {
+    ROOT_QUEUE.with(|q| q.set(Some(queue)));
+}
+
+/// [`push_toast`] from a detached task (`spawn_forever`, the node loop),
+/// where `use_context` cannot find the queue: pushes onto the app root's
+/// queue. `None` before the root has rendered.
+pub(crate) fn push_toast_detached(
+    message: impl Into<String>,
+    level: ToastLevel,
+) -> Option<ToastId> {
+    ROOT_QUEUE
+        .with(|q| q.get())
+        .map(|queue| push_toast_to(queue, message, level))
+}
+
 /// [`push_toast`] onto a queue captured earlier. For code that runs outside
 /// the component tree, such as a detached task, where `use_context` cannot
 /// find the queue: capture it with `use_context::<ToastQueue>()` while still

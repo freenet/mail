@@ -79,6 +79,7 @@ interface TestIds {
   fmBackupSavedNote: string;
   fmSettingsBackup: string;
   fmSettingsBackupBanner: string;
+  fmSettingsRevokeExport: string;
   fmIdRow: string;
   fmIdOpen: string;
   fmIdCreate: string;
