@@ -273,27 +273,10 @@ impl Identity {
                         to_add.push(full);
                         identities.push(identity);
                     }
-                    EntryKind::Contact => {
-                        let stored: crate::app::address_book::StoredContactKeys =
-                            match serde_json::from_slice(&info.key) {
-                                Ok(s) => s,
-                                Err(e) => {
-                                    crate::log::error(
-                                        format!("skipping contact {alias}: bad key bytes: {e}"),
-                                        None,
-                                    );
-                                    return;
-                                }
-                            };
-                        let contact = stored
-                            .into_contact(alias.clone().into(), info.extra.unwrap_or_default());
-                        if let Err(e) = crate::app::address_book::insert_contact(contact) {
-                            crate::log::error(
-                                format!("address book rejected stored contact {alias}: {e}"),
-                                None,
-                            );
-                        }
-                    }
+                    // Contacts are stored in the mail delegate now
+                    // (`contact_store`); those still in this v0.2.x delegate
+                    // are carried over by the migration from it.
+                    EntryKind::Contact => {}
                 });
             *aliases = to_add;
             identities

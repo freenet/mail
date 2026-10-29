@@ -27,6 +27,10 @@ use crate::{
 pub(crate) mod address_book;
 pub(crate) mod backup_panel;
 pub(crate) mod backup_token;
+// Offline builds keep contacts in memory only; they still compile this so
+// its tests run against the in-page delegate.
+#[cfg_attr(not(feature = "use-node"), allow(dead_code))]
+pub(crate) mod contact_store;
 pub(crate) mod login;
 pub(crate) mod settings;
 

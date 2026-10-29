@@ -1303,54 +1303,6 @@ mod identity_management {
         pub(super) static PENDING_CONFIRMATION: RefCell<HashMap<Vec<u8>, NewIdentity>> = RefCell::new(HashMap::new());
     }
 
-    pub(super) async fn create_contact_api_call(
-        client: &mut WebApiRequestClient,
-        contact: &crate::app::address_book::Contact,
-    ) -> Result<(), DynError> {
-        crate::log::debug!("storing contact {}", contact.local_alias);
-        let stored = crate::app::address_book::StoredContactKeys {
-            ml_dsa_vk_bytes: contact.ml_dsa_vk_bytes.clone(),
-            ml_kem_ek_bytes: contact.ml_kem_ek_bytes.clone(),
-            // Persist the sender's advertised alias carried on the contact
-            // (the suggested_alias resolver fallback depends on it). Falls
-            // back to local_alias only when the card had none, matching the
-            // import-form submit path.
-            suggested_alias: contact
-                .suggested_alias
-                .as_deref()
-                .map(str::to_string)
-                .or_else(|| Some(contact.local_alias.to_string())),
-            verified: contact.verified,
-            required_tier: contact.required_tier,
-            max_age_secs: contact.max_age_secs,
-            inbox_wasm_hash: contact.inbox_wasm_hash.clone(),
-        };
-        let msg = IdentityMsg::CreateIdentity {
-            alias: contact.local_alias.to_string(),
-            key: serde_json::to_vec(&stored)?,
-            extra: Some(contact.description.clone()),
-            kind: Some(freenet_mail_wire_v1::identity::EntryKind::Contact),
-        };
-        send_identity_msg(client, &msg).await
-    }
-
-    pub(super) async fn delete_contact_api_call(
-        client: &mut WebApiRequestClient,
-        alias: &str,
-    ) -> Result<(), DynError> {
-        crate::log::debug!("deleting contact {alias}");
-        // The delegate stores own identities and contacts in the same
-        // alias-keyed map, so `DeleteIdentity` is the right wire message
-        // for both. Guarding own-identity aliases against accidental
-        // delete is the UI's responsibility (`address_book::remove_contact`
-        // skips `Entry::Own` and the contact list never renders a Remove
-        // button next to an own identity).
-        let msg = IdentityMsg::DeleteIdentity {
-            alias: alias.to_string(),
-        };
-        send_identity_msg(client, &msg).await
-    }
-
     /// Delete an own identity from the delegate. The delegate stores own
     /// identities and contacts in the same alias-keyed map, so
     /// `DeleteIdentity` is the right wire message regardless of kind —
@@ -1596,6 +1548,31 @@ pub(crate) async fn node_comms(
 
     static IDENTITIES_KEY: OnceLock<DelegateKey> = OnceLock::new();
     IDENTITIES_KEY.set(identities_key.clone()).unwrap();
+
+    // Contacts live in the mail delegate. Load them into the address book;
+    // the call runs in its own task because this loop is what delivers the
+    // delegate's answers.
+    {
+        let (mut login_controller, mut ab_gen) = (login_controller, ab_gen);
+        dioxus::prelude::spawn(async move {
+            match crate::app::contact_store::load_all().await {
+                Ok(contacts) => {
+                    for contact in contacts {
+                        if let Err(e) = crate::app::address_book::insert_contact(contact) {
+                            crate::log::error(
+                                format!("address book rejected stored contact: {e}"),
+                                None,
+                            );
+                        }
+                    }
+                    login_controller.write().updated = true;
+                    let prev = *ab_gen.0.read();
+                    *ab_gen.0.write() = prev.wrapping_add(1);
+                }
+                Err(e) => crate::log::error(format!("loading contacts failed: {e}"), None),
+            }
+        });
+    }
 
     async fn handle_action(
         req: NodeAction,
@@ -1912,14 +1889,10 @@ pub(crate) async fn node_comms(
                 }
             }
             NodeAction::CreateContact { contact } => {
-                if let Err(e) =
-                    identity_management::create_contact_api_call(&mut client, &contact).await
-                {
-                    crate::log::error(
-                        format!("failed to store contact {}: {e}", contact.local_alias),
-                        None,
-                    );
-                } else if let Err(e) = crate::app::address_book::insert_contact(contact.clone()) {
+                // Stored in the mail delegate in the background; the address
+                // book updates now. A refused or unanswered save is reported.
+                crate::app::contact_store::save_in_background(contact.clone());
+                if let Err(e) = crate::app::address_book::insert_contact(contact.clone()) {
                     crate::log::error(format!("address book rejected contact: {e}"), None);
                 } else {
                     // ContactsSection reads ADDRESS_BOOK directly (not via a
@@ -2112,9 +2085,18 @@ pub(crate) async fn node_comms(
                 }
             }
             NodeAction::DeleteContact { alias } => {
-                if let Err(e) =
-                    identity_management::delete_contact_api_call(&mut client, &alias).await
-                {
+                let vk = crate::app::address_book::all_contacts()
+                    .into_iter()
+                    .find(|c| &*c.local_alias == alias.as_str())
+                    .map(|c| c.ml_dsa_vk_bytes);
+                let removed: Result<(), DynError> = match vk {
+                    Some(vk) => {
+                        crate::app::contact_store::remove_in_background(alias.clone(), vk);
+                        Ok(())
+                    }
+                    None => Err(format!("no contact named {alias}").into()),
+                };
+                if let Err(e) = removed {
                     crate::log::error(format!("failed to delete contact {alias}: {e}"), None);
                 } else {
                     crate::app::address_book::remove_contact(&alias);
