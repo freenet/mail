@@ -12,6 +12,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 CRATES=(
     contracts/inbox
     contracts/web-container
+    delegates/mail-delegate
     modules/antiflood-tokens/interfaces
     modules/antiflood-tokens/contracts/token-allocation-record
     modules/antiflood-tokens/delegates/token-generator

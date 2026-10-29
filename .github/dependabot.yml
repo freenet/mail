@@ -69,7 +69,10 @@ updates:
     # signer; every contract and delegate crate is excluded with its own
     # lockfile, and every shipped WASM is a frozen artifact. A bump here cannot
     # move a contract address. It can still change the client's wire bytes,
-    # which wire-v1's golden tests catch.
+    # which wire-v1's golden tests catch. The mail delegate path-depends on
+    # protocol/ and wire-v1/, but builds --locked against its own lockfile:
+    # a requirement bump here that its lockfile no longer satisfies fails
+    # scripts/check-delegate-candidate.sh in CI instead of re-keying it.
     labels:
       - "dependencies"
     groups:

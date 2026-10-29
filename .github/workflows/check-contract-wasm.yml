@@ -170,6 +170,13 @@ jobs:
       - name: Build contract and delegate WASM reproducibly
         run: bash scripts/check-wasm-builds.sh
 
+      # The mail delegate is the next generation, still changing until the
+      # v0.3.0 release freezes it. Its committed candidate WASM is what the
+      # UI will embed and its bytes are its key, so it must be exactly what
+      # the reviewed source builds.
+      - name: Verify the mail-delegate candidate is the source's build
+        run: bash scripts/check-delegate-candidate.sh
+
       # Issue #206 (closes the Phase 1 informational gate). The container
       # contract id is intended to stay byte-stable across releases.
       # Both prerequisites are now in place:
