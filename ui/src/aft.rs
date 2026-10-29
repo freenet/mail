@@ -74,16 +74,6 @@ thread_local! {
     /// A token which has been confirmed as valid by a contract update.
     static VALID_TOKEN: RefCell<HashMap<AftDelegate, Vec<TokenAssignment>>> = RefCell::new(HashMap::new());
     static PENDING_INBOXES_UPDATES: RefCell<Vec<(InboxContract, AssignmentHash)>> = const { RefCell::new(Vec::new()) };
-    /// Recipient fingerprints (six-word, dash-joined) for pending sends.
-    ///
-    /// Populated by `assign_token` from the recipient's ML-DSA VK bytes.
-    /// Cleared when the token assignment is either confirmed or drained.
-    /// Used by the permission pump to resolve which recipients are pending so
-    /// it can look up per-recipient saved decisions (#149 Part 2).
-    /// Pending recipient ML-DSA VK bytes for sends awaiting token assignment.
-    /// Stored as raw byte vecs so the permission pump can cross-reference
-    /// against the address book without a hex-decode step.
-    static PENDING_RECIPIENT_VK_BYTES: RefCell<Vec<Vec<u8>>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Default timeout for pending AFT confirmations. If the host's
@@ -282,38 +272,6 @@ impl AftRecords {
         })
     }
 
-    /// Register the recipient VK bytes for a pending send so the permission
-    /// pump can look it up when deciding whether to auto-accept.
-    /// `recipient_vk_bytes` must be the raw ML-DSA-65 verifying key bytes
-    /// used to derive the inbox `InboxParams.pub_key`.
-    pub fn register_pending_recipient(recipient_vk_bytes: &[u8]) {
-        PENDING_RECIPIENT_VK_BYTES.with(|vec| {
-            let mut v = vec.borrow_mut();
-            if !v.iter().any(|b| b.as_slice() == recipient_vk_bytes) {
-                v.push(recipient_vk_bytes.to_vec());
-            }
-        });
-    }
-
-    /// Snapshot and return the pending recipient VK bytes list, then clear
-    /// it. Called by the permission pump after applying a response.
-    #[cfg(all(target_family = "wasm", feature = "use-node"))]
-    pub fn drain_pending_recipient_vk_bytes() -> Vec<Vec<u8>> {
-        PENDING_RECIPIENT_VK_BYTES.with(|vec| {
-            let mut v = vec.borrow_mut();
-            let out = v.clone();
-            v.clear();
-            out
-        })
-    }
-
-    /// Non-destructive snapshot of pending recipient VK bytes. Called by
-    /// the permission pump when evaluating policy without consuming state.
-    #[cfg(all(target_family = "wasm", feature = "use-node"))]
-    pub fn peek_pending_recipient_vk_bytes() -> Vec<Vec<u8>> {
-        PENDING_RECIPIENT_VK_BYTES.with(|vec| vec.borrow().clone())
-    }
-
     pub async fn confirm_allocation(
         client: &mut WebApiRequestClient,
         aft_record: AftRecordId,
@@ -458,9 +416,6 @@ impl AftRecords {
             &token_params,
         )?;
 
-        // Keep a copy for the recipient-tracking registration below before
-        // the vec is consumed by `InboxParams`.
-        let recipient_vk_for_tracking = recipient_inbox_pub_key.clone();
         let inbox_params: Parameters = InboxParams {
             pub_key: recipient_inbox_pub_key,
         }
@@ -544,10 +499,6 @@ impl AftRecords {
         PENDING_INBOXES_UPDATES.with(|queue| {
             queue.borrow_mut().push((inbox_key, assignment_hash));
         });
-        // Register the recipient's VK hex so the permission pump can
-        // resolve which recipients have pending sends when it needs to
-        // evaluate per-recipient saved decisions (#149 Part 2).
-        Self::register_pending_recipient(&recipient_vk_for_tracking);
         client.send(request.into()).await?;
         Ok(delegate_key)
     }

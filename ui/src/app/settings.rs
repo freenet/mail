@@ -13,11 +13,9 @@
 //! ported in this pass; first cut is desktop-only.
 
 use dioxus::prelude::*;
-#[cfg(any(all(target_family = "wasm", feature = "use-node"), test))]
-use freenet_mail_wire_v1::local_state::IdentityAftPrefs;
 use freenet_mail_wire_v1::local_state::{
     Density, FontSize, GlobalSettings, IdentityPrivacyPrefs, IdentitySettings, InboxSettings,
-    PermissionDecision, Theme, ThreadView,
+    Theme, ThreadView,
 };
 
 use crate::app::User;
@@ -749,32 +747,6 @@ const TIER_ROWS: &[(&str, &str)] = &[
     ("Day365", "1 / year"),
 ];
 
-/// A helper that derives which `PermissionDecision` (if any) should be applied
-/// automatically for a recipient identified by `fingerprint_full` given the
-/// active identity's AFT preferences.
-///
-/// Returns `Some(Accept)` or `Some(Deny)` when a saved or policy-driven
-/// decision is available; `None` when the permission modal should be shown.
-///
-/// Priority order:
-/// 1. Per-recipient saved decision (`permission_decisions` map).
-/// 2. `auto_accept_verified_contacts` + `is_verified`.
-/// 3. No automatic decision → `None`.
-#[cfg(any(all(target_family = "wasm", feature = "use-node"), test))]
-pub(crate) fn resolve_permission_decision(
-    prefs: &IdentityAftPrefs,
-    fingerprint_full: &str,
-    is_verified: bool,
-) -> Option<PermissionDecision> {
-    if let Some(saved) = prefs.permission_decisions.get(fingerprint_full) {
-        return Some(*saved);
-    }
-    if prefs.auto_accept_verified_contacts && is_verified {
-        return Some(PermissionDecision::Accept);
-    }
-    None
-}
-
 /// Collect the ML-DSA-65 verifying key bytes of every contact the user has
 /// explicitly marked as verified in the address book. Used to keep the
 /// `verified_senders` set in the inbox contract in sync with the local
@@ -793,7 +765,6 @@ fn ScrAft() -> Element {
     let aft_now = ident.aft.clone();
     let selected_tier = aft_now.required_tier.clone();
     let max_age_days = aft_now.max_age_days;
-    let auto_accept_verified = aft_now.auto_accept_verified_contacts;
     let allow_verified_skip_token = aft_now.allow_verified_skip_token;
     let actions = use_coroutine_handle::<crate::app::NodeAction>();
 
@@ -851,74 +822,6 @@ fn ScrAft() -> Element {
         next.aft.max_age_days = parsed;
         local_state::persist_identity_settings(alias_key_m.clone(), next.clone());
         push_policy(&alias_key_m, &next.aft.required_tier, parsed);
-    };
-
-    // Toggle for auto-accept verified contacts (Part 3, #149).
-    let alias_key_av = alias_key.clone();
-    let ident_av = ident.clone();
-    let on_auto_accept_verified = move |_| {
-        let mut next = ident_av.clone();
-        next.aft.auto_accept_verified_contacts = !next.aft.auto_accept_verified_contacts;
-        local_state::persist_identity_settings(alias_key_av.clone(), next);
-    };
-
-    // Snapshot decisions so the list is stable while the component renders.
-    let decisions: Vec<(String, PermissionDecision)> = {
-        let mut v: Vec<_> = aft_now
-            .permission_decisions
-            .iter()
-            .map(|(k, v)| (k.clone(), *v))
-            .collect();
-        v.sort_by(|a, b| a.0.cmp(&b.0));
-        v
-    };
-
-    // Remove a saved decision for a specific fingerprint.
-    let alias_key_rm = alias_key.clone();
-    let ident_rm = ident.clone();
-    let on_remove_decision = move |fp: String| {
-        let mut next = ident_rm.clone();
-        next.aft.permission_decisions.remove(&fp);
-        local_state::persist_identity_settings(alias_key_rm.clone(), next);
-    };
-
-    // Contacts available for the "add decision" picker (non-own, sorted by alias).
-    let picker_contacts: Vec<(String, String)> = {
-        let mut v: Vec<_> = address_book::all_contacts()
-            .into_iter()
-            .filter(|c| {
-                !aft_now
-                    .permission_decisions
-                    .contains_key(&c.fingerprint_full())
-            })
-            .map(|c| (c.local_alias.to_string(), c.fingerprint_full()))
-            .collect();
-        v.sort_by(|a, b| a.0.cmp(&b.0));
-        v
-    };
-
-    // Local form state for the "Add decision" form.
-    let mut add_fp = use_signal(String::new);
-    let mut add_accept = use_signal(|| true); // true = Accept, false = Deny
-
-    let alias_key_add = alias_key.clone();
-    let ident_add = ident.clone();
-    let on_add_decision = move |_| {
-        let fp = add_fp.read().clone();
-        if fp.is_empty() {
-            return;
-        }
-        let decision = if *add_accept.read() {
-            PermissionDecision::Accept
-        } else {
-            PermissionDecision::Deny
-        };
-        let mut next = ident_add.clone();
-        next.aft.permission_decisions.insert(fp, decision);
-        local_state::persist_identity_settings(alias_key_add.clone(), next);
-        // Reset form.
-        add_fp.set(String::new());
-        add_accept.set(true);
     };
 
     // #150: toggle "Don't require tokens from verified senders". When
@@ -1114,131 +1017,11 @@ fn ScrAft() -> Element {
                 }
             }
             Card {
-                title: "When sending: skip permission pop-ups",
-                sub: "These settings affect THIS client's send path. They tell your client when to auto-confirm the Freenet gateway's AFT permission prompt instead of asking you. They do NOT change whether a token is minted — only whether you are prompted.",
-                SettingRow {
-                    label: "Auto-confirm prompt for verified contacts",
-                    help: "When on, sending to a contact you have verified (fingerprint confirmed in Settings → Contacts) auto-confirms the AFT permission prompt — no pop-up. The token is still minted normally; you just aren't asked. Independent of the recipient's policy below.",
-                    control: rsx! {
-                        Toggle {
-                            on: auto_accept_verified,
-                            ontoggle: on_auto_accept_verified,
-                        }
-                    },
-                }
-                if !decisions.is_empty() {
-                    div { style: "padding: 12px 16px 4px; border-top: 1px solid var(--line2);",
-                        div { style: "font-size: 11.5px; color: var(--ink3); margin-bottom: 8px;",
-                            "Saved per-recipient decisions"
-                        }
-                        for (fp, decision) in decisions.iter() {
-                            {
-                                let fp_clone = fp.clone();
-                                let on_rm = on_remove_decision.clone();
-                                let decision_label = match decision {
-                                    PermissionDecision::Accept => "always accept",
-                                    PermissionDecision::Deny => "always deny",
-                                };
-                                let decision_color = match decision {
-                                    PermissionDecision::Accept => "var(--green, #22c55e)",
-                                    PermissionDecision::Deny => "var(--red, #ef4444)",
-                                };
-                                rsx! {
-                                    div {
-                                        key: "{fp_clone}",
-                                        style: "display: flex; align-items: center; gap: 8px; padding: 4px 0;",
-                                        span {
-                                            style: "font-family: 'Geist Mono', monospace; font-size: 11px; color: var(--ink2); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;",
-                                            "{fp_clone}"
-                                        }
-                                        span {
-                                            style: "font-size: 11px; color: {decision_color}; font-weight: 500; white-space: nowrap;",
-                                            "{decision_label}"
-                                        }
-                                        button {
-                                            class: "fm-btn-secondary",
-                                            style: "height: 22px; padding: 0 7px; font-size: 11px;",
-                                            onclick: move |_| on_rm(fp_clone.clone()),
-                                            "Remove"
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                // "Add decision" form — only shown when at least one contact
-                // exists that doesn't already have a saved decision.
-                if !picker_contacts.is_empty() {
-                    div {
-                        style: "padding: 12px 16px 8px; border-top: 1px solid var(--line2);",
-                        "data-testid": "fm-aft-add-decision",
-                        div {
-                            style: "font-size: 11.5px; color: var(--ink3); margin-bottom: 8px;",
-                            "Add per-recipient decision"
-                        }
-                        div { style: "display: flex; align-items: center; gap: 8px; flex-wrap: wrap;",
-                            select {
-                                class: "fm-select",
-                                "data-testid": "fm-aft-add-decision-contact",
-                                value: "{add_fp.read()}",
-                                onchange: move |ev| add_fp.set(ev.value()),
-                                option { value: "", disabled: true, selected: add_fp.read().is_empty(), "— choose contact —" }
-                                for (alias, fp) in picker_contacts.iter() {
-                                    {
-                                        let fp_clone = fp.clone();
-                                        rsx! {
-                                            option {
-                                                key: "{fp_clone}",
-                                                value: "{fp_clone}",
-                                                "{alias}"
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            // Accept / Deny radio group
-                            label {
-                                style: "display: flex; align-items: center; gap: 4px; font-size: 12px; cursor: pointer;",
-                                input {
-                                    r#type: "radio",
-                                    name: "add-decision-choice",
-                                    "data-testid": "fm-aft-add-decision-accept",
-                                    checked: *add_accept.read(),
-                                    onchange: move |_| add_accept.set(true),
-                                }
-                                "Accept"
-                            }
-                            label {
-                                style: "display: flex; align-items: center; gap: 4px; font-size: 12px; cursor: pointer;",
-                                input {
-                                    r#type: "radio",
-                                    name: "add-decision-choice",
-                                    "data-testid": "fm-aft-add-decision-deny",
-                                    checked: !*add_accept.read(),
-                                    onchange: move |_| add_accept.set(false),
-                                }
-                                "Deny"
-                            }
-                            button {
-                                class: "fm-btn-primary",
-                                style: "height: 28px; padding: 0 12px; font-size: 12px;",
-                                "data-testid": "fm-aft-add-decision-save",
-                                r#type: "button",
-                                disabled: add_fp.read().is_empty(),
-                                onclick: on_add_decision,
-                                "Save"
-                            }
-                        }
-                    }
-                }
-            }
-            Card {
                 title: "Your inbox policy: let verified senders skip tokens",
                 sub: "This is a RECIPIENT-side policy. It tells the network that your inbox will accept messages from senders you have verified WITHOUT requiring an AFT token. When on, your client publishes the list of contacts you have marked verified to your inbox contract; their clients (if they have observed your inbox settings) will skip minting a token when sending to you. Trade the spam shield for convenience with trusted contacts. Use with care: a compromised verified contact can send unlimited messages to your inbox.",
                 SettingRow {
                     label: "Accept verified senders without tokens",
-                    help: "Recipient-side. Toggling this here does NOT affect whether tokens are minted when you send mail to others — that depends on the recipient's policy, which their client publishes the same way. To stop pop-ups when YOU send, see the “When sending” card above.",
+                    help: "Recipient-side. Toggling this here does NOT affect whether tokens are minted when you send mail to others — that depends on the recipient's policy, which their client publishes the same way.",
                     control: rsx! {
                         div {
                             "data-testid": crate::testid::FM_AFT_VERIFIED_SKIP_TOGGLE,
@@ -1690,14 +1473,6 @@ fn revoke_export_grant() {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    fn prefs_default() -> IdentityAftPrefs {
-        IdentityAftPrefs::default()
-    }
-
-    const FP: &str = "abandon-ability-able-about-above-absent";
-
     /// #340: every Settings screen renders inside `.fm-app`, which has a dark
     /// theme. A hard-coded white inline background ignores the theme and puts
     /// the light dark-mode ink on a white surface (AFT tier cards, identity
@@ -1720,198 +1495,6 @@ mod tests {
         assert!(
             offenders.is_empty(),
             "hard-coded white in settings.rs at line(s) {offenders:?}; use var(--bg-card)"
-        );
-    }
-
-    /// No saved decision + auto-accept OFF → `None` (show modal).
-    #[test]
-    fn no_policy_returns_none() {
-        let prefs = prefs_default();
-        assert_eq!(resolve_permission_decision(&prefs, FP, false), None,);
-    }
-
-    /// Saved Accept decision → always `Some(Accept)`, even if not verified.
-    #[test]
-    fn saved_accept_overrides_everything() {
-        let mut prefs = prefs_default();
-        prefs
-            .permission_decisions
-            .insert(FP.to_string(), PermissionDecision::Accept);
-        assert_eq!(
-            resolve_permission_decision(&prefs, FP, false),
-            Some(PermissionDecision::Accept),
-        );
-        // Even when auto-accept-verified is off.
-        assert_eq!(
-            resolve_permission_decision(&prefs, FP, true),
-            Some(PermissionDecision::Accept),
-        );
-    }
-
-    /// Saved Deny decision → `Some(Deny)`, even for a verified contact.
-    #[test]
-    fn saved_deny_overrides_auto_accept_verified() {
-        let mut prefs = prefs_default();
-        prefs.auto_accept_verified_contacts = true;
-        prefs
-            .permission_decisions
-            .insert(FP.to_string(), PermissionDecision::Deny);
-        assert_eq!(
-            resolve_permission_decision(&prefs, FP, true),
-            Some(PermissionDecision::Deny),
-        );
-    }
-
-    /// `auto_accept_verified_contacts` ON + verified → `Some(Accept)`.
-    #[test]
-    fn auto_accept_verified_returns_accept_for_verified() {
-        let mut prefs = prefs_default();
-        prefs.auto_accept_verified_contacts = true;
-        assert_eq!(
-            resolve_permission_decision(&prefs, FP, true),
-            Some(PermissionDecision::Accept),
-        );
-    }
-
-    /// `auto_accept_verified_contacts` ON + NOT verified → `None` (show modal).
-    #[test]
-    fn auto_accept_verified_returns_none_for_unverified() {
-        let mut prefs = prefs_default();
-        prefs.auto_accept_verified_contacts = true;
-        assert_eq!(resolve_permission_decision(&prefs, FP, false), None,);
-    }
-
-    /// Saved decision takes priority over `auto_accept_verified_contacts`.
-    #[test]
-    fn saved_decision_has_priority_over_auto_accept() {
-        let mut prefs = prefs_default();
-        prefs.auto_accept_verified_contacts = true;
-        prefs
-            .permission_decisions
-            .insert(FP.to_string(), PermissionDecision::Deny);
-        // Saved Deny wins even though auto-accept is on and contact is verified.
-        assert_eq!(
-            resolve_permission_decision(&prefs, FP, true),
-            Some(PermissionDecision::Deny),
-        );
-    }
-
-    /// Missing fingerprint in the decisions map still falls through to
-    /// `auto_accept_verified_contacts` logic.
-    #[test]
-    fn unknown_fingerprint_falls_through_to_auto_accept_policy() {
-        let mut prefs = prefs_default();
-        prefs.auto_accept_verified_contacts = true;
-        prefs
-            .permission_decisions
-            .insert("other-fp".to_string(), PermissionDecision::Deny);
-        // FP is not in the map → check auto_accept_verified.
-        assert_eq!(
-            resolve_permission_decision(&prefs, FP, true),
-            Some(PermissionDecision::Accept),
-        );
-    }
-
-    /// Write-path: `local_set_identity_settings` persists a new
-    /// `PermissionDecision` entry and `identity_settings_for` reads it
-    /// back. This covers the production write path exercised by the
-    /// Settings → AFT "Add decision" Save button (#159).
-    #[test]
-    fn permission_decision_write_path_persists_and_reads_back() {
-        use crate::local_state;
-        use freenet_mail_wire_v1::local_state::{IdentitySettings, LocalState};
-
-        // Seed a clean snapshot so the test is isolated.
-        let mut state = LocalState::default();
-        let alias = "alice";
-        state
-            .aliases_mut()
-            .entry(alias.to_string())
-            .or_default()
-            .settings = IdentitySettings::default();
-        local_state::replace_snapshot(state);
-
-        // Simulate the Save-button handler: read current settings, insert
-        // the decision, then persist via `local_set_identity_settings`.
-        let mut settings = local_state::identity_settings_for(alias);
-        assert!(
-            settings.aft.permission_decisions.is_empty(),
-            "no decisions yet"
-        );
-        settings
-            .aft
-            .permission_decisions
-            .insert(FP.to_string(), PermissionDecision::Accept);
-        local_state::local_set_identity_settings(alias, settings);
-
-        // Read back via the same path the permission pump uses.
-        let read_back = local_state::identity_settings_for(alias);
-        assert_eq!(
-            read_back.aft.permission_decisions.get(FP),
-            Some(&PermissionDecision::Accept),
-            "persisted Accept decision must round-trip through SNAPSHOT"
-        );
-
-        // Inserting Deny for a second fingerprint must not disturb the first.
-        let fp2 = "balance-better-bitter-black-blame-blind";
-        let mut settings2 = local_state::identity_settings_for(alias);
-        settings2
-            .aft
-            .permission_decisions
-            .insert(fp2.to_string(), PermissionDecision::Deny);
-        local_state::local_set_identity_settings(alias, settings2);
-
-        let read_back2 = local_state::identity_settings_for(alias);
-        assert_eq!(
-            read_back2.aft.permission_decisions.get(FP),
-            Some(&PermissionDecision::Accept),
-            "first decision must survive second insert"
-        );
-        assert_eq!(
-            read_back2.aft.permission_decisions.get(fp2),
-            Some(&PermissionDecision::Deny),
-            "second decision must be persisted"
-        );
-    }
-
-    /// Remove-path: removing a saved decision from the map and persisting
-    /// must make it disappear from `identity_settings_for`. Covers the
-    /// "Revoke" button handler (#159).
-    #[test]
-    fn permission_decision_remove_path_clears_entry() {
-        use crate::local_state;
-        use freenet_mail_wire_v1::local_state::{IdentitySettings, LocalState};
-
-        let mut state = LocalState::default();
-        let alias = "bob";
-        let mut base = IdentitySettings::default();
-        base.aft
-            .permission_decisions
-            .insert(FP.to_string(), PermissionDecision::Deny);
-        state
-            .aliases_mut()
-            .entry(alias.to_string())
-            .or_default()
-            .settings = base;
-        local_state::replace_snapshot(state);
-
-        // Verify it's there before removal.
-        let before = local_state::identity_settings_for(alias);
-        assert_eq!(
-            before.aft.permission_decisions.get(FP),
-            Some(&PermissionDecision::Deny),
-            "precondition: Deny must be present before removal"
-        );
-
-        // Simulate the Remove button handler.
-        let mut settings = local_state::identity_settings_for(alias);
-        settings.aft.permission_decisions.remove(FP);
-        local_state::local_set_identity_settings(alias, settings);
-
-        let after = local_state::identity_settings_for(alias);
-        assert!(
-            !after.aft.permission_decisions.contains_key(FP),
-            "removed decision must not appear in SNAPSHOT"
         );
     }
 }
