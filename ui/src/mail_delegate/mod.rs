@@ -102,8 +102,19 @@ pub(crate) fn deliver(payload: &[u8]) -> bool {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How many times this thread asked for the v1 token-generator
+    /// parameters (which carry the signing seed); tests pin who may.
+    pub(crate) static V1_AFT_PARAMS_CALLS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
 /// Send `op` to the mail delegate and wait for its answer.
 pub(crate) async fn call(op: Op) -> Result<Reply, CallError> {
+    #[cfg(test)]
+    if matches!(op, Op::V1AftParams { .. }) {
+        V1_AFT_PARAMS_CALLS.with(|c| c.set(c.get() + 1));
+    }
     let timeout = timeout_ms(&op);
     let request = new_request(op);
     let id = request.request_id;

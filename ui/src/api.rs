@@ -428,6 +428,8 @@ pub(crate) mod embedded_artifact {
 
 #[cfg(feature = "use-node")]
 pub(crate) use delegate_api::{V0_2_CIPHER, V0_2_NONCE};
+#[cfg(feature = "use-node")]
+pub(crate) use token_generator_management::ensure_registered as ensure_token_generator_registered;
 
 #[cfg(feature = "use-node")]
 mod delegate_api {
@@ -1088,6 +1090,25 @@ mod token_generator_management {
 
     thread_local! {
         pub(super) static CREATED_AFT_GEN: RefCell<Vec<(Rc<str>, DelegateKey)>> = const { RefCell::new(Vec::new()) };
+        /// Token-generator delegates registered in this page session.
+        static REGISTERED: RefCell<std::collections::HashSet<Vec<u8>>> =
+            RefCell::new(std::collections::HashSet::new());
+    }
+
+    /// Register the token-generator delegate with `params` once per page
+    /// session, just before its first use. Registering every identity's on
+    /// load would make the page fetch every signing seed on every load.
+    pub(crate) async fn ensure_registered(
+        client: &mut WebApiRequestClient,
+        params: &freenet_stdlib::prelude::Parameters<'static>,
+    ) -> Result<(), DynError> {
+        let key = DelegateKey::from_params(TOKEN_GEN_CODE_HASH, params)?;
+        if REGISTERED.with(|r| r.borrow().contains(key.bytes())) {
+            return Ok(());
+        }
+        delegate_api::create_delegate(client, TOKEN_GEN_CODE_HASH, TOKEN_GEN_CODE, params).await?;
+        REGISTERED.with(|r| r.borrow_mut().insert(key.bytes().to_vec()));
+        Ok(())
     }
 
     /// Register `identity`'s v1 token-generator delegate. `aft_params` are
@@ -1426,17 +1447,10 @@ pub(crate) async fn node_comms(
             InboxModel::load_all(client, &new_ids).await;
             AftRecords::load_all(client, &new_ids, token_rec_to_id).await;
         }
-        for (id, l) in new_ids.iter().zip(&loaded) {
-            if let Some(params) = &l.aft_params
-                && let Err(e) =
-                    token_generator_management::create_delegate(client, id, params).await
-            {
-                crate::log::error(
-                    format!("AFT-gen re-register for `{}` failed: {e}", id.alias()),
-                    None,
-                );
-            }
-        }
+        // The token-generator delegates are registered when first used
+        // (`ensure_token_generator_registered`), not here: their parameters
+        // carry the identity's signing seed, so the page fetches them only
+        // to send.
         // #191: after a reload the local node's contract store is empty, so
         // prime every contact's inbox before the first send to it.
         for contact in crate::app::address_book::all_contacts() {
@@ -1615,7 +1629,7 @@ pub(crate) async fn node_comms(
                 match token_generator_management::create_delegate(
                     &mut client,
                     &identity,
-                    &aft_params,
+                    &aft_params.0,
                 )
                 .await
                 {

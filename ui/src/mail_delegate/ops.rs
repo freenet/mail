@@ -327,9 +327,23 @@ async fn signature(op: Op) -> Result<Vec<u8>, CallError> {
 }
 
 /// The v1 token-generator delegate's parameters for `addr`.
-pub(crate) async fn v1_aft_params(addr: Addr) -> Result<Vec<u8>, CallError> {
+/// Secret bytes held by the page: zeroized on drop, and `Debug` prints only
+/// their length, so a logged action or panic message never shows them.
+#[derive(Clone)]
+pub(crate) struct SecretBytes(pub(crate) zeroize::Zeroizing<Vec<u8>>);
+
+impl std::fmt::Debug for SecretBytes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "SecretBytes(<{} bytes redacted>)", self.0.len())
+    }
+}
+
+/// The v1 token-generator delegate's parameters, which carry the identity's
+/// ML-DSA signing seed (transitional; removed with the anti-flood tokens).
+/// Fetch them only where they are used, and let them drop promptly.
+pub(crate) async fn v1_aft_params(addr: Addr) -> Result<zeroize::Zeroizing<Vec<u8>>, CallError> {
     match call(Op::V1AftParams { addr }).await? {
-        Reply::AftParams(params) => Ok(params.into_vec()),
+        Reply::AftParams(params) => Ok(zeroize::Zeroizing::new(params.into_vec())),
         other => Err(unexpected(&other)),
     }
 }
@@ -415,6 +429,19 @@ mod tests {
             ml_kem_seed: kem.to_vec(),
         };
         (info, keys)
+    }
+
+    #[test]
+    fn loading_an_identity_does_not_fetch_its_signing_seed() {
+        let (info, _) = imported("no-seed-on-load", 23);
+        let before = crate::mail_delegate::V1_AFT_PARAMS_CALLS.with(std::cell::Cell::get);
+        let loaded = block_on(crate::app::identity_store::prepare(info));
+        let after = crate::mail_delegate::V1_AFT_PARAMS_CALLS.with(std::cell::Cell::get);
+        assert_eq!(loaded.info.alias, "no-seed-on-load");
+        assert_eq!(
+            after, before,
+            "loading must not ask for the token-generator parameters"
+        );
     }
 
     #[test]
@@ -533,5 +560,16 @@ mod tests {
         .unwrap();
         assert!(already);
         assert_eq!(again.alias, first.alias);
+    }
+}
+
+#[cfg(test)]
+mod secret_bytes_tests {
+    #[test]
+    fn debug_never_shows_the_bytes() {
+        let s = super::SecretBytes(zeroize::Zeroizing::new(vec![0xab; 4]));
+        let shown = format!("{s:?}");
+        assert_eq!(shown, "SecretBytes(<4 bytes redacted>)");
+        assert!(!shown.contains("171") && !shown.to_lowercase().contains("ab"));
     }
 }

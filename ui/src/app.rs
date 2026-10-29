@@ -97,8 +97,8 @@ pub(crate) enum NodeAction {
         alias: Rc<str>,
         identity: Box<Identity>,
         /// The v1 token-generator delegate's parameters, from the mail
-        /// delegate (`V1AftParams`).
-        aft_params: Vec<u8>,
+        /// delegate (`V1AftParams`). They carry the signing seed.
+        aft_params: crate::mail_delegate::ops::SecretBytes,
     },
     /// Store a new contact in the identity-management delegate.
     CreateContact {

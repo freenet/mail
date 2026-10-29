@@ -411,10 +411,15 @@ impl AftRecords {
         let token_params: Parameters = serde_json::from_slice::<DelegateParameters>(&params_json)?
             .try_into()
             .map_err(|e| format!("{e}"))?;
+        drop(params_json);
         let delegate_key = DelegateKey::from_params(
             crate::aft::TOKEN_GENERATOR_DELEGATE_CODE_HASH,
             &token_params,
         )?;
+        // Registered here, at first use, rather than for every identity on
+        // load (the parameters carry the identity's signing seed).
+        #[cfg(feature = "use-node")]
+        crate::api::ensure_token_generator_registered(client, &token_params).await?;
 
         let inbox_params: Parameters = InboxParams {
             pub_key: recipient_inbox_pub_key,

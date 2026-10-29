@@ -141,14 +141,13 @@ pub(crate) async fn update_markers(
     Ok(())
 }
 
-/// An identity as the node loop needs it on load: its public view, the v1
-/// token-generator parameters (the AFT generator delegate is registered with
-/// them on every session), and the contract code hashes to migrate its inbox
-/// and AFT record from, if they drifted (#213, #251).
+/// An identity as the node loop needs it on load: its public view and the
+/// contract code hashes to migrate its inbox and AFT record from, if they
+/// drifted (#213, #251). It carries no key material: the token-generator
+/// parameters (which hold the signing seed) are fetched only to send.
 #[derive(Clone, Debug)]
 pub(crate) struct LoadedIdentity {
     pub info: IdentityInfo,
-    pub aft_params: Option<Vec<u8>>,
     pub inbox_migrate_from: Option<String>,
     pub aft_migrate_from: Option<String>,
 }
@@ -261,19 +260,8 @@ pub(crate) async fn prepare(info: IdentityInfo) -> LoadedIdentity {
             );
         }
     }
-    let aft_params = match ops::v1_aft_params(info.addr).await {
-        Ok(p) => Some(p),
-        Err(e) => {
-            crate::log::error(
-                format!("token generator parameters for `{}`: {e}", info.alias),
-                None,
-            );
-            None
-        }
-    };
     LoadedIdentity {
         info,
-        aft_params,
         inbox_migrate_from,
         aft_migrate_from,
     }
@@ -355,9 +343,11 @@ pub(crate) async fn publish(identity: Identity, backed_up: bool) -> Result<(), D
     }
     let state =
         initial_inbox_state(&identity, identity.required_tier, identity.max_age_secs).await?;
-    let aft_params = ops::v1_aft_params(identity.addr)
-        .await
-        .map_err(|e| format!("token generator parameters: {e}"))?;
+    let aft_params = ops::SecretBytes(
+        ops::v1_aft_params(identity.addr)
+            .await
+            .map_err(|e| format!("token generator parameters: {e}"))?,
+    );
     let alias = identity.alias.clone();
     send_action(NodeAction::CreateContract {
         alias: alias.clone(),
