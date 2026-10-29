@@ -65,6 +65,43 @@ thread_local! {
     /// `deleted` list (and the kept/archived entries re-removed) until the echo
     /// itself records the deletion. Key: (alias, msg_id).
     static DELETED_MESSAGES: RefCell<HashSet<(String, MessageId)>> = RefCell::new(HashSet::new());
+
+    /// Global-settings changes made in this page, counted so a startup load
+    /// that began before one of them does not overwrite it ([`merge_loaded`]).
+    static SETTINGS_WRITES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Every received message's UI id is below this, so ids at or above it are
+/// free for rows that are not received messages (the folded own-Sent rows,
+/// `app::SENT_FOLD_ID_BASE`). Received ids are hashes, so without the
+/// partition nearly all of them would land in the folded range (#289).
+pub(crate) const RECEIVED_ID_LIMIT: u64 = 1 << 63;
+
+/// Mark the start of a load from the delegate; pass the result to
+/// [`merge_loaded`].
+pub(crate) fn begin_load() -> u64 {
+    SETTINGS_WRITES.with(std::cell::Cell::get)
+}
+
+/// Apply a load that began at `mark` ([`begin_load`]) for `owners` only.
+///
+/// The load is a snapshot taken while the page kept running, so it replaces
+/// just the identities it read: an identity created meanwhile keeps its
+/// state, and the global settings are taken from the load only if nothing in
+/// this page changed them since `mark` (#286: a wholesale replace dropped
+/// both). The optimistic stashes still apply, as for any echo.
+pub(crate) fn merge_loaded(mut loaded: LocalState, owners: &[String], mark: u64) {
+    // Taken out and put back by `replace_snapshot` below, with nothing in
+    // between that could read it.
+    let mut merged = SNAPSHOT.with(|s| std::mem::take(&mut *s.borrow_mut()));
+    for alias in owners {
+        let state = loaded.aliases_mut().remove(alias).unwrap_or_default();
+        merged.aliases_mut().insert(alias.clone(), state);
+    }
+    if SETTINGS_WRITES.with(std::cell::Cell::get) == mark {
+        *merged.global_settings_mut() = loaded.global_settings().clone();
+    }
+    replace_snapshot(merged);
 }
 
 /// Bumped on every snapshot mutation. Components read this signal so Dioxus
@@ -511,6 +548,7 @@ pub(crate) fn local_set_identity_settings(alias: &str, settings: IdentitySetting
 }
 
 pub(crate) fn local_set_global_settings(settings: GlobalSettings) {
+    SETTINGS_WRITES.with(|n| n.set(n.get() + 1));
     SNAPSHOT.with(|s| {
         *s.borrow_mut().global_settings_mut() = settings;
     });
@@ -669,6 +707,59 @@ mod tests {
         let entries = kept_for("alice");
         assert_eq!(entries.len(), 1, "kept entry survives delegate echo");
         assert!(is_read("alice", 5));
+    }
+
+    /// #286: the startup load is a snapshot. An identity created while it
+    /// ran keeps its state, and a settings change made meanwhile wins.
+    #[test]
+    fn a_startup_load_replaces_only_the_identities_it_read() {
+        fresh_snapshot();
+        fresh_pending();
+        let mark = begin_load();
+        // While the load runs: a new identity marks a message read, and the
+        // user changes a global setting.
+        local_mark_read("bob", 3, kept("alice", "hi"));
+        let mut settings = global_settings();
+        settings.inbox.thread_view = freenet_mail_wire_v1::local_state::ThreadView::Compact;
+        local_set_global_settings(settings);
+        // The load, which read only alice and the old settings.
+        let mut loaded = LocalState::default();
+        loaded
+            .aliases_mut()
+            .entry("alice".to_string())
+            .or_default()
+            .read
+            .push(7);
+        merge_loaded(loaded, &["alice".to_string()], mark);
+
+        assert!(
+            is_read("alice", 7),
+            "the loaded identity's state is applied"
+        );
+        assert!(
+            is_read("bob", 3),
+            "an identity created during the load keeps its state"
+        );
+        assert_eq!(
+            global_settings().inbox.thread_view,
+            freenet_mail_wire_v1::local_state::ThreadView::Compact,
+            "a settings change made during the load is not overwritten",
+        );
+    }
+
+    #[test]
+    fn a_startup_load_applies_stored_settings_when_none_changed() {
+        fresh_snapshot();
+        fresh_pending();
+        let mark = begin_load();
+        let mut loaded = LocalState::default();
+        loaded.global_settings_mut().inbox.thread_view =
+            freenet_mail_wire_v1::local_state::ThreadView::Compact;
+        merge_loaded(loaded, &[], mark);
+        assert_eq!(
+            global_settings().inbox.thread_view,
+            freenet_mail_wire_v1::local_state::ThreadView::Compact,
+        );
     }
 
     fn fresh_pending() {

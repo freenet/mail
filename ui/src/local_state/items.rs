@@ -11,8 +11,11 @@
 //! - drafts and sent messages: the 16 bytes of their UUID;
 //! - received messages (kept, archived, flags): `blake3(ciphertext)[..16]`,
 //!   stable across reloads and across the inbox's own ordering. The UI's
-//!   [`MessageId`] is the first 8 of those bytes (little-endian); the full
-//!   16 are remembered per page for writes ([`message_id_for`]).
+//!   [`MessageId`] is the first 8 of those bytes (little-endian) with the top
+//!   bit cleared (see [`super::RECEIVED_ID_LIMIT`]); the full 16 are
+//!   remembered per page for writes ([`message_id_for`]). Two messages of one
+//!   identity share a UI id with probability about n²/2^64 for n messages.
+//!   A UI id is never ordered on: it carries no time and no position.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -34,7 +37,8 @@ thread_local! {
 }
 
 fn remember(full: [u8; 16]) -> MessageId {
-    let id = u64::from_le_bytes(full[..8].try_into().expect("8 bytes"));
+    let id =
+        u64::from_le_bytes(full[..8].try_into().expect("8 bytes")) & (super::RECEIVED_ID_LIMIT - 1);
     FULL_IDS.with(|ids| ids.borrow_mut().insert(id, full));
     id
 }
@@ -387,12 +391,29 @@ mod tests {
     fn a_message_id_is_its_ciphertexts_hash_and_is_remembered_in_full() {
         let id = message_id_for(b"ciphertext");
         let hash = blake3::hash(b"ciphertext");
-        assert_eq!(id.to_le_bytes(), hash.as_bytes()[..8]);
+        let prefix = u64::from_le_bytes(hash.as_bytes()[..8].try_into().unwrap());
+        assert_eq!(id, prefix & (super::super::RECEIVED_ID_LIMIT - 1));
         assert_eq!(full_id(id).unwrap(), hash.as_bytes()[..16]);
         // The same ciphertext always gets the same id: ids survive reloads
         // and a reordered inbox.
         assert_eq!(message_id_for(b"ciphertext"), id);
         assert_ne!(message_id_for(b"other"), id);
+    }
+
+    /// #289: received ids are hashes, so their range must be partitioned
+    /// from the folded own-Sent rows' or a received message is treated as
+    /// one (its "Add to address book" vanishes). About half of all hashes
+    /// have the top bit set, so 64 ciphertexts would catch a missing mask
+    /// with probability 1 - 2^-64.
+    #[test]
+    fn received_message_ids_never_reach_the_folded_sent_range() {
+        for i in 0u32..64 {
+            let id = message_id_for(&i.to_le_bytes());
+            assert!(
+                id < super::super::RECEIVED_ID_LIMIT,
+                "id {id:#x} for ciphertext {i}"
+            );
+        }
     }
 
     #[test]

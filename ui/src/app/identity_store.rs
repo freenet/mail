@@ -163,14 +163,25 @@ pub(crate) async fn load_and_report() {
             return;
         }
     };
-    // Drafts, sent, read marks and settings for these identities. Loaded
-    // before the identities are announced, so the views they open start
-    // from what is stored.
+    #[cfg(feature = "use-node")]
+    let owners: Vec<(String, Addr)> = infos.iter().map(|i| (i.alias.clone(), i.addr)).collect();
+    let mut loaded = Vec::with_capacity(infos.len());
+    for info in infos {
+        loaded.push(prepare(info).await);
+    }
+    // Announce the identities first. Loading their drafts, sent mail, read
+    // marks and settings takes a delegate round trip per item, and while it
+    // ran the user could create an identity that the late announcement then
+    // hid (#286). Views opened before the load lands re-render when it does.
+    send_action(NodeAction::IdentitiesLoaded { identities: loaded });
     #[cfg(feature = "use-node")]
     {
-        let owners: Vec<(String, Addr)> = infos.iter().map(|i| (i.alias.clone(), i.addr)).collect();
+        let mark = crate::local_state::begin_load();
         match crate::local_state::load(&owners).await {
-            Ok(state) => crate::local_state::replace_snapshot(state),
+            Ok(state) => {
+                let aliases: Vec<String> = owners.into_iter().map(|(alias, _)| alias).collect();
+                crate::local_state::merge_loaded(state, &aliases, mark);
+            }
             Err(e) => {
                 crate::log::error(format!("loading local mail state failed: {e}"), None);
                 crate::toast::push_toast_detached(
@@ -180,11 +191,6 @@ pub(crate) async fn load_and_report() {
             }
         }
     }
-    let mut loaded = Vec::with_capacity(infos.len());
-    for info in infos {
-        loaded.push(prepare(info).await);
-    }
-    send_action(NodeAction::IdentitiesLoaded { identities: loaded });
 }
 
 /// Everything the node loop needs for one identity. Records the migration

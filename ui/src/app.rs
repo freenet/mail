@@ -848,14 +848,25 @@ impl User {
     fn new() -> Self {
         // The in-page delegate holds the example identities' keys, as a
         // node's would. It answers synchronously, so this needs no executor
-        // beyond polling once.
+        // beyond polling once. It outlives a `User`: the storybook host builds
+        // a second one, so reuse an identity the delegate already holds
+        // rather than creating it again (which it refuses as a conflict).
         let create = |alias: &str, id: usize| {
-            let (info, _key) =
-                futures::executor::block_on(crate::mail_delegate::ops::create_identity(
-                    alias.into(),
-                    "Mock identity (example-data)".into(),
-                ))
-                .expect("the in-page delegate creates the example identities");
+            let held = futures::executor::block_on(crate::mail_delegate::ops::list_identities())
+                .expect("the in-page delegate lists identities")
+                .into_iter()
+                .find(|info| info.alias == alias);
+            let info = match held {
+                Some(info) => info,
+                None => {
+                    futures::executor::block_on(crate::mail_delegate::ops::create_identity(
+                        alias.into(),
+                        "Mock identity (example-data)".into(),
+                    ))
+                    .expect("the in-page delegate creates the example identities")
+                    .0
+                }
+            };
             Identity::from_info(&info, UserId(id))
         };
         let identities = vec![create("address1", 0), create("address2", 1)];
@@ -1433,8 +1444,9 @@ pub(crate) mod threads {
             (Some(am), Some(bm)) => super::sort_cmp_inbox(am, bm),
             _ => std::cmp::Ordering::Equal,
         };
-        // Total tie-break: newest root_id first. `root_id` is unique per group
+        // Total tie-break: largest root_id first. `root_id` is unique per group
         // (it's the oldest member's message id), so this can never itself tie.
+        // Ids are content hashes, so this is only a fixed order, not a time.
         primary.then_with(|| b.root_id.cmp(&a.root_id))
     }
 
@@ -1944,6 +1956,28 @@ mod thread_grouping_tests {
         // oldest→newest by time then id
         let order: Vec<u64> = g.messages.iter().map(|x| x.id).collect();
         assert_eq!(order, vec![0, 1, 2]);
+    }
+
+    /// Message ids are content hashes and carry no time (#289), so a thread
+    /// is ordered by time alone: here the ids run newest→oldest, and the
+    /// order, the root and "the newest" must still follow the clock.
+    #[test]
+    fn a_thread_is_ordered_by_time_never_by_id() {
+        let msgs = vec![
+            m(u64::MAX >> 2, "mary", "Lunch?", 0, true, Some("t1"), None),
+            m(5, "me", "Re: Lunch?", 10, true, Some("t1"), None),
+            m(1, "mary", "Re: Lunch?", 20, false, Some("t1"), None),
+        ];
+        let groups = group_into_threads(&msgs);
+        let g = group_with_key(&groups, "t1");
+        let order: Vec<u64> = g.messages.iter().map(|x| x.id).collect();
+        assert_eq!(order, vec![u64::MAX >> 2, 5, 1], "oldest→newest by time");
+        assert_eq!(g.root_id, u64::MAX >> 2, "the root is the oldest message");
+        assert_eq!(
+            g.messages.last().map(|x| x.id),
+            Some(1),
+            "the newest is the latest sent"
+        );
     }
 
     /// (b) Legacy messages (no thread_id) group via the heuristic key by
@@ -2933,9 +2967,11 @@ fn folded_sent_rows(received: &[Message], alias: &str, search: &str) -> Vec<Mess
         .collect()
 }
 
-/// Offset for synthetic folded-sent `Message.id`s (#310). Far above any real
-/// inbox enumerate index so a folded row can never shadow a received one.
-const SENT_FOLD_ID_BASE: u64 = 1 << 48;
+/// Offset for synthetic folded-sent `Message.id`s (#310): the half of the id
+/// space received messages never use (`local_state::RECEIVED_ID_LIMIT`), so a
+/// folded row can never shadow a received one, nor a received one pass for a
+/// folded row (#289).
+const SENT_FOLD_ID_BASE: u64 = crate::local_state::RECEIVED_ID_LIMIT;
 
 /// Convert a `SentMessage` into an `is-me` `Message` row for thread folding
 /// (#310). `from = alias` lights up `.is-me` styling; `read = true` (own mail
@@ -2952,7 +2988,7 @@ fn sent_message_to_row(
         hash ^= u64::from(*b);
         hash = hash.wrapping_mul(1099511628211);
     }
-    let synthetic_id = SENT_FOLD_ID_BASE | (hash & ((1 << 48) - 1));
+    let synthetic_id = SENT_FOLD_ID_BASE | (hash & (SENT_FOLD_ID_BASE - 1));
     let time = chrono::DateTime::from_timestamp_millis(s.sent_at).unwrap_or_else(Utc::now);
     Message {
         id: synthetic_id,

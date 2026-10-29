@@ -126,8 +126,13 @@ impl PartialEq for Identity {
 impl Eq for Identity {}
 
 impl Identity {
-    /// Replace the identity list with the identities the mail delegate
-    /// holds. Returns them, with the `UserId` each has in `user.identities`.
+    /// Add (or replace, by alias) the identities the mail delegate held when
+    /// the startup load read them. Returns them, with the `UserId` each has
+    /// in `user.identities`.
+    ///
+    /// Upserts rather than replacing the list: the load is a snapshot taken
+    /// earlier, and an identity created or restored since then is already
+    /// here and must stay (#286: a replace dropped it, and its row vanished).
     #[must_use]
     pub(crate) fn set_identities(
         infos: &[freenet_mail_protocol::IdentityInfo],
@@ -157,7 +162,16 @@ impl Identity {
             crate::app::address_book::register_identity(&identity);
             identities.push(identity);
         }
-        ALIASES.with(|aliases| *aliases.borrow_mut() = identities.clone());
+        ALIASES.with(|aliases| {
+            let aliases = &mut *aliases.borrow_mut();
+            for identity in &identities {
+                if let Some(slot) = aliases.iter_mut().find(|a| a.alias == identity.alias) {
+                    *slot = identity.clone();
+                } else {
+                    aliases.push(identity.clone());
+                }
+            }
+        });
         identities
     }
 
