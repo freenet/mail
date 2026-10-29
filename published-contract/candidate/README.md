@@ -22,4 +22,11 @@ scripts/build-wasm.sh delegates/mail-delegate delegate freenet-main-delegate \
   | sed -n 's/^code hash: *//p' > published-contract/candidate/mail_delegate_code_hash
 ```
 
-Build on linux/amd64 with the toolchain `rust-toolchain.toml` selects, as CI does.
+Build on linux/amd64 with the toolchain `rust-toolchain.toml` selects, as CI
+does. CI is the canonical builder: if its rebuild differs from yours, the
+`check-drift` run uploads its bytes as the artifact
+`mail-delegate-candidate-<sha>`. Commit those:
+
+```bash
+gh run download <run-id> -n mail-delegate-candidate-<sha> -D published-contract/candidate/
+```

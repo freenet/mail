@@ -177,6 +177,14 @@ jobs:
       - name: Verify the mail-delegate candidate is the source's build
         run: bash scripts/check-delegate-candidate.sh
 
+      - name: Upload the rebuilt mail-delegate candidate
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: mail-delegate-candidate-${{ github.sha }}
+          path: target/delegate-candidate-rebuilt/
+          if-no-files-found: ignore
+
       # Issue #206 (closes the Phase 1 informational gate). The container
       # contract id is intended to stay byte-stable across releases.
       # Both prerequisites are now in place:

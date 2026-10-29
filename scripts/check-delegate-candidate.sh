@@ -28,9 +28,15 @@ built_hash="$(sed -n 's/^code hash: *//p' "$OUT/build.log" | tr -d '[:space:]')"
 
 failed=0
 if ! cmp -s "$OUT/mail_delegate" "$WASM"; then
+    # Keep the rebuild: CI uploads it, so the canonical bytes can be
+    # committed from a machine whose build differs.
+    mkdir -p target/delegate-candidate-rebuilt
+    cp "$OUT/mail_delegate" target/delegate-candidate-rebuilt/mail_delegate
+    echo "$built_hash" > target/delegate-candidate-rebuilt/mail_delegate_code_hash
     echo "FAIL: $WASM is not what delegates/mail-delegate builds." >&2
     echo "      rebuilt sha256: $(sha256sum "$OUT/mail_delegate" | cut -d' ' -f1)" >&2
-    echo "      Rebuild it with scripts/build-wasm.sh (see published-contract/candidate/README.md)." >&2
+    echo "      Rebuild it with scripts/build-wasm.sh, or take CI's build" >&2
+    echo "      (see published-contract/candidate/README.md)." >&2
     failed=1
 fi
 if [ "$(tr -d '[:space:]' < "$HASH_FILE")" != "$built_hash" ]; then
