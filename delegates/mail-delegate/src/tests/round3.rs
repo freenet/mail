@@ -226,6 +226,15 @@ fn the_successor_export_leaves_out_an_identity_being_deleted() {
         .collect();
     assert!(keys.iter().any(|k| k.contains(&store::hex(&keep.addr.0))));
     assert!(keys.iter().all(|k| !k.contains(&store::hex(&gone.addr.0))));
+    // The exported identity index lists only the kept identity.
+    let (_, ix) = page
+        .secrets
+        .iter()
+        .find(|(k, _)| k.ends_with(b"/ix/id"))
+        .expect("the identity index is exported");
+    let (_, body) = store::decode_versioned(ix).unwrap();
+    let ids: Vec<ByteBuf> = freenet_mail_protocol::from_cbor(body).unwrap();
+    assert_eq!(ids, vec![ByteBuf::from(keep.addr.0.to_vec())]);
 }
 
 // ── Prompt bookkeeping under storage failures ───────────────────────────────

@@ -40,10 +40,11 @@ tail=()
 
 for crate in "${CRATES[@]}"; do
     echo "== $crate: ${cmd[*]} ${tail[*]:-}"
-    (cd "$ROOT/$crate" && "${cmd[@]}" "${tail[@]}")
+    # ${a[@]+...}: an empty array under set -u fails on bash 3.2 (macOS).
+    (cd "$ROOT/$crate" && "${cmd[@]}" ${tail[@]+"${tail[@]}"})
     features="$(extra_features "$crate")"
     if [ -n "$features" ] && [ "$mode" != fmt ]; then
         echo "== $crate: ${cmd[*]} --features $features ${tail[*]:-}"
-        (cd "$ROOT/$crate" && "${cmd[@]}" --features "$features" "${tail[@]}")
+        (cd "$ROOT/$crate" && "${cmd[@]}" --features "$features" ${tail[@]+"${tail[@]}"})
     fi
 done

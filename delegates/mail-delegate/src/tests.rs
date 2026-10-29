@@ -1119,6 +1119,15 @@ fn a_removal_is_signed_for_real_messages_in_ascending_order_only() {
     assert_eq!(remove(&mut env, vec![hi, lo]), Err(FailureCode::BadInput));
     assert_eq!(remove(&mut env, vec![lo, lo]), Err(FailureCode::BadInput));
     assert_eq!(remove(&mut env, chunks.clone()), Err(FailureCode::BadInput));
+    // Sorted, the same planted chunks ARE signed (they are in the inbox and
+    // ascend), but what is signed is no longer the ciphertext: ordering is
+    // what keeps the signature from covering it.
+    let mut sorted = chunks.clone();
+    sorted.sort();
+    let Ok(Reply::Signature(_)) = remove(&mut env, sorted.clone()) else {
+        panic!("sorted planted chunks refused");
+    };
+    assert_ne!(sorted.concat(), forged[..96].to_vec());
     assert_eq!(
         remove(&mut env, vec![[0xee; 32]]),
         Err(FailureCode::Refused)

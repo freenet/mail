@@ -859,9 +859,10 @@ struct AssignmentHash {
 /// instead. A signature over the payload verifies as a v1 message signature
 /// over the same bytes; to make that a message anyone would accept, the
 /// payload must be a real ciphertext whose 32-byte chunks happen to be
-/// strictly ascending, which for a ciphertext of n chunks occurs with
-/// probability 1/n! (about 2^-138 for the smallest v1 ciphertext). Raw
-/// ascending bytes decrypt to nothing.
+/// strictly ascending. The first chunk holds the nonce, which the attacker
+/// chooses, but the ML-KEM ciphertext after it spans about 34 chunks that
+/// the attacker cannot steer (only re-roll), so they ascend with probability
+/// about 1/34!, roughly 2^-128. Raw ascending bytes decrypt to nothing.
 fn sign_v1_removal(s: &Space<'_>, addr: &Addr, hashes: &[Hash32]) -> OpResult {
     use freenet_mail_wire_v1::inbox::{STATE_UPDATE, removal_payload};
     if hashes.is_empty() || hashes.len() > MAX_REMOVAL_BATCH {
@@ -998,6 +999,32 @@ pub fn exportable_keys(s: &Space<'_>) -> Result<Vec<String>, Failure> {
     Ok(rels)
 }
 
+/// The identity index as a successor should receive it: without identities
+/// being deleted (their records and items are not exported either). `None`
+/// when nothing is left.
+fn exportable_identity_index(s: &Space<'_>) -> Result<Option<Vec<u8>>, Failure> {
+    let Some((generation, _)) = s.read(IDENTITY_INDEX)? else {
+        return Ok(None);
+    };
+    let (_, ids) = s.index(IDENTITY_INDEX)?;
+    let mut kept = Vec::new();
+    for id in ids {
+        let addr = Addr(
+            id.as_slice()
+                .try_into()
+                .map_err(|_| fail(FailureCode::Internal, "the identity index is unreadable"))?,
+        );
+        if load_identity(s, &addr)?.is_some_and(|(_, r)| !r.deleting) {
+            kept.push(ByteBuf::from(id));
+        }
+    }
+    if kept.is_empty() {
+        return Ok(None);
+    }
+    let body = to_cbor(&kept).map_err(|e| fail(FailureCode::Internal, e))?;
+    Ok(Some(store::encode_versioned(generation, &body)))
+}
+
 /// One page of the freenet-migrate export of the caller's namespace.
 pub fn export_for_successor(
     s: &Space<'_>,
@@ -1012,7 +1039,12 @@ pub fn export_for_successor(
         .into_iter()
         .filter(|r| after.is_none_or(|a| r.as_bytes() > a))
     {
-        let Some(value) = s.get(&rel) else {
+        let value = if rel == IDENTITY_INDEX {
+            exportable_identity_index(s)?
+        } else {
+            s.get(&rel)
+        };
+        let Some(value) = value else {
             continue;
         };
         let key = s.full_key(&rel);

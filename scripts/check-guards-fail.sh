@@ -150,6 +150,9 @@ dt "the successor export holds no bookkeeping" "$D/handlers.rs" \
 dt "the successor export leaves out deleting identities" "$D/handlers.rs" \
     'if load_identity(s, &addr)?.is_some_and(|(_, r)| r.deleting) {' 'if false {' \
     the_successor_export_leaves_out_an_identity_being_deleted
+dt "the exported identity index omits deleting identities" "$D/handlers.rs" \
+    'is_some_and(|(_, r)| !r.deleting)' 'is_some()' \
+    the_successor_export_leaves_out_an_identity_being_deleted
 dt "deletion removes the identity's items" "$D/handlers.rs" \
     'for id in &batch {' 'for id in batch.iter().take(0) {' \
     deleting_an_identity_asks_every_time_and_removes_everything_it_owns
