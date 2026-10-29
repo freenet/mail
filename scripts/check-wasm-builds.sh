@@ -22,7 +22,6 @@ trap 'rm -r -- "$OUT"' EXIT
 # <crate dir> <kind> <features> <output name>
 CRATES=(
     "contracts/inbox contract contract freenet_email_inbox"
-    "contracts/web-container contract freenet-main-contract,contract freenet_email_app_web"
     "modules/antiflood-tokens/contracts/token-allocation-record contract freenet-main-contract freenet_token_allocation_record"
     "modules/antiflood-tokens/delegates/token-generator delegate freenet-main-delegate freenet_token_generator"
     "modules/identity-management delegate freenet-main-delegate,contract identity_management"
@@ -33,4 +32,12 @@ for row in "${CRATES[@]}"; do
     echo "== $dir"
     scripts/build-wasm.sh "$dir" "$kind" "$features" "$OUT/$name"
 done
-echo "all contract and delegate crates build to WASM with no build-machine paths"
+# The webapp contract is an fdev "webapp" package, so fdev would package the
+# UI rather than compile the contract. Build it with cargo from its own
+# directory, which is also how contracts/.cargo/config.toml's getrandom flag
+# reaches it.
+echo "== contracts/web-container"
+(cd contracts/web-container \
+    && CARGO_TARGET_DIR="$OUT/web-container-target" \
+        cargo build --locked --release --target wasm32-unknown-unknown)
+echo "all contract and delegate crates build to WASM (the fdev-built ones with no build-machine paths)"
