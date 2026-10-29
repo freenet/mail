@@ -386,18 +386,46 @@ mod delegate_api {
         let key = DelegateKey::from_params(delegate_code_hash, params)?;
         let delegate = DelegateContainer::try_from((delegate_code.to_vec(), params))?;
         assert_eq!(&key, delegate.key());
-        // Nodes ignore these and derive each delegate's secret key from
-        // their own key (freenet-core #4146, shipped in v0.2.60, well below
-        // the network's 0.2.122 floor). stdlib 0.12 dropped the fixed
-        // defaults; random values keep the client from inventing a shared
-        // constant.
-        let request = ClientRequest::DelegateOp(DelegateRequest::RegisterDelegate {
-            delegate,
-            cipher: crate::rng::random_bytes(),
-            nonce: crate::rng::random_bytes(),
-        });
-        client.send(request).await?;
+        client.send(register_request(delegate)).await?;
         Ok(key)
+    }
+
+    /// stdlib 0.3.5's `DelegateRequest::DEFAULT_CIPHER`, which every v0.2.x
+    /// client sent. stdlib 0.12 dropped the constant. Nodes since v0.2.60
+    /// ignore the cipher and nonce and derive each delegate's secret key
+    /// from their own key (freenet-core #4146); an older node encrypted the
+    /// delegate's secrets with them, so a different value would orphan
+    /// every secret it had stored.
+    pub(crate) const V0_2_CIPHER: [u8; 32] = [
+        0, 24, 22, 150, 112, 207, 24, 65, 182, 161, 169, 227, 66, 182, 237, 215, 206, 164, 58, 161,
+        64, 108, 157, 195, 0, 0, 0, 0, 0, 0, 0, 0,
+    ];
+    /// stdlib 0.3.5's `DelegateRequest::DEFAULT_NONCE`; see [`V0_2_CIPHER`].
+    pub(crate) const V0_2_NONCE: [u8; 24] = [
+        57, 18, 79, 116, 63, 134, 93, 39, 208, 161, 156, 229, 222, 247, 111, 79, 210, 126, 127, 55,
+        224, 150, 139, 80,
+    ];
+
+    fn register_request(delegate: DelegateContainer) -> ClientRequest<'static> {
+        ClientRequest::DelegateOp(DelegateRequest::RegisterDelegate {
+            delegate,
+            cipher: V0_2_CIPHER,
+            nonce: V0_2_NONCE,
+        })
+    }
+
+    #[test]
+    fn register_request_sends_the_v0_2_cipher_and_nonce() {
+        let code = include_bytes!("../../published-contract/wasm/v1/mail_local_state");
+        let params = Parameters::from(vec![1u8, 2, 3]);
+        let delegate = DelegateContainer::try_from((code.to_vec(), &params)).unwrap();
+        let ClientRequest::DelegateOp(DelegateRequest::RegisterDelegate { cipher, nonce, .. }) =
+            register_request(delegate)
+        else {
+            panic!("not a RegisterDelegate");
+        };
+        assert_eq!(cipher, V0_2_CIPHER);
+        assert_eq!(nonce, V0_2_NONCE);
     }
 }
 
