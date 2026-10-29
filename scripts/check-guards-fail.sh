@@ -1,14 +1,17 @@
 #!/usr/bin/env bash
 # Show that the mail delegate's guards fail when what they guard is broken.
 #
-# A check only ever watched passing is not known to work. For each guard
-# this applies the regression it exists to catch to a staged copy of the
-# checkout (never to the checkout itself) and requires the guard to FAIL.
-# A mutation whose target text is not found fails this script: an
-# unapplied mutation proves nothing.
+# A check only ever watched passing is not known to work. This first runs
+# every guard on an unmodified staged copy of the checkout and requires it
+# to PASS. Then, for each guard, it applies the regression the guard exists
+# to catch to the staged copy (never to the checkout itself) and requires
+# the guard's own failure: a failing test (`test result: FAILED`), or the
+# guard script's FAIL message. A build error or a toolchain problem is not
+# that failure and counts against this script, as does a mutation whose
+# target text is not found: an unapplied mutation proves nothing.
 #
 # Usage: scripts/check-guards-fail.sh            (all guards)
-#        scripts/check-guards-fail.sh --no-wasm  (skip the WASM rebuild)
+#        scripts/check-guards-fail.sh --no-wasm  (skip the WASM rebuilds)
 # Exit status: 0 = every guard failed as it should, 1 = one did not.
 
 set -euo pipefail
@@ -26,6 +29,39 @@ export CARGO_TARGET_DIR="$ROOT/target/guards-cargo"
     | tar --null --ignore-failed-read -T - -cf -) | tar -xf - -C "$STAGE"
 D="$STAGE/delegates/mail-delegate/src"
 
+delegate_tests() {
+    cargo test --manifest-path "$STAGE/delegates/mail-delegate/Cargo.toml" --features v1-transition
+}
+protocol_tests() {
+    cargo test --manifest-path "$STAGE/Cargo.toml" -p freenet-mail-protocol
+}
+candidate_check() { "$STAGE/scripts/check-delegate-candidate.sh"; }
+
+TEST_FAILED='test result: FAILED'
+CANDIDATE_FAILED='FAIL: published-contract/candidate/mail_delegate is not what'
+
+failures=0
+
+# ── Baseline: every guard passes on the unmodified copy ─────────────────────
+baseline() { # name command...
+    local name="$1"
+    shift
+    if "$@" > "$STAGE/out" 2>&1; then
+        echo "ok - baseline: $name passes"
+    else
+        echo "not ok - baseline: $name fails before any mutation"
+        tail -30 "$STAGE/out"
+        failures=$((failures + 1))
+    fi
+}
+baseline "delegate tests" delegate_tests
+baseline "protocol tests" protocol_tests
+[ "$WASM" -eq 1 ] && baseline "candidate check" candidate_check
+if [ "$failures" -ne 0 ]; then
+    echo "the guards fail without any regression applied; nothing below would mean anything"
+    exit 1
+fi
+
 replace() { # file old new: exact, single occurrence
     python3 - "$1" "$2" "$3" <<'PY'
 import sys
@@ -37,12 +73,12 @@ open(path, "w").write(s.replace(old, new))
 PY
 }
 
-failures=0
-guard() { # name file old new command...
-    local name="$1" file="$2" old="$3" new="$4"
-    shift 4
+guard() { # name file old new expected-output command...
+    local name="$1" file="$2" old="$3" new="$4" expected="$5"
+    shift 5
     cp "$file" "$file.orig"
     if ! replace "$file" "$old" "$new"; then
+        echo "not ok - $name: mutation not applied"
         failures=$((failures + 1))
         mv "$file.orig" "$file"
         return
@@ -50,58 +86,70 @@ guard() { # name file old new command...
     if "$@" > "$STAGE/out" 2>&1; then
         echo "not ok - $name: the guard PASSED with the regression applied"
         failures=$((failures + 1))
-    else
+    elif grep -q -F -- "$expected" "$STAGE/out"; then
         echo "ok - $name"
+    else
+        echo "not ok - $name: failed, but not with the guard's failure (build or tool error?)"
+        tail -20 "$STAGE/out"
+        failures=$((failures + 1))
     fi
     mv "$file.orig" "$file"
 }
 
-tests() { cargo test --quiet --manifest-path "$STAGE/delegates/mail-delegate/Cargo.toml"; }
-
 guard "origin gate refuses delegate callers" "$D/handlers.rs" \
     'Some(MessageOrigin::Delegate(_)) => Err(DelegateError::Other(' \
     'Some(MessageOrigin::Delegate(_)) => Ok(Origin([1; 32])), Some(MessageOrigin::Delegate(_)) => Err(DelegateError::Other(' \
-    tests
+    "$TEST_FAILED" delegate_tests
 guard "compare-and-swap refuses a stale writer" "$D/handlers.rs" \
-    'Some(g) => g == current_gen,' 'Some(_) => true,' tests
+    'Some(g) => g == current_gen,' 'Some(_) => true,' "$TEST_FAILED" delegate_tests
 guard "origins get separate namespaces" "$D/store.rs" \
-    'format!("o/{}/", hex(&origin.0))' '{ let _ = origin; "o/shared/".to_string() }' tests
+    'format!("o/{}/", hex(&origin.0))' '{ let _ = origin; "o/shared/".to_string() }' \
+    "$TEST_FAILED" delegate_tests
 guard "index records enforce per-kind caps" "$D/store.rs" \
-    'if ids.len() >= cap {' 'if ids.len() >= cap + 1_000_000 {' tests
+    'if ids.len() >= cap {' 'if ids.len() >= cap + 1_000_000 {' "$TEST_FAILED" delegate_tests
 guard "the export grant is the only way to skip the prompt" "$D/consent.rs" \
-    'if kind == Kind::Export && s.get(EXPORT_GRANT).is_some() {' 'if kind == Kind::Export {' tests
+    'if kind == Kind::Export && s.get(EXPORT_GRANT).is_some() {' 'if kind == Kind::Export {' \
+    "$TEST_FAILED" delegate_tests
+guard "an export session must match its cursor" "$D/consent.rs" \
+    '&& after == Some(session.cursor.as_slice())' '' "$TEST_FAILED" delegate_tests
 guard "the successor export holds no bookkeeping" "$D/handlers.rs" \
-    'rels.sort();' 'rels.push("mt/gen".to_string()); rels.sort();' tests
-guard "deletion cascades to the identity's items" "$D/handlers.rs" \
-    'for kind in ALL_KINDS.into_iter().filter(|k| store::shape(*k).0) {
-        let ix = index_rel(kind, Some(addr));' \
-    'for kind in ALL_KINDS.into_iter().filter(|_| false) {
-        let ix = index_rel(kind, Some(addr));' tests
-guard "removals need the message in the inbox" "$D/handlers.rs" \
-    'if hashes.iter().any(|h| !present.contains(&h.0)) {' 'if hashes.iter().any(|h| h.0 == [0xff; 32] && !present.contains(&h.0)) {' tests
+    'rels.sort();' 'rels.push("mt/gen".to_string()); rels.sort();' "$TEST_FAILED" delegate_tests
+guard "deletion is bounded per step" "$D/handlers.rs" \
+    'let batch: Vec<Vec<u8>> = ids.iter().take(budget).cloned().collect();' \
+    'let batch: Vec<Vec<u8>> = ids.iter().cloned().collect();' "$TEST_FAILED" delegate_tests
+guard "removals need genuine messages" "$D/handlers.rs" \
+    '.filter(|m| *blake3::hash(&m.content).as_bytes() == m.token_assignment.assignment_hash)' \
+    '.filter(|_| true)' "$TEST_FAILED" delegate_tests
+guard "removal hashes must ascend" "$D/handlers.rs" \
+    'if hashes.windows(2).any(|w| w[0].0 >= w[1].0) {' 'if hashes.is_empty() && hashes.len() > 1 {' \
+    "$TEST_FAILED" delegate_tests
+guard "an answer survives a failed index cleanup" "$D/consent.rs" \
+    'let _ = s.index_remove(PROMPT_INDEX, &answer.request_id.to_be_bytes());' \
+    's.index_remove(PROMPT_INDEX, &answer.request_id.to_be_bytes()).map_err(|_| DelegateError::Other("x".into()))?;' \
+    "$TEST_FAILED" delegate_tests
 guard "an interrupted delete is finished by its retry" "$D/handlers.rs" \
     'finish that now.
-        s.index_remove(&ix, &item.id)?;' 'finish that now.' tests
+        s.index_remove(&ix, &item.id)?;' 'finish that now.' "$TEST_FAILED" delegate_tests
 guard "a request for an unknown operation gets a typed answer" "$D/handlers.rs" \
-    'FailureCode::UnknownOperation,' 'FailureCode::BadInput,' tests
+    'FailureCode::UnknownOperation,' 'FailureCode::BadInput,' "$TEST_FAILED" delegate_tests
 guard "protocol encoding is pinned" "$STAGE/protocol/src/lib.rs" \
     'pub enum FailureCode {
     NotFound,' 'pub enum FailureCode {
     Gone,
-    NotFound,' cargo test --quiet --manifest-path "$STAGE/Cargo.toml" -p freenet-mail-protocol
+    NotFound,' "$TEST_FAILED" protocol_tests
 if [ "$WASM" -eq 1 ]; then
-    guard "the candidate is the source's build" "$STAGE/delegates/mail-delegate/src/store.rs" \
+    guard "the candidate is the source's build" "$D/store.rs" \
         'pub const MAX_PENDING_PROMPTS: usize = 4;' 'pub const MAX_PENDING_PROMPTS: usize = 5;' \
-        "$STAGE/scripts/check-delegate-candidate.sh"
-fi
-
-# The release guard has its own tests, which include the refusals.
-if "$ROOT/scripts/check-release-delegate_test.sh" > "$STAGE/out" 2>&1; then
-    echo "ok - release guard refuses the candidate, a missing or v1-transition delegate"
-else
-    echo "not ok - release guard tests"
-    cat "$STAGE/out"
-    failures=$((failures + 1))
+        "$CANDIDATE_FAILED" candidate_check
+    # The release guard's own tests build real WASM both ways and show each
+    # refusal.
+    if "$ROOT/scripts/check-release-delegate_test.sh" > "$STAGE/out" 2>&1; then
+        echo "ok - release guard: refusals shown on real builds"
+    else
+        echo "not ok - release guard tests"
+        cat "$STAGE/out"
+        failures=$((failures + 1))
+    fi
 fi
 
 [ "$failures" -eq 0 ] || { echo "$failures guard(s) did not fail as they should"; exit 1; }

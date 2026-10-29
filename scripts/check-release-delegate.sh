@@ -2,13 +2,15 @@
 # Refuse a release of v0.3.0 or later that would ship the mail delegate in
 # a state only meant for development:
 #
-#   1. the UI still embeds published-contract/candidate/ (the unfrozen
+#   1. the UI still references published-contract/candidate/ (the unfrozen
 #      build) instead of the frozen published-contract/wasm/v2/;
 #   2. the frozen delegate is missing;
 #   3. the frozen delegate was built with the `v1-transition` feature, whose
 #      V1AftParams operation hands the identity's signing seed to the app
-#      without asking. Detected by the serde field name `generator_seed`,
-#      which only that operation's code puts in the WASM.
+#      without asking. Proven two ways on real builds: the WASM must not
+#      contain the marker string that feature compiles in
+#      (handlers::V1_TRANSITION_MARKER), and it must be byte-identical to a
+#      fresh build of this source WITHOUT the feature.
 #
 # Releases before 0.3.0 do not ship this delegate and pass.
 #
@@ -31,6 +33,7 @@ while [ $# -gt 0 ]; do
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
 done
+MARKER="freenet-mail-delegate:v1-transition-enabled"
 
 # Whether dotted version $1 is lower than $2. Plain bash, because release.sh
 # also runs on macOS, whose BSD sort has no -V.
@@ -61,19 +64,30 @@ if version_lt "$base" 0.3.0; then
 fi
 
 failed=0
-if grep -rn --include='*.rs' 'published-contract/candidate' "$UI_DIR" > /dev/null 2>&1; then
-    echo "FAIL: the UI embeds published-contract/candidate/; freeze the delegate into" >&2
-    echo "      published-contract/wasm/v2/ and point the UI there first." >&2
-    grep -rn --include='*.rs' 'published-contract/candidate' "$UI_DIR" >&2 || true
+if grep -rn 'published-contract/candidate' "$UI_DIR" > /dev/null 2>&1; then
+    echo "FAIL: the UI references published-contract/candidate/; freeze the delegate" >&2
+    echo "      into published-contract/wasm/v2/ and point the UI there first." >&2
+    grep -rn 'published-contract/candidate' "$UI_DIR" >&2 || true
     failed=1
 fi
 if [ ! -f "$WASM" ]; then
     echo "FAIL: $WASM is missing: v$VERSION must ship a frozen mail delegate." >&2
-    failed=1
-elif grep -a -q -F 'generator_seed' "$WASM"; then
+    exit 1
+fi
+if grep -a -q -F "$MARKER" "$WASM"; then
     echo "FAIL: $WASM was built with the v1-transition feature (it can hand the" >&2
     echo "      identity's signing seed to the app). Build it without that feature." >&2
+    exit 1
+fi
+mkdir -p "$ROOT/target"
+OUT="$(mktemp -d "$ROOT/target/release-delegate.XXXXXX")"
+trap 'rm -r -- "$OUT"' EXIT
+"$ROOT/scripts/build-wasm.sh" delegates/mail-delegate delegate freenet-main-delegate \
+    "$OUT/mail_delegate" > "$OUT/build.log" 2>&1 \
+    || { cat "$OUT/build.log" >&2; echo "FAIL: could not build the delegate" >&2; exit 1; }
+if ! cmp -s "$OUT/mail_delegate" "$WASM"; then
+    echo "FAIL: $WASM is not this source built without v1-transition." >&2
     failed=1
 fi
 [ "$failed" -eq 0 ] || exit 1
-echo "ok: v$VERSION ships a frozen mail delegate built without v1-transition"
+echo "ok: v$VERSION ships this source's mail delegate, built without v1-transition"

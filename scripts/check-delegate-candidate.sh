@@ -21,7 +21,7 @@ mkdir -p target
 OUT="$(mktemp -d "$ROOT/target/delegate-candidate.XXXXXX")"
 trap 'rm -r -- "$OUT"' EXIT
 
-scripts/build-wasm.sh delegates/mail-delegate delegate freenet-main-delegate \
+scripts/build-wasm.sh delegates/mail-delegate delegate freenet-main-delegate,v1-transition \
     "$OUT/mail_delegate" > "$OUT/build.log"
 built_hash="$(sed -n 's/^code hash: *//p' "$OUT/build.log" | tr -d '[:space:]')"
 
