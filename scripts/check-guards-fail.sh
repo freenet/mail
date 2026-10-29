@@ -27,6 +27,10 @@ export CARGO_TARGET_DIR="$ROOT/target/guards-cargo"
 
 (cd "$ROOT" && git ls-files -z --cached --others --exclude-standard \
     | tar --null --ignore-failed-read -T - -cf -) | tar -xf - -C "$STAGE"
+# The copy keeps the checkout's mtimes, which can be older than artifacts in
+# the shared target dir built from a MUTATED copy by an earlier run; cargo
+# would then think those fresh. Make every staged file newer.
+find "$STAGE" -type f -exec touch {} +
 D="$STAGE/delegates/mail-delegate/src"
 
 delegate_tests() {
@@ -107,6 +111,9 @@ guard() { # name file old new expected command...
         failures=$((failures + 1))
     fi
     mv "$file.orig" "$file"
+    # cp gave the copy an mtime older than the mutated build; make the restored
+    # file newer, or cargo would keep using the mutated build.
+    touch "$file"
 }
 
 dt() { guard "$1" "$2" "$3" "$4" "tests:$5" delegate_tests; }
