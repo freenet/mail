@@ -2,6 +2,7 @@
 
 mod resilience;
 mod round2;
+mod round3;
 
 use freenet_mail_protocol::{
     Addr, DsaSeed, Entropy, FailureCode, Hash32, IdentityInfo, ImportKind, ImportSource, ItemKind,
@@ -1038,13 +1039,28 @@ fn hold_inbox(env: &mut MemEnv, vk: &[u8], messages: &[(Vec<u8>, [u8; 32])]) {
         .insert(crate::handlers::v1_inbox_id(vk).unwrap(), state);
 }
 
-/// A message as v0.2.x stores it: its hash is blake3 of its content.
-fn genuine(content: &[u8]) -> (Vec<u8>, [u8; 32]) {
-    (content.to_vec(), *blake3::hash(content).as_bytes())
+/// A message stored the way v0.2.x stores it (`ui/src/inbox.rs`): the
+/// assignment hash is blake3 of ONE encryption of the message, and the
+/// stored content is a SECOND, different encryption of it.
+fn v0_2_x_message(recipient_ek: &[u8], plaintext: &[u8], seed: u8) -> (Vec<u8>, [u8; 32]) {
+    use crate::crypto::{MixRng, decode_ek, encrypt_v1};
+    let ek = decode_ek(recipient_ek).unwrap();
+    let hashed = encrypt_v1(
+        &ek,
+        plaintext,
+        &mut MixRng::new("t", &[seed; 32], &Entropy([1; 32])),
+    );
+    let stored = encrypt_v1(
+        &ek,
+        plaintext,
+        &mut MixRng::new("t", &[seed; 32], &Entropy([2; 32])),
+    );
+    assert_ne!(hashed, stored);
+    (stored, *blake3::hash(&hashed).as_bytes())
 }
 
 #[test]
-fn a_removal_is_signed_only_for_genuine_messages_in_ascending_order() {
+fn a_removal_is_signed_for_real_messages_in_ascending_order_only() {
     let mut env = MemEnv::default();
     let me = vector_identity(&mut env);
     let remove = |env: &mut MemEnv, hashes: Vec<[u8; 32]>| {
@@ -1057,35 +1073,40 @@ fn a_removal_is_signed_only_for_genuine_messages_in_ascending_order() {
             },
         )
     };
-    let (a, b) = (genuine(b"one"), genuine(b"two"));
+    let a = v0_2_x_message(&me.ek, b"one", 1);
+    let b = v0_2_x_message(&me.ek, b"two", 2);
+    assert_ne!(
+        *blake3::hash(&a.0).as_bytes(),
+        a.1,
+        "the hash is not of the stored content"
+    );
     let (lo, hi) = if a.1 < b.1 { (a.1, b.1) } else { (b.1, a.1) };
     // No inbox held on this node: refused.
     assert_eq!(remove(&mut env, vec![lo]), Err(FailureCode::Refused));
 
-    // Planted messages whose hashes, in inbox order, spell out bytes the
-    // sender chose (here 64 bytes standing in for a ciphertext). Their hashes
-    // are not derived from their content.
-    let mut chosen = [0u8; 64];
-    chosen[..32].copy_from_slice(&[0x10; 32]);
-    chosen[32..].copy_from_slice(&[0x20; 32]);
-    let p1: [u8; 32] = chosen[..32].try_into().unwrap();
-    let p2: [u8; 32] = chosen[32..].try_into().unwrap();
+    // A planted attempt: a real v1 ciphertext's 32-byte chunks, each the
+    // hash of a planted message, requested in ciphertext order.
+    let forged = crate::crypto::encrypt_v1(
+        &crate::crypto::decode_ek(&me.ek).unwrap(),
+        b"forged",
+        &mut crate::crypto::MixRng::new("t", &[9; 32], &Entropy([9; 32])),
+    );
+    let chunks: Vec<[u8; 32]> = forged[..96]
+        .chunks(32)
+        .map(|c| c.try_into().unwrap())
+        .collect();
+    assert!(
+        chunks.windows(2).any(|w| w[0] >= w[1]),
+        "ciphertext chunks do not ascend"
+    );
     let mut aliasing = [0u8; 32];
     aliasing[..8].copy_from_slice(freenet_mail_wire_v1::inbox::STATE_UPDATE);
-    hold_inbox(
-        &mut env,
-        &me.vk,
-        &[
-            a.clone(),
-            b.clone(),
-            (b"x".to_vec(), p1),
-            (b"y".to_vec(), p2),
-            (b"z".to_vec(), aliasing),
-        ],
-    );
+    let mut held = vec![a.clone(), b.clone(), (b"z".to_vec(), aliasing)];
+    held.extend(chunks.iter().map(|c| (b"x".to_vec(), *c)));
+    hold_inbox(&mut env, &me.vk, &held);
 
     let Ok(Reply::Signature(sig)) = remove(&mut env, vec![lo, hi]) else {
-        panic!("removal refused");
+        panic!("removal of real messages refused");
     };
     let payload = freenet_mail_wire_v1::inbox::removal_payload(&[lo, hi]);
     assert_eq!(
@@ -1095,13 +1116,9 @@ fn a_removal_is_signed_only_for_genuine_messages_in_ascending_order() {
     );
     assert_eq!(sig.into_vec(), vector_keys().sign(&payload));
 
-    // Order and duplicates.
     assert_eq!(remove(&mut env, vec![hi, lo]), Err(FailureCode::BadInput));
     assert_eq!(remove(&mut env, vec![lo, lo]), Err(FailureCode::BadInput));
-    // The planted "ciphertext", in inbox order (which is ascending here).
-    assert_eq!(remove(&mut env, vec![p1, p2]), Err(FailureCode::Refused));
-    assert_eq!(remove(&mut env, vec![p1]), Err(FailureCode::Refused));
-    // A hash not in the inbox at all, and one aliasing the authority salt.
+    assert_eq!(remove(&mut env, chunks.clone()), Err(FailureCode::BadInput));
     assert_eq!(
         remove(&mut env, vec![[0xee; 32]]),
         Err(FailureCode::Refused)

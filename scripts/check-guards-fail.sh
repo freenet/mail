@@ -5,10 +5,10 @@
 # every guard on an unmodified staged copy of the checkout and requires it
 # to PASS. Then, for each guard, it applies the regression the guard exists
 # to catch to the staged copy (never to the checkout itself) and requires
-# the guard's own failure: a failing test (`test result: FAILED`), or the
-# guard script's FAIL message. A build error or a toolchain problem is not
-# that failure and counts against this script, as does a mutation whose
-# target text is not found: an unapplied mutation proves nothing.
+# the guard's own failure: the NAMED test(s) failing (`test ...<name> ...
+# FAILED`; other tests failing alongside does not count), or the guard
+# script's FAIL message. A build or toolchain error is not that failure,
+# and neither is a mutation whose target text is not found.
 #
 # Usage: scripts/check-guards-fail.sh            (all guards)
 #        scripts/check-guards-fail.sh --no-wasm  (skip the WASM rebuilds)
@@ -36,9 +36,6 @@ protocol_tests() {
     cargo test --manifest-path "$STAGE/Cargo.toml" -p freenet-mail-protocol
 }
 candidate_check() { "$STAGE/scripts/check-delegate-candidate.sh"; }
-
-TEST_FAILED='test result: FAILED'
-CANDIDATE_FAILED='FAIL: published-contract/candidate/mail_delegate is not what'
 
 failures=0
 
@@ -73,7 +70,23 @@ open(path, "w").write(s.replace(old, new))
 PY
 }
 
-guard() { # name file old new expected-output command...
+# Whether the output shows the expected failure. `expected` is either
+# `tests:<name>[,<name>...]` (each named test must be reported FAILED) or a
+# fixed string the guard prints.
+shows() {
+    local expected="$1" out="$2" name
+    case "$expected" in
+        tests:*)
+            local IFS=,
+            for name in ${expected#tests:}; do
+                grep -q -E "^test ([a-z0-9_]+::)*${name} \.\.\. FAILED$" "$out" || return 1
+            done
+            ;;
+        *) grep -q -F -- "$expected" "$out" ;;
+    esac
+}
+
+guard() { # name file old new expected command...
     local name="$1" file="$2" old="$3" new="$4" expected="$5"
     shift 5
     cp "$file" "$file.orig"
@@ -86,52 +99,98 @@ guard() { # name file old new expected-output command...
     if "$@" > "$STAGE/out" 2>&1; then
         echo "not ok - $name: the guard PASSED with the regression applied"
         failures=$((failures + 1))
-    elif grep -q -F -- "$expected" "$STAGE/out"; then
+    elif shows "$expected" "$STAGE/out"; then
         echo "ok - $name"
     else
-        echo "not ok - $name: failed, but not with the guard's failure (build or tool error?)"
-        tail -20 "$STAGE/out"
+        echo "not ok - $name: failed, but not as $expected (build error or another test?)"
+        grep -E "FAILED|^error" "$STAGE/out" | head -10
         failures=$((failures + 1))
     fi
     mv "$file.orig" "$file"
 }
 
-guard "origin gate refuses delegate callers" "$D/handlers.rs" \
+dt() { guard "$1" "$2" "$3" "$4" "tests:$5" delegate_tests; }
+
+dt "origin gate refuses delegate callers" "$D/handlers.rs" \
     'Some(MessageOrigin::Delegate(_)) => Err(DelegateError::Other(' \
     'Some(MessageOrigin::Delegate(_)) => Ok(Origin([1; 32])), Some(MessageOrigin::Delegate(_)) => Err(DelegateError::Other(' \
-    "$TEST_FAILED" delegate_tests
-guard "compare-and-swap refuses a stale writer" "$D/handlers.rs" \
-    'Some(g) => g == current_gen,' 'Some(_) => true,' "$TEST_FAILED" delegate_tests
-guard "origins get separate namespaces" "$D/store.rs" \
+    origin_gate_truth_table,delegate_and_unattested_callers_change_nothing
+dt "compare-and-swap refuses a stale writer" "$D/handlers.rs" \
+    'Some(g) => g == current_gen,' 'Some(_) => true,' cas_refuses_a_stale_writer_and_accepts_the_current_one
+dt "origins get separate namespaces" "$D/store.rs" \
     'format!("o/{}/", hex(&origin.0))' '{ let _ = origin; "o/shared/".to_string() }' \
-    "$TEST_FAILED" delegate_tests
-guard "index records enforce per-kind caps" "$D/store.rs" \
-    'if ids.len() >= cap {' 'if ids.len() >= cap + 1_000_000 {' "$TEST_FAILED" delegate_tests
-guard "the export grant is the only way to skip the prompt" "$D/consent.rs" \
+    origins_and_kinds_never_share_a_key,a_foreign_origin_can_neither_read_nor_change_another_namespace
+dt "index records enforce per-kind caps" "$D/store.rs" \
+    'if ids.len() >= cap {' 'if ids.len() >= cap + 1_000_000 {' per_kind_caps_are_enforced_from_the_index
+dt "the export grant is the only way to skip the prompt" "$D/consent.rs" \
     'if kind == Kind::Export && s.get(EXPORT_GRANT).is_some() {' 'if kind == Kind::Export {' \
-    "$TEST_FAILED" delegate_tests
-guard "an export session must match its cursor" "$D/consent.rs" \
-    '&& after == Some(session.cursor.as_slice())' '' "$TEST_FAILED" delegate_tests
-guard "the successor export holds no bookkeeping" "$D/handlers.rs" \
-    'rels.sort();' 'rels.push("mt/gen".to_string()); rels.sort();' "$TEST_FAILED" delegate_tests
-guard "deletion is bounded per step" "$D/handlers.rs" \
+    an_export_asks_and_only_an_allow_releases_the_key
+dt "an export session must match its cursor" "$D/consent.rs" \
+    '&& after == Some(session.cursor.as_slice())' '' \
+    an_approved_export_continues_under_its_session_and_nothing_else
+dt "an export session has a page limit" "$D/consent.rs" \
+    '&& session.pages_left > 0;' ';' a_session_serves_no_more_pages_than_it_has_left
+dt "revoking ends the export session" "$D/handlers.rs" \
+    '.and_then(|()| s.del(store::EXPORT_SESSION))' '' revoking_the_grant_ends_the_export_session
+dt "prompts expire" "$D/consent.rs" \
+    'n.saturating_sub(c) > PROMPT_TTL_SECS ||' 'n.saturating_sub(c) > PROMPT_TTL_SECS * 1000 ||' \
+    prompts_expire_and_an_expired_answer_is_refused
+dt "a stash dated in the future is expired" "$D/consent.rs" \
+    ' || c > n + MAX_CLOCK_SKEW_SECS,' ',' a_stash_dated_in_the_future_is_treated_as_expired
+dt "the successor export holds no bookkeeping" "$D/handlers.rs" \
+    'rels.sort();' 'rels.push("mt/gen".to_string()); rels.sort();' \
+    the_successor_export_asks_and_holds_exactly_the_data
+dt "the successor export leaves out deleting identities" "$D/handlers.rs" \
+    'if load_identity(s, &addr)?.is_some_and(|(_, r)| r.deleting) {' 'if false {' \
+    the_successor_export_leaves_out_an_identity_being_deleted
+dt "deletion removes the identity's items" "$D/handlers.rs" \
+    'for id in &batch {' 'for id in batch.iter().take(0) {' \
+    deleting_an_identity_asks_every_time_and_removes_everything_it_owns
+dt "deletion is bounded per step" "$D/handlers.rs" \
     'let batch: Vec<Vec<u8>> = ids.iter().take(budget).cloned().collect();' \
-    'let batch: Vec<Vec<u8>> = ids.iter().cloned().collect();' "$TEST_FAILED" delegate_tests
-guard "removals need genuine messages" "$D/handlers.rs" \
-    '.filter(|m| *blake3::hash(&m.content).as_bytes() == m.token_assignment.assignment_hash)' \
-    '.filter(|_| true)' "$TEST_FAILED" delegate_tests
-guard "removal hashes must ascend" "$D/handlers.rs" \
+    'let batch: Vec<Vec<u8>> = ids.iter().cloned().collect();' \
+    a_large_identity_is_deleted_in_bounded_steps_and_is_unusable_meanwhile
+dt "removals need the message in the inbox" "$D/handlers.rs" \
+    'if hashes.iter().any(|h| !present.contains(&h.0)) {' 'if hashes.is_empty() && !present.is_empty() {' \
+    a_removal_is_signed_for_real_messages_in_ascending_order_only
+dt "removal hashes must ascend" "$D/handlers.rs" \
     'if hashes.windows(2).any(|w| w[0].0 >= w[1].0) {' 'if hashes.is_empty() && hashes.len() > 1 {' \
-    "$TEST_FAILED" delegate_tests
-guard "an answer survives a failed index cleanup" "$D/consent.rs" \
+    a_removal_is_signed_for_real_messages_in_ascending_order_only
+# The three prompt orderings, each put back the way it used to be.
+dt "a prompt's index slot is claimed before its stash" "$D/consent.rs" \
+    's.index_add(PROMPT_INDEX, &prompt_id.to_be_bytes(), MAX_PENDING_PROMPTS)?;
+    if let Err(f) = s.put(&prompt_rel(prompt_id), &stash) {
+        let _ = s.index_remove(PROMPT_INDEX, &prompt_id.to_be_bytes());
+        return Err(f);
+    }' \
+    's.put(&prompt_rel(prompt_id), &stash)?;
+    s.index_add(PROMPT_INDEX, &prompt_id.to_be_bytes(), MAX_PENDING_PROMPTS)?;' \
+    a_prompt_whose_index_slot_cannot_be_claimed_leaves_no_stash
+dt "pruning keeps refusals it already built" "$D/consent.rs" \
+    '        if s.del(&rel).is_err() {
+            return;
+        }' \
+    '        if s.del(&rel).is_err() {
+            out.clear();
+            return;
+        }' a_failed_cleanup_of_one_expired_prompt_does_not_drop_anothers_refusal
+dt "an answer is given only once its stash is cleared" "$D/consent.rs" \
+    '    if s.del(&rel).is_err() {
+        return Err(DelegateError::Other(' \
+    '    if s.del(&rel).is_err() && false {
+        return Err(DelegateError::Other(' \
+    an_answer_whose_stash_cannot_be_cleared_is_answered_once_later
+dt "an answer survives a failed index cleanup" "$D/consent.rs" \
     'let _ = s.index_remove(PROMPT_INDEX, &answer.request_id.to_be_bytes());' \
     's.index_remove(PROMPT_INDEX, &answer.request_id.to_be_bytes()).map_err(|_| DelegateError::Other("x".into()))?;' \
-    "$TEST_FAILED" delegate_tests
-guard "an interrupted delete is finished by its retry" "$D/handlers.rs" \
+    an_answer_whose_index_cleanup_fails_still_gets_its_response
+dt "an interrupted delete is finished by its retry" "$D/handlers.rs" \
     'finish that now.
-        s.index_remove(&ix, &item.id)?;' 'finish that now.' "$TEST_FAILED" delegate_tests
-guard "a request for an unknown operation gets a typed answer" "$D/handlers.rs" \
-    'FailureCode::UnknownOperation,' 'FailureCode::BadInput,' "$TEST_FAILED" delegate_tests
+        s.index_remove(&ix, &item.id)?;' 'finish that now.' \
+    an_item_delete_interrupted_before_the_index_update_is_finished_by_its_retry
+dt "a request for an unknown operation gets a typed answer" "$D/handlers.rs" \
+    'FailureCode::UnknownOperation,' 'FailureCode::BadInput,' \
+    a_request_from_a_newer_ui_gets_a_typed_answer_with_its_id
 # A rename that still compiles: only the pinned bytes can catch it. (A new
 # variant is caught earlier, by the wildcard-free match in golden.rs, at
 # compile time.)
@@ -139,13 +198,13 @@ guard "protocol encoding is pinned" "$STAGE/protocol/src/lib.rs" \
     'pub enum FailureCode {
     NotFound,' 'pub enum FailureCode {
     #[serde(rename = "Missing")]
-    NotFound,' "$TEST_FAILED" protocol_tests
+    NotFound,' "tests:golden_every_variant_encodes_to_its_pinned_bytes" protocol_tests
 if [ "$WASM" -eq 1 ]; then
     guard "the candidate is the source's build" "$D/store.rs" \
         'pub const MAX_PENDING_PROMPTS: usize = 4;' 'pub const MAX_PENDING_PROMPTS: usize = 5;' \
-        "$CANDIDATE_FAILED" candidate_check
-    # The release guard's own tests build real WASM both ways and show each
-    # refusal.
+        'FAIL: published-contract/candidate/mail_delegate is not what' candidate_check
+    # The release guard's own tests build real WASM and show each refusal,
+    # including each of its two feature checks alone.
     if "$ROOT/scripts/check-release-delegate_test.sh" > "$STAGE/out" 2>&1; then
         echo "ok - release guard: refusals shown on real builds"
     else

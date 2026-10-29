@@ -40,6 +40,17 @@ expect() {
 expect pass "this source built without v1-transition passes" 0.3.0 --wasm "$TMP/release.wasm" --ui-dir "$TMP/ui-clean"
 expect fail "the committed candidate (built with v1-transition) is refused" \
     0.3.0 --wasm "$ROOT/published-contract/candidate/mail_delegate" --ui-dir "$TMP/ui-clean"
+# Each feature check alone. The candidate against a reference built WITH the
+# feature matches byte for byte, so only the marker check can refuse it...
+expect fail "the marker check alone refuses a v1-transition build" \
+    0.3.0 --wasm "$ROOT/published-contract/candidate/mail_delegate" --ui-dir "$TMP/ui-clean" \
+    --reference-features freenet-main-delegate,v1-transition
+# ...and a marker-free WASM that is not this source's build can only be
+# refused by the byte comparison.
+cp "$TMP/release.wasm" "$TMP/other.wasm"
+printf '\0' >> "$TMP/other.wasm"
+expect fail "the byte check alone refuses a marker-free build that is not the source's" \
+    0.3.0 --wasm "$TMP/other.wasm" --ui-dir "$TMP/ui-clean"
 expect fail "a UI referencing the candidate is refused" 0.3.0 --wasm "$TMP/release.wasm" --ui-dir "$TMP/ui-candidate"
 expect fail "a missing frozen delegate is refused" 0.3.1 --wasm "$TMP/missing" --ui-dir "$TMP/ui-clean"
 expect fail "a pre-release of 0.3.0 is checked too" 0.3.0-rc.1 --wasm "$TMP/missing" --ui-dir "$TMP/ui-clean"

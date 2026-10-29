@@ -15,7 +15,8 @@
 # Releases before 0.3.0 do not ship this delegate and pass.
 #
 # Usage: scripts/check-release-delegate.sh <version> [--wasm FILE] [--ui-dir DIR]
-#   --wasm and --ui-dir override the checked files (for the script's tests).
+#                                          [--reference-features F]
+#   The options exist for the script's tests.
 # Exit status: 0 = ok, 1 = refused, 2 = usage error.
 
 set -euo pipefail
@@ -26,10 +27,14 @@ VERSION="${1:-}"
 shift
 WASM="$ROOT/published-contract/wasm/v2/mail_delegate"
 UI_DIR="$ROOT/ui"
+# The features of the reference build the frozen delegate must equal. Only the
+# script's tests change it, to exercise the byte comparison on its own.
+REFERENCE_FEATURES=freenet-main-delegate
 while [ $# -gt 0 ]; do
     case "$1" in
         --wasm) WASM="$2"; shift 2 ;;
         --ui-dir) UI_DIR="$2"; shift 2 ;;
+        --reference-features) REFERENCE_FEATURES="$2"; shift 2 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
 done
@@ -82,7 +87,7 @@ fi
 mkdir -p "$ROOT/target"
 OUT="$(mktemp -d "$ROOT/target/release-delegate.XXXXXX")"
 trap 'rm -r -- "$OUT"' EXIT
-"$ROOT/scripts/build-wasm.sh" delegates/mail-delegate delegate freenet-main-delegate \
+"$ROOT/scripts/build-wasm.sh" delegates/mail-delegate delegate "$REFERENCE_FEATURES" \
     "$OUT/mail_delegate" > "$OUT/build.log" 2>&1 \
     || { cat "$OUT/build.log" >&2; echo "FAIL: could not build the delegate" >&2; exit 1; }
 if ! cmp -s "$OUT/mail_delegate" "$WASM"; then

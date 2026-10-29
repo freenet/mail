@@ -834,7 +834,6 @@ struct InboxHashes {
 
 #[derive(Deserialize)]
 struct MessageHash {
-    content: Vec<u8>,
     token_assignment: AssignmentHash,
 }
 
@@ -852,9 +851,17 @@ struct AssignmentHash {
 ///
 /// - strictly ascending, distinct hashes (the contract accepts any order);
 /// - hashes of messages in this identity's v1 inbox as held on this node;
-/// - hashes v0.2.x derived from the message, `blake3(content)`, which a
-///   sender cannot choose (the contract never checks this);
 /// - never a payload that could alias an authority payload.
+///
+/// A sender does choose its message's hash: v0.2.x hashes one encryption of
+/// the message and stores another, so the hash is not bound to the stored
+/// content and cannot be checked against it. Ordering is the defence
+/// instead. A signature over the payload verifies as a v1 message signature
+/// over the same bytes; to make that a message anyone would accept, the
+/// payload must be a real ciphertext whose 32-byte chunks happen to be
+/// strictly ascending, which for a ciphertext of n chunks occurs with
+/// probability 1/n! (about 2^-138 for the smallest v1 ciphertext). Raw
+/// ascending bytes decrypt to nothing.
 fn sign_v1_removal(s: &Space<'_>, addr: &Addr, hashes: &[Hash32]) -> OpResult {
     use freenet_mail_wire_v1::inbox::{STATE_UPDATE, removal_payload};
     if hashes.is_empty() || hashes.len() > MAX_REMOVAL_BATCH {
@@ -881,17 +888,15 @@ fn sign_v1_removal(s: &Space<'_>, addr: &Addr, hashes: &[Hash32]) -> OpResult {
         })?;
     let inbox: InboxHashes = serde_json::from_slice(&state)
         .map_err(|_| fail(FailureCode::Internal, "the inbox state is unreadable"))?;
-    // Only messages whose hash is what v0.2.x derives from their content.
-    let genuine: std::collections::BTreeSet<[u8; 32]> = inbox
+    let present: std::collections::BTreeSet<[u8; 32]> = inbox
         .messages
         .iter()
-        .filter(|m| *blake3::hash(&m.content).as_bytes() == m.token_assignment.assignment_hash)
         .map(|m| m.token_assignment.assignment_hash)
         .collect();
-    if hashes.iter().any(|h| !genuine.contains(&h.0)) {
+    if hashes.iter().any(|h| !present.contains(&h.0)) {
         return Err(fail(
             FailureCode::Refused,
-            "a hash is not a genuine message in this inbox",
+            "a hash is not a message in this inbox",
         ));
     }
     let ids: Vec<[u8; 32]> = hashes.iter().map(|h| h.0).collect();
@@ -977,6 +982,10 @@ pub fn exportable_keys(s: &Space<'_>) -> Result<Vec<String>, Failure> {
                 .try_into()
                 .map_err(|_| fail(FailureCode::Internal, "the identity index is unreadable"))?,
         );
+        // An identity being deleted is not data to carry forward.
+        if load_identity(s, &addr)?.is_some_and(|(_, r)| r.deleting) {
+            continue;
+        }
         rels.push(identity_rel(&addr));
         for kind in ALL_KINDS.into_iter().filter(|k| store::shape(*k).0) {
             add_kind(s, &mut rels, kind, Some(addr))?;

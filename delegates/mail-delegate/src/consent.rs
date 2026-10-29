@@ -206,6 +206,14 @@ fn continue_session(
     }
 }
 
+/// Test hook: set the live export session's remaining page count.
+#[cfg(test)]
+pub(crate) fn set_session_pages_left(s: &mut Space<'_>, pages: u32) {
+    let mut session: ExportSession = from_cbor(&s.get(EXPORT_SESSION).unwrap()).unwrap();
+    session.pages_left = pages;
+    s.put(EXPORT_SESSION, &to_cbor(&session).unwrap()).unwrap();
+}
+
 /// Checks that can fail before asking, so the user is never asked about a
 /// request that cannot succeed.
 fn precheck(s: &Space<'_>, op: &Op) -> Result<(), Failure> {
