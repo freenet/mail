@@ -134,6 +134,11 @@ pub(crate) enum BackupParseError {
     UnsupportedJsonVersion(u32),
     /// A JSON backup whose key fields are the wrong size.
     BadKeyLength,
+    /// Larger than any backup this app writes.
+    TooLarge,
+    /// A JSON backup whose alias or description is longer than the mail
+    /// delegate accepts.
+    NamesTooLong,
 }
 
 impl std::fmt::Display for BackupParseError {
@@ -160,9 +165,26 @@ impl std::fmt::Display for BackupParseError {
                 f,
                 "This backup file is damaged: its key data is the wrong size."
             ),
+            BackupParseError::TooLarge => write!(
+                f,
+                "This is far larger than a Freenet Mail backup. Pick the .json or .txt \
+                 file you exported, or paste your recovery key."
+            ),
+            BackupParseError::NamesTooLong => write!(
+                f,
+                "This backup's alias or description is too long (at most \
+                 {MAX_ALIAS_CHARS} and {MAX_DESCRIPTION_CHARS} characters)."
+            ),
         }
     }
 }
+
+/// The most restore input (pasted or read from a file) that is parsed. A
+/// recovery key is under 200 bytes and a JSON backup a few KiB.
+pub(crate) const MAX_RESTORE_INPUT_BYTES: usize = 64 * 1024;
+/// The mail delegate's limits on an identity's names.
+pub(crate) const MAX_ALIAS_CHARS: usize = 64;
+pub(crate) const MAX_DESCRIPTION_CHARS: usize = 1024;
 
 /// Parse anything the restore form accepts: a recovery key, or a v2 JSON
 /// backup file. Input whose first non-whitespace character is `{` takes
@@ -172,9 +194,18 @@ impl std::fmt::Display for BackupParseError {
 /// asks for them. The returned backup always has seeds of the correct
 /// length, so `ml_dsa_signing_key()` / `ml_kem_dk()` will not panic on it.
 pub(crate) fn parse_backup(text: &str) -> Result<IdentityBackup, BackupParseError> {
+    if text.len() > MAX_RESTORE_INPUT_BYTES {
+        return Err(BackupParseError::TooLarge);
+    }
     let trimmed = text.trim();
     if trimmed.starts_with('{') {
-        return parse_json_backup(trimmed);
+        let backup = parse_json_backup(trimmed)?;
+        if backup.alias.chars().count() > MAX_ALIAS_CHARS
+            || backup.description.chars().count() > MAX_DESCRIPTION_CHARS
+        {
+            return Err(BackupParseError::NamesTooLong);
+        }
+        return Ok(backup);
     }
     let keys = decode(trimmed).map_err(BackupParseError::Token)?;
     Ok(IdentityBackup {
@@ -220,6 +251,40 @@ mod tests {
             ml_dsa_seed: (0u8..32).collect(),
             ml_kem_seed: (100u8..164).collect(),
         }
+    }
+
+    #[test]
+    fn oversized_restore_input_is_refused_unparsed() {
+        let huge = format!("{FIXTURE_TOKEN}{}", " ".repeat(MAX_RESTORE_INPUT_BYTES));
+        assert!(matches!(
+            parse_backup(&huge),
+            Err(BackupParseError::TooLarge)
+        ));
+        assert!(parse_backup(FIXTURE_TOKEN).is_ok());
+    }
+
+    #[test]
+    fn a_json_backup_with_overlong_names_is_refused() {
+        let backup = IdentityBackup {
+            version: IDENTITY_BACKUP_VERSION,
+            alias: "a".repeat(MAX_ALIAS_CHARS + 1),
+            description: String::new(),
+            keys: fixture_keys(),
+        };
+        let json = serde_json::to_string(&backup).unwrap();
+        assert!(matches!(
+            parse_backup(&json),
+            Err(BackupParseError::NamesTooLong)
+        ));
+    }
+
+    #[test]
+    fn identity_seeds_can_be_wiped() {
+        // `Drop` runs exactly this; checked on a live value, since freed
+        // memory cannot be read back.
+        let mut keys = fixture_keys();
+        zeroize::Zeroize::zeroize(&mut keys);
+        assert!(keys.ml_dsa_seed.is_empty() && keys.ml_kem_seed.is_empty());
     }
 
     /// The recovery key for `fixture_keys()`. Pins the wire format: if

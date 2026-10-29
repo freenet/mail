@@ -29,7 +29,7 @@ pub(crate) async fn list_identities() -> Result<Vec<IdentityInfo>, CallError> {
 pub(crate) async fn create_identity(
     alias: String,
     description: String,
-) -> Result<(IdentityInfo, zeroize::Zeroizing<String>), CallError> {
+) -> Result<(IdentityInfo, SecretString), CallError> {
     let op = Op::CreateIdentity {
         alias,
         description,
@@ -39,7 +39,7 @@ pub(crate) async fn create_identity(
         Reply::CreatedIdentity {
             identity,
             recovery_key,
-        } => Ok((identity, zeroize::Zeroizing::new(recovery_key))),
+        } => Ok((identity, SecretString::new(recovery_key))),
         other => Err(unexpected(&other)),
     }
 }
@@ -357,6 +357,41 @@ impl std::fmt::Debug for SecretBytes {
     }
 }
 
+/// A secret string held by the page, such as a recovery key. Clones share
+/// one allocation, which is zeroized when the last clone drops, and `Debug`
+/// prints nothing of it. (Text handed to the browser, for display, the
+/// clipboard or a download, is outside the page's control.)
+#[derive(Clone)]
+pub(crate) struct SecretString(std::rc::Rc<zeroize::Zeroizing<String>>);
+
+impl SecretString {
+    pub(crate) fn new(s: String) -> Self {
+        Self(std::rc::Rc::new(zeroize::Zeroizing::new(s)))
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl AsRef<str> for SecretString {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl PartialEq for SecretString {
+    fn eq(&self, other: &Self) -> bool {
+        std::rc::Rc::ptr_eq(&self.0, &other.0) || self.as_str() == other.as_str()
+    }
+}
+
+impl std::fmt::Debug for SecretString {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SecretString(<redacted>)")
+    }
+}
+
 /// The v1 token-generator delegate's parameters, which carry the identity's
 /// ML-DSA signing seed (transitional; removed with the anti-flood tokens).
 /// Fetch them only where they are used, and let them drop promptly.
@@ -369,11 +404,9 @@ pub(crate) async fn v1_aft_params(addr: Addr) -> Result<zeroize::Zeroizing<Vec<u
 
 // ── Exports (the delegate asks the user) ───────────────────────────────────
 
-pub(crate) async fn export_recovery_key(
-    addr: Addr,
-) -> Result<zeroize::Zeroizing<String>, CallError> {
+pub(crate) async fn export_recovery_key(addr: Addr) -> Result<SecretString, CallError> {
     match call(Op::ExportRecoveryKey { addr }).await? {
-        Reply::RecoveryKey(key) => Ok(zeroize::Zeroizing::new(key)),
+        Reply::RecoveryKey(key) => Ok(SecretString::new(key)),
         other => Err(unexpected(&other)),
     }
 }

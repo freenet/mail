@@ -270,16 +270,16 @@ pub(crate) async fn prepare(info: IdentityInfo) -> LoadedIdentity {
         }
     };
     let (inbox_migrate_from, aft_migrate_from, write) = plan_load(read);
-    if let Some(new) = write {
-        if let Err(e) = update_markers(info.addr, move |m| *m = new.clone()).await {
-            crate::log::error(
-                format!(
-                    "recording migration markers for `{}` failed: {e}",
-                    info.alias
-                ),
-                None,
-            );
-        }
+    if let Some(new) = write
+        && let Err(e) = update_markers(info.addr, move |m| *m = new.clone()).await
+    {
+        crate::log::error(
+            format!(
+                "recording migration markers for `{}` failed: {e}",
+                info.alias
+            ),
+            None,
+        );
     }
     LoadedIdentity {
         info,

@@ -204,7 +204,7 @@ pub(crate) fn ExportedKeyPanel(
         },
         Some(Ok(token)) => rsx! {
             BackupKeyPanel {
-                token: token.as_str().to_string(),
+                token: token.clone(),
                 alias: alias.clone(),
                 words: words.clone(),
                 saved,
@@ -224,7 +224,7 @@ pub(crate) fn ExportedKeyPanel(
 #[component]
 pub(crate) fn BackupKeyPanel(
     /// The recovery key (`fmail-key-1:...`).
-    token: String,
+    token: crate::mail_delegate::ops::SecretString,
     /// Alias, for the entry title and download filename.
     alias: String,
     /// The identity's six fingerprint words.
@@ -348,7 +348,7 @@ pub(crate) fn BackupKeyPanel(
                 return;
             }
             let fname = super::login::backup_filename(&alias, &words);
-            let body = format!("{token}\n");
+            let body = zeroize::Zeroizing::new(format!("{}\n", token.as_str()));
             match super::login::trigger_browser_download(&fname, body.as_bytes(), "text/plain") {
                 Ok(route) => {
                     download_status.set(Some(Ok((fname, route))));
@@ -421,7 +421,7 @@ pub(crate) fn BackupKeyPanel(
                         "aria-multiline": "true",
                         "aria-labelledby": "{key_label_id}",
                         tabindex: "0",
-                        "{token}"
+                        "{token.as_str()}"
                     }
                 } else {
                     div {
@@ -430,7 +430,7 @@ pub(crate) fn BackupKeyPanel(
                         "data-testid": testid::FM_BACKUP_KEY_MASKED,
                         role: "img",
                         "aria-label": "Recovery key, hidden. Press Show key to display it.",
-                        "{masked(&token)}"
+                        "{masked(token.as_str())}"
                     }
                 }
                 span { class: "field-help",

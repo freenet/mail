@@ -38,16 +38,19 @@ pub(crate) enum CopyOutcome {
 /// reach the clipboard (the create flow's discard warning) treats `false`
 /// as "possibly exported" until it hears otherwise.
 #[cfg(target_family = "wasm")]
-pub(crate) fn copy_text(text: String, done: impl FnOnce(CopyOutcome) + 'static) -> bool {
-    if exec_command_copy(&text) {
+pub(crate) fn copy_text<T: AsRef<str> + 'static>(
+    text: T,
+    done: impl FnOnce(CopyOutcome) + 'static,
+) -> bool {
+    if exec_command_copy(text.as_ref()) {
         done(CopyOutcome::Copied);
         return true;
     }
     wasm_bindgen_futures::spawn_local(async move {
-        match clipboard_api_write(&text).await {
+        match clipboard_api_write(text.as_ref()).await {
             Ok(()) => done(CopyOutcome::Copied),
             Err(api_err) => {
-                if shell_proxy_copy(&text) {
+                if shell_proxy_copy(text.as_ref()) {
                     done(CopyOutcome::SentToShell);
                 } else {
                     done(CopyOutcome::Failed(api_err));
@@ -59,7 +62,10 @@ pub(crate) fn copy_text(text: String, done: impl FnOnce(CopyOutcome) + 'static) 
 }
 
 #[cfg(not(target_family = "wasm"))]
-pub(crate) fn copy_text(_text: String, done: impl FnOnce(CopyOutcome) + 'static) -> bool {
+pub(crate) fn copy_text<T: AsRef<str> + 'static>(
+    _text: T,
+    done: impl FnOnce(CopyOutcome) + 'static,
+) -> bool {
     done(CopyOutcome::Failed(
         "no clipboard outside the browser".into(),
     ));

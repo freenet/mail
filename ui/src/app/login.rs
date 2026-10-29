@@ -371,6 +371,20 @@ pub(crate) struct StoredIdentityKeys {
 
 use serde::{Deserialize, Serialize};
 
+impl zeroize::Zeroize for StoredIdentityKeys {
+    fn zeroize(&mut self) {
+        self.ml_dsa_seed.zeroize();
+        self.ml_kem_seed.zeroize();
+    }
+}
+
+/// Seeds parsed from a restore are wiped when the value is dropped.
+impl Drop for StoredIdentityKeys {
+    fn drop(&mut self) {
+        zeroize::Zeroize::zeroize(self);
+    }
+}
+
 impl StoredIdentityKeys {
     #[cfg(test)]
     pub(crate) fn new(
@@ -1286,7 +1300,11 @@ pub(super) fn CreateAliasForm() -> Element {
     // Reveal stage: the identity the mail delegate just created, its
     // recovery key (returned this once) and its fingerprint, held until the
     // user continues, so they can back it up before the inbox is published.
-    type PendingIdentity = (Identity, zeroize::Zeroizing<String>, [&'static str; 6]);
+    type PendingIdentity = (
+        Identity,
+        crate::mail_delegate::ops::SecretString,
+        [&'static str; 6],
+    );
     let mut pending: Signal<Option<PendingIdentity>> = use_signal(|| None);
     // True once the recovery key has left the browser (copied, downloaded
     // or confirmed saved) during this creation flow, so we can warn before
@@ -1427,14 +1445,13 @@ pub(super) fn CreateAliasForm() -> Element {
     let copies_in_flight = copy_tracker.read().in_flight();
     // Recovery key for the pending keypair, built only while the panel is
     // open so the secret isn't rendered into the DOM unless asked for.
-    let pending_token: Option<Result<String, String>> = if *backup_panel_open.read() {
-        pending
-            .read()
-            .as_ref()
-            .map(|(_, key, _)| Ok(key.as_str().to_string()))
-    } else {
-        None
-    };
+    // A clone of the shared secret, not a copy of its text.
+    let pending_token: Option<Result<crate::mail_delegate::ops::SecretString, String>> =
+        if *backup_panel_open.read() {
+            pending.read().as_ref().map(|(_, key, _)| Ok(key.clone()))
+        } else {
+            None
+        };
 
     rsx! {
         if *discard_confirm_open.read() {
@@ -1691,6 +1708,9 @@ fn ImportForm() -> Element {
     let mut import_backup_form = use_context::<Signal<ImportBackup>>();
     let _actions = use_coroutine_handle::<NodeAction>();
     let mut parsed_backup: Signal<Option<IdentityBackup>> = use_signal(|| None);
+    // The parsed identity's verifying key and fingerprint words, derived once
+    // when the input is parsed rather than on every render.
+    let mut preview: Signal<Option<(Vec<u8>, [&'static str; 6])>> = use_signal(|| None);
     let mut paste_text = use_signal(String::new);
     // Name of the uploaded file the current input came from, if any.
     let mut loaded_file: Signal<Option<String>> = use_signal(|| None);
@@ -1717,6 +1737,7 @@ fn ImportForm() -> Element {
         held_error.set(None);
         if text.trim().is_empty() {
             parsed_backup.set(None);
+            preview.set(None);
             parse_error.set(String::new());
             return;
         }
@@ -1739,10 +1760,25 @@ fn ImportForm() -> Element {
                     }
                 }
                 parse_error.set(String::new());
+                // `parse_backup` guarantees correct seed lengths, so deriving
+                // the keys here cannot panic.
+                let (vk_bytes, ek_bytes) = {
+                    let ml_dsa = b.keys.ml_dsa_signing_key();
+                    let ml_kem = b.keys.ml_kem_dk();
+                    use ml_dsa::signature::Keypair;
+                    use ml_kem::kem::KeyExport;
+                    (
+                        ml_dsa.as_ref().verifying_key().encode().to_vec(),
+                        ml_kem.encapsulation_key().to_bytes().to_vec(),
+                    )
+                };
+                let words = crate::app::address_book::fingerprint_words(&vk_bytes, &ek_bytes);
+                preview.set(Some((vk_bytes, words)));
                 parsed_backup.set(Some(b));
             }
             Err(e) => {
                 parsed_backup.set(None);
+                preview.set(None);
                 if typed && super::backup_token::may_be_incomplete(&text, &e) {
                     parse_error.set(String::new());
                     held_error.set(Some(e.to_string()));
@@ -1753,28 +1789,19 @@ fn ImportForm() -> Element {
         }
     };
 
-    // Derive the identity once per render: the fingerprint preview and the
-    // already-on-this-device check both need it. `parse_backup` guarantees
-    // correct seed lengths, so deriving the keys here cannot panic.
+    // The fingerprint preview, and whether these keys are already on this
+    // device: restoring them again would create a second identity on the
+    // same inbox (same check as the identity's PartialEq: the ML-DSA
+    // verifying key).
     let (preview_words, existing_alias): (Option<[&'static str; 6]>, Option<String>) =
-        match parsed_backup.read().as_ref() {
-            Some(b) => {
-                let ml_dsa = b.keys.ml_dsa_signing_key();
-                let ml_kem = b.keys.ml_kem_dk();
-                use ml_dsa::signature::Keypair;
-                use ml_kem::kem::KeyExport;
-                let vk_bytes: Vec<u8> = ml_dsa.as_ref().verifying_key().encode().to_vec();
-                let ek_bytes: Vec<u8> = ml_kem.encapsulation_key().to_bytes().to_vec();
-                let words = crate::app::address_book::fingerprint_words(&vk_bytes, &ek_bytes);
-                // Restoring keys that are already here would create a
-                // second identity on the same inbox. Same check the
-                // identity's PartialEq uses: the ML-DSA verifying key.
+        match preview.read().as_ref() {
+            Some((vk_bytes, words)) => {
                 let existing = Identity::get_aliases()
                     .borrow()
                     .iter()
-                    .find(|i| i.ml_dsa_vk_bytes() == vk_bytes)
+                    .find(|i| i.ml_dsa_vk_bytes() == *vk_bytes)
                     .map(|i| i.alias.to_string());
-                (Some(words), existing)
+                (Some(*words), existing)
             }
             None => (None, None),
         };
@@ -1851,6 +1878,14 @@ fn ImportForm() -> Element {
                             let Some(file) = input.files().and_then(|files| files.item(0)) else {
                                 return;
                             };
+                            // Not read at all past the size of any backup.
+                            if file.size() > super::backup_token::MAX_RESTORE_INPUT_BYTES as f64 {
+                                input.set_value("");
+                                parsed_backup.set(None);
+                                preview.set(None);
+                                parse_error.set(super::backup_token::BackupParseError::TooLarge.to_string());
+                                return;
+                            }
                             let Ok(reader) = FileReader::new() else {
                                 parse_error.set("Couldn't read that file in this browser.".into());
                                 return;
@@ -1872,6 +1907,7 @@ fn ImportForm() -> Element {
                                     None => {
                                         loaded_file.set(None);
                                         parsed_backup.set(None);
+                                        preview.set(None);
                                         parse_error.set(format!(
                                             "Couldn't read {file_name}. Pick the .txt or .json file you exported."
                                         ));
@@ -2011,6 +2047,11 @@ fn ImportForm() -> Element {
                                 .await;
                                 match imported {
                                     Ok((info, _already_present)) => {
+                                        // The delegate holds the keys now:
+                                        // wipe the page's copies of them.
+                                        paste_text.with_mut(zeroize::Zeroize::zeroize);
+                                        parsed_backup.set(None);
+                                        preview.set(None);
                                         let identity = Identity::from_info(&info, UserId(0));
                                         // Restored from a recovery key or
                                         // backup file, so the user
