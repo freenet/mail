@@ -306,7 +306,15 @@ pub enum Op {
     ExportForSuccessor {
         source_generation: u32,
         after: Option<ByteBuf>,
+        /// The session token from the previous page's reply. With it, later
+        /// pages of an approved export do not ask again. Omitted when absent,
+        /// so requests without it encode as before.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session: Option<ByteBuf>,
     },
+    /// Withdraw a remembered "Always allow for this app" for exports, and end
+    /// any export session.
+    RevokeExportGrant,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -317,7 +325,8 @@ pub struct IdentityInfo {
     pub alias: String,
     pub description: String,
     /// False for an identity imported from older data until the user
-    /// confirms it is theirs.
+    /// confirms it is theirs. A hint for the UI, not a security boundary:
+    /// any code running under the app's origin can confirm it.
     pub confirmed: bool,
     pub generation: u64,
 }
@@ -367,6 +376,15 @@ pub enum Reply {
     ExportedSecrets {
         payload: ByteBuf,
         next: Option<ByteBuf>,
+        /// Present when more pages follow and the host has a clock: pass it
+        /// with the next page's request. Omitted when absent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session: Option<ByteBuf>,
+    },
+    /// Part of a long operation is done; send the same request again to
+    /// continue. `remaining` counts what is left.
+    Continue {
+        remaining: u32,
     },
 }
 

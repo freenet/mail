@@ -38,7 +38,9 @@ sha2 = { version = "=0.11.1", default-features = false }
 crate-type = ["cdylib", "rlib"]
 
 [features]
-default = ["v1-transition"]
+# No default features: the candidate is built with v1-transition explicitly,
+# a release build without it (scripts/check-release-delegate.sh).
+default = []
 # Exports the delegate's FFI entry points (the `#[delegate]` macro gates them
 # on it); build-wasm.sh enables it. Native tests build without it.
 freenet-main-delegate = []

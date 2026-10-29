@@ -37,6 +37,7 @@ fn op_name(op: &Op) -> &'static str {
         Op::ExportRecoveryKey { .. } => "op_export_recovery_key",
         Op::ExportProfile { .. } => "op_export_profile",
         Op::ExportForSuccessor { .. } => "op_export_for_successor",
+        Op::RevokeExportGrant => "op_revoke_export_grant",
     }
 }
 
@@ -57,6 +58,7 @@ fn reply_name(reply: &Reply) -> &'static str {
         Reply::RecoveryKey(_) => "reply_recovery_key",
         Reply::Profile(_) => "reply_profile",
         Reply::ExportedSecrets { .. } => "reply_exported_secrets",
+        Reply::Continue { .. } => "reply_continue",
     }
 }
 
@@ -201,7 +203,9 @@ fn ops() -> Vec<Op> {
         Op::ExportForSuccessor {
             source_generation: 2,
             after: None,
+            session: None,
         },
+        Op::RevokeExportGrant,
     ]
 }
 
@@ -246,7 +250,9 @@ fn replies() -> Vec<Reply> {
         Reply::ExportedSecrets {
             payload: b(&[5]),
             next: Some(b(b"ix/id")),
+            session: None,
         },
+        Reply::Continue { remaining: 12 },
     ]
 }
 
@@ -307,6 +313,19 @@ fn samples() -> Vec<(String, Vec<u8>)> {
         op: Op::GetStatus,
     };
     out.push(("request".into(), enc(&request)));
+    // Optional fields added later, present.
+    let with_session = Op::ExportForSuccessor {
+        source_generation: 2,
+        after: Some(b(b"it/x")),
+        session: Some(b(&[0x55; 32])),
+    };
+    out.push(("op_export_for_successor_session".into(), enc(&with_session)));
+    let reply_session = Reply::ExportedSecrets {
+        payload: b(&[5]),
+        next: Some(b(b"ix/id")),
+        session: Some(b(&[0x66; 32])),
+    };
+    out.push(("reply_exported_secrets_session".into(), enc(&reply_session)));
     let response = Response {
         request_id: RequestId([0x44; 16]),
         result: Err(Failure {

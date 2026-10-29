@@ -1,6 +1,7 @@
 //! Behaviour through the delegate's entry point, over an in-memory host.
 
 mod resilience;
+mod round2;
 
 use freenet_mail_protocol::{
     Addr, DsaSeed, Entropy, FailureCode, Hash32, IdentityInfo, ImportKind, ImportSource, ItemKind,
@@ -194,6 +195,7 @@ fn mutating_ops(a: Addr, g: u64) -> Vec<Op> {
         Op::ExportForSuccessor {
             source_generation: 1,
             after: None,
+            session: None,
         },
     ]
 }
@@ -1021,18 +1023,28 @@ fn the_authority_signature_is_what_v0_2_x_signs() {
 }
 
 /// A v1 inbox state for `vk` holding messages with these assignment hashes.
-fn hold_inbox(env: &mut MemEnv, vk: &[u8], hashes: &[[u8; 32]]) {
-    let messages: Vec<serde_json::Value> = hashes
+fn hold_inbox(env: &mut MemEnv, vk: &[u8], messages: &[(Vec<u8>, [u8; 32])]) {
+    let messages: Vec<serde_json::Value> = messages
         .iter()
-        .map(|h| serde_json::json!({"token_assignment": {"assignment_hash": h.to_vec()}}))
+        .map(|(content, h)| {
+            serde_json::json!({
+                "content": content,
+                "token_assignment": {"assignment_hash": h.to_vec()},
+            })
+        })
         .collect();
     let state = serde_json::to_vec(&serde_json::json!({ "messages": messages })).unwrap();
     env.contracts
         .insert(crate::handlers::v1_inbox_id(vk).unwrap(), state);
 }
 
+/// A message as v0.2.x stores it: its hash is blake3 of its content.
+fn genuine(content: &[u8]) -> (Vec<u8>, [u8; 32]) {
+    (content.to_vec(), *blake3::hash(content).as_bytes())
+}
+
 #[test]
-fn a_removal_is_signed_only_for_messages_in_the_identitys_own_inbox() {
+fn a_removal_is_signed_only_for_genuine_messages_in_ascending_order() {
     let mut env = MemEnv::default();
     let me = vector_identity(&mut env);
     let remove = |env: &mut MemEnv, hashes: Vec<[u8; 32]>| {
@@ -1045,27 +1057,55 @@ fn a_removal_is_signed_only_for_messages_in_the_identitys_own_inbox() {
             },
         )
     };
+    let (a, b) = (genuine(b"one"), genuine(b"two"));
+    let (lo, hi) = if a.1 < b.1 { (a.1, b.1) } else { (b.1, a.1) };
     // No inbox held on this node: refused.
-    assert_eq!(remove(&mut env, vec![[1; 32]]), Err(FailureCode::Refused));
+    assert_eq!(remove(&mut env, vec![lo]), Err(FailureCode::Refused));
+
+    // Planted messages whose hashes, in inbox order, spell out bytes the
+    // sender chose (here 64 bytes standing in for a ciphertext). Their hashes
+    // are not derived from their content.
+    let mut chosen = [0u8; 64];
+    chosen[..32].copy_from_slice(&[0x10; 32]);
+    chosen[32..].copy_from_slice(&[0x20; 32]);
+    let p1: [u8; 32] = chosen[..32].try_into().unwrap();
+    let p2: [u8; 32] = chosen[32..].try_into().unwrap();
     let mut aliasing = [0u8; 32];
     aliasing[..8].copy_from_slice(freenet_mail_wire_v1::inbox::STATE_UPDATE);
-    hold_inbox(&mut env, &me.vk, &[[1; 32], [2; 32], aliasing]);
-    let Ok(Reply::Signature(sig)) = remove(&mut env, vec![[1; 32], [2; 32]]) else {
+    hold_inbox(
+        &mut env,
+        &me.vk,
+        &[
+            a.clone(),
+            b.clone(),
+            (b"x".to_vec(), p1),
+            (b"y".to_vec(), p2),
+            (b"z".to_vec(), aliasing),
+        ],
+    );
+
+    let Ok(Reply::Signature(sig)) = remove(&mut env, vec![lo, hi]) else {
         panic!("removal refused");
     };
-    let payload = freenet_mail_wire_v1::inbox::removal_payload(&[[1; 32], [2; 32]]);
+    let payload = freenet_mail_wire_v1::inbox::removal_payload(&[lo, hi]);
     assert_eq!(
         payload,
-        [[1u8; 32], [2u8; 32]].concat(),
+        [lo, hi].concat(),
         "the contract's layout: hashes concatenated"
     );
     assert_eq!(sig.into_vec(), vector_keys().sign(&payload));
-    // A hash that is not in the inbox: refused.
+
+    // Order and duplicates.
+    assert_eq!(remove(&mut env, vec![hi, lo]), Err(FailureCode::BadInput));
+    assert_eq!(remove(&mut env, vec![lo, lo]), Err(FailureCode::BadInput));
+    // The planted "ciphertext", in inbox order (which is ascending here).
+    assert_eq!(remove(&mut env, vec![p1, p2]), Err(FailureCode::Refused));
+    assert_eq!(remove(&mut env, vec![p1]), Err(FailureCode::Refused));
+    // A hash not in the inbox at all, and one aliasing the authority salt.
     assert_eq!(
-        remove(&mut env, vec![[1; 32], [3; 32]]),
+        remove(&mut env, vec![[0xee; 32]]),
         Err(FailureCode::Refused)
     );
-    // Even a real message whose hash starts with the authority salt.
     assert_eq!(remove(&mut env, vec![aliasing]), Err(FailureCode::Refused));
     assert_eq!(remove(&mut env, vec![]), Err(FailureCode::BadInput));
 }
@@ -1424,11 +1464,16 @@ fn the_successor_export_asks_and_holds_exactly_the_data() {
     let export = Op::ExportForSuccessor {
         source_generation: 3,
         after: None,
+        session: None,
     };
     let (id, _, _) = prompt(&send(&mut env, app(PROD), export.clone()));
     let page = match response(&answer(&mut env, PROD, id, ALWAYS)).result {
-        Ok(Reply::ExportedSecrets { payload, next }) => {
-            assert_eq!(next, None);
+        Ok(Reply::ExportedSecrets {
+            payload,
+            next,
+            session,
+        }) => {
+            assert_eq!((next, session), (None, None));
             freenet_migrate::ExportedSecrets::from_bytes(&payload).unwrap()
         }
         other => panic!("{other:?}"),
@@ -1487,9 +1532,10 @@ fn the_successor_export_pages_within_the_response_budget() {
             Op::ExportForSuccessor {
                 source_generation: 1,
                 after: after.clone(),
+                session: None,
             },
         ));
-        let Ok(Reply::ExportedSecrets { payload, next }) = r.result else {
+        let Ok(Reply::ExportedSecrets { payload, next, .. }) = r.result else {
             panic!()
         };
         assert!(payload.len() <= freenet_mail_protocol::MAX_RESPONSE_BYTES);

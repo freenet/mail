@@ -185,6 +185,10 @@ fn handle_request(
             assignment_hashes,
         } => sign_v1_removal(s, &addr, &assignment_hashes),
         Op::V1AftParams { addr } => v1_aft_params(s, &addr),
+        Op::RevokeExportGrant => s
+            .del(store::EXPORT_GRANT)
+            .and_then(|()| s.del(store::EXPORT_SESSION))
+            .map(|()| Reply::Deleted),
     };
     Ok(respond(id, result))
 }
@@ -201,7 +205,14 @@ pub struct IdentityRecord {
     pub ek: ByteBuf,
     pub alias: String,
     pub description: String,
+    /// Set for identities carried over by a migration until the user confirms
+    /// them. A hint for the UI, not a security boundary: any code running
+    /// under the app's origin can confirm an identity.
     pub confirmed: bool,
+    /// Set once the user approved deleting it; the deletion then proceeds in
+    /// bounded steps and the identity refuses every other operation.
+    #[serde(default)]
+    pub deleting: bool,
 }
 
 const MAX_ALIAS_CHARS: usize = 64;
@@ -242,8 +253,15 @@ pub fn load_identity(s: &Space<'_>, addr: &Addr) -> Result<Option<(u64, Identity
     }
 }
 
+/// A usable identity: present and not being deleted.
 pub fn require_identity(s: &Space<'_>, addr: &Addr) -> Result<(u64, IdentityRecord), Failure> {
-    load_identity(s, addr)?.ok_or_else(|| fail(FailureCode::NotFound, "no such identity"))
+    match load_identity(s, addr)? {
+        None => Err(fail(FailureCode::NotFound, "no such identity")),
+        Some((_, r)) if r.deleting => {
+            Err(fail(FailureCode::Refused, "this identity is being deleted"))
+        }
+        Some(found) => Ok(found),
+    }
 }
 
 /// Every identity, from the identity index (never from a host listing).
@@ -256,7 +274,9 @@ fn all_identities(s: &Space<'_>) -> Result<Vec<(Addr, u64, IdentityRecord)>, Fai
                 .try_into()
                 .map_err(|_| fail(FailureCode::Internal, "the identity index is unreadable"))?,
         );
-        if let Some((g, r)) = load_identity(s, &addr)? {
+        if let Some((g, r)) = load_identity(s, &addr)?
+            && !r.deleting
+        {
             out.push((addr, g, r));
         }
     }
@@ -312,6 +332,7 @@ fn store_new_identity(
         alias,
         description,
         confirmed,
+        deleting: false,
     };
     let body = to_cbor(&record).map_err(|e| fail(FailureCode::Internal, e))?;
     // Claim the index slot first (it enforces the cap), then write; undo the
@@ -409,6 +430,9 @@ fn import_identity(
     let addr = address_of(&Keys::from_seeds(&dsa, &kem).vk_bytes());
     // Never overwrite: the same address means the same seeds.
     if let Some((generation, record)) = load_identity(s, &addr)? {
+        if record.deleting {
+            return Err(fail(FailureCode::Refused, "this identity is being deleted"));
+        }
         return Ok(Reply::Imported {
             identity: info(addr, generation, &record),
             already_present: true,
@@ -472,49 +496,75 @@ fn update_identity(
     Ok(Reply::Ack { generation })
 }
 
-/// Delete an identity and everything it owns. Runs after the user approved.
+/// Most item records one deletion step removes, so a call stays well inside
+/// the host's time limit however large the identity.
+pub const DELETE_STEP: usize = 256;
+
+/// Delete an identity and everything it owns, after the user approved.
+///
+/// The first step marks the record `deleting` (the approval is then
+/// remembered by the record itself); each step removes up to
+/// [`DELETE_STEP`] items and answers `Continue` until none are left, then
+/// removes the record and, last, its index entry. A retry after a failure
+/// resumes where it stopped.
 pub fn delete_identity_now(s: &mut Space<'_>, addr: &Addr, expected_gen: u64) -> OpResult {
-    let Some((generation, _)) = load_identity(s, addr)? else {
-        remove_identity_data(s, addr)?;
+    let Some((generation, mut record)) = load_identity(s, addr)? else {
+        // Record gone: only the index entry can be left.
+        s.index_remove(IDENTITY_INDEX, &addr.0)?;
         return Ok(Reply::Deleted);
     };
-    if generation != expected_gen {
-        return Err(fail(
-            FailureCode::Conflict {
-                current_gen: generation,
-            },
-            "stale generation",
-        ));
+    if !record.deleting {
+        if generation != expected_gen {
+            return Err(fail(
+                FailureCode::Conflict {
+                    current_gen: generation,
+                },
+                "stale generation",
+            ));
+        }
+        record.deleting = true;
+        let body = to_cbor(&record).map_err(|e| fail(FailureCode::Internal, e))?;
+        s.write_if(&identity_rel(addr), generation, &body)?;
     }
-    remove_identity_data(s, addr)?;
-    Ok(Reply::Deleted)
+    delete_step(s, addr)
 }
 
-/// Whether `addr` is still in the identity index although its record is
-/// gone: a deletion that removed the record and then failed.
-pub fn is_partly_deleted(s: &Space<'_>, addr: &Addr) -> Result<bool, Failure> {
-    Ok(load_identity(s, addr)?.is_none() && s.index(IDENTITY_INDEX)?.1.contains(&addr.0[..]))
+/// Whether `addr` needs no approval to finish deleting: either the user
+/// already approved (the record is marked) or only bookkeeping is left.
+pub fn deletion_in_progress(s: &Space<'_>, addr: &Addr) -> Result<bool, Failure> {
+    Ok(match load_identity(s, addr)? {
+        Some((_, r)) => r.deleting,
+        None => s.index(IDENTITY_INDEX)?.1.contains(&addr.0[..]),
+    })
 }
 
-/// Remove an identity's items, their indexes, its record and its index
-/// entry, in that order. Idempotent: rerunning it after a failure part way
-/// through finishes the job, and a record is only removed once everything
-/// it owns is.
-fn remove_identity_data(s: &mut Space<'_>, addr: &Addr) -> Result<(), Failure> {
+fn delete_step(s: &mut Space<'_>, addr: &Addr) -> OpResult {
+    let mut budget = DELETE_STEP;
+    let mut remaining = 0usize;
     for kind in ALL_KINDS.into_iter().filter(|k| store::shape(*k).0) {
         let ix = index_rel(kind, Some(addr));
         let (_, ids) = s.index(&ix)?;
-        for id in ids {
+        let batch: Vec<Vec<u8>> = ids.iter().take(budget).cloned().collect();
+        for id in &batch {
             s.del(&item_rel(&ItemRef {
                 kind,
                 owner: Some(*addr),
-                id,
+                id: id.clone(),
             }))?;
         }
-        s.del(&ix)?;
+        // Items first, then their index entries in one write.
+        s.index_remove_many(&ix, &batch)?;
+        budget -= batch.len();
+        remaining += ids.len() - batch.len();
+    }
+    if remaining > 0 {
+        return Ok(Reply::Continue {
+            remaining: u32::try_from(remaining).unwrap_or(u32::MAX),
+        });
     }
     s.del(&identity_rel(addr))?;
-    s.index_remove(IDENTITY_INDEX, &addr.0)
+    s.index_remove(IDENTITY_INDEX, &addr.0)?;
+    Ok(Reply::Deleted)
 }
 
 // ── Items ───────────────────────────────────────────────────────────────────
@@ -776,7 +826,7 @@ pub fn v1_inbox_id(vk: &[u8]) -> Result<[u8; 32], Failure> {
         .map_err(|_| fail(FailureCode::Internal, "inbox id is not 32 bytes"))
 }
 
-/// Just the assignment hashes of a v1 inbox state.
+/// The parts of a v1 inbox state a removal check needs.
 #[derive(Deserialize)]
 struct InboxHashes {
     messages: Vec<MessageHash>,
@@ -784,6 +834,7 @@ struct InboxHashes {
 
 #[derive(Deserialize)]
 struct MessageHash {
+    content: Vec<u8>,
     token_assignment: AssignmentHash,
 }
 
@@ -796,15 +847,26 @@ struct AssignmentHash {
 ///
 /// The payload is the concatenated hashes (the frozen contract's layout,
 /// [`freenet_mail_wire_v1::inbox::removal_payload`]), which carries no domain
-/// tag. So the delegate builds it only from hashes of messages actually in
-/// this identity's v1 inbox as held on this node, and never for a payload
-/// that could alias an authority payload.
+/// tag, and v1 message signatures use the same key over raw bytes. So the
+/// delegate signs only:
+///
+/// - strictly ascending, distinct hashes (the contract accepts any order);
+/// - hashes of messages in this identity's v1 inbox as held on this node;
+/// - hashes v0.2.x derived from the message, `blake3(content)`, which a
+///   sender cannot choose (the contract never checks this);
+/// - never a payload that could alias an authority payload.
 fn sign_v1_removal(s: &Space<'_>, addr: &Addr, hashes: &[Hash32]) -> OpResult {
     use freenet_mail_wire_v1::inbox::{STATE_UPDATE, removal_payload};
     if hashes.is_empty() || hashes.len() > MAX_REMOVAL_BATCH {
         return Err(fail(
             FailureCode::BadInput,
             "1-1024 message hashes per removal",
+        ));
+    }
+    if hashes.windows(2).any(|w| w[0].0 >= w[1].0) {
+        return Err(fail(
+            FailureCode::BadInput,
+            "hashes must be in strictly ascending order",
         ));
     }
     let (record, keys) = keys_for(s, addr)?;
@@ -819,15 +881,17 @@ fn sign_v1_removal(s: &Space<'_>, addr: &Addr, hashes: &[Hash32]) -> OpResult {
         })?;
     let inbox: InboxHashes = serde_json::from_slice(&state)
         .map_err(|_| fail(FailureCode::Internal, "the inbox state is unreadable"))?;
-    let present: std::collections::BTreeSet<[u8; 32]> = inbox
+    // Only messages whose hash is what v0.2.x derives from their content.
+    let genuine: std::collections::BTreeSet<[u8; 32]> = inbox
         .messages
         .iter()
+        .filter(|m| *blake3::hash(&m.content).as_bytes() == m.token_assignment.assignment_hash)
         .map(|m| m.token_assignment.assignment_hash)
         .collect();
-    if hashes.iter().any(|h| !present.contains(&h.0)) {
+    if hashes.iter().any(|h| !genuine.contains(&h.0)) {
         return Err(fail(
             FailureCode::Refused,
-            "a hash is not a message in this inbox",
+            "a hash is not a genuine message in this inbox",
         ));
     }
     let ids: Vec<[u8; 32]> = hashes.iter().map(|h| h.0).collect();
@@ -841,8 +905,14 @@ fn sign_v1_removal(s: &Space<'_>, addr: &Addr, hashes: &[Hash32]) -> OpResult {
     Ok(Reply::Signature(ByteBuf::from(keys.sign(&payload))))
 }
 
+/// Present in the WASM exactly when it is built with `v1-transition`, so
+/// scripts/check-release-delegate.sh can prove a release build lacks it.
+#[cfg(feature = "v1-transition")]
+pub const V1_TRANSITION_MARKER: &str = "freenet-mail-delegate:v1-transition-enabled";
+
 #[cfg(feature = "v1-transition")]
 fn v1_aft_params(s: &Space<'_>, addr: &Addr) -> OpResult {
+    core::hint::black_box(V1_TRANSITION_MARKER.as_bytes());
     let (_, record) = require_identity(s, addr)?;
     let params = freenet_mail_wire_v1::aft::DelegateParameters::new(record.dsa.0);
     serde_json::to_vec(&params)
@@ -953,6 +1023,7 @@ pub fn export_for_successor(
     Ok(Reply::ExportedSecrets {
         payload: ByteBuf::from(payload),
         next,
+        session: None,
     })
 }
 

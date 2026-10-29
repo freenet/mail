@@ -24,6 +24,7 @@
 //! | `ix/pg` | ids of pending prompts |
 //! | `pg/<prompt id>` | a pending prompt |
 //! | `gr/export` | the remembered export grant |
+//! | `es/current` | the live export session |
 //! | `mt/gen`, `mt/pseq`, `mt/usage` | bookkeeping |
 
 use std::collections::BTreeSet;
@@ -77,6 +78,8 @@ pub fn identity_rel(addr: &Addr) -> String {
 pub const IDENTITY_INDEX: &str = "ix/id";
 pub const PROMPT_INDEX: &str = "ix/pg";
 pub const EXPORT_GRANT: &str = "gr/export";
+/// The one live export session of an origin (a successor export in pages).
+pub const EXPORT_SESSION: &str = "es/current";
 pub const PROMPT_SEQ: &str = "mt/pseq";
 
 pub fn prompt_rel(prompt_id: u32) -> String {
@@ -355,8 +358,17 @@ impl<'a> Space<'a> {
     }
 
     pub fn index_remove(&mut self, rel: &str, id: &[u8]) -> Result<(), Failure> {
+        self.index_remove_many(rel, &[id.to_vec()])
+    }
+
+    /// Remove several ids with one index write.
+    pub fn index_remove_many(&mut self, rel: &str, remove: &[Vec<u8>]) -> Result<(), Failure> {
         let (generation, mut ids) = self.index(rel)?;
-        if ids.remove(id) {
+        let before = ids.len();
+        for id in remove {
+            ids.remove(id);
+        }
+        if ids.len() != before {
             self.write_index(rel, generation, &ids)?;
         }
         Ok(())
