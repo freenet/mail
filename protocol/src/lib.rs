@@ -59,12 +59,34 @@ fixed!(
     Hash32,
     32
 );
-fixed!(
+/// Private key material: not `Copy`, redacted from `Debug`, and zeroized
+/// when dropped.
+macro_rules! secret {
+    ($(#[$m:meta])* $name:ident, $n:expr) => {
+        $(#[$m])*
+        #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+        pub struct $name(#[serde(with = "fixed_bytes")] pub [u8; $n]);
+
+        impl std::fmt::Debug for $name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(concat!(stringify!($name), "(<redacted>)"))
+            }
+        }
+
+        impl Drop for $name {
+            fn drop(&mut self) {
+                zeroize::Zeroize::zeroize(&mut self.0);
+            }
+        }
+    };
+}
+
+secret!(
     /// The 32-byte ML-DSA-65 seed.
     DsaSeed,
     32
 );
-fixed!(
+secret!(
     /// The 64-byte ML-KEM-768 seed.
     KemSeed,
     64
@@ -152,6 +174,16 @@ pub enum ImportSource {
     },
 }
 
+/// Why an identity is being imported.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ImportKind {
+    /// The user restored it (recovery key, backup file): stored confirmed.
+    UserRestore,
+    /// Carried over from older data by a migration: stored unconfirmed until
+    /// the user confirms it is theirs ([`Op::ConfirmIdentity`]).
+    Migration,
+}
+
 /// Operations. Every one is answered with exactly one [`Response`].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Op {
@@ -172,6 +204,7 @@ pub enum Op {
     /// returns the stored identity unchanged.
     ImportIdentity {
         source: ImportSource,
+        kind: ImportKind,
         alias: String,
         description: String,
     },
@@ -181,7 +214,14 @@ pub enum Op {
         description: String,
         expected_gen: u64,
     },
+    /// Deletes the identity and everything it owns. Asks the user every
+    /// time (it cannot be undone), so the answer may come after a prompt.
     DeleteIdentity {
+        addr: Addr,
+        expected_gen: u64,
+    },
+    /// The user confirmed an identity carried over by a migration is theirs.
+    ConfirmIdentity {
         addr: Addr,
         expected_gen: u64,
     },
@@ -256,8 +296,11 @@ pub enum Op {
     // ── Migration ───────────────────────────────────────────────────────
     /// freenet-migrate export of the caller's own namespace, for a future
     /// successor delegate.
+    /// Asks the user, like the other exports. Pages: pass the returned
+    /// `next` as `after` until it is `None`.
     ExportForSuccessor {
         source_generation: u32,
+        after: Option<ByteBuf>,
     },
 }
 
@@ -278,8 +321,11 @@ pub struct IdentityInfo {
 pub struct Status {
     pub protocol_version: u16,
     pub identities: u32,
-    pub stored_keys: u32,
-    pub key_budget: u32,
+    /// Keys and bytes the caller's namespace holds, and its budgets.
+    pub stored_keys: u64,
+    pub stored_bytes: u64,
+    pub key_budget: u64,
+    pub byte_budget: u64,
     pub v1_transition: bool,
 }
 
@@ -311,7 +357,12 @@ pub enum Reply {
     AftParams(ByteBuf),
     RecoveryKey(String),
     Profile(ByteBuf),
-    ExportedSecrets(ByteBuf),
+    /// One page of a freenet-migrate `ExportedSecrets`, and where the next
+    /// page starts (`None` on the last page).
+    ExportedSecrets {
+        payload: ByteBuf,
+        next: Option<ByteBuf>,
+    },
 }
 
 /// Encode `value` as CBOR.

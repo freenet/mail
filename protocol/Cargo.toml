@@ -17,3 +17,4 @@ ciborium = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_bytes = { workspace = true }
 sha2 = { workspace = true }
+zeroize = { workspace = true }

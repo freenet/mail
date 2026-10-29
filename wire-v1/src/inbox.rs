@@ -199,6 +199,13 @@ pub struct Inbox {
     inbox_signature: Signature,
 }
 
+/// Bytes the inbox owner signs for `UpdateInbox::RemoveMessages`: the
+/// assignment hashes concatenated in order, as the frozen inbox contract's
+/// `can_reemove_messages` rebuilds them. There is no domain tag.
+pub fn removal_payload(ids: &[TokenAssignmentHash]) -> Vec<u8> {
+    ids.concat()
+}
+
 /// Canonical bytes the inbox owner signs to authorize a state: the
 /// `STATE_UPDATE` salt, the ML-KEM encapsulation key, the anti-flood
 /// `settings`, and the LWW `last_update`. Binding all four means a peer
