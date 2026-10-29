@@ -466,7 +466,8 @@ fn bincode_rt<T: serde::Serialize + serde::de::DeserializeOwned>(bytes: &[u8]) -
 /// A golden sample: its name, its bytes, and how to decode and re-encode
 /// them (`None` for raw byte strings with no decoder: signing payloads,
 /// signatures, `Display` output).
-type GoldenSample = (&'static str, Vec<u8>, Option<fn(&[u8]) -> Vec<u8>>);
+type Codec = fn(&[u8]) -> Vec<u8>;
+type GoldenSample = (&'static str, Vec<u8>, Option<Codec>);
 
 fn golden_samples() -> Vec<GoldenSample> {
     use aft::{
@@ -477,8 +478,8 @@ fn golden_samples() -> Vec<GoldenSample> {
         Density, DeliveryState, FontSize, LocalState, LocalStateMsg, PermissionDecision, Theme,
         ThreadView,
     };
-    let codec = |name: &str| -> Option<fn(&[u8]) -> Vec<u8>> {
-        let f: fn(&[u8]) -> Vec<u8> = match name {
+    let codec = |name: &str| -> Option<Codec> {
+        let f: Codec = match name {
             "aft_tiers_display" | "aft_signature_content" | "inbox_sign_payload"
             | "inbox_settings_signature" => return None,
             "aft_tiers_json" => json_rt::<Vec<Tier>>,
