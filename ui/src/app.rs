@@ -4883,15 +4883,30 @@ fn archive_message(
         {
             let a = alias.to_string();
             let ar = archived.clone();
-            // spawn_forever: the caller runs post.apply() right after this,
-            // navigating away and unmounting the view. A bare spawn() would
-            // cancel the ArchiveMessage delegate write on unmount, so the
-            // archived message bounced back to the Inbox after reload (#286).
-            confirm_when_stored(
+            let undo_alias = alias.to_string();
+            // The inbox removal is signed and sent only once the archived
+            // copy is stored: removing first would lose the message whenever
+            // the archive write fails or is never answered.
+            confirm_then_remove(
                 "archive message",
                 crate::local_state::archive_message(a, id, ar),
                 &CONFIRM_ARCHIVE,
+                move || {
+                    let result = inbox.write().remove_messages(client, &[id], inbox_data);
+                    async move {
+                        match result {
+                            Ok(fut) => fut.await,
+                            Err(e) => crate::log::error(
+                                format!("removing archived message {id} from the inbox: {e}"),
+                                None,
+                            ),
+                        }
+                    }
+                },
+                move || crate::local_state::local_unarchive_message(&undo_alias, id),
             );
+            post.apply(&mut menu_selection);
+            return;
         }
     }
     let result = inbox
@@ -4903,9 +4918,7 @@ fn archive_message(
     });
     post.apply(&mut menu_selection);
     // Nothing was written that a node must confirm.
-    if alias.is_empty() || cfg!(not(feature = "use-node")) {
-        crate::toast::push_toast(CONFIRM_ARCHIVE.done, crate::toast::ToastLevel::Success);
-    }
+    crate::toast::push_toast(CONFIRM_ARCHIVE.done, crate::toast::ToastLevel::Success);
 }
 
 /// Shared Delete logic (#270 BLOCKER-1): drop any local kept/archived copies
@@ -4977,9 +4990,61 @@ const CONFIRM_DELETE: Confirmation = Confirmation {
 const CONFIRM_ARCHIVE: Confirmation = Confirmation {
     pending: "Archiving…",
     done: "Archived",
-    failed: "Couldn't confirm the archive was saved; the message may be lost after a reload",
-    unconfirmed: "Couldn't confirm the archive was saved; the message may be lost after a reload",
+    failed: "Couldn't archive the message; it stays in your inbox",
+    unconfirmed: "Couldn't confirm the archive was saved; the message stays in your inbox",
 };
+
+/// Run `write`, then `then()` only if the write is stored. Returns the
+/// outcome. Shared by archive (the inbox removal must wait for the archived
+/// copy) and its tests.
+async fn store_then<W, F, R>(write: W, then: F) -> crate::local_state::Stored
+where
+    W: std::future::Future<Output = Result<(), crate::DynError>>,
+    F: FnOnce() -> R,
+    R: std::future::Future<Output = ()>,
+{
+    let result = write.await;
+    if let Err(e) = &result {
+        crate::log::error(format!("local-state write failed: {e}"), None);
+    }
+    let outcome = crate::local_state::Stored::of(&result);
+    if outcome == crate::local_state::Stored::Yes {
+        then().await;
+    }
+    outcome
+}
+
+/// [`confirm_when_stored`], but `then()` runs only once the write is stored,
+/// and `undo()` runs when it is not (the optimistic change is reverted).
+#[cfg(feature = "use-node")]
+fn confirm_then_remove<R: std::future::Future<Output = ()> + 'static>(
+    what: &'static str,
+    write: impl std::future::Future<Output = Result<(), crate::DynError>> + 'static,
+    say: &'static Confirmation,
+    then: impl FnOnce() -> R + 'static,
+    undo: impl FnOnce() + 'static,
+) {
+    use crate::local_state::Stored;
+    use crate::toast::{ToastLevel, dismiss_toast_in, push_sticky_toast_to, push_toast_to};
+    let toasts = use_context::<crate::toast::ToastQueue>();
+    let pending = push_sticky_toast_to(toasts, say.pending, ToastLevel::Info);
+    let _task = dioxus_core::spawn_forever(async move {
+        let outcome = store_then(write, then).await;
+        dismiss_toast_in(toasts, pending);
+        match outcome {
+            Stored::Yes => push_toast_to(toasts, say.done, ToastLevel::Success),
+            Stored::Failed => {
+                crate::log::error(format!("{what}: not stored"), None);
+                undo();
+                push_toast_to(toasts, say.failed, ToastLevel::Error)
+            }
+            Stored::Unknown => {
+                undo();
+                push_toast_to(toasts, say.unconfirmed, ToastLevel::Warning)
+            }
+        };
+    });
+}
 
 /// Run a local-state `write` and confirm it only once it is stored. `pending`
 /// shows from now until the mail delegate has acknowledged the write, then
@@ -6900,5 +6965,40 @@ mod folder_sort_tests {
         a.sort_by(sort_cmp_archive);
         let second: Vec<u64> = a.iter().map(|(id, _)| *id).collect();
         assert_eq!(first, second, "archive sort must be idempotent");
+    }
+}
+
+#[cfg(test)]
+mod archive_order_tests {
+    use super::store_then;
+    use crate::local_state::Stored;
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    fn run(write: Result<(), crate::DynError>) -> (Stored, bool) {
+        let removed = Rc::new(Cell::new(false));
+        let r = removed.clone();
+        let outcome = futures::executor::block_on(store_then(async move { write }, move || {
+            r.set(true);
+            async {}
+        }));
+        (outcome, removed.get())
+    }
+
+    #[test]
+    fn the_inbox_removal_waits_for_the_archived_copy() {
+        assert_eq!(run(Ok(())), (Stored::Yes, true));
+    }
+
+    #[test]
+    fn a_failed_archive_write_leaves_the_message_in_the_inbox() {
+        assert_eq!(run(Err("store refused".into())), (Stored::Failed, false));
+    }
+
+    #[test]
+    fn an_unanswered_archive_write_leaves_the_message_in_the_inbox() {
+        let unknown: crate::DynError =
+            Box::new(crate::mail_delegate::CallError::Unknown("no answer".into()));
+        assert_eq!(run(Err(unknown)), (Stored::Unknown, false));
     }
 }
