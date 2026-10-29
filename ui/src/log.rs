@@ -65,7 +65,7 @@ pub(crate) fn local_state_failure_log_msg(op: &str, err: impl std::fmt::Display)
 /// "Couldn't <op> — changes may not persist after reload."
 pub(crate) fn local_state_failure(op: &str, err: impl std::fmt::Display) {
     error(local_state_failure_log_msg(op, err), None);
-    crate::toast::push_toast(
+    crate::toast::push_toast_detached(
         local_state_failure_toast_msg(op),
         crate::toast::ToastLevel::Error,
     );

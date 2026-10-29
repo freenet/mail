@@ -156,7 +156,7 @@ pub(crate) async fn load_and_report() {
         Ok(infos) => infos,
         Err(e) => {
             crate::log::error(format!("loading identities failed: {e}"), None);
-            crate::toast::push_toast(
+            crate::toast::push_toast_detached(
                 format!("Couldn't load your identities: {e}"),
                 crate::toast::ToastLevel::Error,
             );
@@ -173,7 +173,7 @@ pub(crate) async fn load_and_report() {
             Ok(state) => crate::local_state::replace_snapshot(state),
             Err(e) => {
                 crate::log::error(format!("loading local mail state failed: {e}"), None);
-                crate::toast::push_toast(
+                crate::toast::push_toast_detached(
                     format!("Couldn't load your drafts, sent mail and settings: {e}"),
                     crate::toast::ToastLevel::Error,
                 );
@@ -251,7 +251,7 @@ pub(crate) fn migration_landed(addr: Addr, alias: String, aft: bool) {
         })
         .await;
         match cleared {
-            Ok(()) => drop(crate::toast::push_toast(
+            Ok(()) => drop(crate::toast::push_toast_detached(
                 if aft {
                     format!(
                         "Token ledger `{alias}` migrated to the new contract id after webapp upgrade."

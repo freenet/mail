@@ -2044,16 +2044,31 @@ pub(crate) async fn node_comms(
                 // everything it owns in bounded steps.
                 crate::app::identity_store::spawn_detached(async move {
                     let alias = identity.alias.clone();
+                    // Shown once the user has approved and pages are being
+                    // deleted; a small identity finishes in one step and
+                    // never shows it.
+                    let mut progress: Option<crate::toast::ToastId> = None;
                     let deleted = crate::mail_delegate::ops::delete_identity(
                         identity.addr,
                         identity.generation,
                         |remaining| {
-                            crate::log::info(format!(
-                                "deleting identity `{alias}`: {remaining} items left"
-                            ))
+                            let text = deletion_progress_text(&alias, remaining);
+                            crate::log::info(text.clone());
+                            match progress {
+                                Some(id) => crate::toast::update_toast_detached(id, text),
+                                None => {
+                                    progress = crate::toast::push_sticky_toast_detached(
+                                        text,
+                                        crate::toast::ToastLevel::Info,
+                                    )
+                                }
+                            }
                         },
                     )
                     .await;
+                    if let Some(id) = progress {
+                        crate::toast::dismiss_toast_detached(id);
+                    }
                     match deleted {
                         Ok(()) => {
                             // Drop from in-memory ALIASES + User.identities so
@@ -2083,7 +2098,9 @@ pub(crate) async fn node_comms(
                                 format!("failed to delete identity {alias}: {e}"),
                                 None,
                             );
-                            crate::toast::push_toast(
+                            // Detached task: no component scope for
+                            // `push_toast`'s `use_context`.
+                            crate::toast::push_toast_detached(
                                 format!("Identity `{alias}` was not deleted: {e}"),
                                 crate::toast::ToastLevel::Error,
                             );
@@ -3268,6 +3285,25 @@ pub(crate) async fn node_comms(
             }
         }
     }
+}
+
+/// What the user sees while a large identity is deleted page by page.
+fn deletion_progress_text(alias: &str, remaining: u32) -> String {
+    let items = if remaining == 1 { "item" } else { "items" };
+    format!("Deleting identity `{alias}`… {remaining} {items} left")
+}
+
+#[cfg(test)]
+#[test]
+fn deletion_progress_names_the_identity_and_what_is_left() {
+    assert_eq!(
+        deletion_progress_text("alice", 744),
+        "Deleting identity `alice`… 744 items left"
+    );
+    assert_eq!(
+        deletion_progress_text("bob", 1),
+        "Deleting identity `bob`… 1 item left"
+    );
 }
 
 pub(crate) type AsyncActionResult = Result<(), (DynError, TryNodeAction)>;
