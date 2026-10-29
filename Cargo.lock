@@ -4457,7 +4457,7 @@ dependencies = [
  "freenet-email-core",
  "freenet-email-facade",
  "freenet-stdlib 0.3.5",
- "rand 0.8.5",
+ "rand 0.10.3",
  "serde",
  "tempfile",
  "toml 1.1.8+spec-1.1.0",
