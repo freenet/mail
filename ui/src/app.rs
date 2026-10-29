@@ -259,13 +259,33 @@ pub(crate) fn app() -> Element {
                                 login_ctl.write().updated = true;
                             }
                         }
-                        NodeAction::RenameIdentity { old, new, .. } => {
-                            // Offline mode: just relabel the in-memory
-                            // ALIASES entries. The delegate isn't
-                            // around, so there's no delete+create round
-                            // trip.
-                            Identity::rename_in_place(&old, &new);
-                            login_ctl.write().updated = true;
+                        NodeAction::RenameIdentity { old, new, identity } => {
+                            // The in-page delegate holds the identity, as a
+                            // node's would: rename it there, then relabel.
+                            match crate::mail_delegate::ops::update_identity(
+                                identity.addr,
+                                new.to_string(),
+                                identity.description.clone(),
+                                identity.generation,
+                            )
+                            .await
+                            {
+                                Ok(generation) => {
+                                    Identity::rename_in_place(&old, &new);
+                                    login::Identity::set_generation(
+                                        &identity.addr,
+                                        generation,
+                                        user_sig,
+                                    );
+                                    login_ctl.write().updated = true;
+                                }
+                                Err(e) => {
+                                    crate::toast::push_toast_detached(
+                                        format!("Couldn't rename `{old}`: {e}"),
+                                        crate::toast::ToastLevel::Error,
+                                    );
+                                }
+                            }
                         }
                         NodeAction::DeleteIdentity { identity } => {
                             // The in-page delegate holds the identity, as a

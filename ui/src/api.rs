@@ -2031,11 +2031,11 @@ pub(crate) async fn node_comms(
                     )
                     .await
                     {
-                        Ok(info) => {
+                        Ok(generation) => {
                             crate::app::login::Identity::rename_in_place(&old, &new);
                             crate::app::login::Identity::set_generation(
-                                &info.addr,
-                                info.generation,
+                                &identity.addr,
+                                generation,
                                 user,
                             );
                             login_controller.write().updated = true;
@@ -2045,7 +2045,9 @@ pub(crate) async fn node_comms(
                                 format!("failed to rename identity {old} → {new}: {e}"),
                                 None,
                             );
-                            crate::toast::push_toast(
+                            // Detached task: no component scope to find the
+                            // toast queue in.
+                            crate::toast::push_toast_detached(
                                 format!("Couldn't rename `{old}`: {e}"),
                                 crate::toast::ToastLevel::Error,
                             );

@@ -72,30 +72,22 @@ pub(crate) async fn update_identity(
     alias: String,
     description: String,
     expected_gen: u64,
-) -> Result<IdentityInfo, CallError> {
-    let op = Op::UpdateIdentity {
+) -> Result<u64, CallError> {
+    // The delegate acknowledges with the record's new generation.
+    call_ack(Op::UpdateIdentity {
         addr,
         alias,
         description,
         expected_gen,
-    };
-    match call(op).await? {
-        Reply::Identity(info) => Ok(info),
-        other => Err(unexpected(&other)),
-    }
+    })
+    .await
 }
 
 // Used by the confirm-identity prompt, which lands with the migration that
 // can import unconfirmed identities.
 #[allow(dead_code)]
-pub(crate) async fn confirm_identity(
-    addr: Addr,
-    expected_gen: u64,
-) -> Result<IdentityInfo, CallError> {
-    match call(Op::ConfirmIdentity { addr, expected_gen }).await? {
-        Reply::Identity(info) => Ok(info),
-        other => Err(unexpected(&other)),
-    }
+pub(crate) async fn confirm_identity(addr: Addr, expected_gen: u64) -> Result<u64, CallError> {
+    call_ack(Op::ConfirmIdentity { addr, expected_gen }).await
 }
 
 /// Delete an identity and everything it owns. The delegate asks the user
@@ -222,28 +214,55 @@ pub(crate) async fn put_item_merged(
 /// accepts. Each entry is the plaintext, or `None` for a ciphertext that is
 /// not this identity's (or is malformed): such a message is skipped, never
 /// fatal.
+///
+/// A batch whose plaintexts would exceed the reply budget comes back with
+/// `CapReached` for the entries that did not fit; those are asked for again
+/// in later calls until each has been answered alone. Only a plaintext too
+/// large to fit any reply on its own ends as `None`.
 pub(crate) async fn decrypt_v1(
     addr: Addr,
     ciphertexts: Vec<Vec<u8>>,
 ) -> Result<Vec<Option<Vec<u8>>>, CallError> {
-    let mut out = Vec::with_capacity(ciphertexts.len());
-    for chunk in ciphertexts.chunks(MAX_DECRYPT_BATCH) {
+    let mut out: Vec<Option<Vec<u8>>> = vec![None; ciphertexts.len()];
+    let mut pending: std::collections::VecDeque<usize> = (0..ciphertexts.len()).collect();
+    while !pending.is_empty() {
+        let batch: Vec<usize> = pending
+            .drain(..pending.len().min(MAX_DECRYPT_BATCH))
+            .collect();
         let op = Op::DecryptV1 {
             addr,
-            ciphertexts: chunk.iter().cloned().map(ByteBuf::from).collect(),
+            ciphertexts: batch
+                .iter()
+                .map(|&i| ByteBuf::from(ciphertexts[i].clone()))
+                .collect(),
         };
         let results = match call(op).await? {
             Reply::Decrypted(results) => results,
             other => return Err(unexpected(&other)),
         };
-        if results.len() != chunk.len() {
+        if results.len() != batch.len() {
             return Err(CallError::Unknown(format!(
                 "decrypted {} of {} ciphertexts",
                 results.len(),
-                chunk.len()
+                batch.len()
             )));
         }
-        out.extend(results.into_iter().map(|r| r.ok().map(ByteBuf::into_vec)));
+        let mut retry = Vec::new();
+        for (&i, result) in batch.iter().zip(results) {
+            match result {
+                Ok(plain) => out[i] = Some(plain.into_vec()),
+                Err(FailureCode::CapReached) => retry.push(i),
+                Err(_) => {}
+            }
+        }
+        // Nothing in the batch fitted: its first entry does not fit a reply
+        // even on its own.
+        if retry.len() == batch.len() {
+            retry.remove(0);
+        }
+        for i in retry.into_iter().rev() {
+            pending.push_front(i);
+        }
     }
     Ok(out)
 }
@@ -429,6 +448,43 @@ mod tests {
             ml_kem_seed: kem.to_vec(),
         };
         (info, keys)
+    }
+
+    #[test]
+    fn a_batch_over_the_reply_budget_is_decrypted_in_full() {
+        let (sender, _) = imported("budget-sender", 41);
+        let (recipient, _) = imported("budget-recipient", 51);
+        // Four 200 KB plaintexts: together over the 512 KiB reply budget,
+        // each well under it.
+        let plaintexts: Vec<Vec<u8>> = (0..4u8).map(|n| vec![n; 200 * 1024]).collect();
+        let ciphertexts: Vec<Vec<u8>> = plaintexts
+            .iter()
+            .map(|p| {
+                block_on(seal_v1(sender.addr, recipient.ek.to_vec(), p.clone()))
+                    .unwrap()
+                    .content
+            })
+            .collect();
+        let out = block_on(decrypt_v1(recipient.addr, ciphertexts)).unwrap();
+        let got: Vec<Option<Vec<u8>>> = plaintexts.into_iter().map(Some).collect();
+        assert!(out == got, "every message must come back readable");
+    }
+
+    #[test]
+    fn a_rename_is_acknowledged_with_the_new_generation() {
+        let (info, _) = imported("before-rename", 31);
+        let generation = block_on(update_identity(
+            info.addr,
+            "after-rename".into(),
+            String::new(),
+            info.generation,
+        ))
+        .unwrap();
+        assert!(generation > info.generation);
+        let listed = block_on(list_identities()).unwrap();
+        let renamed = listed.iter().find(|i| i.addr == info.addr).unwrap();
+        assert_eq!(renamed.alias, "after-rename");
+        assert_eq!(renamed.generation, generation);
     }
 
     #[test]

@@ -58,15 +58,20 @@ impl CallError {
     }
 }
 
+/// How long the mail delegate keeps a prompt open for an answer
+/// (`mail_delegate::store::PROMPT_TTL_SECS`; pinned by a test).
+pub(crate) const DELEGATE_PROMPT_TTL_SECS: u32 = 600;
+
 /// How long to wait for an answer. Operations that ask the user (exports,
-/// identity deletion) wait for the prompt: the node times an unanswered
-/// prompt out after about a minute.
+/// identity deletion) wait as long as the delegate would still act on an
+/// answer, plus a margin: giving up sooner would let a late approval carry
+/// out an operation this page already reported as failed.
 pub(crate) fn timeout_ms(op: &Op) -> u32 {
     match op {
         Op::ExportRecoveryKey { .. }
         | Op::ExportProfile { .. }
         | Op::ExportForSuccessor { .. }
-        | Op::DeleteIdentity { .. } => 150_000,
+        | Op::DeleteIdentity { .. } => (DELEGATE_PROMPT_TTL_SECS + 30) * 1000,
         _ => 30_000,
     }
 }
@@ -217,6 +222,32 @@ mod tests {
             result,
         })
         .unwrap()
+    }
+
+    #[cfg(feature = "local-delegate")]
+    #[test]
+    fn the_prompt_ttl_matches_the_delegate() {
+        assert_eq!(
+            u64::from(DELEGATE_PROMPT_TTL_SECS),
+            mail_delegate::store::PROMPT_TTL_SECS
+        );
+    }
+
+    #[test]
+    fn a_consented_call_outwaits_the_delegates_prompt() {
+        let addr = freenet_mail_protocol::Addr([0; 24]);
+        for op in [
+            Op::ExportRecoveryKey { addr },
+            Op::DeleteIdentity {
+                addr,
+                expected_gen: 0,
+            },
+        ] {
+            assert!(
+                u64::from(timeout_ms(&op)) > u64::from(DELEGATE_PROMPT_TTL_SECS) * 1000,
+                "a late approval must not act after the page gave up"
+            );
+        }
     }
 
     #[test]
