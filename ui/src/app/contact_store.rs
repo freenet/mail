@@ -3,8 +3,10 @@
 //! moving the record, and an identity and a contact can never share one).
 //!
 //! The address book (`address_book`) stays the in-memory view the UI reads.
-//! Writes update it at once and persist in a spawned task; a write the
-//! delegate refuses or never answers is reported, not silently dropped.
+//! Writes update it at once and persist in a task that outlives the view
+//! that started it (`spawn_forever`: a scoped task would be cancelled when
+//! that view unmounts); a write the delegate refuses or never answers is
+//! reported, not silently dropped.
 
 use freenet_mail_protocol::address::address_of;
 use freenet_mail_protocol::{ItemKind, ItemRef};
@@ -99,7 +101,7 @@ pub(crate) async fn remove(vk: &[u8]) -> Result<(), CallError> {
 
 /// Persist `contact` in the background, reporting a failure.
 pub(crate) fn save_in_background(contact: Contact) {
-    dioxus::prelude::spawn(async move {
+    let _task = dioxus::core::spawn_forever(async move {
         if let Err(e) = save(&contact).await {
             report(
                 &format!("Couldn't save contact {}", contact.local_alias),
@@ -111,7 +113,7 @@ pub(crate) fn save_in_background(contact: Contact) {
 
 /// Remove a contact in the background, reporting a failure.
 pub(crate) fn remove_in_background(alias: String, vk: Vec<u8>) {
-    dioxus::prelude::spawn(async move {
+    let _task = dioxus::core::spawn_forever(async move {
         if let Err(e) = remove(&vk).await {
             report(&format!("Couldn't remove contact {alias}"), &e);
         }
