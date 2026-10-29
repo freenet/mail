@@ -19,7 +19,7 @@ use crate::aft::{Tier, TokenAssignment, TokenAssignmentHash};
 /// this inbox can be verified on updates. Value is arbitrary but must stay
 /// constant across versions — it's part of the signed-payload convention, so
 /// changing it would invalidate every existing inbox signature.
-const STATE_UPDATE: &[u8; 8] = &[168, 7, 13, 64, 168, 123, 142, 215];
+pub const STATE_UPDATE: &[u8; 8] = &[168, 7, 13, 64, 168, 123, 142, 215];
 
 /// The owner's ML-DSA-65 verifying key. Stored on-wire as the FIPS 204
 /// encoded byte array (1952 bytes for ML-DSA-65) to avoid a custom serde

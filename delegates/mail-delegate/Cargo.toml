@@ -1,0 +1,45 @@
+[package]
+name = "mail-delegate"
+version = "0.3.0"
+edition = "2024"
+license = "LGPL-3.0-or-later"
+publish = false
+description = "Freenet Mail's delegate: identities, keys, contacts and local mail state"
+
+# Outside the workspace with its own Cargo.lock: the delegate's key is
+# derived from its WASM, so its build graph must not move with workspace
+# dependency bumps. Every dependency that reaches the WASM is pinned exactly.
+# Build it only with scripts/build-wasm.sh (remapped paths, --locked).
+#
+# Do not add `getrandom` or `rand`: the delegate runtime has no getrandom
+# backend, and a placeholder import fails instantiation. Randomness comes
+# from the host (`freenet_stdlib::rand`) mixed with entropy the UI sends.
+[workspace]
+
+[dependencies]
+blake3 = { version = "=1.8.7", default-features = false }
+chacha20poly1305 = { version = "=0.11.0", default-features = false, features = ["alloc"] }
+chrono = { version = "=0.4.45", default-features = false, features = ["alloc", "serde"] }
+ciborium = "=0.2.2"
+freenet-mail-protocol = { path = "../../protocol" }
+freenet-mail-wire-v1 = { path = "../../wire-v1" }
+freenet-migrate = { version = "=0.8.0", default-features = false, features = ["delegate"] }
+freenet-stdlib = { version = "=0.12.1", features = ["contract"] }
+hkdf = "=0.13.0"
+ml-dsa = { version = "=0.1.1", default-features = false, features = ["alloc"] }
+ml-kem = { version = "=0.3.3", default-features = false }
+rand_core = { version = "=0.10.1", default-features = false }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_bytes = "=0.11.19"
+serde_json = "=1.0.154"
+sha2 = { version = "=0.11.1", default-features = false }
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["v1-transition"]
+freenet-main-delegate = []
+# Keeps the operations the v0.2.x (v1 inbox) send path needs. Removed with
+# that path when the v2 inbox lands.
+v1-transition = []
