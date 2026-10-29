@@ -1434,6 +1434,10 @@ pub(crate) async fn node_comms(
         mut ab_gen: crate::app::AddressBookGen,
     ) {
         let infos: Vec<_> = loaded.iter().map(|l| l.info.clone()).collect();
+        crate::log::info(format!(
+            "identities loaded from the mail delegate: count={}",
+            infos.len()
+        ));
         let new_ids = crate::app::Identity::set_identities(&infos, user);
         // ALIASES is a thread_local Vec, not a Dioxus signal: bump
         // login_controller so the Identities component re-renders, and the

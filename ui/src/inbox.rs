@@ -1554,7 +1554,7 @@ mod tests {
                     owner_ek_bytes,
                 },
                 key: ContractKey::from_params_and_code(
-                    &params.try_into().unwrap(),
+                    freenet_stdlib::prelude::Parameters::try_from(params).unwrap(),
                     ContractCode::from([].as_slice()),
                 ),
                 removed: HashSet::new(),

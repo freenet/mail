@@ -165,21 +165,17 @@ test.describe("Live node E2E", () => {
         "identity persists across reload",
       ).toBeVisible({ timeout: 30_000 });
 
-      // ── Step 3: assert delegate registered + Init idempotent ──────
-      // PR #34 fix: Init must skip if secret already exists. Probe via
-      // gateway log.
+      // ── Step 3: assert the identities came from the mail delegate ──
+      // After the reload the identity list is read back from the mail
+      // delegate (its keys never leave it). Probe via gateway log.
       await expect
         .poll(
           () =>
-            grepLog(
-              new RegExp(
-                `create alias .*${ALIAS_T1_ALICE}|set_aliases count=\\d+|init skipped — secret already exists`,
-              ),
-            ),
+            grepLog(/identities loaded from the mail delegate: count=[1-9]\d*/),
           {
             message:
-              "expected gateway log to show identity-management activity " +
-              "(create alias / set_aliases / init-skip)",
+              "expected gateway log to show the identities loaded from " +
+              "the mail delegate after the reload",
             timeout: 30_000,
           },
         )

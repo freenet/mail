@@ -84,14 +84,15 @@ fn create(env: &mut MemEnv, origin: u8, alias: &str) -> IdentityInfo {
             identity,
             recovery_key,
         }) => {
-            // The key returned on creation is this identity's own.
+            // The key returned on creation is this identity's own: both
+            // halves (the address depends on the signing half only).
             let (dsa, kem) = recovery_key::decode(&recovery_key).unwrap();
+            let keys = crate::crypto::Keys::from_seeds(&dsa, &kem);
             assert_eq!(
-                freenet_mail_protocol::address::address_of(
-                    &crate::crypto::Keys::from_seeds(&dsa, &kem).vk_bytes()
-                ),
+                freenet_mail_protocol::address::address_of(&keys.vk_bytes()),
                 identity.addr
             );
+            assert_eq!(keys.ek_bytes(), identity.ek.to_vec());
             identity
         }
         other => panic!("{other:?}"),
