@@ -325,11 +325,13 @@ fn a_repair_is_namespaced_and_a_denial_changes_nothing() {
     assert_eq!(listed(&mut env), vec![me]);
 }
 
-/// A failed index add whose index then cannot be read may still have added
-/// the entry, so its create marker becomes "failed" (licensing the entry's
-/// removal) rather than being dropped (which would leak the slot for good).
+/// A failed index add, whose index then cannot be read, never leaks a slot.
+/// (An add once wrote its entry before marking the new index live, so a
+/// refused marker and a refused undo left the entry in place; now the
+/// entry is written only once the index is live, and this script of
+/// faults fails the add before it.)
 #[test]
-fn a_failed_add_to_an_unreadable_index_leaves_its_entry_reclaimable() {
+fn a_failed_add_to_an_unreadable_index_never_leaks_its_slot() {
     use crate::env::mem::{FaultOp, Rule};
     let mut env = MemEnv::default();
     let me = create(&mut env, PROD, "alice");

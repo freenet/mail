@@ -328,10 +328,13 @@ dbt() { guard "$1" "$2" "$3" "$4" "tests:$BLIND_RUN" blind_tests; }
 dt "a deletion answers Deleted only once its marker is confirmed removed" "$D/handlers.rs" \
     '    s.del_written(&marker)?;' '    s.del(&marker)?;' \
     a_deletion_is_not_reported_done_while_its_marker_may_remain
-dt "an index that cannot be read may hold a failed create's entry" "$D/handlers.rs" \
-    '            if s.index(&ix).is_ok_and(|(_, ids)| !ids.contains(&item.id)) {' \
-    '            if !s.index(&ix).is_ok_and(|(_, ids)| ids.contains(&item.id)) {' \
-    a_failed_add_to_an_unreadable_index_leaves_its_entry_reclaimable
+# Retired: "an index that cannot be read may hold a failed create's entry".
+# Its mutation (put_item dropping a failed create's marker when the index
+# cannot be read) can no longer fail any test: write_index adds an entry
+# only once the index is live (`l`), in one write that lands or changes
+# nothing, so a failed index_add never leaves its entry. That guarantee is
+# guarded by "a new index lists nothing until it is live" above;
+# a_failed_add_to_an_unreadable_index_never_leaks_its_slot still runs.
 # Recovery from a key that stays unreadable.
 dt "importing keys restores an identity whose record cannot be read" "$D/handlers.rs" \
     '        return restore_unreadable_identity(s, addr, dsa, kem, alias, description, confirmed).map(' \
