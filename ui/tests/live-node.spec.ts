@@ -2382,6 +2382,13 @@ test.describe("Live node E2E", () => {
       await sheet.locator('input[placeholder="subject"]').fill(subject);
       await sheet.locator(".sheet-x").click();
       await expect(sheet).toHaveCount(0);
+      // The close hands the edit to a task that outlives the sheet; a reload
+      // before the node answers it would end that task with the page. Wait
+      // for the page to say every save is answered, never for a fixed time.
+      await expect(
+        app.locator("html"),
+        "the page says no save is still in flight",
+      ).toHaveAttribute("data-pending-saves", "0", { timeout: 30_000 });
 
       await expect
         .poll(

@@ -5632,28 +5632,39 @@ fn ComposeSheet() -> Element {
             let token_signal = autosave_token;
             latest_edit.set(my_token);
             let latest = latest_edit.clone();
+            // Counted from the keystroke until this edit is stored, failed,
+            // or superseded, so the page knows it is not stored yet
+            // (`pending_saves`). The flush guard below owns it.
+            let in_flight = crate::pending_saves::begin();
+            // Closing the sheet (✕, the veil, navigating away) within the
+            // debounce, or while the save is under way, drops the task below:
+            // the last edit would then live only in this page and be gone on
+            // reload. If it is still the latest edit, save it in a task that
+            // outlives the sheet. Built here, not inside the task, so it
+            // fires even if the sheet closes before the task first runs;
+            // everything it needs is moved in, since the sheet's signals are
+            // gone by then.
+            let flush = {
+                let (alias, id, draft, to_address) =
+                    (alias.clone(), id.clone(), draft.clone(), to_address.clone());
+                OnCancel::new(move || {
+                    // Released when this closure ends, after the flush's own
+                    // count is taken: the count never touches zero between.
+                    let _edit = in_flight;
+                    if latest.get() == my_token {
+                        let in_flight = crate::pending_saves::begin();
+                        let _task = dioxus_core::spawn_forever(async move {
+                            let _in_flight = in_flight;
+                            if let Err(e) =
+                                crate::local_state::save_draft(alias, id, draft, to_address).await
+                            {
+                                crate::log::local_state_failure("save draft on close", e);
+                            }
+                        });
+                    }
+                })
+            };
             spawn(async move {
-                // Closing the sheet (✕, the veil, navigating away) within
-                // the debounce, or while the save is under way, cancels this
-                // task: the last edit would then live only in this page and
-                // be gone on reload. If it is still the latest edit, save it
-                // in a task that outlives the sheet.
-                let flush = {
-                    let (alias, id, draft, to_address) =
-                        (alias.clone(), id.clone(), draft.clone(), to_address.clone());
-                    OnCancel::new(move || {
-                        if latest.get() == my_token {
-                            let _task = dioxus_core::spawn_forever(async move {
-                                if let Err(e) =
-                                    crate::local_state::save_draft(alias, id, draft, to_address)
-                                        .await
-                                {
-                                    crate::log::local_state_failure("save draft on close", e);
-                                }
-                            });
-                        }
-                    })
-                };
                 gloo_timers::future::TimeoutFuture::new(AUTOSAVE_DEBOUNCE_MS).await;
                 if *token_signal.read() != my_token {
                     // A later edit superseded this one; its task saves.
