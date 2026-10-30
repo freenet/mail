@@ -772,6 +772,59 @@ mod tests {
         }
     }
 
+    /// The startup load lists the identities, then prepares each one (a
+    /// delegate round trip apiece) before announcing them, so its snapshot
+    /// can land after the user renamed one. A snapshot older than what the
+    /// page holds must not undo the rename: the old alias came back, the
+    /// new one named no identity, and every draft, sent and settings write
+    /// under it failed with "no identity" (the CI flake behind
+    /// "a renamed identity's draft and settings persist across reload").
+    #[test]
+    fn a_stale_identity_snapshot_does_not_undo_a_rename() {
+        use crate::app::{User, UserId};
+        use dioxus::prelude::*;
+        fn app() -> Element {
+            rsx! {}
+        }
+        let mut dom = VirtualDom::new(app);
+        dom.rebuild_in_place();
+        dom.in_scope(ScopeId::ROOT, || {
+            let me = Identity::from_info(&info("ss-old", 0x76), UserId::new());
+            Identity::register_live_for_test(me.clone());
+            let user = Signal::new(User {
+                logged: true,
+                identified: true,
+                active_id: Some(me.id),
+                identities: vec![me.clone()],
+            });
+            // The rename lands (generation 1 → 2).
+            assert!(Identity::rename_in_place("ss-old", "ss-new"));
+            Identity::set_generation(&me.addr, 2, user);
+            Identity::set_page_alias(&me.addr, "ss-new", user);
+            // Then the startup snapshot, read before the rename, arrives.
+            let _ = Identity::set_identities(&[info("ss-old", 0x76)], user);
+            assert_eq!(Identity::get_alias("ss-new").map(|i| i.addr), Some(me.addr));
+            assert!(Identity::get_alias("ss-old").is_none());
+            assert_eq!(
+                user.read().logged_id().map(|i| i.alias.to_string()),
+                Some("ss-new".to_string())
+            );
+            assert_eq!(
+                crate::local_state::state_key("ss-new"),
+                crate::local_state::addr_key(&me.addr)
+            );
+            // A snapshot newer than the page's copy still applies.
+            let mut newer = info("ss-newer", 0x76);
+            newer.generation = 3;
+            let _ = Identity::set_identities(&[newer], user);
+            assert_eq!(
+                Identity::get_alias("ss-newer").map(|i| i.addr),
+                Some(me.addr)
+            );
+            assert_eq!(user.read().identities[0].generation, 3);
+        });
+    }
+
     /// When it cannot be known whether a failed deletion began, the
     /// identity stays on the page (with a message) rather than being taken
     /// out, or kept, on a guess that "nothing is unfinished".

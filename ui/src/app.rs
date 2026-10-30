@@ -5475,6 +5475,22 @@ use crate::toast::ToastView;
 /// It is not sent from here: that could send it twice.
 const DRAFT_GONE_ELSEWHERE: &str = "This draft was sent or discarded in another tab, so it isn't saved or sent from here. Start a new message if you still want to send it.";
 
+/// The compose sheet's autosave state, from the latest autosave token, the
+/// last one the delegate stored and the last one that failed: `saved`,
+/// `failed` (shown with a retry, never left as `pending`), or `pending`
+/// while a save is still on its way. Exposed as `data-autosave`.
+fn autosave_state(token: u64, saved: u64, failed: u64) -> &'static str {
+    if token == 0 {
+        "pending"
+    } else if saved == token {
+        "saved"
+    } else if failed == token {
+        "failed"
+    } else {
+        "pending"
+    }
+}
+
 #[allow(non_snake_case)]
 fn ComposeSheet() -> Element {
     let mut menu_selection = use_context::<Signal<menu::MenuSelection>>();
@@ -5567,6 +5583,10 @@ fn ComposeSheet() -> Element {
     // to `autosave_token` when what is on screen is stored; exposed on the
     // sheet as `data-autosave` so a test can wait for it instead of sleeping.
     let saved_token = use_signal(|| 0u64);
+    // The last autosave token whose write failed (unanswered, or refused):
+    // the sheet then says the draft is not saved and offers a retry, rather
+    // than staying "pending" with nothing on screen.
+    let failed_token = use_signal(|| 0u64);
     /// Idle window before a draft is flushed to the delegate. Picked to feel
     /// instant for normal typing while still coalescing fast bursts.
     const AUTOSAVE_DEBOUNCE_MS: u32 = 500;
@@ -5631,7 +5651,11 @@ fn ComposeSheet() -> Element {
                         saved.set(my_token);
                     }
                     Ok(crate::local_state::DraftSave::Discarded) => {}
-                    Err(e) => crate::log::local_state_failure("save draft", e),
+                    Err(e) => {
+                        let mut failed = failed_token;
+                        failed.set(my_token);
+                        crate::log::local_state_failure("save draft", e);
+                    }
                 }
             });
         }
@@ -6034,7 +6058,7 @@ fn ComposeSheet() -> Element {
             onclick: move |_| { menu_selection.write().at_new_msg(); },
             div { class: "sheet",
                 "data-testid": testid::FM_COMPOSE_SHEET,
-                "data-autosave": if *autosave_token.read() > 0 && *saved_token.read() == *autosave_token.read() { "saved" } else { "pending" },
+                "data-autosave": autosave_state(*autosave_token.read(), *saved_token.read(), *failed_token.read()),
                 onclick: move |ev| { ev.stop_propagation(); },
                 div { class: "sheet-head",
                     span { class: "sheet-title", "New message" }
@@ -6249,6 +6273,19 @@ fn ComposeSheet() -> Element {
                         role: "status",
                         "aria-live": "polite",
                         "{DRAFT_GONE_ELSEWHERE}"
+                    }
+                } else if autosave_state(*autosave_token.read(), *saved_token.read(), *failed_token.read()) == "failed" {
+                    div {
+                        class: "sheet-recipient-hint",
+                        "data-testid": "compose-draft-not-saved",
+                        role: "alert",
+                        "This draft isn't saved. "
+                        button {
+                            class: "btn btn-secondary",
+                            "data-testid": "compose-draft-retry",
+                            onclick: move |_| autosave(()),
+                            "Retry"
+                        }
                     }
                 }
                 div { class: "sheet-field",
@@ -7307,6 +7344,23 @@ mod folder_sort_tests {
         a.sort_by(sort_cmp_archive);
         let second: Vec<u64> = a.iter().map(|(id, _)| *id).collect();
         assert_eq!(first, second, "archive sort must be idempotent");
+    }
+}
+
+#[cfg(test)]
+mod autosave_state_tests {
+    use super::autosave_state;
+
+    /// A save that failed shows as failed (with a retry), never as
+    /// `pending` for ever; a newer keystroke's save is pending again.
+    #[test]
+    fn a_failed_autosave_is_shown_as_failed_not_pending() {
+        assert_eq!(autosave_state(0, 0, 0), "pending");
+        assert_eq!(autosave_state(3, 0, 0), "pending");
+        assert_eq!(autosave_state(3, 3, 0), "saved");
+        assert_eq!(autosave_state(3, 2, 3), "failed");
+        assert_eq!(autosave_state(4, 2, 3), "pending");
+        assert_eq!(autosave_state(4, 4, 3), "saved");
     }
 }
 

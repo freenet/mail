@@ -134,64 +134,45 @@ impl Identity {
     /// Upserts rather than replacing the list: the load is a snapshot taken
     /// earlier, and an identity created or restored since then is already
     /// here and must stay (#286: a replace dropped it, and its row vanished).
+    /// For the same reason an entry the page holds at a newer delegate
+    /// generation than the snapshot's (renamed since the snapshot was read)
+    /// is kept, not overwritten with the older record ([`Self::upsert`]).
     #[must_use]
     pub(crate) fn set_identities(
         infos: &[freenet_mail_protocol::IdentityInfo],
-        mut user: Signal<crate::app::User>,
+        user: Signal<crate::app::User>,
     ) -> Vec<Self> {
-        let mut identities = Vec::with_capacity(infos.len());
-        for info in infos {
-            // Dedup user.identities by address (an alias changes on rename),
-            // reusing the slot's UserId so a selection naming it stays on it
-            // (#114).
-            let existing_id = user
-                .read()
-                .identities
-                .iter()
-                .find(|i| i.addr == info.addr)
-                .map(|i| i.id);
-            let identity = Identity::from_info(info, existing_id.unwrap_or_else(UserId::new));
-            {
-                let mut user_w = user.write();
-                if let Some(slot) = user_w.identities.iter_mut().find(|i| i.addr == info.addr) {
-                    *slot = identity.clone();
-                } else {
-                    user_w.identities.push(identity.clone());
-                }
-            }
-            crate::app::address_book::register_identity(&identity);
-            identities.push(identity);
-        }
-        ALIASES.with(|aliases| {
-            let aliases = &mut *aliases.borrow_mut();
-            for identity in &identities {
-                if let Some(slot) = aliases.iter_mut().find(|a| a.addr == identity.addr) {
-                    *slot = identity.clone();
-                } else {
-                    aliases.push(identity.clone());
-                }
-            }
-        });
-        identities
+        infos
+            .iter()
+            .map(|info| {
+                let identity = Identity::from_info(info, UserId::new());
+                let identity = Self::upsert(identity, user);
+                crate::app::address_book::register_identity(&identity);
+                identity
+            })
+            .collect()
     }
 
-    /// Add (or replace, by address) one identity the mail delegate created or
-    /// restored, and route its inbox to it.
-    pub(crate) fn set_alias(
-        mut identity: Identity,
-        inbox_key: ContractKey,
-        mut user: Signal<crate::app::User>,
-    ) -> Identity {
-        // Replace in place by address (an alias changes on rename), reusing
-        // the slot's UserId so a selection naming it stays on it (#81, #114).
-        let existing_id = user
+    /// Add `identity` to `user.identities` and the alias list, or replace
+    /// the entry with its address. An entry already at a newer generation
+    /// wins: every rename bumps the delegate generation, so a record read
+    /// before the rename must not bring the old alias back (the new one then
+    /// named no identity, and every write under it failed with "no
+    /// identity"). Returns the identity as the page now holds it, with the
+    /// `UserId` of the slot it fills (#81, #114).
+    fn upsert(mut identity: Identity, mut user: Signal<crate::app::User>) -> Identity {
+        let held = user
             .read()
             .identities
             .iter()
             .find(|i| i.addr == identity.addr)
-            .map(|i| i.id);
-        identity.id = existing_id.unwrap_or_else(UserId::new);
-        crate::inbox::InboxModel::set_contract_identity(inbox_key, identity.clone());
+            .cloned();
+        if let Some(held) = held {
+            if held.generation > identity.generation {
+                return held;
+            }
+            identity.id = held.id;
+        }
         {
             let mut user_w = user.write();
             if let Some(slot) = user_w
@@ -206,13 +187,28 @@ impl Identity {
         }
         ALIASES.with(|aliases| {
             let aliases = &mut *aliases.borrow_mut();
-            crate::app::address_book::register_identity(&identity);
-            if let Some(slot) = aliases.iter_mut().find(|a| a.addr == identity.addr) {
-                *slot = identity.clone();
-            } else {
-                aliases.push(identity.clone());
+            match aliases.iter_mut().find(|a| a.addr == identity.addr) {
+                Some(slot) if slot.generation > identity.generation => {}
+                Some(slot) => *slot = identity.clone(),
+                None => aliases.push(identity.clone()),
             }
         });
+        identity
+    }
+
+    /// Add (or replace, by address) one identity the mail delegate created or
+    /// restored, and route its inbox to it.
+    pub(crate) fn set_alias(
+        identity: Identity,
+        inbox_key: ContractKey,
+        user: Signal<crate::app::User>,
+    ) -> Identity {
+        // Replace in place by address (an alias changes on rename), reusing
+        // the slot's UserId so a selection naming it stays on it, and never
+        // with an older record than the page holds ([`Self::upsert`]).
+        let identity = Self::upsert(identity, user);
+        crate::inbox::InboxModel::set_contract_identity(inbox_key, identity.clone());
+        crate::app::address_book::register_identity(&identity);
         identity
     }
 
