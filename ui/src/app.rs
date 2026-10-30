@@ -585,12 +585,46 @@ impl InboxView {
         Ok(futs)
     }
 
+    /// The identity whose inbox this view shows now.
+    fn active_user(&self) -> UserId {
+        *self.active_id.borrow()
+    }
+
+    /// A removal of `ids` from the inbox shown NOW, to run later. The
+    /// target is fixed here: an archive waits for its write to be
+    /// acknowledged before removing, and the user may switch identity
+    /// meanwhile; removing from whichever inbox is active by then would
+    /// leave the message in the right one and touch the wrong one.
+    fn defer_removal(&self, ids: &[u64]) -> DeferredRemoval {
+        DeferredRemoval {
+            target: self.active_user(),
+            ids: ids.to_vec(),
+        }
+    }
+
     fn remove_messages(
         &mut self,
         client: WebApiRequestClient,
         ids: &[u64],
         inbox_data: InboxesData,
     ) -> Result<LocalBoxFuture<'static, ()>, DynError> {
+        self.defer_removal(ids).run(client, inbox_data)
+    }
+}
+
+/// See [`InboxView::defer_removal`].
+struct DeferredRemoval {
+    target: UserId,
+    ids: Vec<u64>,
+}
+
+impl DeferredRemoval {
+    fn run(
+        self,
+        client: WebApiRequestClient,
+        inbox_data: InboxesData,
+    ) -> Result<LocalBoxFuture<'static, ()>, DynError> {
+        let ids = &self.ids[..];
         tracing::debug!("removing messages: {ids:?}");
         // In offline mode the real `InboxesData` store is never populated,
         // so skip the contract-state mutation and just return a no-op.
@@ -605,11 +639,13 @@ impl InboxView {
         {
             // FIXME: indexing by id fails cause all not aliases inboxes has been loaded initially
             let inbox_data = inbox_data.snapshot();
-            let mut inbox = inbox_data[**self.active_id.borrow()].borrow_mut();
+            let mut inbox = inbox_data[*self.target].borrow_mut();
             inbox.remove_messages(client, ids)
         }
     }
+}
 
+impl InboxView {
     /// Mark messages as read in the in-memory view. Read-state persistence
     /// to the mail-local-state delegate is the caller's responsibility (see
     /// `OpenMessage`). Crucially this does NOT evict the message from the
@@ -4907,6 +4943,9 @@ fn archive_message(
             let a = alias.to_string();
             let ar = archived.clone();
             let undo_alias = alias.to_string();
+            // Bound to the inbox shown now: the user may switch identity
+            // while the archive write is being confirmed.
+            let removal = inbox.read().defer_removal(&[id]);
             // The inbox removal is signed and sent only once the archived
             // copy is stored: removing first would lose the message whenever
             // the archive write fails or is never answered.
@@ -4915,7 +4954,7 @@ fn archive_message(
                 crate::local_state::archive_message(a, id, ar),
                 &CONFIRM_ARCHIVE,
                 move || {
-                    let result = inbox.write().remove_messages(client, &[id], inbox_data);
+                    let result = removal.run(client, inbox_data);
                     async move {
                         match result {
                             Ok(fut) => fut.await,
@@ -6083,6 +6122,27 @@ fn ComposeSheet() -> Element {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod deferred_removal_tests {
+    use super::{InboxView, UserId};
+
+    /// An archive removes the message only once its write is confirmed, and
+    /// the user can switch identity meanwhile: the removal must go to the
+    /// inbox that was shown when the archive started.
+    #[test]
+    fn a_deferred_removal_keeps_the_inbox_it_was_made_for() {
+        let view = InboxView::new();
+        let alice = UserId::new();
+        let bob = UserId::new();
+        *view.active_id.borrow_mut() = alice;
+        let removal = view.defer_removal(&[7]);
+        *view.active_id.borrow_mut() = bob;
+        assert_eq!(removal.target, alice);
+        assert_eq!(removal.ids, vec![7]);
+        assert_eq!(view.active_user(), bob);
     }
 }
 
