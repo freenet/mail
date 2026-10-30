@@ -335,6 +335,9 @@ impl Identity {
     /// Drop the entry whose alias matches `alias` from the shared
     /// `ALIASES` store. Returns `true` if a matching entry was found.
     /// Used by `NodeAction::DeleteIdentity`.
+    /// Remove the live identity named `alias` (tests; the app removes by
+    /// address, [`Self::remove_in_place_by_addr`]).
+    #[cfg(test)]
     pub(crate) fn remove_in_place(alias: &str) -> bool {
         ALIASES.with(|aliases| {
             let aliases = &mut *aliases.borrow_mut();
