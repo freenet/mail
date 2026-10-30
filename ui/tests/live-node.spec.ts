@@ -2353,62 +2353,6 @@ test.describe("Live node E2E", () => {
     }
   });
 
-  test("a draft edited just before the compose sheet closes is saved", async ({ browser }) => {
-    // The autosave is debounced (500 ms) and ran in a task owned by the
-    // compose sheet: closing the sheet within the debounce cancelled it,
-    // so the last edit lived only in the page and was gone on reload.
-    const stopPump = startPermissionPump();
-    const ctx = await browser.newContext();
-    const run = `${Date.now().toString(36)}${test.info().repeatEachIndex}`;
-    const alias = `fl${run}`;
-    const subject = `closed fast ${run}`;
-    try {
-      const page = await ctx.newPage();
-      await page.goto("");
-      await createIdentity(page, alias);
-      const app = page.frameLocator("iframe#app");
-      await app
-        .locator(`[data-testid="fm-id-row"][data-alias="${alias}"] [data-testid="fm-id-open"]`)
-        .first()
-        .click();
-      await app.locator('[data-testid="fm-compose-btn"]').click();
-      const sheet = app.locator('[data-testid="fm-compose-sheet"]');
-      await sheet.locator('input[placeholder="alias or address"]').fill(alias);
-      await sheet.locator("textarea.sheet-textarea").fill("first words");
-      await expect(sheet, "the first edit is stored").toHaveAttribute("data-autosave", "saved", {
-        timeout: 30_000,
-      });
-      // The last edit, then close at once: well inside the debounce.
-      await sheet.locator('input[placeholder="subject"]').fill(subject);
-      await sheet.locator(".sheet-x").click();
-      await expect(sheet).toHaveCount(0);
-
-      await expect
-        .poll(
-          async () => {
-            await page.reload();
-            const fresh = page.frameLocator("iframe#app");
-            await expect(fresh.locator(".brand-name").first()).toContainText(APP_NAME, {
-              timeout: 60_000,
-            });
-            await fresh
-              .locator(`[data-testid="fm-id-row"][data-alias="${alias}"] [data-testid="fm-id-open"]`)
-              .first()
-              .click();
-            await fresh.locator('[data-testid="fm-folder-drafts"]').click();
-            const card = fresh.locator('[data-testid="fm-draft-card"]', { hasText: subject });
-            await expect(card).toBeVisible({ timeout: 15_000 }).catch(() => {});
-            return (await card.count()) > 0 ? "saved" : "lost";
-          },
-          { timeout: 120_000, intervals: [2_000] },
-        )
-        .toBe("saved");
-    } finally {
-      await ctx.close().catch(() => {});
-      stopPump();
-    }
-  });
-
   test("an identity left at the reveal step gets its contracts on the next load", async ({
     browser,
   }) => {

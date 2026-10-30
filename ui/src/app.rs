@@ -5571,10 +5571,6 @@ fn ComposeSheet() -> Element {
     // it still matches when the timer elapses — older keystrokes are silently
     // dropped. Send / Discard bump the token to cancel a pending save.
     let mut autosave_token = use_signal(|| 0u64);
-    // The latest edit's token, outside the signal system: a pending save
-    // re-issued when this sheet unmounts reads it after the signals are gone.
-    #[cfg(feature = "use-node")]
-    let latest_edit = use_hook(|| std::rc::Rc::new(std::cell::Cell::new(0u64)));
     // Set when an autosave finds this draft removed in another tab
     // (discarded or sent there): autosave stops, so the draft is not brought
     // back, and the sheet says so.
@@ -5630,34 +5626,9 @@ fn ComposeSheet() -> Element {
         {
             let alias = alias_for_save.clone();
             let token_signal = autosave_token;
-            latest_edit.set(my_token);
-            let latest = latest_edit.clone();
             spawn(async move {
-                // Closing the sheet (✕, the veil, navigating away) within
-                // the debounce, or while the save is under way, cancels this
-                // task: the last edit would then live only in this page and
-                // be gone on reload. If it is still the latest edit, save it
-                // in a task that outlives the sheet.
-                let flush = {
-                    let (alias, id, draft, to_address) =
-                        (alias.clone(), id.clone(), draft.clone(), to_address.clone());
-                    OnCancel::new(move || {
-                        if latest.get() == my_token {
-                            let _task = dioxus_core::spawn_forever(async move {
-                                if let Err(e) =
-                                    crate::local_state::save_draft(alias, id, draft, to_address)
-                                        .await
-                                {
-                                    crate::log::local_state_failure("save draft on close", e);
-                                }
-                            });
-                        }
-                    })
-                };
                 gloo_timers::future::TimeoutFuture::new(AUTOSAVE_DEBOUNCE_MS).await;
                 if *token_signal.read() != my_token {
-                    // A later edit superseded this one; its task saves.
-                    flush.disarm();
                     return;
                 }
                 match crate::local_state::save_draft(alias.clone(), id.clone(), draft, to_address)
@@ -5682,7 +5653,6 @@ fn ComposeSheet() -> Element {
                         crate::log::local_state_failure("save draft", e);
                     }
                 }
-                flush.disarm();
             });
         }
     });
