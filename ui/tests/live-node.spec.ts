@@ -2434,18 +2434,16 @@ test.describe("Live node E2E", () => {
           .frameLocator("iframe#app")
           .locator(`[data-testid="fm-id-row"][data-alias="${alias}"]`),
       ).toBeVisible({ timeout: 60_000 });
+      // Both contracts are found (a positive signal for each), so the check
+      // below runs after both answers, not before a late one.
+      const loaded = (line: string) =>
+        since().some((t) => t.includes(line) && t.includes(`alias=\`${alias}\``));
       await expect
-        .poll(
-          () =>
-            since().some(
-              (t) => t.includes("own inbox state loaded") && t.includes(`alias=\`${alias}\``),
-            ),
-          {
-            message: "the next load found the self-healed inbox on the node",
-            timeout: 120_000,
-            intervals: [2_000],
-          },
-        )
+        .poll(() => loaded("own inbox state loaded") && loaded("own AFT record loaded"), {
+          message: "the next load found the self-healed inbox and AFT record on the node",
+          timeout: 120_000,
+          intervals: [2_000],
+        })
         .toBe(true);
       expect(
         since().some(

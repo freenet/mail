@@ -2477,7 +2477,13 @@ pub(crate) async fn node_comms(
                     _ => {
                         match token_rec_to_id.remove(&key) {
                             Some(identity) => {
-                                // is a AFT record contract
+                                // is a AFT record contract. Release-visible:
+                                // the live-node suite reads it as proof the
+                                // node holds this identity's AFT record (#288).
+                                crate::log::info(format!(
+                                    "own AFT record loaded (key={key}, alias=`{}`)",
+                                    identity.alias
+                                ));
                                 if let Err(e) = AftRecords::set_identity_contract(
                                     identity.clone(),
                                     state.into(),
