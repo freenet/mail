@@ -1,4 +1,12 @@
-import { test, expect, type FrameLocator } from "@playwright/test";
+import {
+  test,
+  expect,
+  type Browser,
+  type BrowserContext,
+  type FrameLocator,
+  type Page,
+  type TestInfo,
+} from "@playwright/test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { APP_NAME } from "./app-name";
@@ -86,6 +94,72 @@ const ALIAS_T10_BOB = "bob10";
 // already cached this inbox from an earlier test (which would mask the
 // subscribe-before-get bug — the contract would already be locally held).
 const ALIAS_T11_BOB = "bob11";
+type Evidence = {
+  newContext: Browser["newContext"];
+  contexts: BrowserContext[];
+  lines: string[];
+};
+const EVIDENCE = new WeakMap<Browser, Evidence>();
+
+function watchContext(ctx: BrowserContext, ev: Evidence) {
+  const label = `ctx${ev.contexts.length}`;
+  ev.contexts.push(ctx);
+  const watchPage = (p: Page) => {
+    p.on("console", (m) =>
+      ev.lines.push(`[${label}:${m.type()}] ${m.text()}`),
+    );
+    p.on("pageerror", (e) => ev.lines.push(`[${label}:pageerror] ${e.message}`));
+  };
+  ctx.pages().forEach(watchPage);
+  ctx.on("page", watchPage);
+}
+
+async function recordEvidence(browser: Browser, context: BrowserContext) {
+  const ev: Evidence = {
+    newContext: browser.newContext.bind(browser),
+    contexts: [],
+    lines: [],
+  };
+  EVIDENCE.set(browser, ev);
+  const start = async (ctx: BrowserContext) => {
+    watchContext(ctx, ev);
+    await ctx.tracing.start({ screenshots: true, snapshots: true });
+  };
+  await start(context);
+  browser.newContext = async (options) => {
+    const ctx = await ev.newContext(options);
+    await start(ctx);
+    return ctx;
+  };
+}
+
+async function attachEvidence(browser: Browser, testInfo: TestInfo) {
+  const ev = EVIDENCE.get(browser);
+  if (!ev) return;
+  browser.newContext = ev.newContext;
+  EVIDENCE.delete(browser);
+  const failed = testInfo.status !== testInfo.expectedStatus;
+  for (const [i, ctx] of ev.contexts.entries()) {
+    const file = testInfo.outputPath(`trace-ctx${i}.zip`);
+    // A context the test already closed has no tracing to stop.
+    const stopped = await ctx.tracing
+      .stop(failed ? { path: file } : undefined)
+      .then(() => true)
+      .catch(() => false);
+    if (failed && stopped) {
+      await testInfo.attach(`trace-ctx${i}`, { path: file });
+    }
+  }
+  if (failed) {
+    await testInfo.attach("console", {
+      body: ev.lines.join("\n"),
+      contentType: "text/plain",
+    });
+    console.log(`── console of failed test "${testInfo.title}" ──`);
+    for (const line of ev.lines) console.log(line);
+  }
+}
+
 test.describe("Live node E2E", () => {
   test.skip(
     !process.env.FREENET_EMAIL_BASE_URL?.includes("/v1/contract/web/"),
@@ -99,7 +173,7 @@ test.describe("Live node E2E", () => {
   // skip is keyed on project name and resolved per-test (not via a
   // beforeAll), so running the full suite without `--project=chromium`
   // does not trip a beforeEach against an unreachable gateway.
-  test.beforeEach(async ({}, testInfo) => {
+  test.beforeEach(async ({ browser, context }, testInfo) => {
     test.skip(
       testInfo.project.name !== "chromium",
       "live-node spec runs on chromium only",
@@ -107,6 +181,14 @@ test.describe("Live node E2E", () => {
     // Sanity: gateway permission API reachable from test runner.
     const res = await fetch(`${ISO_GW_ORIGIN}/permission/pending`);
     expect(res.ok, "iso gateway /permission/pending must respond").toBe(true);
+    await recordEvidence(browser, context);
+  });
+
+  // A failure that only happens in CI leaves nothing to diagnose unless every
+  // page's console and a trace are kept. This suite runs with retries: 0, so
+  // the config's `trace: "on-first-retry"` never fires here.
+  test.afterEach(async ({ browser }, testInfo) => {
+    await attachEvidence(browser, testInfo);
   });
 
   test("create identity → reload persists → drives permission flow", async ({
