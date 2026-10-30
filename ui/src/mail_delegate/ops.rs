@@ -674,6 +674,27 @@ mod tests {
         assert!(ids.iter().all(|i| i.addr != info.addr));
     }
 
+    /// The offline build runs the delegate with `v1-transition`, so the
+    /// transitional token-generator parameters are exercised there too: they
+    /// must be exactly what the v0.2 client derived from the identity's
+    /// signing seed, or token signing would use the wrong generator.
+    #[test]
+    fn v1_aft_params_are_the_v0_2_token_generator_parameters() {
+        let (info, keys) = imported("aft-params", 61);
+        let params = block_on(v1_aft_params(info.addr)).unwrap();
+        let decoded: freenet_mail_wire_v1::aft::DelegateParameters =
+            serde_json::from_slice(&params).unwrap();
+        let seed: [u8; 32] = keys.ml_dsa_seed.as_slice().try_into().unwrap();
+        assert_eq!(decoded.generator_seed, seed);
+        assert_eq!(
+            &params[..],
+            serde_json::to_vec(&freenet_mail_wire_v1::aft::DelegateParameters::new(seed))
+                .unwrap()
+                .as_slice(),
+            "byte-identical to the v0.2 client's encoding",
+        );
+    }
+
     #[test]
     fn importing_twice_never_overwrites() {
         let (first, _) = imported("import-once", 51);

@@ -35,8 +35,10 @@ gloo-timers = { version = "0.4.0", features = ["futures"] }
 freenet-mail-wire-v1 = { workspace = true, features = ["clock"] }
 freenet-mail-protocol = { workspace = true }
 # The real mail delegate, run in-page for the offline build (no node). Never
-# linked into a `use-node` build: the node runs the published WASM.
-mail-delegate = { path = "../delegates/mail-delegate", optional = true }
+# linked into a `use-node` build: the node runs the published WASM. Built
+# with `v1-transition`, as the candidate the node build embeds is, so the
+# offline build answers `V1AftParams` the same way.
+mail-delegate = { path = "../delegates/mail-delegate", optional = true, features = ["v1-transition"] }
 serde_bytes = "0.11.19"
 ciborium = "0.2.2"
 zeroize = "1.8.2"
