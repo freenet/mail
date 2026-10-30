@@ -1266,6 +1266,30 @@ fn import_fixture(env: &mut MemEnv, origin: u8) -> Addr {
     .addr
 }
 
+/// The node answers a prompt nobody answered (its 60 s timeout, or a
+/// dismissed dialog) with an EMPTY response. That must end the waiting
+/// request with a refusal, which is what keeps the UI from waiting out its
+/// own much longer backstop, and the refusal must say it went unanswered.
+#[test]
+fn an_unanswered_prompt_ends_the_waiting_request() {
+    let mut env = MemEnv::default();
+    let addr = import_fixture(&mut env, PROD);
+    let id = prompt(&send(&mut env, app(PROD), Op::ExportRecoveryKey { addr })).0;
+    let failure = response(&answer(&mut env, PROD, id, b""))
+        .result
+        .unwrap_err();
+    assert_eq!(failure.code, FailureCode::Refused);
+    assert!(
+        failure.detail.contains("not answered"),
+        "{}",
+        failure.detail
+    );
+    assert!(
+        answer(&mut env, PROD, id, ALLOW).is_empty(),
+        "the prompt is gone"
+    );
+}
+
 #[test]
 fn an_export_asks_and_only_an_allow_releases_the_key() {
     let (dsa, kem) = fixture_seeds();
