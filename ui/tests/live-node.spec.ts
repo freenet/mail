@@ -109,6 +109,15 @@ function watchContext(ctx: BrowserContext, ev: Evidence) {
       ev.lines.push(`[${label}:${m.type()}] ${m.text()}`),
     );
     p.on("pageerror", (e) => ev.lines.push(`[${label}:pageerror] ${e.message}`));
+    // A page that restarts mid-test loses its in-memory state; these say why.
+    p.on("framenavigated", (f) =>
+      ev.lines.push(
+        `[${label}:navigated] ${f === p.mainFrame() ? "top" : "frame"} ${f.url()}`,
+      ),
+    );
+    p.on("crash", () => ev.lines.push(`[${label}:crash]`));
+    p.on("dialog", (d) => ev.lines.push(`[${label}:dialog] ${d.type()} ${d.message()}`));
+    p.on("close", () => ev.lines.push(`[${label}:close]`));
   };
   ctx.pages().forEach(watchPage);
   ctx.on("page", watchPage);
