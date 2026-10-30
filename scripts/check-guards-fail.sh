@@ -277,6 +277,29 @@ dt "a delete removes a key that reads as absent" "$D/store.rs" \
 dt "an unreadable index is not taken for empty" "$D/store.rs" \
     'if self.get(&index_marker_rel(rel)).as_deref() == Some(MARKER_LIVE) {' 'if false {' \
     an_unreadable_index_is_not_rebuilt_from_nothing
+dt "an emptied index is written empty, not removed" "$D/store.rs" \
+    '        if generation == 0 && ids.is_empty() {
+            return Ok(());
+        }' \
+    '        if ids.is_empty() {
+            if generation == 0 {
+                return Ok(());
+            }
+            self.put_for_delete(&marker, MARKER_PENDING)?;
+            if let Err(e) = self.del(rel) {
+                let _ = self.put_for_delete(&marker, MARKER_LIVE);
+                return Err(e);
+            }
+            let _ = self.del(&marker);
+            return Ok(());
+        }' \
+    an_emptied_index_reads_the_same_whether_its_record_reads_or_not
+dt "a new index lists nothing until it is live" "$D/store.rs" \
+    '            let created = self.create_index(rel, &marker)?;' \
+    '            self.put(&marker, MARKER_PENDING)?;
+            let created = self.write_if(rel, 0, &body)?;
+            self.put_for_delete(&marker, MARKER_LIVE)?;' \
+    a_record_under_a_pending_marker_never_lists_an_entry
 dt "the counter is read from both copies" "$D/store.rs" \
     '        [GENERATION, GENERATION_COPY]
             .iter()' '        [GENERATION]

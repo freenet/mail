@@ -10,6 +10,10 @@
 //! `FAULT_SEEDS` (default 300), `FAULT_OPS` (default 60 per seed) and
 //! `FAULT_RATE` (default 60 per thousand calls, for each fault) widen
 //! a run; a failing seed is printed and belongs in `PINNED_SEEDS`.
+//! `FAULT_SEED=n` with `replay_one_unreadable_key_seed` re-runs one seed;
+//! `FAULT_TRACE=1` prints every reply and `FAULT_DUMP=1` the stored keys
+//! when a check fails. (Instrumentation that calls the host shifts the
+//! seeded faults, so keep traces to what the code already read.)
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -40,6 +44,12 @@ const PINNED_BLIND_RUNS: &[(u64, usize, u32, u32)] = &[
     // An index created but left marked "may be absent", rebuilt from
     // nothing once it failed to read.
     (339, 80, 200, 100),
+    // An index emptied by a removal the host refused, with `l` refused
+    // back too: its old entries stayed listed under `p`, read as empty
+    // while unreadable (so a create's marker was dropped) and as live
+    // once readable again, naming an item that was never stored.
+    (765, 60, 200, 20),
+    (934, 60, 200, 20),
 ];
 
 const KINDS: [ItemKind; 5] = [
@@ -653,6 +663,19 @@ fn rel_keys(env: &MemEnv) -> BTreeMap<String, Vec<u8>> {
         .collect()
 }
 
+/// With `FAULT_DUMP=1`, print the namespace's keys when a check fails, to
+/// read the state a failing seed left behind.
+fn dump(keys: &BTreeMap<String, Vec<u8>>) {
+    if std::env::var_os("FAULT_DUMP").is_some() {
+        for (k, v) in keys {
+            eprintln!(
+                "DUMP {k} = {:?}",
+                String::from_utf8_lossy(&v[..v.len().min(60)])
+            );
+        }
+    }
+}
+
 fn check(run: &mut Run) -> Result<(), String> {
     let env = run.env.clone();
     let keys = rel_keys(&env);
@@ -704,6 +727,7 @@ fn check(run: &mut Run) -> Result<(), String> {
     }
     let leaked: BTreeSet<Vec<u8>> = indexed.difference(&records).cloned().collect();
     if let Some(id) = leaked.iter().next() {
+        dump(&keys);
         return Err(format!(
             "index entry {} has no record (marker {:?}): a leaked slot",
             &store::hex(id)[..8],
@@ -776,6 +800,7 @@ fn check(run: &mut Run) -> Result<(), String> {
             for id in ids {
                 let item = format!("it/{tag}/{owner_hex}/{}", store::hex(&id));
                 if !keys.contains_key(&item) {
+                    dump(&keys);
                     run.m.leaks += 1;
                     return Err(format!("{k} names {item}, which is not stored"));
                 }

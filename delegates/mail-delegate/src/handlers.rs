@@ -895,7 +895,11 @@ fn delete_step(s: &mut Space<'_>, addr: &Addr) -> OpResult {
     // marker (which names the address) goes too, before the record, so a
     // failure here is retried by the next step.
     for kind in ALL_KINDS.into_iter().filter(|k| store::shape(*k).0) {
-        s.del(&store::index_marker_rel(&index_rel(kind, Some(addr))))?;
+        // The record first: a removal refused above leaves it under `p`,
+        // listing nothing, and without its marker it would read as live.
+        let ix = index_rel(kind, Some(addr));
+        s.del(&ix)?;
+        s.del(&store::index_marker_rel(&ix))?;
     }
     // The marker goes first: it is what lets a later listing prune the
     // index entry if removing it below fails.

@@ -570,10 +570,23 @@ impl<'a> Space<'a> {
         self.del(&index_marker_rel(rel))
     }
 
-    /// Write an index (generation 0 = create it), or remove it when empty,
-    /// keeping its existence marker in step. The marker says `p` whenever
-    /// the index may legitimately be absent (before its first write lands,
-    /// while it is removed), and `l` only once it was written.
+    /// Write an index (generation 0 = absent: create it first), keeping its
+    /// existence marker in step: `p` while a new index is being created,
+    /// `l` once it was written.
+    ///
+    /// A record that lists anything is only ever written under `l`, and the
+    /// only record written under `p` is the empty list. So whichever of the
+    /// two keys fails to read, the index never lists an entry that is not
+    /// live (a record under `p` is empty), and never reads a live list as
+    /// empty (`l` beside an absent record is `Busy`).
+    ///
+    /// An emptied index keeps its record, as the empty list, rather than
+    /// being removed. Removing it meant setting `p` first and `l` back if the
+    /// removal was refused, and both could be refused: the old entries then
+    /// stayed under `p`, read as empty while the record failed to read and as
+    /// live once it read again, after their items' markers had been dropped
+    /// (fault-harness seeds 765 and 934). Only an identity's deletion
+    /// removes its indexes (`delete_step`), and [`Space::reset_index`].
     fn write_index(
         &mut self,
         rel: &str,
@@ -581,19 +594,7 @@ impl<'a> Space<'a> {
         ids: &BTreeSet<Vec<u8>>,
     ) -> Result<(), Failure> {
         let marker = index_marker_rel(rel);
-        if ids.is_empty() {
-            if generation == 0 {
-                return Ok(());
-            }
-            self.put_for_delete(&marker, MARKER_PENDING)?;
-            if let Err(e) = self.del(rel) {
-                // Still there: say so again, or a read that fails later
-                // would be taken for an empty index.
-                let _ = self.put_for_delete(&marker, MARKER_LIVE);
-                return Err(e);
-            }
-            // Left as `p` if this fails: "may be absent", which is true.
-            let _ = self.del(&marker);
+        if generation == 0 && ids.is_empty() {
             return Ok(());
         }
         let list: Vec<serde_bytes::ByteBuf> = ids
@@ -602,33 +603,37 @@ impl<'a> Space<'a> {
             .collect();
         let body =
             freenet_mail_protocol::to_cbor(&list).map_err(|e| fail(FailureCode::Internal, e))?;
-        if generation > 0 {
-            // It exists (it was just read), so `l` is true before and after
-            // the write. Set first, so nothing can fail after the write.
-            if self.get(&marker).as_deref() != Some(MARKER_LIVE) {
-                self.put_for_delete(&marker, MARKER_LIVE)?;
-            }
-            return self.write_if(rel, generation, &body).map(|_| ());
+        if generation == 0 {
+            // Just created under `l` by this op (delegate messages run one at
+            // a time), so its generation is known and is not read back: a
+            // record that fails to read straight after being written must
+            // not fail the write.
+            let created = self.create_index(rel, &marker)?;
+            let next = self.next_generation(created)?;
+            return self.put(rel, &encode_versioned(next, &body));
         }
-        // Created: `p` until the index is written, then `l`. Not best
-        // effort: an index whose marker still said `p` would be taken for
-        // empty, and rebuilt from nothing, the first time a read of it
-        // failed. If `l` cannot be set, the new index is removed again
-        // (removal does not depend on reading it), so an error means
-        // "not written".
-        self.put(&marker, MARKER_PENDING)?;
-        self.write_if(rel, 0, &body)?;
-        let live = |sp: &mut Self| sp.put_for_delete(&marker, MARKER_LIVE);
-        if let Err(e) = live(self).or_else(|_| live(self)) {
-            // Never leave a written index under `p`: once it failed to read
-            // it would be taken for empty and rebuilt from nothing. Remove
-            // it (confirmed: it was just written), or else keep trying `l`.
-            if self.del_written(rel).is_err() {
-                let _ = live(self).or_else(|_| live(self));
-            }
-            return Err(e);
+        // It exists (it was just read), so `l` is true before and after the
+        // write. Set first, so nothing can fail after the write. A record
+        // that could be found under `p` is the empty list, so setting `l`
+        // over it revives nothing.
+        if self.get(&marker).as_deref() != Some(MARKER_LIVE) {
+            self.put_for_delete(&marker, MARKER_LIVE)?;
         }
-        Ok(())
+        self.write_if(rel, generation, &body).map(|_| ())
+    }
+
+    /// Create the index at `rel` as the empty list: `p`, the record, then
+    /// `l`. Returns its generation. If `l` cannot be set the error stands
+    /// and the empty record stays under `p`, where it reads as empty either
+    /// way, so the next write finishes the job.
+    fn create_index(&mut self, rel: &str, marker: &str) -> Result<u64, Failure> {
+        let empty = freenet_mail_protocol::to_cbor(&Vec::<serde_bytes::ByteBuf>::new())
+            .map_err(|e| fail(FailureCode::Internal, e))?;
+        self.put(marker, MARKER_PENDING)?;
+        let generation = self.write_if(rel, 0, &empty)?;
+        let live = |sp: &mut Self| sp.put_for_delete(marker, MARKER_LIVE);
+        live(self).or_else(|_| live(self))?;
+        Ok(generation)
     }
 
     /// Add `id` to the index at `rel`, refusing past `cap` entries.
@@ -890,7 +895,7 @@ mod tests {
     }
 
     #[test]
-    fn indexes_are_sets_with_caps_and_vanish_when_empty() {
+    fn indexes_are_sets_with_caps_and_read_empty_once_emptied() {
         let mut env = MemEnv::default();
         let mut s = Space::new(&mut env, Origin([1; 32]));
         s.index_add("ix/t", b"b", 2).unwrap();
@@ -907,7 +912,114 @@ mod tests {
         );
         s.index_remove("ix/t", b"a").unwrap();
         s.index_remove("ix/t", b"b").unwrap();
-        assert_eq!(s.get("ix/t"), None);
+        // An emptied index keeps its record, as the empty list, still live:
+        // it reads as empty, not as an unreadable list (`Busy`).
+        let (generation, ids) = s.index("ix/t").unwrap();
+        assert!(generation > 0 && ids.is_empty());
+        assert_eq!(
+            s.get(&index_marker_rel("ix/t")).as_deref(),
+            Some(MARKER_LIVE)
+        );
+        // And it fills again.
+        s.index_add("ix/t", b"c", 2).unwrap();
+        assert_eq!(s.index("ix/t").unwrap().1.len(), 1);
+    }
+
+    /// Emptying an index under refused writes and removals never leaves a
+    /// record that reads differently depending on whether it can be read:
+    /// it must list the same either way, or be `Busy` while unreadable.
+    /// (Removing the record, as emptying once did, could leave the old
+    /// entries under `p`: listed while readable, empty while not.)
+    #[test]
+    fn an_emptied_index_reads_the_same_whether_its_record_reads_or_not() {
+        use crate::env::mem::{FaultOp, Faults, Rule};
+        let mut env = MemEnv::default();
+        Space::new(&mut env, Origin([1; 32]))
+            .index_add("ix/t", b"a", 4)
+            .unwrap();
+        // From here: the record's removal and the marker's next write but
+        // one are refused (a removal sets the marker, then sets it back).
+        let mut faults = Faults::rule(FaultOp::RemoveFail, "ix/t", 1);
+        faults.rules.push(Rule {
+            op: FaultOp::SetFail,
+            key_contains: "xm/ix/t".into(),
+            nth: 2,
+        });
+        env.faults = Some(faults);
+        let _ = Space::new(&mut env, Origin([1; 32])).index_remove("ix/t", b"a");
+        env.faults = None;
+        let readable = Space::new(&mut env, Origin([1; 32]))
+            .index("ix/t")
+            .map(|(_, ids)| ids);
+        let record = Space::new(&mut env, Origin([1; 32])).full_key("ix/t");
+        env.faults = Some(Faults::blind(&String::from_utf8(record).unwrap()));
+        let unreadable = Space::new(&mut env, Origin([1; 32]))
+            .index("ix/t")
+            .map(|(_, ids)| ids);
+        match unreadable {
+            Err(f) => assert_eq!(f.code, FailureCode::Busy),
+            Ok(ids) => assert_eq!(Ok(ids), readable),
+        }
+    }
+
+    /// Whichever of an index's two keys fails to read, the index never
+    /// lists an entry its writer did not commit. A create whose marker
+    /// cannot be set to `l` leaves only the empty list under `p`, and an
+    /// index is emptied by writing the empty list, never by a removal that
+    /// could be refused half-way (fault-harness seeds 765 and 934 left the
+    /// old entries under `p`).
+    #[test]
+    fn a_record_under_a_pending_marker_never_lists_an_entry() {
+        use crate::env::mem::{FaultOp, Faults, Rule};
+        // The marker's writes are `p` (call 1), then `l` and its retry
+        // (calls 2 and 3): refuse both `l`s.
+        // (Distinct spellings of the key: each rule counts its own matches.)
+        let mut faults = Faults::rule(FaultOp::SetFail, "xm/ix/t", 2);
+        let rule = |op, key: &str, nth| Rule {
+            op,
+            key_contains: key.into(),
+            nth,
+        };
+        faults.rules.push(rule(FaultOp::SetFail, "/xm/ix/t", 3));
+        // Removals of the record are refused too: a create that undid itself
+        // by removing what it wrote (as this once did) is left with it.
+        for (key, nth) in [("ix/t", 1), ("/ix/t", 2), ("1/ix/t", 3)] {
+            faults.rules.push(rule(FaultOp::RemoveFail, key, nth));
+        }
+        let mut env = MemEnv {
+            faults: Some(faults),
+            ..MemEnv::default()
+        };
+        assert!(
+            Space::new(&mut env, Origin([1; 32]))
+                .index_add("ix/t", b"a", 4)
+                .is_err()
+        );
+        env.faults = None;
+        let lists = |env: &mut MemEnv| {
+            Space::new(env, Origin([1; 32]))
+                .index("ix/t")
+                .map(|(_, ids)| ids.len())
+        };
+        // Under `p`, with the marker read: nothing listed.
+        assert_eq!(lists(&mut env), Ok(0));
+        // With the marker unreadable (it reads as absent), the record is
+        // read as it is: still nothing, since only the empty list was
+        // written under `p`.
+        let marker = Space::new(&mut env, Origin([1; 32])).full_key(&index_marker_rel("ix/t"));
+        let saved = env.secrets.remove(&marker).unwrap();
+        assert_eq!(lists(&mut env), Ok(0));
+        // With the record unreadable instead: nothing either.
+        env.secrets.insert(marker, saved);
+        let record = Space::new(&mut env, Origin([1; 32])).full_key("ix/t");
+        env.faults = Some(Faults::blind(&String::from_utf8(record).unwrap()));
+        assert_eq!(lists(&mut env), Ok(0));
+        // The next add finishes the job: listed, under `l`.
+        env.faults = None;
+        Space::new(&mut env, Origin([1; 32]))
+            .index_add("ix/t", b"a", 4)
+            .unwrap();
+        assert_eq!(lists(&mut env), Ok(1));
     }
 
     #[test]
