@@ -590,14 +590,28 @@ impl InboxView {
         *self.active_id.borrow()
     }
 
-    /// A removal of `ids` from the inbox shown NOW, to run later. The
-    /// target is fixed here: an archive waits for its write to be
-    /// acknowledged before removing, and the user may switch identity
-    /// meanwhile; removing from whichever inbox is active by then would
-    /// leave the message in the right one and touch the wrong one.
-    fn defer_removal(&self, ids: &[u64]) -> DeferredRemoval {
+    /// A removal of `ids` from the inbox shown NOW, to run later. The inbox
+    /// is resolved and bound here, by the identity that owns it (the way
+    /// `MessageList` finds the inbox it shows): an archive waits for its
+    /// write to be acknowledged before removing, and the user may switch
+    /// identity meanwhile. Inboxes are kept in the order their state
+    /// arrived, so a position in that list says nothing about whose inbox
+    /// it is.
+    fn defer_removal(&self, ids: &[u64], inbox_data: InboxesData) -> DeferredRemoval {
+        self.defer_removal_in(ids, &inbox_data.snapshot(), inbox_owner)
+    }
+
+    /// [`Self::defer_removal`] over any list of inboxes and owner lookup.
+    fn defer_removal_in<T: Clone>(
+        &self,
+        ids: &[u64],
+        inboxes: &[T],
+        owner: impl Fn(&T) -> Option<UserId>,
+    ) -> DeferredRemoval<T> {
+        let target = self.active_user();
         DeferredRemoval {
-            target: self.active_user(),
+            target,
+            inbox: pick_inbox(inboxes, target, owner),
             ids: ids.to_vec(),
         }
     }
@@ -608,30 +622,35 @@ impl InboxView {
         ids: &[u64],
         inbox_data: InboxesData,
     ) -> Result<LocalBoxFuture<'static, ()>, DynError> {
-        self.defer_removal(ids).run(client, inbox_data)
+        self.defer_removal(ids, inbox_data).run(client)
     }
 }
 
-/// See [`InboxView::defer_removal`].
-struct DeferredRemoval {
+/// The identity that owns `inbox`, as the inbox routing records it.
+fn inbox_owner(inbox: &Rc<RefCell<InboxModel>>) -> Option<UserId> {
+    crate::inbox::InboxModel::contract_identity(&inbox.borrow().key).map(|id| id.id)
+}
+
+/// The inbox in `inboxes` that `target` owns, found by owner, never by
+/// position. `None` if that identity's inbox is not loaded.
+fn pick_inbox<T: Clone>(
+    inboxes: &[T],
     target: UserId,
+    owner: impl Fn(&T) -> Option<UserId>,
+) -> Option<T> {
+    inboxes.iter().find(|ib| owner(ib) == Some(target)).cloned()
+}
+
+/// See [`InboxView::defer_removal`].
+struct DeferredRemoval<T = Rc<RefCell<InboxModel>>> {
+    target: UserId,
+    /// The inbox bound when the removal was deferred.
+    inbox: Option<T>,
     ids: Vec<u64>,
 }
 
 impl DeferredRemoval {
-    /// The inbox this removal was made for, out of `inboxes` (indexed by
-    /// identity): the one shown when it was deferred, whichever is shown
-    /// now. `None` if that inbox is not loaded.
-    #[cfg(any(test, not(all(feature = "example-data", not(feature = "use-node")))))]
-    fn pick<T: Clone>(&self, inboxes: &[T]) -> Option<T> {
-        inboxes.get(*self.target).cloned()
-    }
-
-    fn run(
-        self,
-        client: WebApiRequestClient,
-        inbox_data: InboxesData,
-    ) -> Result<LocalBoxFuture<'static, ()>, DynError> {
+    fn run(self, client: WebApiRequestClient) -> Result<LocalBoxFuture<'static, ()>, DynError> {
         let ids = &self.ids[..];
         tracing::debug!("removing messages: {ids:?}");
         // In offline mode the real `InboxesData` store is never populated,
@@ -640,7 +659,6 @@ impl DeferredRemoval {
         {
             let _ = client;
             let _ = ids;
-            let _ = inbox_data;
             Ok(async {}.boxed_local())
         }
         #[cfg(not(all(feature = "example-data", not(feature = "use-node"))))]
@@ -648,7 +666,7 @@ impl DeferredRemoval {
             // Not every identity's inbox may be loaded yet; that is an
             // error to report, not a panic.
             let inbox = self
-                .pick(&inbox_data.snapshot())
+                .inbox
                 .ok_or_else(|| format!("the inbox for identity {} is not loaded", *self.target))?;
             let mut inbox = inbox.borrow_mut();
             inbox.remove_messages(client, ids)
@@ -4941,7 +4959,7 @@ fn archive_message(
             let undo_alias = alias.to_string();
             // Bound to the inbox shown now: the user may switch identity
             // while the archive write is being confirmed.
-            let removal = inbox.read().defer_removal(&[id]);
+            let removal = inbox.read().defer_removal(&[id], inbox_data);
             // The inbox removal is signed and sent only once the archived
             // copy is stored: removing first would lose the message whenever
             // the archive write fails or is never answered.
@@ -4950,7 +4968,7 @@ fn archive_message(
                 crate::local_state::archive_message(a, id, ar),
                 &CONFIRM_ARCHIVE,
                 move || {
-                    let result = removal.run(client, inbox_data);
+                    let result = removal.run(client);
                     async move {
                         match result {
                             Ok(fut) => fut.await,
@@ -6134,37 +6152,46 @@ fn ComposeSheet() -> Element {
 mod deferred_removal_tests {
     use super::{InboxView, UserId};
 
+    /// Inboxes in the order their state arrived, which is not the order of
+    /// their owners' ids: bob's state came in first.
+    const ARRIVAL_ORDER: [(&str, UserId); 2] =
+        [("bob's inbox", UserId(1)), ("alice's inbox", UserId(0))];
+
+    fn owner(inbox: &(&'static str, UserId)) -> Option<UserId> {
+        Some(inbox.1)
+    }
+
     /// An archive removes the message only once its write is confirmed, and
     /// the user can switch identity meanwhile: the removal must go to the
-    /// inbox that was shown when the archive started.
+    /// inbox that was shown when the archive started, and it is found by its
+    /// owner, not by its position in the list.
     #[test]
-    fn a_deferred_removal_keeps_the_inbox_it_was_made_for() {
+    fn a_deferred_removal_binds_the_shown_identitys_inbox_by_owner() {
         let view = InboxView::new();
-        let alice = UserId::new();
-        let bob = UserId::new();
+        let (alice, bob) = (UserId(0), UserId(1));
         *view.active_id.borrow_mut() = alice;
-        let removal = view.defer_removal(&[7]);
+        let removal = view.defer_removal_in(&[7], &ARRIVAL_ORDER, owner);
         *view.active_id.borrow_mut() = bob;
         assert_eq!(removal.target, alice);
         assert_eq!(removal.ids, vec![7]);
+        assert_eq!(removal.inbox.map(|ib| ib.0), Some("alice's inbox"));
         assert_eq!(view.active_user(), bob);
     }
 
     /// The archive flow end to end, minus the network: the removal is bound
     /// when the archive starts, the user switches identity while the archive
     /// write is awaited (`store_then`, as archive uses), and the removal then
-    /// picks its inbox the way `DeferredRemoval::run` does: alice's, not the
-    /// one shown by then.
+    /// runs against alice's inbox, not the one shown by then nor the one at
+    /// alice's id's position.
     #[test]
     fn a_removal_after_an_identity_switch_mid_wait_goes_to_the_original_inbox() {
         use futures::executor::block_on;
         use std::cell::Cell;
         let view = InboxView::new();
         let (alice, bob) = (UserId(0), UserId(1));
-        let inboxes = vec!["alice's inbox", "bob's inbox"];
         *view.active_id.borrow_mut() = alice;
 
-        let removal = view.defer_removal(&[7]);
+        let removal = view.defer_removal_in(&[7], &ARRIVAL_ORDER, owner);
         let picked = Cell::new(None);
         let outcome = block_on(super::store_then(
             async {
@@ -6173,7 +6200,7 @@ mod deferred_removal_tests {
                 Ok(())
             },
             || async {
-                picked.set(removal.pick(&inboxes));
+                picked.set(removal.inbox.map(|ib| ib.0));
             },
         ));
         assert_eq!(outcome, crate::local_state::Stored::Yes);
@@ -6183,7 +6210,22 @@ mod deferred_removal_tests {
         // An inbox that is not loaded is reported, never a panic.
         let unloaded = InboxView::new();
         *unloaded.active_id.borrow_mut() = UserId(5);
-        assert_eq!(unloaded.defer_removal(&[1]).pick(&inboxes), None);
+        assert!(
+            unloaded
+                .defer_removal_in(&[1], &ARRIVAL_ORDER, owner)
+                .inbox
+                .is_none()
+        );
+    }
+
+    /// An inbox whose owner the routing does not know is never chosen, even
+    /// when it sits at the target's position.
+    #[test]
+    fn an_inbox_with_an_unknown_owner_is_never_picked() {
+        let inboxes = [("unrouted", None), ("alice's inbox", Some(UserId(0)))];
+        let picked = super::pick_inbox(&inboxes, UserId(0), |ib| ib.1);
+        assert_eq!(picked.map(|ib| ib.0), Some("alice's inbox"));
+        assert_eq!(super::pick_inbox(&inboxes[..1], UserId(0), |ib| ib.1), None);
     }
 }
 
