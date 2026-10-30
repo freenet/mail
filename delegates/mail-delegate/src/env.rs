@@ -89,13 +89,24 @@ pub mod mem {
     /// Seeded, deterministic host faults.
     ///
     /// The host model the delegate defends against: any call may fail, and
-    /// a failed read looks exactly like an absent key, but a read failure is
-    /// transient: an immediate re-read of the key that just missed succeeds.
-    /// A key that stays unreadable is indistinguishable from data loss, and
-    /// nothing above the host can recover from that.
+    /// a failed read looks exactly like an absent key. Most read failures
+    /// are transient (an immediate re-read succeeds), but freenet-core also
+    /// reports a file it cannot read or decrypt as "not found", on every
+    /// read: a *persistent* miss. The delegate must stay safe (never
+    /// overwrite, unlist or reuse anything) while any one present key is
+    /// persistently unreadable; it cannot be expected to serve that key.
     #[derive(Default, Clone, PartialEq, Eq, Debug)]
     pub struct Faults {
         rng: Cell<u64>,
+        /// Chance per read of a present key, in thousandths, that the key
+        /// becomes persistently unreadable (one key at a time).
+        pub blind_rate: u32,
+        /// Keys (exact full keys) that always read as absent.
+        pub blind_keys: Vec<String>,
+        blinded: RefCell<Option<Vec<u8>>>,
+        /// Misses the code under test could see: every persistent miss
+        /// (a transient one is hidden by an immediate re-read).
+        pub observed: Cell<u64>,
         /// Chance per call, in thousandths.
         pub get_miss: u32,
         pub set_fail: u32,
@@ -116,6 +127,28 @@ pub mod mem {
                 remove_fail: per_mille,
                 ..Faults::default()
             }
+        }
+
+        /// Seeded faults, plus one present key at a time going
+        /// persistently unreadable at `blind_per_mille` per read.
+        pub fn seeded_with_blindness(seed: u64, per_mille: u32, blind_per_mille: u32) -> Self {
+            Faults {
+                blind_rate: blind_per_mille,
+                ..Faults::seeded(seed, per_mille)
+            }
+        }
+
+        /// Reads of the full key `key` always fail.
+        pub fn blind(key: &str) -> Self {
+            Faults {
+                blind_keys: vec![key.into()],
+                ..Faults::default()
+            }
+        }
+
+        /// The key that went persistently unreadable, if any.
+        pub fn blinded(&self) -> Option<Vec<u8>> {
+            self.blinded.borrow().clone()
         }
 
         pub fn rule(op: FaultOp, key_contains: &str, nth: u32) -> Self {
@@ -165,7 +198,20 @@ pub mod mem {
             hit
         }
 
-        fn miss(&self, key: &[u8]) -> bool {
+        fn miss(&self, key: &[u8], present: bool) -> bool {
+            let text = String::from_utf8_lossy(key);
+            let persistent = self.blind_keys.iter().any(|b| text == b.as_str())
+                || self.blinded.borrow().as_deref() == Some(key);
+            if persistent && present {
+                self.observed.set(self.observed.get() + 1);
+                return true;
+            }
+            if present && self.blinded.borrow().is_none() && self.roll(self.blind_rate) {
+                *self.blinded.borrow_mut() = Some(key.to_vec());
+                self.injected.set(self.injected.get() + 1);
+                self.observed.set(self.observed.get() + 1);
+                return true;
+            }
             let mut last = self.last_miss.borrow_mut();
             if last.as_deref() == Some(key) {
                 // The immediate re-read of a key that just missed succeeds.
@@ -202,7 +248,7 @@ pub mod mem {
 
         fn fault(&self, op: FaultOp, key: &[u8]) -> bool {
             self.faults.as_ref().is_some_and(|f| match op {
-                FaultOp::GetMiss => f.miss(key),
+                FaultOp::GetMiss => f.miss(key, self.secrets.contains_key(key)),
                 _ => f.hit(op, key),
             })
         }

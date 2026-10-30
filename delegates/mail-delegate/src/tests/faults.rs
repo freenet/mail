@@ -23,6 +23,9 @@ use crate::handlers::DELETE_STEP;
 /// Seeds that once broke an invariant, kept as regression cases.
 const PINNED_SEEDS: &[u64] = &[1, 2, 3, 4, 5, 10, 29, 43, 129, 162, 203];
 
+/// Seeds that broke an invariant while a key stayed unreadable.
+const PINNED_BLIND_SEEDS: &[u64] = &[19, 38, 41, 46, 51, 270];
+
 const KINDS: [ItemKind; 5] = [
     ItemKind::Draft,
     ItemKind::Sent,
@@ -63,6 +66,11 @@ struct Model {
     items: BTreeMap<(ItemKind, Option<Addr>, Vec<u8>), Possible>,
     /// Every generation the delegate handed out, to catch reuse.
     generations: Vec<u64>,
+    /// Index entries left with no record under a create's marker: the
+    /// store cannot tell a create that failed from a record that keeps
+    /// failing to read, so it keeps the entry (a slot, no data) rather
+    /// than risk unlisting a live record.
+    leaks: u64,
     log: Vec<String>,
 }
 
@@ -99,7 +107,11 @@ impl Run {
         let msg =
             InboundDelegateMsg::ApplicationMessage(ApplicationMessage::new(to_cbor(&req).unwrap()));
         let out = process(&mut self.env, app(PROD), msg);
-        self.seen(out)
+        let seen = self.seen(out);
+        if std::env::var_os("FAULT_TRACE").is_some() {
+            eprintln!("  -> {}", describe(&seen));
+        }
+        seen
     }
 
     fn answer(&mut self, prompt_id: u32, choice: &[u8]) -> Seen {
@@ -539,18 +551,30 @@ fn check(run: &mut Run) -> Result<(), String> {
         .collect();
     // No private key without an index entry, no index entry without a
     // record (a slot is never leaked).
-    if records != indexed {
+    let marker_of = |id: &[u8]| keys.get(&format!("dl/{}", store::hex(id))).cloned();
+    if let Some(id) = records.difference(&indexed).next() {
         return Err(format!(
-            "identity records {} vs index entries {}",
-            records.len(),
-            indexed.len()
+            "identity {} is stored but not listed",
+            &store::hex(id)[..8]
         ));
     }
-    // A marker may be left only where it licenses nothing (no entry).
+    let leaked: BTreeSet<Vec<u8>> = indexed.difference(&records).cloned().collect();
+    for id in &leaked {
+        if marker_of(id).as_deref() != Some(store::MARKER_CREATING) {
+            return Err(format!(
+                "index entry {} has no record and no create marker ({:?})",
+                &store::hex(id)[..8],
+                marker_of(id).map(|m| String::from_utf8_lossy(&m).into_owned())
+            ));
+        }
+    }
+    run.m.leaks += leaked.len() as u64;
+    // A marker may be left only where it licenses nothing (no entry), or
+    // beside a tolerated leak.
     if let Some(h) = keys
         .keys()
         .filter_map(|k| k.strip_prefix("dl/"))
-        .find(|h| indexed.contains(&unhex(h)))
+        .find(|h| indexed.contains(&unhex(h)) && !leaked.contains(&unhex(h)))
     {
         return Err(format!("a marker outlived its create or deletion: {h}"));
     }
@@ -599,6 +623,14 @@ fn check(run: &mut Run) -> Result<(), String> {
             for id in ids {
                 let item = format!("it/{tag}/{owner_hex}/{}", store::hex(&id));
                 if !keys.contains_key(&item) {
+                    let pending = format!(
+                        "pi/{}",
+                        store::hex(&blake3::hash(item.as_bytes()).as_bytes()[..16])
+                    );
+                    if keys.get(&pending).map(Vec::as_slice) == Some(store::MARKER_CREATING) {
+                        run.m.leaks += 1;
+                        continue;
+                    }
                     return Err(format!("{k} names {item}, which is not stored"));
                 }
             }
@@ -640,9 +672,20 @@ fn unhex(h: &str) -> Vec<u8> {
 }
 
 fn run_seed(seed: u64, ops: usize, per_mille: u32) -> Result<u64, String> {
+    run_seed_with(seed, ops, Faults::seeded(seed, per_mille), per_mille).map(|(i, _, _)| i)
+}
+
+/// Run one seed over `faults`; returns (faults injected, misses observed,
+/// tolerated slot leaks).
+fn run_seed_with(
+    seed: u64,
+    ops: usize,
+    faults: Faults,
+    per_mille: u32,
+) -> Result<(u64, u64, u64), String> {
     let mut run = Run {
         env: MemEnv {
-            faults: Some(Faults::seeded(seed, per_mille)),
+            faults: Some(faults),
             ..MemEnv::default()
         },
         rng: Rng(seed.wrapping_mul(0xD1B5_4A32_D192_ED03) | 1),
@@ -653,9 +696,21 @@ fn run_seed(seed: u64, ops: usize, per_mille: u32) -> Result<u64, String> {
         run.step();
     }
     let injected = run.env.faults.as_ref().map_or(0, |f| f.injected.get());
+    let observed = run.env.faults.as_ref().map_or(0, |f| f.observed.get());
+    let blinded = run
+        .env
+        .faults
+        .as_ref()
+        .and_then(|f| f.blinded())
+        .map(|k| String::from_utf8_lossy(&k).into_owned());
     run.heal();
-    check(&mut run).map_err(|e| format!("seed {seed}: {e}\n  ops: {}", run.m.log.join(", ")))?;
-    Ok(injected)
+    check(&mut run).map_err(|e| {
+        format!(
+            "seed {seed}: {e}\n  unreadable: {blinded:?}\n  ops: {}",
+            run.m.log.join(", ")
+        )
+    })?;
+    Ok((injected, observed, run.m.leaks))
 }
 
 fn env_or(name: &str, default: u64) -> u64 {
@@ -692,6 +747,123 @@ fn invariants_hold_over_a_host_that_misses_reads_and_refuses_writes() {
     );
     // The faults really fired.
     assert!(injected > seeds, "only {injected} faults injected");
+}
+
+/// One present key at a time goes persistently unreadable (freenet-core
+/// reports a file it cannot read or decrypt as "not found", every time),
+/// on top of the transient faults. The delegate need not serve that key,
+/// but must never overwrite, unlist, leak or reuse anything because of it.
+/// Persistent misses are visible to the code (no re-read hides them), so
+/// the run also checks that the code really saw them.
+#[test]
+fn invariants_hold_while_a_key_stays_unreadable() {
+    let seeds = env_or("FAULT_SEEDS", 300);
+    let ops = env_or("FAULT_OPS", 60) as usize;
+    let rate = env_or("FAULT_RATE", 60) as u32;
+    let blind = env_or("FAULT_BLIND_RATE", 20) as u32;
+    let mut observed = 0;
+    let mut failures = Vec::new();
+    for seed in PINNED_BLIND_SEEDS.iter().copied().chain(1..=seeds) {
+        let faults = Faults::seeded_with_blindness(seed, rate, blind);
+        match run_seed_with(seed, ops, faults, rate) {
+            Ok((_, o, _)) => observed += o,
+            Err(e) => failures.push(e),
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} of {} seeds broke an invariant:\n{}",
+        failures.len(),
+        seeds as usize + PINNED_BLIND_SEEDS.len(),
+        failures
+            .iter()
+            .take(5)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    assert!(
+        observed > seeds,
+        "only {observed} unreadable reads observed"
+    );
+}
+
+/// A create's marker that could not be cleaned up (left `c`, or `s` once
+/// spent), beside a record that keeps failing to read, licenses nothing: a
+/// deletion still asks the user, and no listing unlists the identity. Only
+/// an approved deletion's own marker (`d`) does either.
+#[test]
+fn a_create_marker_beside_an_unreadable_record_licenses_nothing() {
+    for leftover in [store::MARKER_CREATING, store::MARKER_SPENT] {
+        let mut run = Run {
+            env: MemEnv::default(),
+            rng: Rng(7),
+            m: Model::default(),
+            lose_reply: 0,
+        };
+        let ui_entropy = run.entropy();
+        let Seen::Reply(Ok(Reply::CreatedIdentity { identity, .. })) =
+            run.send(Op::CreateIdentity {
+                alias: "x3".into(),
+                description: String::new(),
+                ui_entropy,
+            })
+        else {
+            panic!("create failed on a perfect host");
+        };
+        let addr = identity.addr;
+        let full = |rel: &str| {
+            String::from_utf8(Space::new(&mut MemEnv::default(), Origin([PROD; 32])).full_key(rel))
+                .unwrap()
+        };
+        run.env.secrets.insert(
+            full(&store::deleted_rel(&addr)).into_bytes(),
+            leftover.to_vec(),
+        );
+        run.env.faults = Some(Faults::blind(&full(&store::identity_rel(&addr))));
+        // A listing prunes recordless entries: this one must stay.
+        run.send(Op::ListDeletingIdentities);
+        // The deletion must ask, not finish on the marker's say-so.
+        let seen = run.send(Op::DeleteIdentity {
+            addr,
+            expected_gen: identity.generation,
+        });
+        assert!(
+            !matches!(seen, Seen::Reply(Ok(Reply::Deleted))),
+            "{leftover:?}: deleted without asking: {}",
+            describe(&seen)
+        );
+        run.env.faults = None;
+        let Seen::Reply(Ok(Reply::Identities(listed))) = run.send(Op::ListIdentities) else {
+            panic!("listing failed on a working host");
+        };
+        assert!(
+            listed.iter().any(|i| i.addr == addr),
+            "{leftover:?}: the identity was unlisted"
+        );
+    }
+}
+
+/// Re-run one seed of the unreadable-key run (`FAULT_SEED=n`, with
+/// `FAULT_TRACE=1` to print every reply). Passes when no seed is given.
+#[test]
+fn replay_one_unreadable_key_seed() {
+    let Some(seed) = std::env::var("FAULT_SEED")
+        .ok()
+        .and_then(|v| v.parse().ok())
+    else {
+        return;
+    };
+    let rate = env_or("FAULT_RATE", 60) as u32;
+    let blind = env_or("FAULT_BLIND_RATE", 20) as u32;
+    let ops = env_or("FAULT_OPS", 60) as usize;
+    run_seed_with(
+        seed,
+        ops,
+        Faults::seeded_with_blindness(seed, rate, blind),
+        rate,
+    )
+    .unwrap();
 }
 
 /// The same runs over a perfect host: the model and the checks agree with

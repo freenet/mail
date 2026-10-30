@@ -36,13 +36,18 @@ D="$STAGE/delegates/mail-delegate/src"
 # The seeded fault-injection run is slow, so the per-guard delegate runs skip
 # it and the guards it backs run it alone.
 FAULT_RUN=invariants_hold_over_a_host_that_misses_reads_and_refuses_writes
+BLIND_RUN=invariants_hold_while_a_key_stays_unreadable
 delegate_tests() {
     cargo test --manifest-path "$STAGE/delegates/mail-delegate/Cargo.toml" --features v1-transition \
-        -- --skip "$FAULT_RUN"
+        -- --skip "$FAULT_RUN" --skip "$BLIND_RUN"
 }
 fault_tests() {
     cargo test --manifest-path "$STAGE/delegates/mail-delegate/Cargo.toml" --features v1-transition \
         -- --exact "tests::faults::$FAULT_RUN"
+}
+blind_tests() {
+    cargo test --manifest-path "$STAGE/delegates/mail-delegate/Cargo.toml" --features v1-transition \
+        -- --exact "tests::faults::$BLIND_RUN"
 }
 protocol_tests() {
     cargo test --manifest-path "$STAGE/Cargo.toml" -p freenet-mail-protocol
@@ -66,6 +71,7 @@ baseline() { # name command...
 }
 baseline "delegate tests" delegate_tests
 baseline "delegate fault-injection runs" fault_tests
+baseline "delegate unreadable-key runs" blind_tests
 baseline "protocol tests" protocol_tests
 baseline "release freeze tests" freeze_tests
 [ "$WASM" -eq 1 ] && baseline "candidate check" candidate_check
@@ -240,14 +246,29 @@ dt "re-creating an identity clears its deletion marker" "$D/handlers.rs" \
             Ok(info(addr, generation, &record))' '            Ok(info(addr, generation, &record))' \
     a_reimported_identity_clears_its_old_deletion_marker
 dt "a delete removes a key that reads as absent" "$D/store.rs" \
-    '            if !self.env.remove(&key) && self.fetch(&key).is_some() {' \
+    '            if !self.env.remove(&key) && !self.env.remove(&key) && self.fetch(&key).is_some() {' \
     '            if false {' \
     a_delete_removes_a_key_whose_reads_fail
+dt "an unreadable index is not taken for empty" "$D/store.rs" \
+    'if self.get(&index_marker_rel(rel)).as_deref() == Some(MARKER_LIVE) {' 'if false {' \
+    an_unreadable_index_is_not_rebuilt_from_nothing
+dt "the counter is read from both copies" "$D/store.rs" \
+    '        [GENERATION, GENERATION_COPY]
+            .iter()' '        [GENERATION]
+            .iter()' \
+    an_unreadable_counter_copy_does_not_restart_generations
+dt "a create's marker licenses no prune" "$D/handlers.rs" \
+    'if kind != store::MARKER_FAILED && kind != store::MARKER_DELETING {' 'if false {' \
+    a_create_marker_beside_an_unreadable_record_licenses_nothing
+dt "only a deletion's marker skips the prompt" "$D/handlers.rs" \
+    's.get(&store::deleted_rel(addr)).as_deref() == Some(store::MARKER_DELETING)' \
+    's.get(&store::deleted_rel(addr)).is_some()' \
+    a_create_marker_beside_an_unreadable_record_licenses_nothing
 dft() { guard "$1" "$2" "$3" "$4" "tests:$FAULT_RUN" fault_tests; }
 dft "absence is believed only when a re-read agrees" "$D/store.rs" \
     'self.env.get(key).or_else(|| self.env.get(key))' 'self.env.get(key)'
 dft "a create's marker lets a failed create's slot be freed" "$D/handlers.rs" \
-    '    s.put(&marker, b"")?;
+    '    s.put(&marker, store::MARKER_CREATING)?;
     if let Err(e) = s.index_add(IDENTITY_INDEX, &addr.0, MAX_IDENTITIES) {' \
     '    if let Err(e) = s.index_add(IDENTITY_INDEX, &addr.0, MAX_IDENTITIES) {'
 dft "a deletion answers Deleted only once its marker is gone" "$D/handlers.rs" \
@@ -255,8 +276,15 @@ dft "a deletion answers Deleted only once its marker is gone" "$D/handlers.rs" \
     Ok(Reply::Deleted)' '    let _ = s.del(&marker);
     Ok(Reply::Deleted)'
 dt "listing frees index entries whose item is gone" "$D/handlers.rs" \
-    '        let _ = s.index_remove_many(&ix, &recordless);' '        let _ = &recordless;' \
+    '        if s.index_remove_many(&ix, &ids).is_ok() {' '        if false && s.index_remove_many(&ix, &ids).is_ok() {' \
     listing_frees_an_index_entry_whose_item_is_gone
+dbt() { guard "$1" "$2" "$3" "$4" "tests:$BLIND_RUN" blind_tests; }
+dbt "an item that cannot be read is not created over" "$D/handlers.rs" \
+    'if current.is_none() && s.index(&ix)?.1.contains(&item.id) {' 'if false {'
+dbt "a failure after a write is reported as partial" "$D/handlers.rs" \
+    '    s.index_remove(&ix, &item.id).map_err(partial)?;
+    // A `d` marker left behind' '    s.index_remove(&ix, &item.id)?;
+    // A `d` marker left behind'
 dt "a failed prune does not fail the deletion listing" "$D/handlers.rs" \
     '    let _ = prune_recordless_identities(s);' '    prune_recordless_identities(s)?;' \
     a_failed_prune_does_not_fail_the_deletion_listing

@@ -52,6 +52,21 @@ const ENVELOPE_TAG: u8 = 1;
 const HEADER_LEN: usize = 1 + 8;
 const USAGE: &str = "mt/usage";
 const GENERATION: &str = "mt/gen";
+/// A second copy of the generation counter. The host cannot tell a failed
+/// read from an absent key, and a read can keep failing (a file it cannot
+/// read or decrypt), so the counter is kept twice and read as the larger.
+const GENERATION_COPY: &str = "mt/gen2";
+/// An index's existence marker (`xm/<index rel>`): `l` once the index has
+/// been written, `p` while it is being created or removed. An index that
+/// reads as absent while its marker says `l` is unreadable, not empty, and
+/// is never rewritten from scratch (that would unlist everything in it).
+const INDEX_MARKER_PREFIX: &str = "xm/";
+const MARKER_LIVE: &[u8] = b"l";
+const MARKER_PENDING: &[u8] = b"p";
+
+pub fn index_marker_rel(index: &str) -> String {
+    format!("{INDEX_MARKER_PREFIX}{index}")
+}
 
 /// The 32-byte web-app contract id a request came from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -83,6 +98,20 @@ pub fn identity_rel(addr: &Addr) -> String {
 pub fn deleted_rel(addr: &Addr) -> String {
     format!("dl/{}", hex(&addr.0))
 }
+
+/// The marker a create writes before claiming its index slot. It licenses
+/// nothing by itself: left behind beside a record that later fails to read,
+/// it must not get that record unlisted.
+pub const MARKER_CREATING: &[u8] = b"c";
+/// A create whose record write was refused and whose slot could not be
+/// given back: the entry has no record, and a listing may drop it.
+pub const MARKER_FAILED: &[u8] = b"f";
+/// The marker a deletion the user approved writes: the record is being, or
+/// was, removed. Only this one licenses finishing a deletion without asking.
+pub const MARKER_DELETING: &[u8] = b"d";
+/// A create marker whose create finished but which could not be removed:
+/// it licenses nothing.
+pub const MARKER_SPENT: &[u8] = b"s";
 
 pub const IDENTITY_INDEX: &str = "ix/id";
 pub const PROMPT_INDEX: &str = "ix/pg";
@@ -281,7 +310,10 @@ impl<'a> Space<'a> {
     pub fn del(&mut self, rel: &str) -> Result<(), Failure> {
         let key = self.full_key(rel);
         let Some(old) = self.fetch(&key) else {
-            if !self.env.remove(&key) && self.fetch(&key).is_some() {
+            // The host answers "not found" both for an absent key and for a
+            // removal it failed, so a refusal is retried once: a key that
+            // keeps failing to read may still be there.
+            if !self.env.remove(&key) && !self.env.remove(&key) && self.fetch(&key).is_some() {
                 return Err(fail(FailureCode::Internal, "the host refused the delete"));
             }
             return Ok(());
@@ -307,18 +339,34 @@ impl<'a> Space<'a> {
         }
     }
 
-    /// Take the next generation. Fails closed: if the counter cannot be
-    /// written, the next call would hand out the same generation.
-    pub fn next_generation(&mut self) -> Result<u64, Failure> {
-        let current = self
-            .get(GENERATION)
-            .and_then(|b| <[u8; 8]>::try_from(b.as_slice()).ok())
+    /// The counter, as the larger of its two copies.
+    fn counter(&self) -> u64 {
+        [GENERATION, GENERATION_COPY]
+            .iter()
+            .filter_map(|rel| self.get(rel))
+            .filter_map(|b| <[u8; 8]>::try_from(b.as_slice()).ok())
             .map(u64::from_le_bytes)
-            .unwrap_or(0);
-        let next = current
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Take the next generation, above `floor` (the generation of the record
+    /// about to be replaced) too, so a counter whose copies both read as
+    /// absent still never hands a record a generation it has had.
+    ///
+    /// Fails closed unless both copies hold the new value: then whichever
+    /// copy stays readable reads as the latest. (Accepting one write would
+    /// leave the latest value only in a copy that may be the unreadable one,
+    /// and the next call would hand out the same generation again.)
+    pub fn next_generation(&mut self, floor: u64) -> Result<u64, Failure> {
+        let next = self
+            .counter()
+            .max(floor)
             .checked_add(1)
             .ok_or_else(|| fail(FailureCode::Internal, "generation counter exhausted"))?;
-        self.put(GENERATION, &next.to_le_bytes())?;
+        let bytes = next.to_le_bytes();
+        self.put(GENERATION, &bytes)?;
+        self.put(GENERATION_COPY, &bytes)?;
         Ok(next)
     }
 
@@ -334,15 +382,26 @@ impl<'a> Space<'a> {
                 "stale generation",
             ));
         }
-        let generation = self.next_generation()?;
+        let generation = self.next_generation(current)?;
         self.put(rel, &encode_versioned(generation, body))?;
         Ok(generation)
     }
 
     /// The ids an index record lists, and its generation (0 = absent).
+    ///
+    /// An index that reads as absent while its marker says it was written is
+    /// unreadable, not empty: `Busy`, so no caller rebuilds it from nothing.
     pub fn index(&self, rel: &str) -> Result<(u64, BTreeSet<Vec<u8>>), Failure> {
         match self.read(rel)? {
-            None => Ok((0, BTreeSet::new())),
+            None => {
+                if self.get(&index_marker_rel(rel)).as_deref() == Some(MARKER_LIVE) {
+                    return Err(fail(
+                        FailureCode::Busy,
+                        "an index record could not be read; retry",
+                    ));
+                }
+                Ok((0, BTreeSet::new()))
+            }
             Some((g, body)) => {
                 let ids: Vec<serde_bytes::ByteBuf> = freenet_mail_protocol::from_cbor(&body)
                     .map_err(|_| fail(FailureCode::Internal, "an index record is unreadable"))?;
@@ -351,14 +410,31 @@ impl<'a> Space<'a> {
         }
     }
 
+    /// Write an index (generation 0 = create it), or remove it when empty,
+    /// keeping its existence marker in step. The marker says `p` whenever
+    /// the index may legitimately be absent (before its first write lands,
+    /// while it is removed), and `l` only once it was written.
     fn write_index(
         &mut self,
         rel: &str,
         generation: u64,
         ids: &BTreeSet<Vec<u8>>,
     ) -> Result<(), Failure> {
+        let marker = index_marker_rel(rel);
         if ids.is_empty() {
-            return self.del(rel);
+            if generation == 0 {
+                return Ok(());
+            }
+            self.put(&marker, MARKER_PENDING)?;
+            if let Err(e) = self.del(rel) {
+                // Still there: say so again, or a read that fails later
+                // would be taken for an empty index.
+                let _ = self.put(&marker, MARKER_LIVE);
+                return Err(e);
+            }
+            // Left as `p` if this fails: "may be absent", which is true.
+            let _ = self.del(&marker);
+            return Ok(());
         }
         let list: Vec<serde_bytes::ByteBuf> = ids
             .iter()
@@ -366,7 +442,27 @@ impl<'a> Space<'a> {
             .collect();
         let body =
             freenet_mail_protocol::to_cbor(&list).map_err(|e| fail(FailureCode::Internal, e))?;
-        self.write_if(rel, generation, &body).map(|_| ())
+        if generation > 0 {
+            // It exists (it was just read), so `l` is true before and after
+            // the write. Set first, so nothing can fail after the write.
+            if self.get(&marker).as_deref() != Some(MARKER_LIVE) {
+                self.put(&marker, MARKER_LIVE)?;
+            }
+            return self.write_if(rel, generation, &body).map(|_| ());
+        }
+        // Created: `p` until the index is written, then `l`. Not best
+        // effort: an index whose marker still said `p` would be taken for
+        // empty, and rebuilt from nothing, the first time a read of it
+        // failed. If `l` cannot be set, the new index is removed again
+        // (removal does not depend on reading it), so an error means
+        // "not written".
+        self.put(&marker, MARKER_PENDING)?;
+        self.write_if(rel, 0, &body)?;
+        if let Err(e) = self.put(&marker, MARKER_LIVE) {
+            let _ = self.del(rel);
+            return Err(e);
+        }
+        Ok(())
     }
 
     /// Add `id` to the index at `rel`, refusing past `cap` entries.
@@ -439,8 +535,11 @@ mod tests {
     fn generations_never_repeat_and_fail_closed() {
         let mut env = MemEnv::default();
         let mut s = Space::new(&mut env, Origin([1; 32]));
-        assert_eq!(s.next_generation(), Ok(1));
-        assert_eq!(s.next_generation(), Ok(2));
+        assert_eq!(s.next_generation(0), Ok(1));
+        assert_eq!(s.next_generation(0), Ok(2));
+        // Never at or below the record being replaced.
+        assert_eq!(s.next_generation(10), Ok(11));
+        assert_eq!(s.next_generation(0), Ok(12));
         s.env.set(b"unrelated", b"");
         let mut env2 = MemEnv {
             fail_writes: true,
@@ -448,9 +547,67 @@ mod tests {
         };
         assert!(
             Space::new(&mut env2, Origin([1; 32]))
-                .next_generation()
+                .next_generation(0)
                 .is_err()
         );
+    }
+
+    /// A host whose reads of `rel` (in origin `[1; 32]`) always fail, as a
+    /// file it cannot read or decrypt does.
+    fn blind_to(rel: &str) -> MemEnv {
+        let key = format!("{}{rel}", namespace(&Origin([1; 32])));
+        MemEnv {
+            faults: Some(crate::env::mem::Faults::blind(&key)),
+            ..MemEnv::default()
+        }
+    }
+
+    /// One copy of the counter staying unreadable never makes it restart
+    /// (a restarted counter hands out generations already used).
+    #[test]
+    fn an_unreadable_counter_copy_does_not_restart_generations() {
+        let mut env = MemEnv::default();
+        for _ in 0..5 {
+            Space::new(&mut env, Origin([1; 32]))
+                .next_generation(0)
+                .unwrap();
+        }
+        for copy in [GENERATION, GENERATION_COPY] {
+            let mut blind = blind_to(copy);
+            blind.secrets = env.secrets.clone();
+            let next = Space::new(&mut blind, Origin([1; 32])).next_generation(0);
+            assert_eq!(next, Ok(6), "with {copy} unreadable");
+        }
+    }
+
+    /// An index that stays unreadable is never rewritten from scratch: an
+    /// add would otherwise write a fresh index holding only the new id and
+    /// unlist everything else.
+    #[test]
+    fn an_unreadable_index_is_not_rebuilt_from_nothing() {
+        let mut env = MemEnv::default();
+        {
+            let mut s = Space::new(&mut env, Origin([1; 32]));
+            s.index_add("ix/t", b"a", 8).unwrap();
+            s.index_add("ix/t", b"b", 8).unwrap();
+        }
+        let mut blind = blind_to("ix/t");
+        blind.secrets = env.secrets.clone();
+        let mut s = Space::new(&mut blind, Origin([1; 32]));
+        let err = s.index_add("ix/t", b"c", 8).unwrap_err();
+        assert_eq!(err.code, FailureCode::Busy);
+        assert!(s.index("ix/t").is_err(), "an unreadable index is not empty");
+        blind.faults = None;
+        let (_, ids) = Space::new(&mut blind, Origin([1; 32]))
+            .index("ix/t")
+            .unwrap();
+        assert_eq!(ids.len(), 2, "both entries are still listed");
+        // Emptied and removed, it is absent again, not unreadable.
+        let mut s = Space::new(&mut blind, Origin([1; 32]));
+        s.index_remove_many("ix/t", &[b"a".to_vec(), b"b".to_vec()])
+            .unwrap();
+        assert_eq!(s.index("ix/t").unwrap().1.len(), 0);
+        s.index_add("ix/t", b"d", 8).unwrap();
     }
 
     #[test]

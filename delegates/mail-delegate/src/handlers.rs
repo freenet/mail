@@ -319,7 +319,16 @@ fn prune_recordless_identities(s: &mut Space<'_>) -> Result<(), Failure> {
             continue;
         };
         let marker = store::deleted_rel(&addr);
-        if s.get(&marker).is_none() {
+        let Some(kind) = s.get(&marker) else {
+            continue;
+        };
+        if kind != store::MARKER_FAILED && kind != store::MARKER_DELETING {
+            // A create's marker (in progress, finished, or spent) licenses
+            // nothing: beside a record that keeps failing to read, it would
+            // unlist a live identity. Cleaned once the record reads again.
+            if load_identity(s, &addr)?.is_some() {
+                markers.push(marker);
+            }
             continue;
         }
         match load_identity(s, &addr)? {
@@ -412,23 +421,49 @@ fn store_new_identity(
     // The marker says "this entry may have no record". It is written before
     // the slot is claimed, so a create that fails after claiming it, and
     // whose undo fails too, leaves an entry the next listing can free.
+    if s.index(IDENTITY_INDEX)?.1.contains(&addr.0[..]) {
+        // Listed but unreadable (a read that keeps failing): never write a
+        // record over it, and never undo an entry this create did not add.
+        return Err(fail(
+            FailureCode::Busy,
+            "this identity could not be read; retry",
+        ));
+    }
     let marker = store::deleted_rel(&addr);
-    s.put(&marker, b"")?;
+    s.put(&marker, store::MARKER_CREATING)?;
     if let Err(e) = s.index_add(IDENTITY_INDEX, &addr.0, MAX_IDENTITIES) {
-        let _ = s.del(&marker);
+        // A refusal before any write leaves no entry; a failed write may
+        // have, and the marker is what lets a listing free that slot.
+        if s.index(IDENTITY_INDEX)
+            .is_ok_and(|(_, ids)| ids.contains(&addr.0[..]))
+        {
+            let _ = retried(|| s.put(&marker, store::MARKER_FAILED));
+        } else {
+            let _ = s.del(&marker);
+        }
         return Err(e);
     }
     match s.write_if(&identity_rel(&addr), 0, &body) {
         Ok(generation) => {
-            // A marker left beside the record licenses nothing (an entry is
-            // only pruned when its record is confirmed absent), and the next
-            // listing cleans it.
-            let _ = s.del(&marker);
+            // A create marker left beside the record would let a later
+            // failed read of the record unlist it, so it must not stay `c`:
+            // removed, or else marked spent, or else the create reports a
+            // failure (the identity exists; a listing shows it).
+            if s.del(&marker).is_err() && s.put(&marker, store::MARKER_SPENT).is_err() {
+                return Err(fail(
+                    FailureCode::Internal,
+                    "the identity was stored but its bookkeeping failed; reload",
+                ));
+            }
             Ok(info(addr, generation, &record))
         }
         Err(e) => {
-            if s.index_remove(IDENTITY_INDEX, &addr.0).is_ok() {
+            if retried(|| s.index_remove(IDENTITY_INDEX, &addr.0)).is_ok() {
                 let _ = s.del(&marker);
+            } else {
+                // The record was not written and the slot is still claimed:
+                // say so, so a listing can free it.
+                let _ = retried(|| s.put(&marker, store::MARKER_FAILED));
             }
             Err(e)
         }
@@ -535,6 +570,15 @@ fn import_identity(
             already_present: true,
         });
     }
+    if s.index(IDENTITY_INDEX)?.1.contains(&addr.0[..]) {
+        return Err(
+            if s.get(&store::deleted_rel(&addr)).as_deref() == Some(store::MARKER_DELETING) {
+                fail(FailureCode::Refused, "this identity is being deleted")
+            } else {
+                fail(FailureCode::Busy, "this identity could not be read; retry")
+            },
+        );
+    }
     check_names(&alias, &description)?;
     let confirmed = kind == ImportKind::UserRestore;
     store_new_identity(s, dsa, kem, alias, description, confirmed).map(|identity| Reply::Imported {
@@ -615,12 +659,11 @@ pub fn delete_identity_now(s: &mut Space<'_>, addr: &Addr, expected_gen: u64) ->
                 "the identity could not be read; retry",
             ));
         }
-        // Record gone: only the index entry can be left.
-        s.index_remove(IDENTITY_INDEX, &addr.0)?;
-        // `Deleted` means nothing is left, the marker (which names the
-        // address) included; a retry finishes a failed removal.
-        s.del(&marker)?;
-        return Ok(Reply::Deleted);
+        // Record gone, or unreadable (a read that keeps failing): the user
+        // approved deleting it, so finish the whole deletion either way:
+        // its items and indexes, then the record (removed whether or not
+        // it reads), the entry and the marker.
+        return delete_step(s, addr).map_err(partial);
     };
     if !record.deleting {
         if generation != expected_gen {
@@ -635,7 +678,8 @@ pub fn delete_identity_now(s: &mut Space<'_>, addr: &Addr, expected_gen: u64) ->
         let body = to_cbor(&record).map_err(|e| fail(FailureCode::Internal, e))?;
         s.write_if(&identity_rel(addr), generation, &body)?;
     }
-    delete_step(s, addr)
+    // The record is marked `deleting`: from here a failure is partial.
+    delete_step(s, addr).map_err(partial)
 }
 
 /// Whether `addr` needs no approval to finish deleting: either the user
@@ -643,9 +687,11 @@ pub fn delete_identity_now(s: &mut Space<'_>, addr: &Addr, expected_gen: u64) ->
 pub fn deletion_in_progress(s: &Space<'_>, addr: &Addr) -> Result<bool, Failure> {
     Ok(match load_identity(s, addr)? {
         Some((_, r)) => r.deleting,
-        // No record (confirmed) and a marker: only bookkeeping is left (an
-        // index entry, the marker itself), and nothing of the user's to lose.
-        None => s.get(&store::deleted_rel(addr)).is_some(),
+        // No readable record and a deletion marker: the user approved this
+        // deletion (the marker is written only after the record was marked
+        // `deleting`). A create's marker licenses nothing here: beside a
+        // record that keeps failing to read it would skip the prompt.
+        None => s.get(&store::deleted_rel(addr)).as_deref() == Some(store::MARKER_DELETING),
     })
 }
 
@@ -673,10 +719,16 @@ fn delete_step(s: &mut Space<'_>, addr: &Addr) -> OpResult {
             remaining: u32::try_from(remaining).unwrap_or(u32::MAX),
         });
     }
+    // Every index the identity owned is empty and removed; its existence
+    // marker (which names the address) goes too, before the record, so a
+    // failure here is retried by the next step.
+    for kind in ALL_KINDS.into_iter().filter(|k| store::shape(*k).0) {
+        s.del(&store::index_marker_rel(&index_rel(kind, Some(addr))))?;
+    }
     // The marker goes first: it is what lets a later listing prune the
     // index entry if removing it below fails.
     let marker = store::deleted_rel(addr);
-    s.put(&marker, b"")?;
+    s.put(&marker, store::MARKER_DELETING)?;
     s.del(&identity_rel(addr))?;
     s.index_remove(IDENTITY_INDEX, &addr.0)?;
     // Only once the marker is gone too: a failure here is retried, and the
@@ -711,6 +763,47 @@ fn check_item(s: &Space<'_>, item: &ItemRef) -> Result<(), Failure> {
     Ok(())
 }
 
+/// The pending marker of an item write (`c`: a create claimed the index
+/// slot, `f`: that create failed and could not give the slot back, `d`: a
+/// delete is removing the record). Like the identity markers,
+/// it is the only licence for a listing to drop an index entry whose record
+/// reads as absent: the host cannot tell a failed read from an absent key.
+/// Keyed by a hash, so a marker left behind names no identity.
+fn pending_rel(item: &ItemRef) -> String {
+    let h = blake3::hash(item_rel(item).as_bytes());
+    format!("pi/{}", store::hex(&h.as_bytes()[..16]))
+}
+
+/// Run a cleanup write up to three times. Undoing a half-done change is
+/// what keeps an index entry from outliving its record, and a host refusal
+/// is usually transient.
+fn retried<T>(mut op: impl FnMut() -> Result<T, Failure>) -> Result<T, Failure> {
+    op().or_else(|_| op()).or_else(|_| op())
+}
+
+/// A failure after this op already changed something. Only `Internal`
+/// tells the caller the op may have happened; any other code (`Busy`,
+/// `Conflict`, `NotFound`) promises it had no effect, which would be false.
+fn partial(f: Failure) -> Failure {
+    if f.code == FailureCode::Internal {
+        f
+    } else {
+        fail(
+            FailureCode::Internal,
+            format!("partly done, retry: {}", f.detail),
+        )
+    }
+}
+
+/// Clear a pending marker once the write it covered finished: removed, or
+/// else marked spent (it then licenses nothing).
+fn spend_marker(s: &mut Space<'_>, marker: &str) -> Result<(), Failure> {
+    if s.del(marker).is_err() {
+        s.put(marker, store::MARKER_SPENT)?;
+    }
+    Ok(())
+}
+
 fn get_item(s: &Space<'_>, item: ItemRef) -> OpResult {
     check_item(s, &item)?;
     Ok(Reply::Item(s.read(&item_rel(&item))?.map(
@@ -734,6 +827,15 @@ fn put_item(
     }
     let rel = item_rel(&item);
     let current = s.read(&rel)?;
+    let ix = index_rel(item.kind, item.owner.as_ref());
+    if current.is_none() && s.index(&ix)?.1.contains(&item.id) {
+        // Listed but unreadable: writing would replace it unseen, and undoing
+        // a failed write would unlist it.
+        return Err(fail(
+            FailureCode::Busy,
+            "this item could not be read; retry",
+        ));
+    }
     let current_gen = current.as_ref().map_or(0, |(g, _)| *g);
     let matches = match expected_gen {
         None => current.is_none(),
@@ -751,18 +853,43 @@ fn put_item(
             "stale generation",
         ));
     }
-    let ix = index_rel(item.kind, item.owner.as_ref());
+    let marker = pending_rel(&item);
     if current.is_none() {
-        // Claim the index slot first; it enforces the per-kind cap.
-        s.index_add(&ix, &item.id, store::cap(item.kind))?;
+        // Claim the index slot first; it enforces the per-kind cap. The
+        // marker lets a listing free the slot if the write below fails and
+        // so does undoing the claim.
+        s.put(&marker, store::MARKER_CREATING)?;
+        if let Err(e) = s.index_add(&ix, &item.id, store::cap(item.kind)) {
+            if s.index(&ix).is_ok_and(|(_, ids)| ids.contains(&item.id)) {
+                let _ = retried(|| s.put(&marker, store::MARKER_FAILED));
+            } else {
+                let _ = s.del(&marker);
+            }
+            return Err(e);
+        }
     }
     match s.write_if(&rel, current_gen, &body) {
-        Ok(generation) => Ok(Reply::Ack { generation }),
+        Ok(generation) => {
+            if current.is_none() && spend_marker(s, &marker).is_err() {
+                // Stored, but a create marker beside it would let a later
+                // failed read unlist it: report the write as failed (a
+                // retry of the same body is acknowledged).
+                return Err(fail(
+                    FailureCode::Internal,
+                    "the item was stored but its bookkeeping failed; retry",
+                ));
+            }
+            Ok(Reply::Ack { generation })
+        }
         Err(e) => {
             if current.is_none() {
-                let _ = s.index_remove(&ix, &item.id);
+                if retried(|| s.index_remove(&ix, &item.id)).is_ok() {
+                    let _ = s.del(&marker);
+                    return Err(e);
+                }
+                let _ = retried(|| s.put(&marker, store::MARKER_FAILED));
             }
-            Err(e)
+            Err(partial(e))
         }
     }
 }
@@ -771,10 +898,19 @@ fn delete_item(s: &mut Space<'_>, item: ItemRef, expected_gen: u64) -> OpResult 
     check_item(s, &item)?;
     let rel = item_rel(&item);
     let ix = index_rel(item.kind, item.owner.as_ref());
+    // Before anything is removed: an index that cannot be read would fail
+    // the delete half-way, after the record was gone.
+    s.index(&ix)?;
+    let marker = pending_rel(&item);
     let Some((generation, _)) = s.read(&rel)? else {
-        // Already gone. If an earlier delete removed the record but failed
-        // to update the index, finish that now.
-        s.index_remove(&ix, &item.id)?;
+        // Already gone, or unreadable (a read that keeps failing looks the
+        // same). Remove it either way, then finish the index: `Deleted`
+        // must mean it is gone, and an index entry must never be dropped
+        // while its record may remain.
+        s.put(&marker, store::MARKER_DELETING)?;
+        s.del(&rel).map_err(partial)?;
+        s.index_remove(&ix, &item.id).map_err(partial)?;
+        let _ = s.del(&marker);
         return Ok(Reply::Deleted);
     };
     if generation != expected_gen {
@@ -786,9 +922,14 @@ fn delete_item(s: &mut Space<'_>, item: ItemRef, expected_gen: u64) -> OpResult 
         ));
     }
     // Record first, index entry last: a failure in between leaves an index
-    // entry with no record, which readers skip and a retry removes.
-    s.del(&rel)?;
-    s.index_remove(&ix, &item.id)?;
+    // entry with no record, which readers skip, and which the marker lets a
+    // listing (or a retry) remove.
+    s.put(&marker, store::MARKER_DELETING)?;
+    s.del(&rel).map_err(partial)?;
+    s.index_remove(&ix, &item.id).map_err(partial)?;
+    // A `d` marker left behind only ever licenses dropping this entry once
+    // its record is absent, which it is.
+    let _ = s.del(&marker);
     Ok(Reply::Deleted)
 }
 
@@ -822,9 +963,16 @@ fn list_items(
     {
         let item = ItemRef { kind, owner, id };
         let Some((generation, body)) = s.read(&item_rel(&item))? else {
-            // An entry a failed write or delete left behind (its record is
-            // confirmed absent): it would hold a slot of the kind's cap.
-            recordless.push(item.id);
+            // An entry a failed create or delete left behind (its marker
+            // says so) would hold a slot of the kind's cap: drop it. Without
+            // a marker the record may only be unreadable, and stays listed.
+            let marker = s.get(&pending_rel(&item));
+            if matches!(
+                marker.as_deref(),
+                Some(store::MARKER_FAILED) | Some(store::MARKER_DELETING)
+            ) {
+                recordless.push(item);
+            }
             continue;
         };
         if items.len() == limit || used + body.len() + 64 > budget {
@@ -840,7 +988,12 @@ fn list_items(
     }
     if !recordless.is_empty() {
         // Housekeeping: a failure here leaves the entries for the next list.
-        let _ = s.index_remove_many(&ix, &recordless);
+        let ids: Vec<Vec<u8>> = recordless.iter().map(|i| i.id.clone()).collect();
+        if s.index_remove_many(&ix, &ids).is_ok() {
+            for item in &recordless {
+                let _ = s.del(&pending_rel(item));
+            }
+        }
     }
     Ok(Reply::Items { items, more })
 }
