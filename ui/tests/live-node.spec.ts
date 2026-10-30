@@ -1941,6 +1941,15 @@ test.describe("Live node E2E", () => {
 
       // ── Pre-reload: message is in Sent, Drafts is empty ───────────
       await aliceApp.locator('[data-testid="fm-folder-sent"]').click();
+      // Once (1 in ~86 runs) the view stayed on Inbox after this click, with
+      // the pointer still over Sent and no overlay, navigation or error. Say
+      // so here rather than as a missing Sent card: the console then shows
+      // whether the click reached the app ("folder: clicked Sent") and
+      // whether the inbox view re-mounted ("inbox view: mounted").
+      await expect(
+        aliceApp.locator('[data-testid="fm-folder-sent"]'),
+        "the Sent folder is selected after clicking it",
+      ).toHaveClass(/\bactive\b/, { timeout: 5_000 });
       await expect(
         aliceApp.locator('[data-testid="fm-sent-card"]').first(),
         "sent message appears in Sent before reload",
