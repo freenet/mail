@@ -1394,17 +1394,11 @@ impl InboxModel {
     }
 
     /// This only affects in-memory messages, changes are not persisted.
+    /// Messages are kept in arrival order and their ids are content hashes,
+    /// so nothing here may assume they are sorted by id.
     fn remove_received_message(&mut self, ids: &[u64]) {
-        if ids.len() > 1 {
-            let drop: HashSet<u64> = HashSet::from_iter(ids.iter().copied());
-            self.messages.retain(|a| !drop.contains(&a.id));
-        } else {
-            for id in ids {
-                if let Ok(p) = self.messages.binary_search_by_key(id, |a| a.id) {
-                    self.messages.remove(p);
-                }
-            }
-        }
+        let drop: HashSet<u64> = HashSet::from_iter(ids.iter().copied());
+        self.messages.retain(|a| !drop.contains(&a.id));
     }
 
     /// Apply a new anti-flood policy locally and return a future yielding
@@ -1692,6 +1686,37 @@ mod tests {
             inbox.remove_received_message(&[id]);
         }
         eprintln!("{}ms", t0.elapsed().as_millis());
+        assert_eq!(inbox.messages.len(), 5000);
+    }
+
+    /// Ids are content hashes kept in arrival order, not sorted: removing
+    /// one message must find it wherever it sits. A binary search over this
+    /// order misses most of them.
+    #[test]
+    fn a_single_removal_finds_a_message_out_of_id_order() {
+        let mut inbox = InboxModel::new(
+            freenet_mail_protocol::Addr([1; 24]),
+            &[2; 1952],
+            vec![3; 1184],
+        );
+        let ids = [0x9f00_u64, 0x10, 0xffff_0000, 0x42, 0x7, 0x5555_5555];
+        for id in ids {
+            inbox.messages.push(MessageModel {
+                id,
+                content: DecryptedMessage::default(),
+                token_assignment: crate::test_util::test_assignment(),
+                sender_vk: Vec::new(),
+                signature_valid: false,
+            });
+        }
+        for (removed, id) in ids.iter().enumerate() {
+            inbox.remove_received_message(&[*id]);
+            assert!(
+                !inbox.messages.iter().any(|m| m.id == *id),
+                "message {id:#x} is still there"
+            );
+            assert_eq!(inbox.messages.len(), ids.len() - removed - 1);
+        }
     }
 
     fn fresh_signing_key() -> MlDsaSigningKey<MlDsa65> {
