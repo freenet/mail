@@ -2352,6 +2352,84 @@ test.describe("Live node E2E", () => {
       stopPump();
     }
   });
+
+  test("an identity left at the reveal step gets its contracts on the next load", async ({
+    browser,
+  }) => {
+    // Creating an identity stores it in the mail delegate at once; its
+    // inbox and token-record contracts are published only when the user
+    // presses Continue on the reveal step. If the tab is reloaded before
+    // that, the next load lists the identity and GETs both contracts, the
+    // node answers NotFound (nobody holds them), and the #288 self-heal
+    // re-PUTs them. Without that, the identity would be listed but could
+    // neither receive nor send.
+    const stopPump = startPermissionPump();
+    const ctx = await browser.newContext();
+    const run = `${Date.now().toString(36)}${test.info().repeatEachIndex}`;
+    const alias = `reveal${run}`;
+    try {
+      const page = await ctx.newPage();
+      const lines: string[] = [];
+      page.on("console", (msg) => lines.push(msg.text()));
+      await page.goto("");
+      const app = page.frameLocator("iframe#app");
+      await expect(app.locator(".brand-name").first()).toContainText(APP_NAME, {
+        timeout: 60_000,
+      });
+      await app.locator('[data-testid="fm-id-create"]').click();
+      await app.locator('[data-testid="fm-create-alias-input"]').fill(alias);
+      await app.locator('[data-testid="fm-create-submit"]').click();
+      // The reveal step: the delegate holds the identity now.
+      await expect(app.locator('[data-testid="fm-create-confirm"]')).toBeVisible({
+        timeout: 30_000,
+      });
+
+      // Leave without pressing Continue.
+      await page.reload();
+      const reloaded = page.frameLocator("iframe#app");
+      await expect(
+        reloaded.locator(`[data-testid="fm-id-row"][data-alias="${alias}"]`),
+        "the created identity is listed after the reload",
+      ).toBeVisible({ timeout: 60_000 });
+
+      const healed = (what: string) =>
+        lines.some(
+          (t) =>
+            t.includes(`own ${what} not found on the network`) &&
+            t.includes(`alias=\`${alias}\``) &&
+            t.includes("self-heal"),
+        );
+      await expect
+        .poll(() => healed("inbox") && healed("AFT record"), {
+          message: "both contracts were re-published on the next load",
+          timeout: 180_000,
+          intervals: [2_000],
+        })
+        .toBe(true);
+      const failed = lines.filter((t) => t.includes("re-PUT failed") && t.includes(alias));
+      expect(failed, `no self-heal PUT failed: ${failed.join(" | ")}`).toEqual([]);
+
+      // And they are held now: a further load finds them.
+      lines.length = 0;
+      await page.reload();
+      await expect(
+        page
+          .frameLocator("iframe#app")
+          .locator(`[data-testid="fm-id-row"][data-alias="${alias}"]`),
+      ).toBeVisible({ timeout: 60_000 });
+      // An absence: give the load's GETs time to answer. The node holds
+      // both contracts since the self-heal PUT (subscribe: true), so they
+      // answer from the local store well within this.
+      await page.waitForTimeout(20_000);
+      expect(
+        healed("inbox") || healed("AFT record"),
+        "after the self-heal the contracts are found, not re-published again",
+      ).toBe(false);
+    } finally {
+      await ctx.close().catch(() => {});
+      stopPump();
+    }
+  });
 });
 
 async function composeAndSend(
