@@ -339,7 +339,9 @@ fn prune_recordless_identities(s: &mut Space<'_>) -> Result<(), Failure> {
             // one case that misreads (a record written, its marker cleanup
             // refused, then the record going unreadable) unlists an identity
             // that could not be used anyway, and importing it again restores
-            // it.
+            // it. Another tab's create cannot be in flight here: core runs a
+            // delegate's messages one at a time and a create is one op, so a
+            // `c` marker seen by a listing belongs to a create that ended.
             gone.push(id);
             markers.push(marker);
             continue;

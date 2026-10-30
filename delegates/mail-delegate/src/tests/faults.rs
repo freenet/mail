@@ -928,11 +928,14 @@ fn invariants_hold_while_a_key_stays_unreadable() {
 }
 
 /// A create's marker that could not be cleaned up (left `c`, or `s` once
-/// spent), beside a record that keeps failing to read, licenses nothing: a
-/// deletion still asks the user, and no listing unlists the identity. Only
-/// an approved deletion's own marker (`d`) does either.
+/// spent), beside a record that keeps failing to read, never lets a
+/// deletion skip asking the user: only an approved deletion's own marker
+/// (`d`) does. A `c` marker beside an absent record does let a listing
+/// unlist the identity (it looks like a create that never finished, whose
+/// slot must be freed); that identity stays restorable by importing its
+/// keys again, and is listed once its record reads.
 #[test]
-fn a_create_marker_beside_an_unreadable_record_licenses_nothing() {
+fn a_create_marker_beside_an_unreadable_record_never_skips_the_prompt_and_stays_restorable() {
     for leftover in [store::MARKER_CREATING, store::MARKER_SPENT] {
         let mut run = Run {
             env: MemEnv::default(),

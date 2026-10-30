@@ -270,11 +270,11 @@ dt "a spent create marker licenses no prune" "$D/handlers.rs" \
             continue;
         }
         if kind == store::MARKER_SPENT {' \
-    a_create_marker_beside_an_unreadable_record_licenses_nothing
+    a_create_marker_beside_an_unreadable_record_never_skips_the_prompt_and_stays_restorable
 dt "only a deletion's marker skips the prompt" "$D/handlers.rs" \
     's.get(&store::deleted_rel(addr)).as_deref() == Some(store::MARKER_DELETING)' \
     's.get(&store::deleted_rel(addr)).is_some()' \
-    a_create_marker_beside_an_unreadable_record_licenses_nothing
+    a_create_marker_beside_an_unreadable_record_never_skips_the_prompt_and_stays_restorable
 dft() { guard "$1" "$2" "$3" "$4" "tests:$FAULT_RUN" fault_tests; }
 dft "absence is believed only when a re-read agrees" "$D/store.rs" \
     'self.env.get(key).or_else(|| self.env.get(key))' 'self.env.get(key)'
@@ -307,6 +307,10 @@ dt "a create's marker does not stop deleting an unreadable identity" "$D/consent
                     != Some(crate::store::MARKER_DELETING)' \
     '                && s.get(&crate::store::deleted_rel(addr)).is_none()' \
     a_spent_create_marker_does_not_stop_deleting_an_unreadable_identity
+dt "a failed create marks its slot free to reclaim" "$D/handlers.rs" \
+    '        if kind != store::MARKER_FAILED && kind != store::MARKER_DELETING {' \
+    '        if kind != store::MARKER_DELETING {' \
+    a_failed_create_marks_its_slot_free_to_reclaim
 dt "an unreadable list does not block deleting its identity" "$D/handlers.rs" \
     '            Err(_) if s.index_unreadable(&ix) => {' \
     '            Err(_) if false => {' \

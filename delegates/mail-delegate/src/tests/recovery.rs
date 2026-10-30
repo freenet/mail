@@ -439,6 +439,47 @@ fn a_create_that_never_finished_frees_its_slot_on_the_next_listing() {
     assert_eq!(identity_index_len(&mut env), 1, "the slot was freed");
 }
 
+/// A create whose record write and its undo were refused, but whose marking
+/// as failed (`f`) went through, leaves an entry with no record: the next
+/// listing frees that slot.
+#[test]
+fn a_failed_create_marks_its_slot_free_to_reclaim() {
+    use crate::env::mem::{FaultOp, Rule};
+    let mut env = MemEnv::default();
+    import_fixture(&mut env, PROD);
+    let rule = |op, key: &str, nth| Rule {
+        op,
+        key_contains: key.into(),
+        nth,
+    };
+    // The record write, then the undo of the index entry and its two
+    // retries; the index add, the create marker and the `f` marking (each
+    // its own first write to that key text) go through.
+    let mut faults = Faults::default();
+    faults.rules = vec![
+        rule(FaultOp::SetFail, "/id/", 1),
+        rule(FaultOp::SetFail, "/ix/id", 2),
+        rule(FaultOp::SetFail, "ix/id", 3),
+        rule(FaultOp::SetFail, "x/id", 4),
+    ];
+    env.faults = Some(faults);
+    let created = call(
+        &mut env,
+        PROD,
+        Op::CreateIdentity {
+            alias: "failed".into(),
+            description: String::new(),
+            ui_entropy: Entropy([7; 32]),
+        },
+    );
+    assert!(created.is_err(), "{created:?}");
+    env.faults = None;
+    assert_eq!(identity_index_len(&mut env), 2, "the slot was claimed");
+    assert_eq!(listed(&mut env).len(), 1, "the failed create is not listed");
+    call(&mut env, PROD, Op::ListDeletingIdentities).unwrap();
+    assert_eq!(identity_index_len(&mut env), 1, "the slot was freed");
+}
+
 /// Round 10: an approved deletion that takes several steps records the
 /// approval durably at its first step. If the record then stops reading,
 /// neither a restore nor a migration import may write it back with

@@ -750,7 +750,9 @@ pub(crate) fn local_delete_draft(alias: &str, id: &str) {
 
 pub(crate) fn local_save_sent(alias: &str, id: &str, sent: SentMessage) {
     let alias = &state_key(alias);
-    crate::log::info(format!("Sent row kept on this page: key={alias} id={id}"));
+    // No address or message id: this runs on every send, and the console
+    // is captured in test artifacts.
+    crate::log::info("Sent row kept on this page");
     change(Change::SaveSent(
         alias.to_string(),
         id.to_string(),
