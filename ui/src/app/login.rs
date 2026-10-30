@@ -1259,10 +1259,35 @@ pub(super) fn Identities() -> Element {
         }
     });
 
+    // The node can no longer read Mail's list of identities: offer to
+    // reset it (the delegate asks first), then restore from recovery keys.
+    let needs_repair = *crate::app::identity_store::IDENTITY_INDEX_NEEDS_REPAIR.read();
+
     rsx! {
         div { style: "display:flex; align-items:baseline; justify-content:space-between; margin-bottom:18px;",
             h1 { class: "display lg italic", "Your identities" }
             span { class: "mono-tag", "{aliases_list.len()} on this device" }
+        }
+        if needs_repair {
+            div {
+                class: "field-help",
+                "data-testid": testid::FM_ID_REPAIR_STORAGE_NOTE,
+                style: "display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:10px;",
+                span {
+                    "Mail's list of your identities on this node can't be read. Repairing it \
+                     starts the list again; restore each identity from its recovery key."
+                }
+                button {
+                    class: "btn btn-secondary",
+                    "data-testid": testid::FM_ID_REPAIR_STORAGE,
+                    onclick: move |_| {
+                        crate::app::identity_store::spawn_detached(
+                            crate::app::identity_store::repair_identity_index(),
+                        );
+                    },
+                    "Repair storage"
+                }
+            }
         }
         {unfinished_iter}
         div { class: "id-list",

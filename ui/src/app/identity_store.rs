@@ -244,6 +244,44 @@ fn report_unknown_unfinished_deletions(listed: Option<Vec<IdentityInfo>>) {
 const UNFINISHED_UNKNOWN_TEXT: &str = "Couldn't check whether an identity deletion was left unfinished. Reload the page to check again.";
 
 /// The text shown when a startup load still fails after its retries.
+/// The node keeps answering that Mail's list of identities cannot be read
+/// (a file it can no longer read or decrypt): "Your identities" offers to
+/// repair it instead of failing every load.
+pub(crate) static IDENTITY_INDEX_NEEDS_REPAIR: GlobalSignal<bool> = Signal::global(|| false);
+
+const IDENTITY_INDEX_UNREADABLE_TEXT: &str = "Mail's list of your identities on this node can't be read. \
+     Use \"Repair storage\" under Your identities, then restore each identity from its recovery key.";
+
+/// Whether a startup load failure is the identity list being unreadable,
+/// rather than a passing error: the delegate answers `Busy` for an index it
+/// wrote but can no longer read, every time, so it outlasts the retries.
+fn identity_index_unreadable(e: &crate::mail_delegate::CallError) -> bool {
+    matches!(e.code(), Some(freenet_mail_protocol::FailureCode::Busy))
+}
+
+/// Reset the unreadable identity list (the delegate asks the user), then
+/// load again: the list starts empty and each identity comes back by
+/// restoring it from its recovery key.
+pub(crate) async fn repair_identity_index() {
+    match ops::repair_index(None, None).await {
+        Ok(()) => {
+            *IDENTITY_INDEX_NEEDS_REPAIR.write() = false;
+            crate::toast::push_toast_detached(
+                "Repaired. Restore each identity from its recovery key to see it again.",
+                crate::toast::ToastLevel::Success,
+            );
+            load_and_report().await;
+        }
+        Err(e) => {
+            crate::log::error(format!("repairing the identity list failed: {e}"), None);
+            crate::toast::push_toast_detached(
+                format!("Couldn't repair the list of identities: {e}"),
+                crate::toast::ToastLevel::Error,
+            );
+        }
+    }
+}
+
 fn startup_load_failure_text(what: &str, e: &crate::mail_delegate::CallError) -> String {
     format!("Couldn't load {what}: {e}. Reload the page to try again.")
 }
@@ -575,10 +613,18 @@ pub(crate) async fn load_and_report() {
         Ok(infos) => infos,
         Err(e) => {
             crate::log::error(format!("loading identities failed: {e}"), None);
-            crate::toast::push_toast_detached(
-                startup_load_failure_text("your identities", &e),
-                crate::toast::ToastLevel::Error,
-            );
+            if identity_index_unreadable(&e) {
+                *IDENTITY_INDEX_NEEDS_REPAIR.write() = true;
+                crate::toast::push_toast_detached(
+                    IDENTITY_INDEX_UNREADABLE_TEXT,
+                    crate::toast::ToastLevel::Error,
+                );
+            } else {
+                crate::toast::push_toast_detached(
+                    startup_load_failure_text("your identities", &e),
+                    crate::toast::ToastLevel::Error,
+                );
+            }
             return;
         }
     };
@@ -1044,6 +1090,48 @@ mod tests {
         assert_eq!(
             InboxModel::id_for_alias("rt-dup").map(|i| i.addr),
             Some(new.addr)
+        );
+    }
+
+    /// An identity list the node can no longer read (a file it cannot read
+    /// or decrypt reads as absent, every time) is told apart from a passing
+    /// error, can be repaired through the delegate, and each identity then
+    /// comes back from its recovery key.
+    #[cfg(all(feature = "local-delegate", not(feature = "use-node")))]
+    #[test]
+    fn an_unreadable_identity_list_is_repaired_and_identities_restored() {
+        use futures::executor::block_on;
+        let (info, recovery_key) =
+            block_on(ops::create_identity("repair-me".into(), String::new())).unwrap();
+        // The identity index of the in-page namespace, not its marker
+        // (`.../xm/ix/id`).
+        crate::mail_delegate::local::miss_next_reads("d/ix/id", 100_000);
+        let err = block_on(ops::list_identities()).unwrap_err();
+        assert!(identity_index_unreadable(&err), "{err}");
+        // The in-page delegate answers its prompt with the first choice,
+        // "Repair", as the user would.
+        block_on(ops::repair_index(None, None)).unwrap();
+        crate::mail_delegate::local::miss_next_reads("d/ix/id", 0);
+        let listed = block_on(ops::list_identities()).unwrap();
+        assert!(
+            listed.iter().all(|i| i.addr != info.addr),
+            "the list starts again"
+        );
+        // A readable list is never reset.
+        assert!(block_on(ops::repair_index(None, None)).is_err());
+        let (restored, _) = block_on(ops::import_identity(
+            freenet_mail_protocol::ImportSource::RecoveryKey(recovery_key.as_str().to_string()),
+            freenet_mail_protocol::ImportKind::UserRestore,
+            "repair-me".into(),
+            String::new(),
+        ))
+        .unwrap();
+        assert_eq!(restored.addr, info.addr);
+        assert!(
+            block_on(ops::list_identities())
+                .unwrap()
+                .iter()
+                .any(|i| i.addr == info.addr)
         );
     }
 

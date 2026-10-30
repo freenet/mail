@@ -191,6 +191,28 @@ pub(crate) async fn list_deleting_identities() -> Result<Vec<IdentityInfo>, Call
 
 // ── Stored items ───────────────────────────────────────────────────────────
 
+/// Whether `e` says the item is listed but its stored bytes cannot be read
+/// (the host reports a file it cannot read or decrypt as absent, every
+/// time). Writing it with no expected generation replaces it.
+pub(crate) fn is_unreadable(e: &CallError) -> bool {
+    matches!(e.code(), Some(FailureCode::Unreadable))
+}
+
+/// Tell the user, once per page, that something stored could not be read
+/// and was replaced (or that defaults stand in for it).
+pub(crate) fn notice_unreadable() {
+    thread_local! {
+        static SHOWN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+    if !SHOWN.with(|s| s.replace(true)) {
+        crate::toast::push_toast_detached(
+            "Some of Mail's saved data on this node could not be read. \
+             Defaults are used in its place, and saving replaces it.",
+            crate::toast::ToastLevel::Warning,
+        );
+    }
+}
+
 pub(crate) async fn get_item(item: ItemRef) -> Result<Option<Item>, CallError> {
     match call(Op::GetItem { item }).await? {
         Reply::Item(item) => Ok(item),
@@ -267,7 +289,20 @@ pub(crate) async fn put_item_merged(
     let mut attempt = 0;
     let mut existed = false;
     loop {
-        let current = get_item(item.clone()).await?;
+        let current = match get_item(item.clone()).await {
+            Ok(current) => current,
+            // Listed but unreadable: merge onto nothing and replace it (a
+            // create, so the delegate keeps its index entry). Never a
+            // resurrection: the item is still listed, not deleted.
+            Err(e) if is_unreadable(&e) => {
+                let Some(body) = merge(None) else {
+                    return Ok(None);
+                };
+                notice_unreadable();
+                return put_item(item.clone(), body, None).await.map(Some);
+            }
+            Err(e) => return Err(e),
+        };
         let (stored, generation) = match &current {
             Some(i) => (Some(i.body.as_slice()), i.generation),
             None if existed => return Ok(None),
@@ -512,6 +547,20 @@ pub(crate) async fn export_recovery_key(addr: Addr) -> Result<SecretString, Call
 pub(crate) async fn export_profile(addr: Addr) -> Result<zeroize::Zeroizing<Vec<u8>>, CallError> {
     match call(Op::ExportProfile { addr }).await? {
         Reply::Profile(profile) => Ok(zeroize::Zeroizing::new(profile.into_vec())),
+        other => Err(unexpected(&other)),
+    }
+}
+
+/// Reset a list the node can no longer read: the identity list
+/// (`kind: None`) or one kind's list for its owner. The delegate asks the
+/// user first, and refuses while the list reads fine. Stored records stay;
+/// identities come back by restoring them from their recovery keys.
+pub(crate) async fn repair_index(
+    kind: Option<freenet_mail_protocol::ItemKind>,
+    owner: Option<Addr>,
+) -> Result<(), CallError> {
+    match call(Op::RepairIndex { kind, owner }).await? {
+        Reply::Ack { .. } => Ok(()),
         other => Err(unexpected(&other)),
     }
 }

@@ -83,7 +83,8 @@ pub(crate) fn timeout_ms(op: &Op) -> u32 {
         Op::ExportRecoveryKey { .. }
         | Op::ExportProfile { .. }
         | Op::ExportForSuccessor { .. }
-        | Op::DeleteIdentity { .. } => (DELEGATE_PROMPT_TTL_SECS + 30) * 1000,
+        | Op::DeleteIdentity { .. }
+        | Op::RepairIndex { .. } => (DELEGATE_PROMPT_TTL_SECS + 30) * 1000,
         _ => 30_000,
     }
 }
@@ -106,6 +107,7 @@ fn consented(op: &Op) -> bool {
             | Op::ExportProfile { .. }
             | Op::ExportForSuccessor { .. }
             | Op::DeleteIdentity { .. }
+            | Op::RepairIndex { .. }
     )
 }
 

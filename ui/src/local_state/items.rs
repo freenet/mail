@@ -156,12 +156,18 @@ async fn delete(item: ItemRef) -> Result<(), CallError> {
         // when the item reads as absent (so a delete of something already
         // deleted costs two reads; `delete_message`, deleting a message's
         // kept and archived copies, pays it for each copy that is absent).
-        let current = match ops::get_item(item.clone()).await? {
-            Some(current) => current,
-            None => match ops::get_item(item.clone()).await? {
+        let current = match ops::get_item(item.clone()).await {
+            Ok(Some(current)) => current,
+            Ok(None) => match ops::get_item(item.clone()).await? {
                 Some(current) => current,
                 None => return Ok(()),
             },
+            // Listed but unreadable: the delegate deletes it without
+            // reading it (any generation; it cannot be compared).
+            Err(e) if ops::is_unreadable(&e) => {
+                return ops::delete_item(item.clone(), 0).await;
+            }
+            Err(e) => return Err(e),
         };
         match ops::delete_item(item.clone(), current.generation).await {
             Err(e)
@@ -268,7 +274,12 @@ pub(crate) async fn check_draft_before_send(
 }
 
 async fn draft_stored(item: &ItemRef) -> Result<bool, DynError> {
-    Ok(ops::get_item(item.clone()).await.map_err(boxed)?.is_some())
+    match ops::get_item(item.clone()).await {
+        Ok(found) => Ok(found.is_some()),
+        // Still listed (stored), just unreadable: not gone.
+        Err(e) if ops::is_unreadable(&e) => Ok(true),
+        Err(e) => Err(boxed(e)),
+    }
 }
 
 /// Save a draft unless it is gone. An autosave still in flight when the
@@ -330,9 +341,12 @@ async fn message_gone(alias: &str, msg_id: MessageId) -> Result<bool, DynError> 
     if super::is_deleted(alias, msg_id) || super::is_archived(alias, msg_id) {
         return Ok(true);
     }
-    let flags = ops::get_item(message_item(ItemKind::Flags, alias, msg_id)?)
-        .await
-        .map_err(boxed)?;
+    let flags = match ops::get_item(message_item(ItemKind::Flags, alias, msg_id)?).await {
+        Ok(flags) => flags,
+        // Its marks cannot be read: nothing here knows it is gone.
+        Err(e) if ops::is_unreadable(&e) => None,
+        Err(e) => return Err(boxed(e)),
+    };
     Ok(flags
         .and_then(|f| serde_json::from_slice::<Flags>(&f.body).ok())
         .is_some_and(|f| f.deleted))
@@ -649,6 +663,20 @@ pub(crate) async fn reclaim_flags(
     Ok(dropped)
 }
 
+/// A stored item, or `None` (defaults) when it is listed but cannot be
+/// read: the user is told once, and the next save replaces it.
+fn readable_or_default(
+    got: Result<Option<freenet_mail_protocol::Item>, CallError>,
+) -> Result<Option<freenet_mail_protocol::Item>, CallError> {
+    match got {
+        Err(e) if ops::is_unreadable(&e) => {
+            ops::notice_unreadable();
+            Ok(None)
+        }
+        other => other,
+    }
+}
+
 /// Everything stored for `identities` (alias, address), as one snapshot.
 pub(crate) async fn load(identities: &[(String, Addr)]) -> Result<LocalState, CallError> {
     let mut state = LocalState::default();
@@ -697,14 +725,14 @@ pub(crate) async fn load(identities: &[(String, Addr)]) -> Result<LocalState, Ca
             }
         }
         let settings = item(ItemKind::IdentitySettings, owner, Vec::new());
-        if let Some(i) = ops::get_item(settings).await?
+        if let Some(i) = readable_or_default(ops::get_item(settings).await)?
             && let Some(s) = decode("identity settings", &i.body)
         {
             entry.settings = s;
         }
     }
     let global = item(ItemKind::GlobalSettings, None, Vec::new());
-    if let Some(i) = ops::get_item(global).await?
+    if let Some(i) = readable_or_default(ops::get_item(global).await)?
         && let Some(g) = decode("global settings", &i.body)
     {
         *state.global_settings_mut() = g;
@@ -1448,5 +1476,41 @@ mod delegate_tests {
         let settings = loaded("items-settings", addr).identity_settings("items-settings");
         assert_eq!(settings.display_name, "Name");
         assert_eq!(settings.signature, "-- sig");
+    }
+
+    /// Settings the node can no longer read (a file it cannot read or
+    /// decrypt reads as absent every time) load as defaults instead of
+    /// failing the whole load, and the next save replaces them.
+    #[test]
+    fn unreadable_settings_load_as_defaults_and_a_save_replaces_them() {
+        let addr = identity("items-unreadable");
+        let before = IdentitySettings::default();
+        let mut name = before.clone();
+        name.display_name = "Old".into();
+        block_on(set_identity_settings(
+            "items-unreadable".into(),
+            before.clone(),
+            name,
+        ))
+        .unwrap();
+        let key_text = format!("/it/si/{}", mail_delegate::store::hex(&addr.0));
+        crate::mail_delegate::local::miss_next_reads(&key_text, 10_000);
+        let settings = loaded("items-unreadable", addr).identity_settings("items-unreadable");
+        assert_eq!(
+            settings, before,
+            "defaults stand in for unreadable settings"
+        );
+        let mut sig = before.clone();
+        sig.signature = "-- new".into();
+        block_on(set_identity_settings(
+            "items-unreadable".into(),
+            before,
+            sig,
+        ))
+        .unwrap();
+        crate::mail_delegate::local::miss_next_reads(&key_text, 0);
+        let settings = loaded("items-unreadable", addr).identity_settings("items-unreadable");
+        assert_eq!(settings.signature, "-- new", "the save replaced them");
+        assert_eq!(settings.display_name, "", "nothing unreadable came back");
     }
 }

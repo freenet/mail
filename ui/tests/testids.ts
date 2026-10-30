@@ -91,6 +91,8 @@ interface TestIds {
   fmIdDelete: string;
   fmIdUnfinishedDelete: string;
   fmIdFinishDelete: string;
+  fmIdRepairStorage: string;
+  fmIdRepairStorageNote: string;
   fmRenameInput: string;
   fmRenameSubmit: string;
   fmDeleteConfirmInput: string;
