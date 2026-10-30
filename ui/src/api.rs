@@ -1628,6 +1628,7 @@ pub(crate) async fn node_comms(
             // A failed load is retried a few times, then reported: an empty
             // address book must never look like having no contacts.
             let mut attempt = 0u32;
+            let journal = crate::app::contact_store::begin_load();
             let loaded = loop {
                 match crate::app::contact_store::load_all().await {
                     Err(e) if attempt < CONTACT_LOAD_RETRIES => {
@@ -1640,6 +1641,9 @@ pub(crate) async fn node_comms(
             };
             match loaded {
                 Ok(contacts) => {
+                    let contacts =
+                        crate::app::contact_store::unchanged_since_load_began(&journal, contacts);
+                    drop(journal);
                     let (contacts, clashed) =
                         crate::app::contact_store::disambiguate(contacts, |alias| {
                             crate::app::login::Identity::get_alias(alias).is_some()

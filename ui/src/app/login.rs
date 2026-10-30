@@ -1015,6 +1015,11 @@ pub(super) fn Identities() -> Element {
                 rename_error.set(format!("`{next}` is already in use on this device."));
                 return;
             }
+            // Nor onto a contact's name: both would answer to it.
+            if crate::app::address_book::is_contact_name(&next) {
+                rename_error.set(format!("`{next}` is the name of a contact."));
+                return;
+            }
             actions.send(NodeAction::RenameIdentity {
                 old: rename_id.alias.clone(),
                 new: Rc::from(next.as_str()),

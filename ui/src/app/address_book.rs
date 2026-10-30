@@ -673,6 +673,43 @@ pub fn remove_contact(alias: &str) {
     bump_address_book_gen();
 }
 
+/// Re-key an own identity's entry after a rename: drop the entry under its
+/// old name (matched by keys, not name) and register it under the new one.
+/// Until this runs, the old name would still send to it and the new name
+/// would not resolve at all.
+pub fn rename_own_identity(identity: &Identity, new: &str) {
+    remove_own_identity(identity);
+    let mut renamed = identity.clone();
+    renamed.alias = std::rc::Rc::from(new);
+    register_identity(&renamed);
+}
+
+/// A contact with filler keys, for tests elsewhere in the crate.
+#[cfg(test)]
+pub(crate) fn contact_for_test(alias: &str, vk: u8) -> Contact {
+    Contact {
+        local_alias: alias.into(),
+        suggested_alias: None,
+        description: String::new(),
+        ml_dsa_vk_bytes: vec![vk; 1952],
+        ml_kem_ek_bytes: vec![vk; 1184],
+        required_tier: Tier::Day1,
+        max_age_secs: DEFAULT_MAX_AGE_SECS,
+        verified: false,
+        inbox_wasm_hash: None,
+    }
+}
+
+/// Whether `alias` names a contact (not one of the user's own identities):
+/// renaming an identity onto it would leave two entries answering to it.
+pub fn is_contact_name(alias: &str) -> bool {
+    ADDRESS_BOOK.with(|ab| {
+        ab.borrow()
+            .get(alias)
+            .is_some_and(|e| matches!(e, Entry::Contact(_)))
+    })
+}
+
 /// Remove an own identity's entry (it was deleted), matched by its keys, not
 /// its name. Until this runs, typing its name would still send to an inbox
 /// nobody can read any more.

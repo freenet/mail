@@ -81,6 +81,10 @@ thread_local! {
     /// sent (ms since the epoch), oldest first.
     static TOKEN_CALLS: RefCell<std::collections::VecDeque<i64>> =
         const { RefCell::new(std::collections::VecDeque::new()) };
+    /// Calls taken out of `TOKEN_CALLS` as expired, still unanswered. The
+    /// node answers token calls in the order they were sent, so the next
+    /// answer belongs to the oldest of these, not to a newer call.
+    static TOKEN_CALLS_EXPIRED: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
 /// A token call unanswered for longer than this no longer counts as in
@@ -90,14 +94,46 @@ const TOKEN_CALL_WINDOW_MS: i64 = 60_000;
 
 /// A token-generator call was sent.
 pub(crate) fn note_token_call_sent() {
-    let now = chrono::Utc::now().timestamp_millis();
-    TOKEN_CALLS.with(|c| c.borrow_mut().push_back(now));
+    note_token_call_sent_at(chrono::Utc::now().timestamp_millis());
+}
+
+fn note_token_call_sent_at(now_ms: i64) {
+    TOKEN_CALLS.with(|c| c.borrow_mut().push_back(now_ms));
 }
 
 /// A token-generator call was answered (or an error was taken as its
 /// answer).
 pub(crate) fn note_token_call_answered() {
-    TOKEN_CALLS.with(|c| c.borrow_mut().pop_front());
+    note_token_call_answered_at(chrono::Utc::now().timestamp_millis());
+}
+
+fn note_token_call_answered_at(now_ms: i64) {
+    expire_token_calls(now_ms);
+    // Answers come in send order: a late answer to a call that already
+    // expired must not end a newer call's window.
+    let late = TOKEN_CALLS_EXPIRED.with(|e| {
+        let n = e.get();
+        if n > 0 {
+            e.set(n - 1);
+        }
+        n > 0
+    });
+    if !late {
+        TOKEN_CALLS.with(|c| c.borrow_mut().pop_front());
+    }
+}
+
+fn expire_token_calls(now_ms: i64) {
+    TOKEN_CALLS.with(|c| {
+        let mut c = c.borrow_mut();
+        while c
+            .front()
+            .is_some_and(|sent| now_ms - sent > TOKEN_CALL_WINDOW_MS)
+        {
+            c.pop_front();
+            TOKEN_CALLS_EXPIRED.with(|e| e.set(e.get().saturating_add(1)));
+        }
+    });
 }
 
 /// Whether a token-generator call is waiting for its answer: a node
@@ -109,16 +145,8 @@ pub(crate) fn token_request_in_flight() -> bool {
 }
 
 fn token_calls_in_flight_at(now_ms: i64) -> bool {
-    TOKEN_CALLS.with(|c| {
-        let mut c = c.borrow_mut();
-        while c
-            .front()
-            .is_some_and(|sent| now_ms - sent > TOKEN_CALL_WINDOW_MS)
-        {
-            c.pop_front();
-        }
-        !c.is_empty()
-    })
+    expire_token_calls(now_ms);
+    TOKEN_CALLS.with(|c| !c.borrow().is_empty())
 }
 
 /// Default timeout for pending AFT confirmations. If the host's
@@ -774,10 +802,31 @@ mod tests {
     /// record (an entry in PENDING_INBOXES_UPDATES) is not a call: it used
     /// to keep keyless node errors away from the mail calls for as long as
     /// the record went unconfirmed.
+    /// The node answers token calls in send order. An answer arriving after
+    /// its call's window ran out belongs to that expired call: it must not
+    /// end a newer call's window, or a keyless error of the newer call would
+    /// be blamed on the mail delegate (round 9).
+    #[test]
+    fn a_late_answer_to_an_expired_token_call_does_not_end_a_newer_one() {
+        TOKEN_CALLS.with(|c| c.borrow_mut().clear());
+        TOKEN_CALLS_EXPIRED.with(|e| e.set(0));
+        let t0 = 1_000_000;
+        note_token_call_sent_at(t0);
+        let t1 = t0 + TOKEN_CALL_WINDOW_MS + 1;
+        assert!(!token_calls_in_flight_at(t1), "the first call expired");
+        note_token_call_sent_at(t1);
+        // The first call's late answer; the second still waits.
+        note_token_call_answered_at(t1 + 10);
+        assert!(token_calls_in_flight_at(t1 + 10));
+        note_token_call_answered_at(t1 + 20);
+        assert!(!token_calls_in_flight_at(t1 + 20));
+    }
+
     #[test]
     fn only_a_waiting_token_call_is_in_flight_and_not_for_ever() {
         let now = 1_000_000;
         TOKEN_CALLS.with(|c| c.borrow_mut().clear());
+        TOKEN_CALLS_EXPIRED.with(|e| e.set(0));
         PENDING_INBOXES_UPDATES.with(|q| q.borrow_mut().clear());
         assert!(!token_calls_in_flight_at(now));
         PENDING_INBOXES_UPDATES.with(|q| {

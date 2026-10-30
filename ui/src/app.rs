@@ -5575,6 +5575,8 @@ fn ComposeSheet() -> Element {
     // re-issued when this sheet unmounts reads it after the signals are gone.
     #[cfg(feature = "use-node")]
     let latest_edit = use_hook(|| std::rc::Rc::new(std::cell::Cell::new(0u64)));
+    #[cfg(feature = "use-node")]
+    let latest_edit_for_delete = latest_edit.clone();
     // Set when an autosave finds this draft removed in another tab
     // (discarded or sent there): autosave stops, so the draft is not brought
     // back, and the sheet says so.
@@ -5730,6 +5732,10 @@ fn ComposeSheet() -> Element {
         // DeleteDraft that follows.
         let bumped = *autosave_token.read() + 1;
         autosave_token.set(bumped);
+        // The close-flush checks this one: Send or Discard must not fire a
+        // save of the draft they just removed.
+        #[cfg(feature = "use-node")]
+        latest_edit_for_delete.set(bumped);
         crate::local_state::local_delete_draft(&alias_for_delete, &id);
         #[cfg(feature = "use-node")]
         {

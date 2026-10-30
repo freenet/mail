@@ -65,6 +65,54 @@ pub(crate) fn decode(item: &ItemRef, body: &[u8]) -> Option<Contact> {
     )
 }
 
+thread_local! {
+    /// While the startup load runs: the signing keys of contacts this page
+    /// saved or removed meanwhile. The load read them before (or while)
+    /// they changed, so the page's own state of each is newer than what the
+    /// load returns.
+    static CHANGED_DURING_LOAD: std::cell::RefCell<Option<std::collections::HashSet<Vec<u8>>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The startup contact load is running; dropping it ends the journal.
+pub(crate) struct ContactLoad(());
+
+impl Drop for ContactLoad {
+    fn drop(&mut self) {
+        CHANGED_DURING_LOAD.with(|c| *c.borrow_mut() = None);
+    }
+}
+
+/// Start journalling contact changes for the startup load.
+pub(crate) fn begin_load() -> ContactLoad {
+    CHANGED_DURING_LOAD.with(|c| *c.borrow_mut() = Some(Default::default()));
+    ContactLoad(())
+}
+
+fn note_changed(vk: &[u8]) {
+    CHANGED_DURING_LOAD.with(|c| {
+        if let Some(changed) = c.borrow_mut().as_mut() {
+            changed.insert(vk.to_vec());
+        }
+    });
+}
+
+/// The loaded contacts the page did not change while the load ran: a
+/// contact saved or removed meanwhile keeps the page's state (a removal is
+/// not brought back, an edit not undone).
+pub(crate) fn unchanged_since_load_began(
+    _load: &ContactLoad,
+    contacts: Vec<Contact>,
+) -> Vec<Contact> {
+    CHANGED_DURING_LOAD.with(|c| match c.borrow().as_ref() {
+        Some(changed) => contacts
+            .into_iter()
+            .filter(|contact| !changed.contains(&contact.ml_dsa_vk_bytes))
+            .collect(),
+        None => contacts,
+    })
+}
+
 /// Every stored contact.
 pub(crate) async fn load_all() -> Result<Vec<Contact>, CallError> {
     let items = ops::list_all_items(ItemKind::Contact, None).await?;
@@ -88,6 +136,7 @@ pub(crate) async fn load_all() -> Result<Vec<Contact>, CallError> {
 /// That is why this does not use `put_item_merged`, whose "existed, then
 /// gone" rule is right for drafts and wrong here.
 pub(crate) async fn save(contact: &Contact) -> Result<(), CallError> {
+    note_changed(&contact.ml_dsa_vk_bytes);
     let item = item_for(&contact.ml_dsa_vk_bytes);
     store_replacing(
         encode(contact),
@@ -136,6 +185,7 @@ where
 
 /// Remove the contact with verifying key `vk`. Absent is success.
 pub(crate) async fn remove(vk: &[u8]) -> Result<(), CallError> {
+    note_changed(vk);
     let item = item_for(vk);
     match ops::get_item(item.clone()).await? {
         Some(stored) => ops::delete_item(item, stored.generation).await,
@@ -339,6 +389,30 @@ mod tests {
             inbox_wasm_hash: Some("hash".into()),
         }
         .into_contact("Bob".into(), "from work".into())
+    }
+
+    /// A contact removed (or saved) while the startup load ran keeps the
+    /// page's state: the load's older copy does not bring it back.
+    #[cfg(all(feature = "local-delegate", not(feature = "use-node")))]
+    #[test]
+    fn a_contact_changed_during_the_startup_load_keeps_the_pages_state() {
+        use futures::executor::block_on;
+        let load = begin_load();
+        block_on(remove(&[0x71; 1952])).unwrap();
+        let kept = unchanged_since_load_began(
+            &load,
+            vec![contact(vec![0x71; 1952]), contact(vec![0x72; 1952])],
+        );
+        assert_eq!(kept.len(), 1, "the removed contact is not brought back");
+        assert_eq!(kept[0].ml_dsa_vk_bytes, vec![0x72; 1952]);
+        drop(load);
+        // Outside a load nothing is journaled.
+        block_on(remove(&[0x72; 1952])).unwrap();
+        let load = begin_load();
+        assert_eq!(
+            unchanged_since_load_began(&load, vec![contact(vec![0x72; 1952])]).len(),
+            1
+        );
     }
 
     /// Writes for one contact run in the order they were made; a writer is

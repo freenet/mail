@@ -217,9 +217,12 @@ fn seen_draft(key: String, id: String) {
 
 /// Forget this page's bookkeeping for a deleted identity: its pending
 /// mark writes and the delivery states waiting for its Sent items.
-pub(crate) fn forget_identity_bookkeeping(addr: &Addr, alias: &str) {
+pub(crate) fn forget_identity_bookkeeping(addr: &Addr) {
     FLAG_WRITES.with(|w| w.borrow_mut().1.retain(|(a, _), _| a != addr));
-    EARLY_DELIVERY.with(|e| e.borrow_mut().retain(|(a, _), _| a != alias));
+    // Keyed by state key (the address), like everything `save_sent` and
+    // `set_sent_delivery_state` write: by alias it would match nothing.
+    let key = super::addr_key(addr);
+    EARLY_DELIVERY.with(|e| e.borrow_mut().retain(|(a, _), _| *a != key));
 }
 
 /// Forget the drafts seen for state key `key` (its identity is gone).
@@ -756,12 +759,18 @@ mod tests {
                 id: vec![7; 16],
             });
         }
+        // Delivery states are keyed by the identity's state key (its
+        // address), as `save_sent` writes them.
+        let (gone_key, kept_key) = (
+            crate::local_state::addr_key(&gone),
+            crate::local_state::addr_key(&kept),
+        );
         EARLY_DELIVERY.with(|e| {
             let mut e = e.borrow_mut();
-            e.insert(("fg-gone".into(), "s1".into()), DeliveryState::Delivered);
-            e.insert(("fg-kept".into(), "s1".into()), DeliveryState::Delivered);
+            e.insert((gone_key.clone(), "s1".into()), DeliveryState::Delivered);
+            e.insert((kept_key.clone(), "s1".into()), DeliveryState::Delivered);
         });
-        forget_identity_bookkeeping(&gone, "fg-gone");
+        forget_identity_bookkeeping(&gone);
         FLAG_WRITES.with(|w| {
             let w = w.borrow();
             assert!(!w.1.keys().any(|(a, _)| *a == gone));
@@ -769,8 +778,8 @@ mod tests {
         });
         EARLY_DELIVERY.with(|e| {
             let e = e.borrow();
-            assert!(!e.contains_key(&("fg-gone".to_string(), "s1".to_string())));
-            assert!(e.contains_key(&("fg-kept".to_string(), "s1".to_string())));
+            assert!(!e.contains_key(&(gone_key.clone(), "s1".to_string())));
+            assert!(e.contains_key(&(kept_key.clone(), "s1".to_string())));
         });
     }
 

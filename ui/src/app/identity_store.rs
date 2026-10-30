@@ -88,8 +88,18 @@ pub(crate) async fn rename_identity(
         Err(e) => Renamed::Refused(e.to_string()),
     };
     if let Renamed::Done(generation) = outcome {
-        Identity::rename_in_place(old, new);
+        // The page's own list must take the new name before anything else
+        // does: relabelling the inbox, the address book or the page under a
+        // name the list refused would leave them disagreeing.
+        if !Identity::rename_in_place(old, new) {
+            crate::log::error(
+                format!("renamed `{old}` to `{new}`, but the page's list did not take it"),
+                None,
+            );
+            return Renamed::Unknown;
+        }
         crate::inbox::InboxModel::rename_identity(&identity.addr, new);
+        super::address_book::rename_own_identity(identity, new);
         Identity::set_generation(&identity.addr, generation, user);
         Identity::set_page_alias(&identity.addr, new, user);
     }
@@ -312,7 +322,7 @@ pub(crate) fn settle_after_failed_deletion(
 /// Take a deleted identity out of this page: the live identities, the
 /// identities list, the signed-in identity and its in-page state.
 pub(crate) fn drop_from_page(identity: &crate::app::login::Identity, user: &mut crate::app::User) {
-    forget_everywhere(&identity.addr, &identity.alias);
+    forget_everywhere(&identity.addr);
     crate::app::address_book::remove_own_identity(identity);
     let was_logged_in = user.logged_id().is_some_and(|i| i.addr == identity.addr);
     user.identities.retain(|i| i.addr != identity.addr);
@@ -324,10 +334,10 @@ pub(crate) fn drop_from_page(identity: &crate::app::login::Identity, user: &mut 
 /// Everything this page holds for a deleted identity, by address: the
 /// live identity, its local state and bookkeeping, its inbox routing and
 /// the inbox states seen for it (round-8 X5, X12).
-pub(crate) fn forget_everywhere(addr: &freenet_mail_protocol::Addr, alias: &str) {
+pub(crate) fn forget_everywhere(addr: &freenet_mail_protocol::Addr) {
     crate::app::login::Identity::remove_in_place_by_addr(addr);
     crate::local_state::forget_identity(addr);
-    crate::local_state::forget_identity_bookkeeping(addr, alias);
+    crate::local_state::forget_identity_bookkeeping(addr);
     crate::inbox::InboxModel::forget_identity(addr);
     #[cfg(feature = "use-node")]
     crate::api::forget_inbox_states(addr);
@@ -363,7 +373,7 @@ pub(crate) async fn finish_deletion(info: IdentityInfo) {
     match delete_with_progress(info.addr, info.generation, &info.alias).await {
         Ok(()) => {
             // By address: a new identity may carry this one's alias.
-            forget_everywhere(&info.addr, &info.alias);
+            forget_everywhere(&info.addr);
             crate::toast::push_toast_detached(
                 format!("Identity `{}` deleted", info.alias),
                 crate::toast::ToastLevel::Success,
@@ -1077,7 +1087,7 @@ mod tests {
         let old = Identity::from_info(&info("rt-dup", 0x51), UserId::new());
         let new = Identity::from_info(&info("rt-dup", 0x52), UserId::new());
         InboxModel::set_contract_identity(key(0x51), old.clone());
-        forget_everywhere(&old.addr, &old.alias);
+        forget_everywhere(&old.addr);
         InboxModel::set_contract_identity(key(0x52), new.clone());
         assert!(InboxModel::contract_identity(&key(0x51)).is_none());
         assert!(InboxModel::id_for_addr(&old.addr).is_none());
@@ -1420,6 +1430,52 @@ mod tests {
             );
             assert_eq!(&*user.read().identities[1].alias, "rl-other");
         });
+    }
+
+    /// A rename re-keys the identity's own address-book entry: the new name
+    /// sends to it, the old one no longer does (round 9, Y6).
+    #[cfg(all(feature = "local-delegate", not(feature = "use-node")))]
+    #[test]
+    fn a_rename_moves_the_address_book_entry_to_the_new_name() {
+        use crate::app::{User, UserId, address_book};
+        use dioxus::prelude::*;
+        use futures::executor::block_on;
+        fn app() -> Element {
+            rsx! {}
+        }
+        let (info, _) = block_on(ops::create_identity("ab-old".into(), String::new())).unwrap();
+        let me = Identity::from_info(&info, UserId::new());
+        Identity::register_live_for_test(me.clone());
+        address_book::register_identity(&me);
+        let mut dom = VirtualDom::new(app);
+        dom.rebuild_in_place();
+        dom.in_scope(ScopeId::ROOT, || {
+            let user = Signal::new(User {
+                logged: true,
+                identified: true,
+                active_id: Some(me.id),
+                identities: vec![me.clone()],
+            });
+            let outcome = block_on(rename_identity(&me, "ab-old", "ab-new", user));
+            assert!(matches!(outcome, Renamed::Done(_)));
+        });
+        let new = address_book::lookup("ab-new").expect("the new name resolves");
+        assert!(new.is_own);
+        assert_eq!(new.ml_dsa_vk_bytes, me.ml_dsa_vk_bytes());
+        assert!(
+            address_book::lookup("ab-old").is_none(),
+            "the old name no longer sends to it"
+        );
+    }
+
+    /// A rename onto a contact's name is refused (both would answer to it).
+    #[test]
+    fn a_contact_name_is_not_free_for_an_identity() {
+        use crate::app::address_book;
+        assert!(!address_book::is_contact_name("cn-nobody"));
+        let contact = address_book::contact_for_test("cn-bob", 0x61);
+        address_book::insert_contact(contact).unwrap();
+        assert!(address_book::is_contact_name("cn-bob"));
     }
 
     #[test]

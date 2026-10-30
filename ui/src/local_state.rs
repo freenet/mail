@@ -328,7 +328,11 @@ pub(crate) fn merge_loaded(mut loaded: LocalState, owners: &[String], mark: Load
         }
     }
     *merged.global_settings_mut() = fresh.global_settings().clone();
-    replace_snapshot(merged);
+    // The load cannot confirm a discard: the journal already replayed it
+    // into `merged`, so the draft is absent whether or not the delegate
+    // has removed it, and a late save of a draft never stored must still
+    // find its tombstone.
+    install_snapshot(merged, false);
 }
 
 /// Bumped on every snapshot mutation. Components read this signal so Dioxus
@@ -348,7 +352,17 @@ fn bump() {
     }
 }
 
+/// Install a delegate echo as the snapshot (tests; the app installs only
+/// the startup merge, through [`install_snapshot`]).
+#[cfg(test)]
 pub(crate) fn replace_snapshot(new: LocalState) {
+    install_snapshot(new, true);
+}
+
+/// Install `new` as the snapshot. A draft tombstone always strips its draft
+/// from it; with `confirm_discards`, a tombstone whose draft `new` lacks is
+/// taken as confirmed (the delegate's echo of the delete) and dropped.
+fn install_snapshot(new: LocalState, confirm_discards: bool) {
     let mut new = new;
     DELETED_DRAFTS.with(|tombs| {
         let mut tombs = tombs.borrow_mut();
@@ -361,7 +375,7 @@ pub(crate) fn replace_snapshot(new: LocalState) {
             {
                 return true;
             }
-            false
+            !confirm_discards
         });
     });
     PENDING_KEPT.with(|pending| {
@@ -1223,6 +1237,20 @@ mod tests {
 
     /// #286: the startup load is a snapshot. An identity created while it
     /// ran keeps its state, and a settings change made meanwhile wins.
+    #[test]
+    fn a_draft_discarded_during_the_startup_load_keeps_its_tombstone() {
+        fresh_snapshot();
+        fresh_pending();
+        let mark = begin_load();
+        // A draft that was never stored is discarded while the load runs.
+        local_delete_draft("alice", "late-draft");
+        merge_loaded(LocalState::default(), &["alice".to_string()], mark);
+        assert!(
+            draft_discarded("alice", "late-draft"),
+            "a late autosave of it must still be refused"
+        );
+    }
+
     #[test]
     fn a_startup_load_replaces_only_the_identities_it_read() {
         fresh_snapshot();
