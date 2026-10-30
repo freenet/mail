@@ -67,7 +67,10 @@ recovery-key codec. Its encoding is pinned per variant in
   and listing, caps and exports read those.
 - **Budgets:** every key an origin writes goes through `store::Space`, which
   enforces a per-origin key and byte budget, so one app cannot exhaust
-  storage for another.
+  storage for another. The usage record is not exact (it runs high when a
+  counted write is refused, and can be lost), so a write that finds it
+  unknown, or that it would refuse, first recounts what is stored, in pages
+  of `RECOUNT_STEP` keys: a drifted record never blocks an origin for good.
 - **Compare-and-swap:** every record, index records included, carries a
   generation that is checked on write. Generations come from a per-origin
   counter and are never reused.

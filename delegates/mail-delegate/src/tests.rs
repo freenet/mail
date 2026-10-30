@@ -339,14 +339,15 @@ fn another_app_exhausting_its_budget_and_the_host_registry_does_not_touch_mail()
         env.secrets
             .insert(format!("o/foreign/{i}").into_bytes(), vec![0; 8]);
     }
-    // The other app has used its whole budget.
+    // The other app has used its whole budget (as a finished recount found
+    // it, so it is not recounted away).
     {
         let mut other = Space::new(&mut env, Origin([OTHER; 32]));
         other.put("filler", b"x").unwrap();
-        let usage_key = other.full_key("mt/usage");
-        let mut full = store::MAX_ORIGIN_KEYS.to_le_bytes().to_vec();
-        full.extend_from_slice(&0u64.to_le_bytes());
-        env.secrets.insert(usage_key, full);
+        other.confirm_usage_for_test(store::Usage {
+            keys: store::MAX_ORIGIN_KEYS,
+            bytes: 0,
+        });
     }
     assert_eq!(
         call(

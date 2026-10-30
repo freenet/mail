@@ -128,19 +128,33 @@ struct Run {
     /// The key that went persistently unreadable during the run, kept
     /// past `heal` (which turns the faults off).
     blinded: Option<Vec<u8>>,
+    /// The last request id handed out.
+    next_request: u64,
+    /// The request each consent prompt was raised for.
+    prompts: BTreeMap<u32, RequestId>,
 }
 
 impl Run {
     fn send(&mut self, op: Op) -> Seen {
+        // Every request gets its own id, as the UI's do: a call may also
+        // answer an earlier request (a prompt it pushes out is refused), and
+        // only distinct ids tell that answer from this request's own.
+        self.next_request += 1;
+        let mut id = [0u8; 16];
+        id[..8].copy_from_slice(&self.next_request.to_le_bytes());
+        let request_id = RequestId(id);
         let req = Request {
             version: PROTOCOL_VERSION,
-            request_id: RequestId([0x5a; 16]),
+            request_id,
             op,
         };
         let msg =
             InboundDelegateMsg::ApplicationMessage(ApplicationMessage::new(to_cbor(&req).unwrap()));
         let out = process(&mut self.env, app(PROD), msg);
-        let seen = self.seen(out);
+        let seen = self.seen(out, request_id);
+        if let Seen::Prompt(p) = seen {
+            self.prompts.insert(p, request_id);
+        }
         if std::env::var_os("FAULT_TRACE").is_some() {
             eprintln!("  -> {}", describe(&seen));
         }
@@ -158,10 +172,19 @@ impl Run {
             app(PROD),
             InboundDelegateMsg::UserResponse(resp),
         );
-        self.seen(out)
+        let asked_by = self.prompts[&prompt_id];
+        self.seen(out, asked_by)
     }
 
-    fn seen(&mut self, out: Result<Vec<OutboundDelegateMsg>, DelegateError>) -> Seen {
+    /// What the client saw for request `expected`. Every response in one
+    /// call answers a distinct request, and any other than `expected` is a
+    /// refusal of an earlier request this run was prompted for (a prompt
+    /// pushed out by newer ones).
+    fn seen(
+        &mut self,
+        out: Result<Vec<OutboundDelegateMsg>, DelegateError>,
+        expected: RequestId,
+    ) -> Seen {
         let Ok(out) = out else {
             return Seen::Lost;
         };
@@ -172,8 +195,15 @@ impl Run {
             return Seen::Prompt(p);
         }
         let rs = responses(&out);
-        assert!(rs.len() <= 1, "more than one response: {out:?}");
-        let Some(r) = rs.into_iter().next() else {
+        let ids: BTreeSet<[u8; 16]> = rs.iter().map(|r| r.request_id.0).collect();
+        assert_eq!(ids.len(), rs.len(), "two responses to one request: {rs:?}");
+        for r in rs.iter().filter(|r| r.request_id != expected) {
+            assert!(
+                r.result.is_err() && self.prompts.values().any(|id| *id == r.request_id),
+                "a response to no pending prompt: {r:?}"
+            );
+        }
+        let Some(r) = rs.into_iter().find(|r| r.request_id == expected) else {
             return Seen::Lost;
         };
         if self.rng.chance(self.lose_reply) {
@@ -834,7 +864,28 @@ fn check(run: &mut Run) -> Result<(), String> {
             return Err(format!("generation {g} was handed out twice"));
         }
     }
-    Ok(())
+    never_stuck_at_cap(&env)
+}
+
+/// After healing, the origin is never stuck at `CapReached`: whatever the
+/// usage record says (here, a record that drifted up to the whole budget),
+/// a write that grows the store is accepted once the recount it starts has
+/// finished, because what is really stored is far below the budget.
+fn never_stuck_at_cap(env: &MemEnv) -> Result<(), String> {
+    let mut e = env.clone();
+    let mut s = Space::new(&mut e, Origin([PROD; 32]));
+    s.set_usage_for_test(store::Usage {
+        keys: store::MAX_ORIGIN_KEYS,
+        bytes: store::MAX_ORIGIN_BYTES,
+    });
+    for _ in 0..64 {
+        match s.put("probe/write", b"x") {
+            Ok(()) => return Ok(()),
+            Err(f) if f.code == FailureCode::Busy => {}
+            Err(f) => return Err(format!("stuck after healing: {f:?}")),
+        }
+    }
+    Err("the recount never finished".into())
 }
 
 fn unhex(h: &str) -> Vec<u8> {
@@ -866,6 +917,8 @@ fn run_seed_with(
         m: Model::default(),
         lose_reply: u64::from(per_mille),
         blinded: None,
+        next_request: 0,
+        prompts: BTreeMap::new(),
     };
     for _ in 0..ops {
         run.step();
@@ -993,6 +1046,8 @@ fn a_create_marker_beside_an_unreadable_record_never_skips_the_prompt_and_stays_
             m: Model::default(),
             lose_reply: 0,
             blinded: None,
+            next_request: 0,
+            prompts: BTreeMap::new(),
         };
         let ui_entropy = run.entropy();
         let Seen::Reply(Ok(Reply::CreatedIdentity {
@@ -1098,6 +1153,8 @@ fn the_invariant_check_fails_on_a_leaked_identity_slot() {
         m: Model::default(),
         lose_reply: 0,
         blinded: None,
+        next_request: 0,
+        prompts: BTreeMap::new(),
     };
     run.create();
     let addr = *run.m.ids.keys().next().unwrap();

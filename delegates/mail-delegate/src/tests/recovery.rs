@@ -128,11 +128,11 @@ fn deleting_works_when_the_budget_is_full() {
     let mut env = MemEnv::default();
     let me = create(&mut env, PROD, "alice");
     let g = ack(put(&mut env, draft(me.addr, 1), b"d", None));
-    // Fill the budget: the usage record says every key is taken.
+    // Fill the budget: every key is taken, as a finished recount found it.
     {
         let mut s = Space::new(&mut env, Origin([PROD; 32]));
         let used = s.usage();
-        s.set_usage_for_test(store::Usage {
+        s.confirm_usage_for_test(store::Usage {
             keys: store::MAX_ORIGIN_KEYS,
             bytes: used.bytes,
         });
@@ -325,11 +325,9 @@ fn a_repair_is_namespaced_and_a_denial_changes_nothing() {
     assert_eq!(listed(&mut env), vec![me]);
 }
 
-/// A failed index add, whose index then cannot be read, never leaks a slot.
-/// (An add once wrote its entry before marking the new index live, so a
-/// refused marker and a refused undo left the entry in place; now the
-/// entry is written only once the index is live, and this script of
-/// faults fails the add before it.)
+/// A create whose record write is refused after its entry went into the
+/// index, and whose undo then cannot read that index, never leaks the slot:
+/// the item is marked failed (`f`), and the next listing frees it.
 #[test]
 fn a_failed_add_to_an_unreadable_index_never_leaks_its_slot() {
     use crate::env::mem::{FaultOp, Rule};
@@ -337,32 +335,39 @@ fn a_failed_add_to_an_unreadable_index_never_leaks_its_slot() {
     let me = create(&mut env, PROD, "alice");
     let ix = store::index_rel(ItemKind::Draft, Some(&me.addr));
     let ix_key = full(&mut env, &ix);
+    let item = draft(me.addr, 1);
     let rule = |op, key: &str, nth| Rule {
         op,
         key_contains: key.into(),
         nth,
     };
-    // The draft index is created for this first draft: its "written"
-    // marker is refused twice and its undo three times, so the add fails
-    // with the entry in place; then the index stops reading.
+    // The draft index is created for this first draft and its entry added;
+    // the draft's record write is refused; from then on the index does not
+    // read, so the undo cannot remove the entry.
     let mut faults = Faults::default();
     faults.rules = vec![
-        rule(FaultOp::SetFail, "xm/ix/dr", 2),
-        rule(FaultOp::SetFail, "m/ix/dr", 3),
-        rule(FaultOp::RemoveFail, "1/ix/dr/", 1),
-        rule(FaultOp::RemoveFail, "/ix/dr/", 2),
-        rule(FaultOp::RemoveFail, "ix/dr/", 3),
-        // Its first present read is the undo's; from the next it stops.
+        rule(FaultOp::SetFail, &store::item_rel(&item), 1),
         rule(FaultOp::GetBlindFrom, &ix_key, 2),
     ];
     env.faults = Some(faults);
-    assert!(put(&mut env, draft(me.addr, 1), b"d", None).is_err());
+    assert!(put(&mut env, item.clone(), b"d", None).is_err());
     env.faults = None;
+    // The step this test is about was reached: the entry is in the index
+    // with no record, and the item is marked as a create that failed.
+    {
+        let s = Space::new(&mut env, Origin([PROD; 32]));
+        assert_eq!(
+            s.get(&store::pending_item_rel(&item)).as_deref(),
+            Some(store::MARKER_FAILED)
+        );
+        assert!(s.index(&ix).unwrap().1.contains(&item.id));
+        assert!(s.get(&store::item_rel(&item)).is_none());
+    }
     // A listing frees the slot; nothing is left naming a missing draft.
     list_ids(&mut env, PROD, ItemKind::Draft, Some(me.addr));
     let s = Space::new(&mut env, Origin([PROD; 32]));
     let (_, ids) = s.index(&ix).unwrap();
-    assert!(!ids.contains(&vec![1; 16]), "the failed add's slot leaked");
+    assert!(!ids.contains(&item.id), "the failed add's slot leaked");
 }
 
 /// A delete that removed the record but then could not update the index
@@ -682,4 +687,103 @@ fn importing_keys_restores_an_identity_whose_record_is_corrupt() {
             "the record is replaced, not counted twice"
         );
     }
+}
+
+// ── Usage accounting never sticks ───────────────────────────────────────────
+
+/// A fresh, complete count of what the origin stores.
+fn recounted(env: &mut MemEnv) -> store::Usage {
+    let mut s = Space::new(env, Origin([PROD; 32]));
+    loop {
+        if let Ok(u) = s.recount() {
+            return u;
+        }
+    }
+}
+
+fn recorded(env: &mut MemEnv) -> store::Usage {
+    Space::new(env, Origin([PROD; 32])).usage()
+}
+
+/// A usage record that cannot be read is unknown, not zero: the next write
+/// recounts what is stored, so the record never under-counts it (believing
+/// zero let an origin write past its budget for good).
+#[test]
+fn a_lost_usage_record_is_recounted_not_taken_as_zero() {
+    let mut env = MemEnv::default();
+    let me = create(&mut env, PROD, "alice");
+    for i in 1..=5 {
+        ack(put(&mut env, draft(me.addr, i), b"draft", None));
+    }
+    let before = recorded(&mut env);
+    Space::new(&mut env, Origin([PROD; 32])).forget_usage_for_test();
+    ack(put(&mut env, draft(me.addr, 6), b"draft", None));
+    let after = recorded(&mut env);
+    assert!(
+        after.keys > before.keys,
+        "{after:?} under-counts {before:?}"
+    );
+    assert_eq!(after, recounted(&mut env));
+}
+
+/// A record that drifted high (a write counted then refused by the host, a
+/// key removed whose size could not be read) up to the budget never blocks
+/// for good: the write that would be refused recounts first, and succeeds.
+#[test]
+fn a_drifted_usage_record_is_recounted_before_refusing() {
+    let mut env = MemEnv::default();
+    let me = create(&mut env, PROD, "alice");
+    ack(put(&mut env, draft(me.addr, 1), b"draft", None));
+    // Phantom keys fill the recorded budget.
+    Space::new(&mut env, Origin([PROD; 32])).set_usage_for_test(store::Usage {
+        keys: store::MAX_ORIGIN_KEYS,
+        bytes: store::MAX_ORIGIN_BYTES,
+    });
+    ack(put(&mut env, draft(me.addr, 2), b"draft", None));
+    let after = recorded(&mut env);
+    assert!(after.keys < store::MAX_ORIGIN_KEYS);
+    assert_eq!(after, recounted(&mut env));
+}
+
+/// A store larger than one recount step is counted over several calls:
+/// each refused write advances the count (`Busy`), and the write after it
+/// finishes succeeds. The count matches a fresh one, and a recount of an
+/// unchanged store gives the same answer.
+#[test]
+fn a_large_store_is_recounted_in_pages_and_recounts_agree() {
+    let mut env = MemEnv::default();
+    let me = create(&mut env, PROD, "alice");
+    {
+        let mut s = Space::new(&mut env, Origin([PROD; 32]));
+        let ix = store::index_rel(ItemKind::Sent, Some(&me.addr));
+        for i in 0..(store::RECOUNT_STEP as u32 + 100) {
+            let mut id = vec![0u8; 16];
+            id[..4].copy_from_slice(&i.to_be_bytes());
+            s.index_add(&ix, &id, usize::MAX).unwrap();
+            let item = ItemRef {
+                kind: ItemKind::Sent,
+                owner: Some(me.addr),
+                id,
+            };
+            s.put(&store::item_rel(&item), b"sent").unwrap();
+        }
+        s.forget_usage_for_test();
+    }
+    let mut busy = 0;
+    loop {
+        match put(&mut env, draft(me.addr, 1), b"draft", None) {
+            Err(FailureCode::Busy) => busy += 1,
+            other => {
+                ack(other);
+                break;
+            }
+        }
+        assert!(busy < 10, "the recount never finished");
+    }
+    assert!(busy >= 1, "a store this large takes more than one step");
+    let after = recorded(&mut env);
+    assert!(after.keys > store::RECOUNT_STEP as u64);
+    let once = recounted(&mut env);
+    assert_eq!(once, recounted(&mut env), "a recount is idempotent");
+    assert_eq!(after, once);
 }

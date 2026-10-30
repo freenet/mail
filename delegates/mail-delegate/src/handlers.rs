@@ -895,8 +895,10 @@ fn delete_step(s: &mut Space<'_>, addr: &Addr) -> OpResult {
     // marker (which names the address) goes too, before the record, so a
     // failure here is retried by the next step.
     for kind in ALL_KINDS.into_iter().filter(|k| store::shape(*k).0) {
-        // The record first: a removal refused above leaves it under `p`,
-        // listing nothing, and without its marker it would read as live.
+        // Each index is an empty list by now (an emptied index is written
+        // as one, never removed). The record goes, then its marker: if
+        // either removal is refused, the retry of this step finds an empty
+        // list, or no list under a marker it then removes, and finishes.
         let ix = index_rel(kind, Some(addr));
         s.del(&ix)?;
         s.del(&store::index_marker_rel(&ix))?;
@@ -941,15 +943,9 @@ fn check_item(s: &Space<'_>, item: &ItemRef) -> Result<(), Failure> {
     Ok(())
 }
 
-/// The pending marker of an item write (`c`: a create claimed the index
-/// slot, `f`: that create failed and could not give the slot back, `d`: a
-/// delete is removing the record). Like the identity markers,
-/// it is the only licence for a listing to drop an index entry whose record
-/// reads as absent: the host cannot tell a failed read from an absent key.
-/// Keyed by a hash, so a marker left behind names no identity.
+/// The pending marker of an item write; see [`store::pending_item_rel`].
 fn pending_rel(item: &ItemRef) -> String {
-    let h = blake3::hash(item_rel(item).as_bytes());
-    format!("pi/{}", store::hex(&h.as_bytes()[..16]))
+    store::pending_item_rel(item)
 }
 
 /// Run a cleanup write up to three times. Undoing a half-done change is

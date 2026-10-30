@@ -300,6 +300,16 @@ dt "a new index lists nothing until it is live" "$D/store.rs" \
             let created = self.write_if(rel, 0, &body)?;
             self.put_for_delete(&marker, MARKER_LIVE)?;' \
     a_record_under_a_pending_marker_never_lists_an_entry
+dt "a lost usage record is recounted, not taken as zero" "$D/store.rs" \
+    '            None => self.recount()?,' '            None => Usage::default(),' \
+    a_lost_usage_record_is_recounted_not_taken_as_zero
+dt "a drifted usage record is recounted before refusing" "$D/store.rs" \
+    '            if self.recount_state() != Some((RECOUNT_DONE, before)) {' '            if false {' \
+    a_drifted_usage_record_is_recounted_before_refusing
+dt "a recount continues where the last call stopped" "$D/store.rs" \
+    '            Some((visited, u)) if visited != RECOUNT_DONE && visited as usize <= keys.len() => {' \
+    '            Some((visited, u)) if false && visited <= keys.len() as u64 => {' \
+    a_large_store_is_recounted_in_pages_and_recounts_agree
 dt "the counter is read from both copies" "$D/store.rs" \
     '        [GENERATION, GENERATION_COPY]
             .iter()' '        [GENERATION]

@@ -56,6 +56,17 @@ pub const PROMPT_TTL_SECS: u64 = 600;
 const ENVELOPE_TAG: u8 = 1;
 const HEADER_LEN: usize = 1 + 8;
 const USAGE: &str = "mt/usage";
+/// A recount of the usage record ([`Space::recount_step`]):
+/// `[visited][keys][bytes]` (u64 LE each) while it is under way,
+/// `[RECOUNT_DONE][keys][bytes]` once finished, the usage it found.
+const RECOUNT: &str = "mt/recount";
+const RECOUNT_DONE: u64 = u64::MAX;
+/// Keys a recount reads per call, so one call stays well within the host's
+/// time limit; a larger store is recounted over several calls.
+pub const RECOUNT_STEP: usize = 2048;
+/// What a key that must exist but cannot be read counts for in a recount:
+/// its size is unknown, and counting it as nothing would under-count.
+pub const UNREADABLE_VALUE_BYTES: u64 = 1024;
 const GENERATION: &str = "mt/gen";
 /// A second copy of the generation counter. The host cannot tell a failed
 /// read from an absent key, and a read can keep failing (a file it cannot
@@ -222,11 +233,39 @@ pub fn fail(code: FailureCode, detail: impl Into<String>) -> Failure {
     }
 }
 
-/// Keys and bytes an origin holds (its usage record excluded).
+/// The pending marker of an item write (`c`: a create claimed the index
+/// slot, `f`: that create failed and could not give the slot back, `d`: a
+/// delete is removing the record). Like the identity markers, it is the
+/// only licence for a listing to drop an index entry whose record reads as
+/// absent: the host cannot tell a failed read from an absent key. Keyed by
+/// a hash, so a marker left behind names no identity.
+pub fn pending_item_rel(item: &ItemRef) -> String {
+    let h = blake3::hash(item_rel(item).as_bytes());
+    format!("pi/{}", hex(&h.as_bytes()[..16]))
+}
+
+/// Keys and bytes an origin holds (its usage record and recount record
+/// excluded).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Usage {
     pub keys: u64,
     pub bytes: u64,
+}
+
+fn encode_usage(u: Usage) -> [u8; 16] {
+    let mut b = [0u8; 16];
+    b[..8].copy_from_slice(&u.keys.to_le_bytes());
+    b[8..].copy_from_slice(&u.bytes.to_le_bytes());
+    b
+}
+
+/// `None` for a record that does not decode: unknown, as if unreadable.
+fn decode_usage(b: &[u8]) -> Option<Usage> {
+    let b = <[u8; 16]>::try_from(b).ok()?;
+    Some(Usage {
+        keys: u64::from_le_bytes(b[..8].try_into().expect("8 bytes")),
+        bytes: u64::from_le_bytes(b[8..].try_into().expect("8 bytes")),
+    })
 }
 
 /// One origin's view of the store. Every write goes through here, so the
@@ -260,22 +299,31 @@ impl<'a> Space<'a> {
         self.env.get(key).or_else(|| self.env.get(key))
     }
 
+    /// The recorded usage, for reporting; zero when the record cannot be
+    /// read. Writes never use this: see [`Space::stored_usage`].
     pub fn usage(&self) -> Usage {
-        self.get(USAGE)
-            .and_then(|b| <[u8; 16]>::try_from(b.as_slice()).ok())
-            .map(|b| Usage {
-                keys: u64::from_le_bytes(b[..8].try_into().expect("8 bytes")),
-                bytes: u64::from_le_bytes(b[8..].try_into().expect("8 bytes")),
-            })
-            .unwrap_or_default()
+        self.stored_usage().unwrap_or_default()
+    }
+
+    /// The usage record, or `None` when it reads as absent. Absent means
+    /// unknown, not zero: the record may be unreadable, and believing zero
+    /// would let this origin write past its budget. A write that finds it
+    /// unknown recounts ([`Space::recount_step`]).
+    fn stored_usage(&self) -> Option<Usage> {
+        self.get(USAGE).and_then(|b| decode_usage(&b))
     }
 
     fn set_usage(&mut self, u: Usage) -> bool {
-        let mut b = [0u8; 16];
-        b[..8].copy_from_slice(&u.keys.to_le_bytes());
-        b[8..].copy_from_slice(&u.bytes.to_le_bytes());
         let key = self.full_key(USAGE);
-        self.env.set(&key, &b)
+        self.env.set(&key, &encode_usage(u))
+    }
+
+    /// Apply `f` to the recorded usage. Nothing is written while it is
+    /// unknown: the next write recounts it.
+    fn adjust_usage(&mut self, f: impl FnOnce(Usage) -> Usage) {
+        if let Some(u) = self.stored_usage() {
+            self.set_usage(f(u));
+        }
     }
 
     #[cfg(test)]
@@ -283,9 +331,36 @@ impl<'a> Space<'a> {
         assert!(self.set_usage(u));
     }
 
+    /// Record `u` as both the usage and the result of a finished recount:
+    /// a store that a recount found full, so the next refused write does
+    /// not recount it again.
+    #[cfg(test)]
+    pub fn confirm_usage_for_test(&mut self, u: Usage) {
+        assert!(self.set_usage(u));
+        assert!(self.set_recount_state(RECOUNT_DONE, u));
+    }
+
+    #[cfg(test)]
+    pub fn forget_usage_for_test(&mut self) {
+        let key = self.full_key(USAGE);
+        assert!(self.env.remove(&key));
+    }
+
+    /// What the store holds by [`Space::known_keys`], counted over as many
+    /// calls as it takes: `Ok(usage)` once a recount has covered every key
+    /// (it is also recorded), `Err(Busy)` while one is still under way.
+    pub fn recount(&mut self) -> Result<Usage, Failure> {
+        self.recount_step().ok_or_else(|| {
+            fail(
+                FailureCode::Busy,
+                "this app's storage use is being recounted; retry",
+            )
+        })
+    }
+
     /// Store `value` under `rel`, within the origin's budget. The usage
     /// record is written first: if the value write then fails, the record
-    /// over-counts, which only ever costs capacity.
+    /// over-counts, which only ever costs capacity until a recount.
     pub fn put(&mut self, rel: &str, value: &[u8]) -> Result<(), Failure> {
         self.put_within(rel, value, 0, 0)
     }
@@ -305,23 +380,43 @@ impl<'a> Space<'a> {
     ) -> Result<(), Failure> {
         let key = self.full_key(rel);
         let old = self.fetch(&key);
-        let before = self.usage();
         let old_size = old.as_ref().map_or(0, |v| (key.len() + v.len()) as u64);
-        let after = Usage {
-            keys: before.keys + u64::from(old.is_none()),
-            bytes: (before.bytes + (key.len() + value.len()) as u64).saturating_sub(old_size),
+        let with_write = |before: Usage| Usage {
+            keys: before.keys.saturating_add(u64::from(old.is_none())),
+            bytes: before
+                .bytes
+                .saturating_add((key.len() + value.len()) as u64)
+                .saturating_sub(old_size),
         };
         // A write that does not grow the store is never refused, so a user
         // over the budget can still shrink what is stored.
-        let grows = after.keys > before.keys || after.bytes > before.bytes;
-        if grows
-            && (after.keys > MAX_ORIGIN_KEYS + extra_keys
-                || after.bytes > MAX_ORIGIN_BYTES + extra_bytes)
-        {
-            return Err(fail(
-                FailureCode::CapReached,
-                "this app's storage budget is full",
-            ));
+        let refused = |before: Usage, after: Usage| {
+            let grows = after.keys > before.keys || after.bytes > before.bytes;
+            grows
+                && (after.keys > MAX_ORIGIN_KEYS + extra_keys
+                    || after.bytes > MAX_ORIGIN_BYTES + extra_bytes)
+        };
+        let mut before = match self.stored_usage() {
+            Some(u) => u,
+            None => self.recount()?,
+        };
+        let mut after = with_write(before);
+        if refused(before, after) {
+            // The record can run high: a write it counted that the host then
+            // refused, a key that cannot be read and so cannot be measured
+            // when removed. Before refusing, count what is really stored, so
+            // a record that drifted never blocks this origin for good. A
+            // recount that already found exactly this is not repeated.
+            if self.recount_state() != Some((RECOUNT_DONE, before)) {
+                before = self.recount()?;
+                after = with_write(before);
+            }
+            if refused(before, after) {
+                return Err(fail(
+                    FailureCode::CapReached,
+                    "this app's storage budget is full",
+                ));
+            }
         }
         if !self.set_usage(after) {
             return Err(fail(FailureCode::Internal, "the host refused the write"));
@@ -359,11 +454,7 @@ impl<'a> Space<'a> {
         if !self.env.remove(&key) {
             return Err(fail(FailureCode::Internal, "the host refused the delete"));
         }
-        let u = self.usage();
-        self.set_usage(Usage {
-            keys: u.keys.saturating_sub(1),
-            bytes: u.bytes.saturating_sub((key.len() + old.len()) as u64),
-        });
+        self.forget_key((key.len() + old.len()) as u64);
         Ok(())
     }
 
@@ -379,13 +470,7 @@ impl<'a> Space<'a> {
             return Err(fail(FailureCode::Internal, "the host refused the delete"));
         }
         match old {
-            Some(old) => {
-                let u = self.usage();
-                self.set_usage(Usage {
-                    keys: u.keys.saturating_sub(1),
-                    bytes: u.bytes.saturating_sub((key.len() + old.len()) as u64),
-                });
-            }
+            Some(old) => self.forget_key((key.len() + old.len()) as u64),
             None => self.forget_unsized_key(),
         }
         Ok(())
@@ -400,32 +485,154 @@ impl<'a> Space<'a> {
         let removed = self.env.remove(&key) || self.env.remove(&key);
         if removed {
             match old {
-                Some(old) => {
-                    let u = self.usage();
-                    self.set_usage(Usage {
-                        keys: u.keys.saturating_sub(1),
-                        bytes: u.bytes.saturating_sub((key.len() + old.len()) as u64),
-                    });
-                }
+                Some(old) => self.forget_key((key.len() + old.len()) as u64),
                 None => self.forget_unsized_key(),
             }
         }
         removed
     }
 
+    /// Account for a removed key of `size` bytes (key plus value).
+    fn forget_key(&mut self, size: u64) {
+        self.adjust_usage(|u| Usage {
+            keys: u.keys.saturating_sub(1),
+            bytes: u.bytes.saturating_sub(size),
+        });
+    }
+
     /// Account for a key removed (or about to be replaced) whose value
     /// could not be read. The key count is exact; its bytes cannot be known
     /// (the host reports an unreadable value as absent, and nothing records
-    /// sizes elsewhere), so they stay counted. The usage record is an upper
-    /// bound throughout ([`Space::put`] over-counts on a failed write too):
-    /// the error only ever costs this origin budget, never lets it exceed
-    /// one, and arises only from values the host itself failed to read.
+    /// sizes elsewhere), so they stay counted.
+    ///
+    /// The usage record is therefore not exact. It runs high here and when
+    /// a counted write is then refused, and it can be lost altogether (an
+    /// unreadable record). Neither is allowed to stick: a write that finds
+    /// the record unknown, or that would be refused against it, recounts
+    /// what is stored first ([`Space::recount_step`]).
     fn forget_unsized_key(&mut self) {
-        let u = self.usage();
-        self.set_usage(Usage {
+        self.adjust_usage(|u| Usage {
             keys: u.keys.saturating_sub(1),
             bytes: u.bytes,
         });
+    }
+
+    /// `(visited, usage so far)` of a recount, `visited == RECOUNT_DONE`
+    /// once one finished.
+    fn recount_state(&self) -> Option<(u64, Usage)> {
+        let b = self.get(RECOUNT)?;
+        let b = <[u8; 24]>::try_from(b.as_slice()).ok()?;
+        let visited = u64::from_le_bytes(b[..8].try_into().expect("8 bytes"));
+        Some((visited, decode_usage(&b[8..])?))
+    }
+
+    fn set_recount_state(&mut self, visited: u64, u: Usage) -> bool {
+        let mut b = [0u8; 24];
+        b[..8].copy_from_slice(&visited.to_le_bytes());
+        b[8..].copy_from_slice(&encode_usage(u));
+        let key = self.full_key(RECOUNT);
+        self.env.set(&key, &b)
+    }
+
+    /// Every key this origin can name, in a fixed order, each with whether
+    /// it must exist: the bookkeeping, every index and its marker, the
+    /// prompts, each identity's record and deletion marker, and every
+    /// listed item with its pending marker. Keys nothing lists any more
+    /// (bytes left behind by a deletion that could not read their list)
+    /// cannot be named and are not counted: a recount never counts more
+    /// than it can show is stored.
+    fn known_keys(&self) -> Vec<(String, bool)> {
+        let mut out: Vec<(String, bool)> = [
+            GENERATION,
+            GENERATION_COPY,
+            PROMPT_SEQ,
+            EXPORT_GRANT,
+            EXPORT_SESSION,
+        ]
+        .iter()
+        .map(|rel| (rel.to_string(), false))
+        .collect();
+        // An index's ids, recording the index and its marker. One that
+        // cannot be read must exist (its marker says it was written) but
+        // lists nothing countable.
+        let listed = |out: &mut Vec<(String, bool)>, rel: &str| {
+            out.push((index_marker_rel(rel), false));
+            match self.index(rel) {
+                Ok((generation, ids)) => {
+                    out.push((rel.to_string(), generation != 0));
+                    ids
+                }
+                Err(_) => {
+                    out.push((rel.to_string(), true));
+                    BTreeSet::new()
+                }
+            }
+        };
+        for id in listed(&mut out, PROMPT_INDEX) {
+            if let Ok(b) = <[u8; 4]>::try_from(id.as_slice()) {
+                out.push((prompt_rel(u32::from_be_bytes(b)), true));
+            }
+        }
+        let mut owners = vec![None];
+        for id in listed(&mut out, IDENTITY_INDEX) {
+            if let Ok(a) = <[u8; 24]>::try_from(id.as_slice()) {
+                let addr = Addr(a);
+                out.push((identity_rel(&addr), true));
+                out.push((deleted_rel(&addr), false));
+                owners.push(Some(addr));
+            }
+        }
+        for owner in owners {
+            for kind in ALL_KINDS.iter().filter(|k| shape(**k).0 == owner.is_some()) {
+                for id in listed(&mut out, &index_rel(*kind, owner.as_ref())) {
+                    let item = ItemRef {
+                        kind: *kind,
+                        owner,
+                        id,
+                    };
+                    out.push((pending_item_rel(&item), false));
+                    out.push((item_rel(&item), true));
+                }
+            }
+        }
+        out
+    }
+
+    /// Count what this origin stores, [`RECOUNT_STEP`] keys per call:
+    /// `Some(usage)` once every key in [`Space::known_keys`] is counted, and
+    /// the usage record is then set to it. A key that must exist but cannot
+    /// be read counts as [`UNREADABLE_VALUE_BYTES`]; so the result never
+    /// counts less than what reads.
+    ///
+    /// Idempotent: a recount of an unchanged store gives the same usage. A
+    /// store that changes between the calls of one recount is counted
+    /// approximately, which only lasts until the next recount.
+    fn recount_step(&mut self) -> Option<Usage> {
+        let keys = self.known_keys();
+        let (start, mut acc) = match self.recount_state() {
+            Some((visited, u)) if visited != RECOUNT_DONE && visited as usize <= keys.len() => {
+                (visited as usize, u)
+            }
+            _ => (0, Usage::default()),
+        };
+        let end = (start + RECOUNT_STEP).min(keys.len());
+        for (rel, must_exist) in &keys[start..end] {
+            let key = self.full_key(rel);
+            let size = match self.fetch(&key) {
+                Some(v) => (key.len() + v.len()) as u64,
+                None if *must_exist => key.len() as u64 + UNREADABLE_VALUE_BYTES,
+                None => continue,
+            };
+            acc.keys += 1;
+            acc.bytes += size;
+        }
+        if end < keys.len() {
+            self.set_recount_state(end as u64, acc);
+            return None;
+        }
+        self.set_usage(acc);
+        self.set_recount_state(RECOUNT_DONE, acc);
+        Some(acc)
     }
 
     /// Write `body` at `rel` as a new record over a stored value that cannot
@@ -883,7 +1090,9 @@ mod tests {
     fn the_budget_refuses_and_leaves_the_store_unchanged() {
         let mut env = MemEnv::default();
         let mut s = Space::new(&mut env, Origin([1; 32]));
-        s.set_usage(Usage {
+        // Full, as a finished recount found it (a record that merely says
+        // full is recounted first: `a_drifted_usage_record_is_recounted`).
+        s.confirm_usage_for_test(Usage {
             keys: MAX_ORIGIN_KEYS,
             bytes: 0,
         });
