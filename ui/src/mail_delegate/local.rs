@@ -23,10 +23,32 @@ pub(crate) const ORIGIN: [u8; 32] = [0x4d; 32];
 struct PageEnv {
     secrets: BTreeMap<Vec<u8>, Vec<u8>>,
     contracts: HashMap<[u8; 32], Vec<u8>>,
+    /// Tests: the next `n` reads of keys containing the text miss.
+    #[cfg(test)]
+    misses: std::cell::RefCell<Option<(String, u32)>>,
+}
+
+/// Tests: make the next `n` host reads of keys containing `text` miss, as a
+/// failing host's would (the delegate re-reads a miss once, so 2 make one
+/// delegate answer "absent" for a key that is stored).
+#[cfg(test)]
+pub(crate) fn miss_next_reads(text: &str, n: u32) {
+    ENV.with(|e| *e.borrow().misses.borrow_mut() = Some((text.into(), n)));
 }
 
 impl Env for PageEnv {
     fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
+        #[cfg(test)]
+        {
+            let mut misses = self.misses.borrow_mut();
+            if let Some((text, n)) = misses.as_mut()
+                && *n > 0
+                && String::from_utf8_lossy(key).contains(text.as_str())
+            {
+                *n -= 1;
+                return None;
+            }
+        }
         self.secrets.get(key).cloned()
     }
     fn set(&mut self, key: &[u8], value: &[u8]) -> bool {

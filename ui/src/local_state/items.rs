@@ -34,13 +34,15 @@ use serde::{Deserialize, Serialize};
 use crate::DynError;
 use crate::mail_delegate::{CallError, ops};
 
+/// This page's mark-write count, and the count at each mark's last write.
+type FlagWrites = (u64, HashMap<(Addr, Vec<u8>), u64>);
+
 thread_local! {
     /// The full 16-byte item id of every message id handed out this page.
     static FULL_IDS: RefCell<HashMap<MessageId, [u8; 16]>> = RefCell::new(HashMap::new());
     /// Counts this page's mark writes; each mark remembers the count at its
     /// last write, so a reclaim leaves alone marks written after it began.
-    static FLAG_WRITES: RefCell<(u64, HashMap<(Addr, Vec<u8>), u64>)> =
-        RefCell::new((0, HashMap::new()));
+    static FLAG_WRITES: RefCell<FlagWrites> = RefCell::new((0, HashMap::new()));
 }
 
 fn note_flag_write(item: &ItemRef) {
@@ -239,14 +241,17 @@ pub(crate) async fn check_draft_before_send(
     if !seen {
         return Ok(DraftCheck::Current);
     }
-    let stored = ops::get_item(item(ItemKind::Draft, Some(owner), uuid_id(&id)?))
-        .await
-        .map_err(boxed)?;
-    Ok(if stored.is_some() {
+    let it = item(ItemKind::Draft, Some(owner), uuid_id(&id)?);
+    // Absent twice before it counts: one lost read must not refuse a send.
+    Ok(if draft_stored(&it).await? || draft_stored(&it).await? {
         DraftCheck::Current
     } else {
         DraftCheck::GoneElsewhere
     })
+}
+
+async fn draft_stored(item: &ItemRef) -> Result<bool, DynError> {
+    Ok(ops::get_item(item.clone()).await.map_err(boxed)?.is_some())
 }
 
 /// Save a draft unless it is gone. An autosave still in flight when the
@@ -266,30 +271,39 @@ pub(crate) async fn save_draft(
     let item = item(ItemKind::Draft, Some(owner), uuid_id(&id)?);
     let seen = SEEN_DRAFTS.with(|s| s.borrow().contains(&(key.clone(), id.clone())));
     let body = json(&StoredDraft { draft, to_address });
-    let mut outcome = DraftSave::Stored;
-    let written = ops::put_item_merged(item, |stored| {
-        if super::draft_discarded(&alias, &id) {
-            outcome = DraftSave::Discarded;
-            return None;
+    // "Gone elsewhere" stops this page autosaving the draft and drops it, so
+    // it is believed only when a second read agrees: one lost read must not
+    // cost the user their draft.
+    for attempt in 0..2 {
+        let mut outcome = DraftSave::Stored;
+        let written = ops::put_item_merged(item.clone(), |stored| {
+            if super::draft_discarded(&alias, &id) {
+                outcome = DraftSave::Discarded;
+                return None;
+            }
+            if stored.is_none() && seen {
+                outcome = DraftSave::GoneElsewhere;
+                return None;
+            }
+            Some(body.clone())
+        })
+        .await
+        .map_err(boxed)?;
+        let outcome = match (written, outcome) {
+            (Some(_), _) => {
+                seen_draft(key, id);
+                return Ok(DraftSave::Stored);
+            }
+            // `put_item_merged` declines on its own when the draft existed at
+            // its first read and was gone at a retry: removed by another tab.
+            (None, DraftSave::Stored) => DraftSave::GoneElsewhere,
+            (None, other) => other,
+        };
+        if outcome != DraftSave::GoneElsewhere || attempt == 1 || !draft_stored(&item).await? {
+            return Ok(outcome);
         }
-        if stored.is_none() && seen {
-            outcome = DraftSave::GoneElsewhere;
-            return None;
-        }
-        Some(body.clone())
-    })
-    .await
-    .map_err(boxed)?;
-    match (written, outcome) {
-        (Some(_), _) => {
-            seen_draft(key, id);
-            Ok(DraftSave::Stored)
-        }
-        // `put_item_merged` declines on its own when the draft existed at its
-        // first read and was gone at a retry: removed by another tab too.
-        (None, DraftSave::Stored) => Ok(DraftSave::GoneElsewhere),
-        (None, other) => Ok(other),
     }
+    unreachable!("the second attempt always returns")
 }
 
 /// Whether message `msg_id` is gone, as far as anything here knows: deleted
@@ -1150,6 +1164,37 @@ mod delegate_tests {
             block_on(check_draft_before_send(alias.into(), fresh)).unwrap(),
             DraftCheck::Current
         );
+    }
+
+    /// One delegate answer saying a seen draft is absent, while it is
+    /// really stored (a read the host failed), neither refuses its send nor
+    /// stops its autosave: "gone elsewhere" needs a second read to agree.
+    #[cfg(feature = "local-delegate")]
+    #[test]
+    fn a_single_lost_read_never_makes_a_draft_gone_elsewhere() {
+        let addr = identity("items-lost-read");
+        let alias = "items-lost-read";
+        let id = uuid::Uuid::new_v4().to_string();
+        block_on(save_draft(alias.into(), id.clone(), draft("v1"), None)).unwrap();
+        let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+        let rel = format!("it/dr/{}/{}", hex(&addr.0), hex(&uuid_id(&id).unwrap()));
+        crate::mail_delegate::local::miss_next_reads(&rel, 2);
+        assert_eq!(
+            block_on(check_draft_before_send(alias.into(), id.clone())).unwrap(),
+            DraftCheck::Current
+        );
+        crate::mail_delegate::local::miss_next_reads(&rel, 2);
+        assert_eq!(
+            block_on(save_draft(alias.into(), id.clone(), draft("v2"), None)).unwrap(),
+            DraftSave::Stored
+        );
+        crate::mail_delegate::local::miss_next_reads("", 0);
+        let item = ItemRef {
+            kind: ItemKind::Draft,
+            owner: Some(addr),
+            id: uuid_id(&id).unwrap(),
+        };
+        assert!(block_on(ops::get_item(item)).unwrap().is_some());
     }
 
     /// The recipient address a draft was addressed to survives a reload,
