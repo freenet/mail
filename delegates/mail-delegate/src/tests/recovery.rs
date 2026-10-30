@@ -280,6 +280,77 @@ fn a_repair_is_namespaced_and_a_denial_changes_nothing() {
     assert_eq!(listed(&mut env), vec![me]);
 }
 
+/// A failed index add whose index then cannot be read may still have added
+/// the entry, so its create marker becomes "failed" (licensing the entry's
+/// removal) rather than being dropped (which would leak the slot for good).
+#[test]
+fn a_failed_add_to_an_unreadable_index_leaves_its_entry_reclaimable() {
+    use crate::env::mem::{FaultOp, Rule};
+    let mut env = MemEnv::default();
+    let me = create(&mut env, PROD, "alice");
+    let ix = store::index_rel(ItemKind::Draft, Some(&me.addr));
+    let ix_key = full(&mut env, &ix);
+    let rule = |op, key: &str, nth| Rule {
+        op,
+        key_contains: key.into(),
+        nth,
+    };
+    // The draft index is created for this first draft: its "written"
+    // marker is refused twice and its undo three times, so the add fails
+    // with the entry in place; then the index stops reading.
+    let mut faults = Faults::default();
+    faults.rules = vec![
+        rule(FaultOp::SetFail, "xm/ix/dr", 2),
+        rule(FaultOp::SetFail, "m/ix/dr", 3),
+        rule(FaultOp::RemoveFail, "1/ix/dr/", 1),
+        rule(FaultOp::RemoveFail, "/ix/dr/", 2),
+        rule(FaultOp::RemoveFail, "ix/dr/", 3),
+        rule(FaultOp::GetBlindFrom, &ix_key, 3),
+    ];
+    env.faults = Some(faults);
+    assert!(put(&mut env, draft(me.addr, 1), b"d", None).is_err());
+    env.faults = None;
+    // A listing frees the slot; nothing is left naming a missing draft.
+    list_ids(&mut env, PROD, ItemKind::Draft, Some(me.addr));
+    let s = Space::new(&mut env, Origin([PROD; 32]));
+    let (_, ids) = s.index(&ix).unwrap();
+    assert!(!ids.contains(&vec![1; 16]), "the failed add's slot leaked");
+}
+
+/// A delete that removed the record but then could not update the index
+/// (it stopped reading) reports that it may have happened (`Internal`),
+/// never a code that promises it had no effect.
+#[test]
+fn a_delete_whose_index_update_fails_after_the_record_went_is_partial() {
+    use crate::env::mem::{FaultOp, Rule};
+    let mut env = MemEnv::default();
+    let me = create(&mut env, PROD, "alice");
+    let g = ack(put(&mut env, draft(me.addr, 1), b"d", None));
+    let ix_key = full(
+        &mut env,
+        &store::index_rel(ItemKind::Draft, Some(&me.addr)),
+    );
+    // The index reads for the delete's first check, then stops.
+    let mut faults = Faults::default();
+    faults.rules = vec![Rule {
+        op: FaultOp::GetBlindFrom,
+        key_contains: ix_key,
+        nth: 2,
+    }];
+    env.faults = Some(faults);
+    assert_eq!(
+        call(
+            &mut env,
+            PROD,
+            Op::DeleteItem {
+                item: draft(me.addr, 1),
+                expected_gen: g,
+            }
+        ),
+        Err(FailureCode::Internal)
+    );
+}
+
 /// Y5: a create whose record write, undo and marking were all refused
 /// leaves an entry with only its create marker. The next listing frees the
 /// slot (absence confirmed by a re-read), so nothing leaks for good.

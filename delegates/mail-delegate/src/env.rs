@@ -75,6 +75,10 @@ pub mod mem {
         SetFail,
         /// `remove` is refused (the key stays).
         RemoveFail,
+        /// From the `nth` `get` of a matching key on, every read misses (a
+        /// key that reads fine and then stops: a file the host can no
+        /// longer read or decrypt). Not masked by an immediate re-read.
+        GetBlindFrom,
     }
 
     /// Fail the `nth` (1-based) host call of `op` on a key containing
@@ -190,6 +194,7 @@ pub mod mem {
                 FaultOp::GetMiss => self.get_miss,
                 FaultOp::SetFail => self.set_fail,
                 FaultOp::RemoveFail => self.remove_fail,
+                FaultOp::GetBlindFrom => 0,
             };
             let hit = targeted || self.roll(chance);
             if hit {
@@ -198,7 +203,29 @@ pub mod mem {
             hit
         }
 
+        /// Whether a `GetBlindFrom` rule has made `key` unreadable by now
+        /// (counting this read).
+        fn blinded_from(&self, key: &[u8]) -> bool {
+            let text = String::from_utf8_lossy(key);
+            let mut blind = false;
+            for r in self.rules.iter().filter(|r| r.op == FaultOp::GetBlindFrom) {
+                if text.contains(r.key_contains.as_str()) {
+                    let mut counts = self.counts.borrow_mut();
+                    let n = counts
+                        .entry((FaultOp::GetBlindFrom, r.key_contains.clone()))
+                        .or_default();
+                    *n += 1;
+                    blind |= *n >= r.nth;
+                }
+            }
+            blind
+        }
+
         fn miss(&self, key: &[u8], present: bool) -> bool {
+            if present && self.blinded_from(key) {
+                self.observed.set(self.observed.get() + 1);
+                return true;
+            }
             let text = String::from_utf8_lossy(key);
             let persistent = self.blind_keys.iter().any(|b| text == b.as_str())
                 || self.blinded.borrow().as_deref() == Some(key);

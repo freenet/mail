@@ -241,7 +241,10 @@ dt "a record that fails to read is never pruned" "$D/handlers.rs" \
         };' '        let kind = s.get(&marker).unwrap_or_else(|| store::MARKER_DELETING.to_vec());' \
     a_record_that_fails_to_read_is_never_pruned_from_the_index
 dt "an import re-indexes a present, unindexed identity" "$D/handlers.rs" \
-    'if !s.index(IDENTITY_INDEX)?.1.contains(&addr.0[..]) {' 'if false {' \
+    '        // Present but unindexed (an index write that failed): list it again.
+        if !s.index(IDENTITY_INDEX)?.1.contains(&addr.0[..]) {' \
+    '        // Present but unindexed (an index write that failed): list it again.
+        if false {' \
     importing_a_present_but_unindexed_identity_indexes_it_again
 dt "re-creating an identity clears its deletion marker" "$D/handlers.rs" \
     '            if s.del(&marker).is_err() && s.put(&marker, store::MARKER_SPENT).is_err() {' \
@@ -281,9 +284,10 @@ dt "listing frees index entries whose item is gone" "$D/handlers.rs" \
 dbt() { guard "$1" "$2" "$3" "$4" "tests:$BLIND_RUN" blind_tests; }
 dbt "a deletion answers Deleted only once its marker is confirmed removed" "$D/handlers.rs" \
     '    s.del_written(&marker)?;' '    s.del(&marker)?;'
-dbt "an index that cannot be read may hold a failed create's entry" "$D/handlers.rs" \
+dt "an index that cannot be read may hold a failed create's entry" "$D/handlers.rs" \
     '            if s.index(&ix).is_ok_and(|(_, ids)| !ids.contains(&item.id)) {' \
-    '            if !s.index(&ix).is_ok_and(|(_, ids)| ids.contains(&item.id)) {'
+    '            if !s.index(&ix).is_ok_and(|(_, ids)| ids.contains(&item.id)) {' \
+    a_failed_add_to_an_unreadable_index_leaves_its_entry_reclaimable
 # Recovery from a key that stays unreadable.
 dt "importing keys restores an identity whose record cannot be read" "$D/handlers.rs" \
     '        return restore_unreadable_identity(s, addr, dsa, kem, alias, description, confirmed).map(' \
@@ -314,10 +318,11 @@ dt "a create that never finished frees its slot" "$D/handlers.rs" \
     '        if kind == store::MARKER_CREATING && load_identity(s, &addr)?.is_none() {' \
     '        if false {' \
     a_create_that_never_finished_frees_its_slot_on_the_next_listing
-dbt "a failure after a write is reported as partial" "$D/handlers.rs" \
+dt "a failure after a write is reported as partial" "$D/handlers.rs" \
     '    s.index_remove(&ix, &item.id).map_err(partial)?;
     // A `d` marker left behind' '    s.index_remove(&ix, &item.id)?;
-    // A `d` marker left behind'
+    // A `d` marker left behind' \
+    a_delete_whose_index_update_fails_after_the_record_went_is_partial
 dt "a failed prune does not fail the deletion listing" "$D/handlers.rs" \
     '    let _ = prune_recordless_identities(s);' '    prune_recordless_identities(s)?;' \
     a_failed_prune_does_not_fail_the_deletion_listing
