@@ -98,12 +98,35 @@ type Evidence = {
   newContext: Browser["newContext"];
   contexts: BrowserContext[];
   lines: string[];
+  // Taken when a context closes: tests close theirs in `finally`, before
+  // `afterEach` can look at a page. Written out only if the test failed.
+  snapshots: { name: string; body: string | Buffer; contentType: string }[];
 };
 const EVIDENCE = new WeakMap<Browser, Evidence>();
+
+async function snapshotPages(ctx: BrowserContext, label: string, ev: Evidence) {
+  for (const [j, page] of ctx.pages().entries()) {
+    if (page.isClosed()) continue;
+    const name = `${label}-page${j}`;
+    const shot = await page.screenshot({ fullPage: true }).catch(() => null);
+    if (shot) ev.snapshots.push({ name: `${name}.png`, body: shot, contentType: "image/png" });
+    const app = await page
+      .$("iframe#app")
+      .then((el) => el?.contentFrame() ?? null)
+      .catch(() => null);
+    const html = await (app ?? page.mainFrame()).content().catch(() => null);
+    if (html) ev.snapshots.push({ name: `${name}.html`, body: html, contentType: "text/html" });
+  }
+}
 
 function watchContext(ctx: BrowserContext, ev: Evidence) {
   const label = `ctx${ev.contexts.length}`;
   ev.contexts.push(ctx);
+  const close = ctx.close.bind(ctx);
+  ctx.close = async (options) => {
+    await snapshotPages(ctx, label, ev);
+    return close(options);
+  };
   const watchPage = (p: Page) => {
     p.on("console", (m) =>
       ev.lines.push(`[${label}:${m.type()}] ${m.text()}`),
@@ -128,6 +151,7 @@ async function recordEvidence(browser: Browser, context: BrowserContext) {
     newContext: browser.newContext.bind(browser),
     contexts: [],
     lines: [],
+    snapshots: [],
   };
   EVIDENCE.set(browser, ev);
   watchContext(context, ev);
@@ -152,19 +176,9 @@ async function attachEvidence(browser: Browser, testInfo: TestInfo) {
     await testInfo.attach(name, { path: file, contentType });
   };
   for (const [i, ctx] of ev.contexts.entries()) {
-    for (const [j, page] of ctx.pages().entries()) {
-      if (page.isClosed()) continue;
-      const name = `ctx${i}-page${j}`;
-      const shot = await page.screenshot({ fullPage: true }).catch(() => null);
-      if (shot) await keep(`${name}.png`, shot, "image/png");
-      const app = await page
-        .$("iframe#app")
-        .then((el) => el?.contentFrame() ?? null)
-        .catch(() => null);
-      const html = await (app ?? page.mainFrame()).content().catch(() => null);
-      if (html) await keep(`${name}.html`, html, "text/html");
-    }
+    await snapshotPages(ctx, `ctx${i}`, ev);
   }
+  for (const snap of ev.snapshots) await keep(snap.name, snap.body, snap.contentType);
   await keep("console.txt", ev.lines.join("\n"), "text/plain");
   console.log(`── console of failed test "${testInfo.title}" ──`);
   for (const line of ev.lines) console.log(line);

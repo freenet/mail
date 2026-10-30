@@ -5928,7 +5928,15 @@ fn ComposeSheet() -> Element {
                 // which silently killed every send before the AFT
                 // request hit the wire.
                 futs.into_iter().for_each(|f| {
-                    let _task = dioxus_core::spawn_forever(f);
+                    // Counted from now, not from the task's first poll, so a
+                    // reload in between is not an uncounted loss. This covers
+                    // the send until its token is requested; the inbox update
+                    // that follows the token's answer is not counted.
+                    let in_flight = crate::pending_saves::begin();
+                    let _task = dioxus_core::spawn_forever(async move {
+                        let _in_flight = in_flight;
+                        f.await;
+                    });
                 });
                 true
             }
@@ -6003,7 +6011,9 @@ fn ComposeSheet() -> Element {
                 // unmount, so the SaveSent delegate write never reached the
                 // wire — the message persisted only in the in-session
                 // snapshot and re-derived as a Draft after reload (#286).
+                let in_flight = crate::pending_saves::begin();
                 let _task = dioxus_core::spawn_forever(async move {
+                    let _in_flight = in_flight;
                     if let Err(e) = crate::local_state::save_sent(alias_async, id_async, sent).await
                     {
                         crate::log::local_state_failure("save sent message", e);

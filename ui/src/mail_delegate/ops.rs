@@ -255,6 +255,8 @@ pub(crate) async fn put_item(
     body: Vec<u8>,
     expected_gen: Option<u64>,
 ) -> Result<u64, CallError> {
+    // Counted until answered, so the page knows a reload would lose it.
+    let _in_flight = crate::pending_saves::begin();
     call_ack(Op::PutItem {
         item,
         body: ByteBuf::from(body),
@@ -264,6 +266,7 @@ pub(crate) async fn put_item(
 }
 
 pub(crate) async fn delete_item(item: ItemRef, expected_gen: u64) -> Result<(), CallError> {
+    let _in_flight = crate::pending_saves::begin();
     match call(Op::DeleteItem { item, expected_gen }).await? {
         Reply::Deleted | Reply::Ack { .. } => Ok(()),
         other => Err(unexpected(&other)),
@@ -286,6 +289,7 @@ pub(crate) async fn put_item_merged(
     item: ItemRef,
     mut merge: impl FnMut(Option<&[u8]>) -> Option<Vec<u8>>,
 ) -> Result<Option<u64>, CallError> {
+    let _in_flight = crate::pending_saves::begin();
     let mut attempt = 0;
     let mut existed = false;
     loop {
@@ -665,6 +669,40 @@ mod tests {
             ml_kem_seed: kem.to_vec(),
         };
         (info, keys)
+    }
+
+    /// Every item write (the Sent copy, archive, delete, settings, contacts,
+    /// not only drafts) counts as pending until the delegate answers, so a
+    /// reload just after it can be held off (#286: a reload right after Send
+    /// lost the Sent copy whose write was still in flight).
+    #[test]
+    fn an_item_write_is_counted_as_pending_until_answered() {
+        let (owner, _) = imported("pending-write", 62);
+        let item = ItemRef {
+            kind: ItemKind::Sent,
+            owner: Some(owner.addr),
+            id: vec![7; 16],
+        };
+        let before = crate::pending_saves::pending();
+        let mut seen = None;
+        block_on(put_item_merged(item.clone(), |_| {
+            seen = Some(crate::pending_saves::pending());
+            Some(b"sent".to_vec())
+        }))
+        .unwrap();
+        assert_eq!(
+            seen,
+            Some(before + 1),
+            "counted while the write is in flight"
+        );
+        assert_eq!(
+            crate::pending_saves::pending(),
+            before,
+            "released once answered"
+        );
+        let stored = block_on(get_item(item.clone())).unwrap().unwrap();
+        block_on(delete_item(item, stored.generation)).unwrap();
+        assert_eq!(crate::pending_saves::pending(), before);
     }
 
     #[test]

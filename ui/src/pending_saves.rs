@@ -1,14 +1,15 @@
-//! Draft saves this page has started and the mail delegate has not yet
-//! answered.
+//! Writes this page has started that the mail delegate has not yet
+//! answered (drafts, the Sent copy, archive, delete, settings, contacts),
+//! and sends not yet handed to the node.
 //!
-//! A save is async: it reaches the delegate over the node's WebSocket a
-//! few round trips later. Closing the compose sheet hands its last edit to
-//! a task that outlives the sheet, but a reload or a closed tab ends the
-//! page, and that task with it, so an edit made just before is lost. The
-//! count is published synchronously as `data-pending-saves` on the
-//! document element, which is what a test waits on before reloading, and
-//! while it is above zero the page asks the browser to warn before
-//! leaving (best effort: a sandboxed frame may not be allowed to prompt).
+//! Each is async: it reaches the node over its WebSocket a few round trips
+//! later, in a task that outlives the component that started it. A reload
+//! or a closed tab ends the page, and those tasks with it, so a write or a
+//! send made just before is lost. The count is published synchronously as
+//! `data-pending-saves` on the document element, which is what a test waits
+//! on before reloading, and while it is above zero the page asks the browser
+//! to warn before leaving (best effort: a sandboxed frame may not be allowed
+//! to prompt).
 
 use std::cell::Cell;
 
