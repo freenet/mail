@@ -851,6 +851,32 @@ pub(crate) fn local_delete_message(alias: &str, msg_id: MessageId) {
     bump();
 }
 
+/// A sent message's write was acknowledged by the delegate: drop its
+/// optimistic copy. The stashes guard against an older snapshot landing
+/// over the page's own writes; the only such snapshot now is the startup
+/// load, whose journal replays every change made while it ran
+/// ([`begin_load`]), so an acknowledged write needs no copy, and holding
+/// full message bodies for the whole session only costs memory.
+fn drain_acked_sent(key: &str, id: &str) {
+    OPTIMISTIC_SENT.with(|p| p.borrow_mut().remove(&(key.to_string(), id.to_string())));
+}
+
+/// A read mark's kept copy was acknowledged: see [`drain_acked_sent`].
+fn drain_acked_kept(key: &str, msg_id: MessageId) {
+    PENDING_KEPT.with(|p| {
+        p.borrow_mut()
+            .remove(&(key.to_string(), msg_id.to_string()))
+    });
+}
+
+/// An archive was acknowledged: see [`drain_acked_sent`].
+fn drain_acked_archived(key: &str, msg_id: MessageId) {
+    OPTIMISTIC_ARCHIVED.with(|p| {
+        p.borrow_mut()
+            .remove(&(key.to_string(), msg_id.to_string()))
+    });
+}
+
 pub(crate) fn local_mark_read(alias: &str, msg_id: MessageId, kept: KeptMessage) {
     let alias = &state_key(alias);
     change(Change::MarkRead(alias.to_string(), msg_id, kept.clone()));

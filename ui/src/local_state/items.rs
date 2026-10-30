@@ -365,6 +365,7 @@ pub(crate) async fn save_sent(
     let item = item(ItemKind::Sent, Some(owner(&alias)?), uuid_id(&id)?);
     let sent = sent_with_early_delivery(&alias, &id, sent);
     put(item, json(&sent)).await.map_err(boxed)?;
+    super::drain_acked_sent(&alias, &id);
     // A state that arrived while that write was in flight found no item
     // yet; apply it now that the item is stored.
     let late = EARLY_DELIVERY.with(|e| e.borrow_mut().remove(&(alias.clone(), id.clone())));
@@ -443,6 +444,7 @@ pub(crate) async fn mark_read(
     if deleted || message_gone(&alias, msg_id).await? {
         delete(kept_item).await.map_err(boxed)?;
     }
+    super::drain_acked_kept(&super::state_key(&alias), msg_id);
     Ok(())
 }
 
@@ -458,6 +460,7 @@ pub(crate) async fn archive_message(
     )
     .await
     .map_err(boxed)?;
+    super::drain_acked_archived(&super::state_key(&alias), msg_id);
     delete(message_item(ItemKind::Kept, &alias, msg_id)?)
         .await
         .map_err(boxed)?;
@@ -849,6 +852,42 @@ mod delegate_tests {
             .into_iter()
             .map(|i| i.item.id)
             .collect()
+    }
+
+    /// Once the delegate acknowledges a sent message, a read mark's kept
+    /// copy or an archive, the page drops its optimistic copy of the body
+    /// (it used to hold every one for the whole session).
+    #[test]
+    fn acknowledged_writes_drop_their_optimistic_copies() {
+        let alias = "items-drain";
+        let _addr = identity(alias);
+        let key = super::super::state_key(alias);
+        let sent_id = uuid::Uuid::new_v4().to_string();
+        let read = message_id_for(b"drain: read");
+        let filed = message_id_for(b"drain: archived");
+        super::super::local_save_sent(alias, &sent_id, SentMessage::default());
+        super::super::local_mark_read(alias, read, kept("k".into()));
+        super::super::local_archive_message(alias, filed, archived());
+        let held = || {
+            (
+                super::super::OPTIMISTIC_SENT
+                    .with(|p| p.borrow().contains_key(&(key.clone(), sent_id.clone()))),
+                super::super::PENDING_KEPT
+                    .with(|p| p.borrow().contains_key(&(key.clone(), read.to_string()))),
+                super::super::OPTIMISTIC_ARCHIVED
+                    .with(|p| p.borrow().contains_key(&(key.clone(), filed.to_string()))),
+            )
+        };
+        assert_eq!(held(), (true, true, true));
+        block_on(save_sent(
+            alias.into(),
+            sent_id.clone(),
+            SentMessage::default(),
+        ))
+        .unwrap();
+        block_on(mark_read(alias.into(), read, kept("k".into()))).unwrap();
+        block_on(archive_message(alias.into(), filed, archived())).unwrap();
+        assert_eq!(held(), (false, false, false));
     }
 
     /// Marks of messages that left the inbox with no kept or archived copy
