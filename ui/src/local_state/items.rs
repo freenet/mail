@@ -94,7 +94,7 @@ async fn put(item: ItemRef, body: Vec<u8>) -> Result<(), CallError> {
 }
 
 /// Change one message's flags.
-async fn set_flags(item: ItemRef, change: impl Fn(&mut Flags)) -> Result<(), CallError> {
+async fn set_flags(item: ItemRef, mut change: impl FnMut(&mut Flags)) -> Result<(), CallError> {
     ops::put_item_merged(item, |stored| {
         let mut flags: Flags = stored
             .and_then(|b| serde_json::from_slice(b).ok())
@@ -134,9 +134,32 @@ fn boxed(e: CallError) -> DynError {
 
 // ── Writes ────────────────────────────────────────────────────────────────
 
+/// An autosave still in flight when the draft is discarded must not bring
+/// it back: the discard is checked at the last moment before each write.
 pub(crate) async fn save_draft(alias: String, id: String, draft: Draft) -> Result<(), DynError> {
     let item = item(ItemKind::Draft, Some(owner(&alias)?), uuid_id(&id)?);
-    put(item, json(&draft)).await.map_err(boxed)
+    let body = json(&draft);
+    ops::put_item_merged(item, |_| {
+        (!super::draft_discarded(&alias, &id)).then(|| body.clone())
+    })
+    .await
+    .map(|_| ())
+    .map_err(boxed)
+}
+
+/// Whether message `msg_id` is gone, as far as anything here knows: deleted
+/// or archived in this page, or marked deleted in its stored flags (which
+/// a delete writes first, so this holds across tabs).
+async fn message_gone(alias: &str, msg_id: MessageId) -> Result<bool, DynError> {
+    if super::is_deleted(alias, msg_id) || super::is_archived(alias, msg_id) {
+        return Ok(true);
+    }
+    let flags = ops::get_item(message_item(ItemKind::Flags, alias, msg_id)?)
+        .await
+        .map_err(boxed)?;
+    Ok(flags
+        .and_then(|f| serde_json::from_slice::<Flags>(&f.body).ok())
+        .is_some_and(|f| f.deleted))
 }
 
 pub(crate) async fn delete_draft(alias: String, id: String) -> Result<(), DynError> {
@@ -224,14 +247,33 @@ pub(crate) async fn mark_read(
     msg_id: MessageId,
     kept: KeptMessage,
 ) -> Result<(), DynError> {
-    put(message_item(ItemKind::Kept, &alias, msg_id)?, json(&kept))
-        .await
-        .map_err(boxed)?;
-    set_flags(message_item(ItemKind::Flags, &alias, msg_id)?, |f| {
-        f.read = true
+    // A read mark racing a delete or an archive must not write the
+    // message's content back after them.
+    if message_gone(&alias, msg_id).await? {
+        return Ok(());
+    }
+    let body = json(&kept);
+    let kept_item = message_item(ItemKind::Kept, &alias, msg_id)?;
+    ops::put_item_merged(kept_item.clone(), |_| {
+        let gone = super::is_deleted(&alias, msg_id) || super::is_archived(&alias, msg_id);
+        (!gone).then(|| body.clone())
     })
     .await
-    .map_err(boxed)
+    .map_err(boxed)?;
+    let mut deleted = false;
+    set_flags(message_item(ItemKind::Flags, &alias, msg_id)?, |f| {
+        deleted = f.deleted;
+        if !f.deleted {
+            f.read = true;
+        }
+    })
+    .await
+    .map_err(boxed)?;
+    // A delete landed between the check and the write: take the copy back.
+    if deleted || message_gone(&alias, msg_id).await? {
+        delete(kept_item).await.map_err(boxed)?;
+    }
+    Ok(())
 }
 
 /// Archiving implies read and drops any kept copy.
@@ -672,6 +714,54 @@ mod delegate_tests {
         let state = loaded("items-delete", addr);
         assert!(state.is_deleted("items-delete", id));
         assert!(!state.is_archived("items-delete", id));
+    }
+
+    /// An autosave still in flight when its draft is discarded must not
+    /// bring the draft back.
+    #[test]
+    fn a_late_autosave_does_not_bring_back_a_discarded_draft() {
+        let addr = identity("items-late-save");
+        let id = uuid::Uuid::new_v4().to_string();
+        block_on(save_draft(
+            "items-late-save".into(),
+            id.clone(),
+            draft("one"),
+        ))
+        .unwrap();
+        super::super::local_delete_draft("items-late-save", &id);
+        block_on(delete_draft("items-late-save".into(), id.clone())).unwrap();
+        block_on(save_draft("items-late-save".into(), id, draft("late"))).unwrap();
+        assert_eq!(
+            loaded("items-late-save", addr)
+                .drafts_of("items-late-save")
+                .count(),
+            0
+        );
+    }
+
+    /// A read mark racing a delete, including one made in another tab
+    /// (known here only from the stored flags), must not write the
+    /// message's content back.
+    #[test]
+    fn a_read_mark_after_a_delete_stores_no_copy() {
+        let addr = identity("items-read-del");
+        let id = message_id_for(b"a ciphertext deleted elsewhere");
+        block_on(delete_message("items-read-del".into(), id)).unwrap();
+        block_on(mark_read(
+            "items-read-del".into(),
+            id,
+            KeptMessage::default(),
+        ))
+        .unwrap();
+        let state = loaded("items-read-del", addr);
+        assert!(state.is_deleted("items-read-del", id));
+        assert!(
+            state
+                .for_alias("items-read-del")
+                .is_none_or(|s| s.kept.is_empty()),
+            "no kept copy of a deleted message"
+        );
+        assert!(!state.is_read("items-read-del", id));
     }
 
     /// Two tabs change different settings fields from the same starting

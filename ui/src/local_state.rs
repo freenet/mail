@@ -470,6 +470,13 @@ pub(crate) fn is_deleted(alias: &str, id: MessageId) -> bool {
     SNAPSHOT.with(|s| s.borrow().is_deleted(alias, id))
 }
 
+/// Whether this page discarded draft `id` (a late autosave must not bring
+/// it back).
+fn draft_discarded(alias: &str, id: &str) -> bool {
+    let key = state_key(alias);
+    DELETED_DRAFTS.with(|t| t.borrow().contains(&(key, id.to_string())))
+}
+
 /// Drop everything cached for the identity at `addr` (it was deleted).
 /// Keyed by address, so it never touches another identity that happens to
 /// carry the same alias, such as a new one created while this one's
