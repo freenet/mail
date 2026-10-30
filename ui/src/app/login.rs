@@ -127,7 +127,7 @@ impl PartialEq for Identity {
 impl Eq for Identity {}
 
 impl Identity {
-    /// Add (or replace, by alias) the identities the mail delegate held when
+    /// Add (or replace, by address) the identities the mail delegate held when
     /// the startup load read them. Returns them, with the `UserId` each has
     /// in `user.identities`.
     ///
@@ -141,20 +141,19 @@ impl Identity {
     ) -> Vec<Self> {
         let mut identities = Vec::with_capacity(infos.len());
         for info in infos {
-            let alias: Rc<str> = info.alias.as_str().into();
-            // Dedup user.identities by alias, reusing the slot's UserId: it
-            // must stay equal to the slot index that `set_logged_id` asserts
-            // against (#114).
+            // Dedup user.identities by address (an alias changes on rename),
+            // reusing the slot's UserId so a selection naming it stays on it
+            // (#114).
             let existing_id = user
                 .read()
                 .identities
                 .iter()
-                .find(|i| i.alias == alias)
+                .find(|i| i.addr == info.addr)
                 .map(|i| i.id);
             let identity = Identity::from_info(info, existing_id.unwrap_or_else(UserId::new));
             {
                 let mut user_w = user.write();
-                if let Some(slot) = user_w.identities.iter_mut().find(|i| i.alias == alias) {
+                if let Some(slot) = user_w.identities.iter_mut().find(|i| i.addr == info.addr) {
                     *slot = identity.clone();
                 } else {
                     user_w.identities.push(identity.clone());
@@ -166,7 +165,7 @@ impl Identity {
         ALIASES.with(|aliases| {
             let aliases = &mut *aliases.borrow_mut();
             for identity in &identities {
-                if let Some(slot) = aliases.iter_mut().find(|a| a.alias == identity.alias) {
+                if let Some(slot) = aliases.iter_mut().find(|a| a.addr == identity.addr) {
                     *slot = identity.clone();
                 } else {
                     aliases.push(identity.clone());
@@ -176,21 +175,20 @@ impl Identity {
         identities
     }
 
-    /// Add (or replace, by alias) one identity the mail delegate created or
+    /// Add (or replace, by address) one identity the mail delegate created or
     /// restored, and route its inbox to it.
     pub(crate) fn set_alias(
         mut identity: Identity,
         inbox_key: ContractKey,
         mut user: Signal<crate::app::User>,
     ) -> Identity {
-        // Replace in place by alias, reusing the slot's UserId:
-        // `User::set_logged_id` asserts `id.0 < identities.len()` and
-        // `logged_id()` indexes by `id.0` (#81, #114).
+        // Replace in place by address (an alias changes on rename), reusing
+        // the slot's UserId so a selection naming it stays on it (#81, #114).
         let existing_id = user
             .read()
             .identities
             .iter()
-            .find(|i| i.alias == identity.alias)
+            .find(|i| i.addr == identity.addr)
             .map(|i| i.id);
         identity.id = existing_id.unwrap_or_else(UserId::new);
         crate::inbox::InboxModel::set_contract_identity(inbox_key, identity.clone());
@@ -199,7 +197,7 @@ impl Identity {
             if let Some(slot) = user_w
                 .identities
                 .iter_mut()
-                .find(|i| i.alias == identity.alias)
+                .find(|i| i.addr == identity.addr)
             {
                 *slot = identity.clone();
             } else {
@@ -209,7 +207,7 @@ impl Identity {
         ALIASES.with(|aliases| {
             let aliases = &mut *aliases.borrow_mut();
             crate::app::address_book::register_identity(&identity);
-            if let Some(slot) = aliases.iter_mut().find(|a| a.alias == identity.alias) {
+            if let Some(slot) = aliases.iter_mut().find(|a| a.addr == identity.addr) {
                 *slot = identity.clone();
             } else {
                 aliases.push(identity.clone());
@@ -311,6 +309,24 @@ impl Identity {
             .filter(|i| &i.addr == addr)
         {
             i.generation = generation;
+        }
+    }
+
+    /// Relabel the identity at `addr` in `user.identities` (the alias list is
+    /// relabelled by [`Self::rename_in_place`]): the open identity's name,
+    /// and every lookup through it, follows a rename.
+    pub(crate) fn set_page_alias(
+        addr: &freenet_mail_protocol::Addr,
+        alias: &str,
+        mut user: Signal<crate::app::User>,
+    ) {
+        for i in user
+            .write()
+            .identities
+            .iter_mut()
+            .filter(|i| &i.addr == addr)
+        {
+            i.alias = Rc::from(alias);
         }
     }
 

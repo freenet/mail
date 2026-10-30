@@ -2145,33 +2145,20 @@ pub(crate) async fn node_comms(
                 // The delegate renames in place (same keys, same address);
                 // wait for it in a task, never in this loop.
                 crate::app::identity_store::spawn_detached(async move {
-                    match crate::mail_delegate::ops::update_identity(
-                        identity.addr,
-                        new.to_string(),
-                        identity.description.clone(),
-                        identity.generation,
-                    )
-                    .await
-                    {
-                        Ok(generation) => {
-                            crate::app::login::Identity::rename_in_place(&old, &new);
-                            crate::inbox::InboxModel::rename_identity(&identity.addr, &new);
-                            crate::app::login::Identity::set_generation(
-                                &identity.addr,
-                                generation,
-                                user,
-                            );
-                            login_controller.write().updated = true;
-                        }
-                        Err(e) => {
+                    let outcome =
+                        crate::app::identity_store::rename_identity(&identity, &old, &new, user)
+                            .await;
+                    match crate::app::identity_store::rename_failure_text(&old, &outcome) {
+                        None => login_controller.write().updated = true,
+                        Some(text) => {
                             crate::log::error(
-                                format!("failed to rename identity {old} → {new}: {e}"),
+                                format!("renaming identity {old} → {new}: {outcome:?}"),
                                 None,
                             );
                             // Detached task: no component scope to find the
                             // toast queue in.
                             crate::toast::push_toast_detached(
-                                format!("Couldn't rename `{old}`: {e}"),
+                                text,
                                 crate::toast::ToastLevel::Error,
                             );
                         }

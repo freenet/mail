@@ -41,6 +41,72 @@ pub(crate) fn spawn_detached(fut: impl std::future::Future<Output = ()> + 'stati
     let _task = dioxus::core::spawn_forever(fut);
 }
 
+/// What a rename's answer means for the page.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Renamed {
+    /// Renamed, at this generation.
+    Done(u64),
+    /// The delegate refused: the old name stands.
+    Refused(String),
+    /// Unknown, even after re-reading the identity.
+    Unknown,
+}
+
+/// After a rename got no answer: what the identity's stored record says.
+/// The rename may well have landed, so neither "renamed" nor "failed" is
+/// assumed.
+pub(crate) fn renamed_per_record(listed: &[IdentityInfo], addr: &Addr, new: &str) -> Renamed {
+    match listed.iter().find(|i| &i.addr == addr) {
+        Some(i) if i.alias == new => Renamed::Done(i.generation),
+        Some(_) => Renamed::Refused("the rename did not take effect".into()),
+        None => Renamed::Unknown,
+    }
+}
+
+/// Rename an identity in the mail delegate and, once it has, everywhere the
+/// page holds it (the alias list, the inbox model, the identity list and the
+/// generation). Used by the node and the offline builds alike.
+pub(crate) async fn rename_identity(
+    identity: &Identity,
+    old: &str,
+    new: &str,
+    user: Signal<crate::app::User>,
+) -> Renamed {
+    let outcome = match ops::update_identity(
+        identity.addr,
+        new.to_string(),
+        identity.description.clone(),
+        identity.generation,
+    )
+    .await
+    {
+        Ok(generation) => Renamed::Done(generation),
+        Err(crate::mail_delegate::CallError::Unknown(_)) => match ops::list_identities().await {
+            Ok(listed) => renamed_per_record(&listed, &identity.addr, new),
+            Err(_) => Renamed::Unknown,
+        },
+        Err(e) => Renamed::Refused(e.to_string()),
+    };
+    if let Renamed::Done(generation) = outcome {
+        Identity::rename_in_place(old, new);
+        crate::inbox::InboxModel::rename_identity(&identity.addr, new);
+        Identity::set_generation(&identity.addr, generation, user);
+        Identity::set_page_alias(&identity.addr, new, user);
+    }
+    outcome
+}
+
+/// The user-facing text for a rename that did not end in [`Renamed::Done`].
+pub(crate) fn rename_failure_text(old: &str, outcome: &Renamed) -> Option<String> {
+    match outcome {
+        Renamed::Done(_) => None,
+        Renamed::Refused(why) => Some(format!("Couldn't rename `{old}`: {why}")),
+        Renamed::Unknown => Some(format!(
+            "No answer while renaming `{old}`: it may have been renamed. Reload to see its current name."
+        )),
+    }
+}
+
 /// Delete an identity and everything it owns from the mail delegate (which
 /// asks the user first), showing how much is left while a large one is
 /// deleted page by page. A small identity finishes in one step and never
@@ -829,6 +895,35 @@ mod tests {
         assert!(Identity::get_alias("dl-kept").is_some());
     }
 
+    /// Ids are handles, not positions: after the middle identity of three
+    /// leaves the page, selecting the others selects exactly them (before,
+    /// `logged_id` indexed `identities` by id and picked the wrong one, and
+    /// `set_logged_id` asserted the id was a valid index and panicked).
+    #[test]
+    fn selection_survives_removing_an_identity_from_the_middle() {
+        use crate::app::{User, UserId, login::Identity};
+        let first = Identity::from_info(&info("mid-1", 0x61), UserId::new());
+        let middle = Identity::from_info(&info("mid-2", 0x62), UserId::new());
+        let last = Identity::from_info(&info("mid-3", 0x63), UserId::new());
+        for i in [&first, &middle, &last] {
+            Identity::register_live_for_test(i.clone());
+        }
+        let mut user = User {
+            logged: true,
+            identified: true,
+            active_id: None,
+            identities: vec![first.clone(), middle.clone(), last.clone()],
+        };
+        drop_from_page(&middle, &mut user);
+        user.set_logged_id(last.id);
+        assert_eq!(user.logged_id().map(|i| i.addr), Some(last.addr));
+        user.set_logged_id(first.id);
+        assert_eq!(user.logged_id().map(|i| i.addr), Some(first.addr));
+        // The removed identity's id selects nothing, not a neighbour.
+        user.set_logged_id(middle.id);
+        assert!(user.logged_id().is_none());
+    }
+
     /// "Finish deleting" clicked twice starts one deletion; the claim is
     /// released when that attempt ends, so a later retry can run.
     #[test]
@@ -911,6 +1006,56 @@ mod tests {
                 !FINISHING_VIEW.read().contains(&addr),
                 "and re-enables when it ends"
             );
+        });
+    }
+
+    /// A rename with no answer is judged by the stored record, never
+    /// assumed to have failed (it may well have landed).
+    #[test]
+    fn a_rename_without_an_answer_is_judged_by_the_record() {
+        let addr = Addr([0x51; 24]);
+        let mut renamed = info("rn-new", 0x51);
+        renamed.generation = 7;
+        assert_eq!(
+            renamed_per_record(std::slice::from_ref(&renamed), &addr, "rn-new"),
+            Renamed::Done(7)
+        );
+        assert!(matches!(
+            renamed_per_record(&[info("rn-old", 0x51)], &addr, "rn-new"),
+            Renamed::Refused(_)
+        ));
+        assert_eq!(renamed_per_record(&[], &addr, "rn-new"), Renamed::Unknown);
+        let text = rename_failure_text("rn-old", &Renamed::Unknown).unwrap();
+        assert!(text.contains("may have been renamed"), "{text}");
+        assert!(!text.contains("Couldn't rename"), "{text}");
+    }
+
+    /// A rename relabels the identity in `user.identities` too, so the open
+    /// identity's name (and every lookup through it) follows the rename.
+    #[test]
+    fn a_rename_relabels_the_page_identity() {
+        use crate::app::{User, UserId};
+        use dioxus::prelude::*;
+        fn app() -> Element {
+            rsx! {}
+        }
+        let mut dom = VirtualDom::new(app);
+        dom.rebuild_in_place();
+        dom.in_scope(ScopeId::ROOT, || {
+            let me = Identity::from_info(&info("rl-old", 0x52), UserId::new());
+            let other = Identity::from_info(&info("rl-other", 0x53), UserId::new());
+            let user = Signal::new(User {
+                logged: true,
+                identified: true,
+                active_id: Some(me.id),
+                identities: vec![me.clone(), other.clone()],
+            });
+            Identity::set_page_alias(&me.addr, "rl-new", user);
+            assert_eq!(
+                user.read().logged_id().map(|i| i.alias.to_string()),
+                Some("rl-new".to_string())
+            );
+            assert_eq!(&*user.read().identities[1].alias, "rl-other");
         });
     }
 

@@ -248,10 +248,8 @@ pub(crate) fn app() -> Element {
                             backed_up,
                         } => {
                             if Identity::get_alias(&identity.alias).is_none() {
-                                // UserId must equal the slot index
-                                // (`User::set_logged_id` indexes by it).
                                 let mut identity = *identity;
-                                identity.id = UserId(user_sig.read().identities.len());
+                                identity.id = UserId::new();
                                 let alias = identity.alias.clone();
                                 Identity::register_example(identity.clone());
                                 user_sig.write().identities.push(identity);
@@ -262,27 +260,14 @@ pub(crate) fn app() -> Element {
                         NodeAction::RenameIdentity { old, new, identity } => {
                             // The in-page delegate holds the identity, as a
                             // node's would: rename it there, then relabel.
-                            match crate::mail_delegate::ops::update_identity(
-                                identity.addr,
-                                new.to_string(),
-                                identity.description.clone(),
-                                identity.generation,
-                            )
-                            .await
-                            {
-                                Ok(generation) => {
-                                    Identity::rename_in_place(&old, &new);
-                                    crate::inbox::InboxModel::rename_identity(&identity.addr, &new);
-                                    login::Identity::set_generation(
-                                        &identity.addr,
-                                        generation,
-                                        user_sig,
-                                    );
-                                    login_ctl.write().updated = true;
-                                }
-                                Err(e) => {
+                            let outcome =
+                                identity_store::rename_identity(&identity, &old, &new, user_sig)
+                                    .await;
+                            match identity_store::rename_failure_text(&old, &outcome) {
+                                None => login_ctl.write().updated = true,
+                                Some(text) => {
                                     crate::toast::push_toast_detached(
-                                        format!("Couldn't rename `{old}`: {e}"),
+                                        text,
                                         crate::toast::ToastLevel::Error,
                                     );
                                 }
@@ -419,8 +404,11 @@ pub struct InboxView {
 pub(crate) struct UserId(usize);
 
 impl UserId {
+    /// A page-unique id. It is an identity's handle, never its position in
+    /// `User::identities` (identities are removed from the middle). Starts
+    /// above the fixed ids the example data seeds (0 and 1).
     pub fn new() -> Self {
-        static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
+        static NEXT_ID: AtomicUsize = AtomicUsize::new(16);
         Self(NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst))
     }
 }
@@ -1011,13 +999,17 @@ impl User {
         }
     }
 
+    /// The active identity, looked up by its id (never by position: removing
+    /// an identity shifts the ones after it).
     pub(crate) fn logged_id(&self) -> Option<&Identity> {
-        self.active_id.and_then(|id| self.identities.get(id.0))
+        self.active_id
+            .and_then(|id| self.identities.iter().find(|i| i.id == id))
     }
 
+    /// Select `id`. An id no identity on the page carries (one removed
+    /// meanwhile) selects nothing rather than another identity.
     pub(crate) fn set_logged_id(&mut self, id: UserId) {
-        assert!(id.0 < self.identities.len());
-        self.active_id = Some(id);
+        self.active_id = self.identities.iter().any(|i| i.id == id).then_some(id);
     }
 
     /// Clear the active-identity selection without logging out the user
