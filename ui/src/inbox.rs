@@ -1108,6 +1108,19 @@ impl InboxModel {
         })
     }
 
+    /// Relabel the identity at `addr` in the routing map after a rename.
+    /// Routing is by inbox contract, which a rename does not change; this
+    /// only keeps the alias shown for routed messages current.
+    pub fn rename_identity(addr: &freenet_mail_protocol::Addr, new_alias: &str) {
+        INBOX_TO_ID.with(|map| {
+            for identity in map.borrow_mut().values_mut() {
+                if identity.addr == *addr {
+                    identity.alias = new_alias.into();
+                }
+            }
+        });
+    }
+
     pub fn contract_identity(key: &InboxContract) -> Option<Identity> {
         INBOX_TO_ID.with(|map| map.borrow().get(key).cloned())
     }

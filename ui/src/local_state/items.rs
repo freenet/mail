@@ -56,9 +56,10 @@ fn full_id(id: MessageId) -> Result<[u8; 16], DynError> {
         .ok_or_else(|| format!("message {id} is not loaded").into())
 }
 
+/// The identity that owns `alias`'s items: the address its state key names
+/// ([`super::state_key`]), which a rename does not change.
 fn owner(alias: &str) -> Result<Addr, DynError> {
-    crate::inbox::InboxModel::id_for_alias(alias)
-        .map(|identity| identity.addr)
+    super::addr_of_key(&super::state_key(alias))
         .ok_or_else(|| format!("no identity `{alias}`").into())
 }
 
@@ -169,6 +170,9 @@ pub(crate) async fn save_sent(
     id: String,
     sent: SentMessage,
 ) -> Result<(), DynError> {
+    // Keyed like the rest of the local state: by address, so a rename
+    // between this write and a delivery state can't split them.
+    let alias = super::state_key(&alias);
     let item = item(ItemKind::Sent, Some(owner(&alias)?), uuid_id(&id)?);
     let sent = sent_with_early_delivery(&alias, &id, sent);
     put(item, json(&sent)).await.map_err(boxed)?;
@@ -193,6 +197,7 @@ pub(crate) async fn set_sent_delivery_state(
     id: String,
     state: DeliveryState,
 ) -> Result<(), DynError> {
+    let alias = super::state_key(&alias);
     let item = item(ItemKind::Sent, Some(owner(&alias)?), uuid_id(&id)?);
     let key = (alias.clone(), id.clone());
     ops::put_item_merged(item, |stored| {
@@ -555,6 +560,47 @@ mod delegate_tests {
             in_reply_to: None,
             quoted_excerpt: None,
         }
+    }
+
+    /// After a rename, every write under the new alias still reaches the
+    /// identity's items. The inbox routing map holds its own copy of the
+    /// identity; resolving owners through it failed every write after a
+    /// rename with "no identity".
+    #[test]
+    fn writes_under_a_renamed_alias_still_persist() {
+        let addr = identity("items-rn-old");
+        let (info, _) = {
+            let list = block_on(ops::list_identities()).unwrap();
+            let info = list.into_iter().find(|i| i.addr == addr).unwrap();
+            (info, ())
+        };
+        crate::app::login::Identity::register_live_for_test(
+            crate::app::login::Identity::from_info(&info, crate::app::UserId::new()),
+        );
+        // What the app does on a rename the delegate acknowledged.
+        block_on(ops::update_identity(
+            addr,
+            "items-rn-new".into(),
+            String::new(),
+            info.generation,
+        ))
+        .unwrap();
+        assert!(crate::app::login::Identity::rename_in_place(
+            "items-rn-old",
+            "items-rn-new"
+        ));
+        // The routing map is deliberately left holding the old alias:
+        // persistence must not depend on it.
+        let id = uuid::Uuid::new_v4().to_string();
+        block_on(save_draft("items-rn-new".into(), id, draft("after"))).unwrap();
+        let before = IdentitySettings::default();
+        let mut after = before.clone();
+        after.display_name = "Renamed".into();
+        block_on(set_identity_settings("items-rn-new".into(), before, after)).unwrap();
+        let key = super::super::addr_key(&addr);
+        let state = loaded(&key, addr);
+        assert_eq!(state.drafts_of(&key).count(), 1);
+        assert_eq!(state.identity_settings(&key).display_name, "Renamed");
     }
 
     #[test]

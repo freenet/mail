@@ -90,8 +90,10 @@ enum Change {
     /// The fields that differ between the two values changed.
     IdentitySettings(String, IdentitySettings, IdentitySettings),
     GlobalSettings(GlobalSettings, GlobalSettings),
+    /// Everything kept for one identity (a state key, [`addr_key`]). There
+    /// is no rename change: an identity's key is its address, which a
+    /// rename does not touch.
     Forget(String),
-    Rename(String, String),
 }
 
 /// Apply `change` to `state` exactly as the page applied it to its
@@ -164,13 +166,8 @@ fn apply(state: &mut LocalState, change: &Change) {
         Change::GlobalSettings(before, after) => {
             overlay_changed_fields(state.global_settings_mut(), before, after);
         }
-        Change::Forget(alias) => {
-            state.aliases_mut().remove(alias);
-        }
-        Change::Rename(old, new) => {
-            if let Some(entry) = state.aliases_mut().remove(old) {
-                state.aliases_mut().insert(new.clone(), entry);
-            }
+        Change::Forget(key) => {
+            state.aliases_mut().remove(key);
         }
     }
 }
@@ -212,6 +209,49 @@ fn change(change: Change) {
 /// `app::SENT_FOLD_ID_BASE`). Received ids are hashes, so without the
 /// partition nearly all of them would land in the folded range (#289).
 pub(crate) const RECEIVED_ID_LIMIT: u64 = 1 << 63;
+
+/// Identity-scoped state is keyed by the identity's address, never by its
+/// alias: an alias is a display label that a rename changes, and an identity
+/// whose deletion is unfinished may share it with a new one. Every entry
+/// point below takes the alias the UI holds and turns it into this key once
+/// ([`state_key`]); everything inside treats the key as opaque.
+pub(crate) fn addr_key(addr: &freenet_mail_protocol::Addr) -> String {
+    use std::fmt::Write as _;
+    let mut key = String::with_capacity(1 + 2 * addr.0.len());
+    key.push('@');
+    for byte in addr.0 {
+        let _ = write!(key, "{byte:02x}");
+    }
+    key
+}
+
+/// The address a state key names (see [`addr_key`]).
+pub(crate) fn addr_of_key(key: &str) -> Option<freenet_mail_protocol::Addr> {
+    let hex = key.strip_prefix('@')?;
+    if hex.len() != 48 {
+        return None;
+    }
+    let mut addr = [0u8; 24];
+    for (i, byte) in addr.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(hex.get(2 * i..2 * i + 2)?, 16).ok()?;
+    }
+    Some(freenet_mail_protocol::Addr(addr))
+}
+
+/// The key `alias`'s state lives under: its identity's address. The live
+/// identity list is renamed in place, so a renamed identity keeps its key.
+/// A key passed in comes back unchanged; an alias that names no identity
+/// (an identity not announced yet, or a unit test) is its own key.
+pub(crate) fn state_key(alias: &str) -> String {
+    if addr_of_key(alias).is_some() {
+        return alias.to_string();
+    }
+    crate::app::login::Identity::get_alias(alias)
+        .map(|identity| identity.addr)
+        .or_else(|| crate::inbox::InboxModel::id_for_alias(alias).map(|identity| identity.addr))
+        .map(|addr| addr_key(&addr))
+        .unwrap_or_else(|| alias.to_string())
+}
 
 /// A load from the delegate in progress: from [`begin_load`] until it is
 /// passed to [`merge_loaded`] or dropped (the load failed), the page's
@@ -265,12 +305,6 @@ pub(crate) fn merge_loaded(mut loaded: LocalState, owners: &[String], mark: Load
         touched.insert(alias.clone());
     }
     for change in &since {
-        match change {
-            Change::Rename(old, new) if touched.remove(old) => {
-                touched.insert(new.clone());
-            }
-            _ => {}
-        }
         apply(&mut fresh, change);
     }
     // Taken out and put back by `replace_snapshot` below, with nothing in
@@ -400,6 +434,7 @@ pub(crate) fn replace_snapshot(new: LocalState) {
 }
 
 pub(crate) fn drafts_for(alias: &str) -> Vec<(String, Draft)> {
+    let alias = &state_key(alias);
     SNAPSHOT.with(|s| {
         s.borrow()
             .drafts_of(alias)
@@ -409,10 +444,12 @@ pub(crate) fn drafts_for(alias: &str) -> Vec<(String, Draft)> {
 }
 
 pub(crate) fn is_read(alias: &str, id: MessageId) -> bool {
+    let alias = &state_key(alias);
     SNAPSHOT.with(|s| s.borrow().is_read(alias, id))
 }
 
 pub(crate) fn archived_for(alias: &str) -> Vec<(MessageId, ArchivedMessage)> {
+    let alias = &state_key(alias);
     SNAPSHOT.with(|s| match s.borrow().for_alias(alias) {
         Some(state) => state
             .archived
@@ -424,30 +461,31 @@ pub(crate) fn archived_for(alias: &str) -> Vec<(MessageId, ArchivedMessage)> {
 }
 
 pub(crate) fn is_archived(alias: &str, id: MessageId) -> bool {
+    let alias = &state_key(alias);
     SNAPSHOT.with(|s| s.borrow().is_archived(alias, id))
 }
 
 pub(crate) fn is_deleted(alias: &str, id: MessageId) -> bool {
+    let alias = &state_key(alias);
     SNAPSHOT.with(|s| s.borrow().is_deleted(alias, id))
 }
 
-/// Drop everything cached for `alias` (its identity was deleted), so an
-/// identity later created under the same alias starts empty instead of
-/// inheriting the old one's drafts, sent mail and settings.
-pub(crate) fn forget_alias(alias: &str) {
-    change(Change::Forget(alias.to_string()));
-    DELETED_DRAFTS.with(|t| t.borrow_mut().retain(|(a, _)| a != alias));
-    PENDING_KEPT.with(|t| t.borrow_mut().retain(|(a, _), _| a != alias));
-    OPTIMISTIC_SENT.with(|t| t.borrow_mut().retain(|(a, _), _| a != alias));
-    OPTIMISTIC_ARCHIVED.with(|t| t.borrow_mut().retain(|(a, _), _| a != alias));
-    DELETED_MESSAGES.with(|t| t.borrow_mut().retain(|(a, _)| a != alias));
-    READ_SENT.with(|t| t.borrow_mut().retain(|(a, _)| a != alias));
-    bump();
+/// Drop everything cached for the identity at `addr` (it was deleted).
+/// Keyed by address, so it never touches another identity that happens to
+/// carry the same alias, such as a new one created while this one's
+/// deletion was unfinished.
+pub(crate) fn forget_identity(addr: &freenet_mail_protocol::Addr) {
+    forget_key(&addr_key(addr));
 }
 
-/// Move what is cached for `old` to `new` (the identity was renamed).
-pub(crate) fn rename_alias(old: &str, new: &str) {
-    change(Change::Rename(old.to_string(), new.to_string()));
+fn forget_key(key: &str) {
+    change(Change::Forget(key.to_string()));
+    DELETED_DRAFTS.with(|t| t.borrow_mut().retain(|(a, _)| a != key));
+    PENDING_KEPT.with(|t| t.borrow_mut().retain(|(a, _), _| a != key));
+    OPTIMISTIC_SENT.with(|t| t.borrow_mut().retain(|(a, _), _| a != key));
+    OPTIMISTIC_ARCHIVED.with(|t| t.borrow_mut().retain(|(a, _), _| a != key));
+    DELETED_MESSAGES.with(|t| t.borrow_mut().retain(|(a, _)| a != key));
+    READ_SENT.with(|t| t.borrow_mut().retain(|(a, _)| a != key));
     bump();
 }
 
@@ -461,6 +499,7 @@ thread_local! {
 /// late read mark would write its kept copy back after the delete). Views
 /// render many times while open; each render used to send it again.
 pub(crate) fn should_persist_read(alias: &str, id: MessageId) -> bool {
+    let alias = &state_key(alias);
     if is_deleted(alias, id) || is_archived(alias, id) {
         return false;
     }
@@ -468,6 +507,7 @@ pub(crate) fn should_persist_read(alias: &str, id: MessageId) -> bool {
 }
 
 pub(crate) fn sent_for(alias: &str) -> Vec<(String, SentMessage)> {
+    let alias = &state_key(alias);
     SNAPSHOT.with(|s| {
         s.borrow()
             .sent_of(alias)
@@ -477,6 +517,7 @@ pub(crate) fn sent_for(alias: &str) -> Vec<(String, SentMessage)> {
 }
 
 pub(crate) fn kept_for(alias: &str) -> Vec<(MessageId, KeptMessage)> {
+    let alias = &state_key(alias);
     SNAPSHOT.with(|s| match s.borrow().for_alias(alias) {
         Some(state) => state
             .kept
@@ -488,6 +529,7 @@ pub(crate) fn kept_for(alias: &str) -> Vec<(MessageId, KeptMessage)> {
 }
 
 pub(crate) fn identity_settings_for(alias: &str) -> IdentitySettings {
+    let alias = &state_key(alias);
     SNAPSHOT.with(|s| s.borrow().identity_settings(alias))
 }
 
@@ -558,11 +600,13 @@ mod legacy {
 // re-renders without waiting for the delegate roundtrip.
 
 pub(crate) fn local_save_draft(alias: &str, id: &str, draft: Draft) {
+    let alias = &state_key(alias);
     change(Change::SaveDraft(alias.to_string(), id.to_string(), draft));
     bump();
 }
 
 pub(crate) fn local_delete_draft(alias: &str, id: &str) {
+    let alias = &state_key(alias);
     change(Change::DeleteDraft(alias.to_string(), id.to_string()));
     // Tombstone protects against a stale `save_draft` echo that would
     // otherwise re-add this draft via `replace_snapshot` (#107).
@@ -573,6 +617,7 @@ pub(crate) fn local_delete_draft(alias: &str, id: &str) {
 }
 
 pub(crate) fn local_save_sent(alias: &str, id: &str, sent: SentMessage) {
+    let alias = &state_key(alias);
     change(Change::SaveSent(
         alias.to_string(),
         id.to_string(),
@@ -588,6 +633,7 @@ pub(crate) fn local_save_sent(alias: &str, id: &str, sent: SentMessage) {
 }
 
 pub(crate) fn local_delete_sent(alias: &str, id: &str) {
+    let alias = &state_key(alias);
     change(Change::DeleteSent(alias.to_string(), id.to_string()));
     // Drop any optimistic-sent protection for this id so a later stale echo
     // doesn't resurrect a sent row the user just deleted (#265).
@@ -603,6 +649,7 @@ pub(crate) fn local_delete_sent(alias: &str, id: &str) {
 /// reload even though the in-memory render was correctly suppressed (#288).
 #[must_use]
 pub(crate) fn local_set_sent_delivery_state(alias: &str, id: &str, state: DeliveryState) -> bool {
+    let alias = &state_key(alias);
     // Pending is the only non-terminal state. Once a row reaches Delivered
     // or Failed it must NOT flip again (#288): the stale-send timeout sweep
     // can drain a Pending entry and flip it Failed, after which a late
@@ -633,6 +680,7 @@ pub(crate) fn delivery_state_is_terminal(state: DeliveryState) -> bool {
 }
 
 pub(crate) fn local_archive_message(alias: &str, msg_id: MessageId, archived: ArchivedMessage) {
+    let alias = &state_key(alias);
     change(Change::Archive(alias.to_string(), msg_id, archived.clone()));
     // Archive supersedes a pending kept tombstone — drop it so a stale
     // echo doesn't re-insert the kept entry under the archived row.
@@ -651,6 +699,7 @@ pub(crate) fn local_archive_message(alias: &str, msg_id: MessageId, archived: Ar
 
 #[allow(dead_code)] // Wired for #60 (true unarchive).
 pub(crate) fn local_unarchive_message(alias: &str, msg_id: MessageId) {
+    let alias = &state_key(alias);
     change(Change::Unarchive(alias.to_string(), msg_id));
     // Drop optimistic-archive protection so a stale echo doesn't re-archive
     // a message the user just unarchived (#265).
@@ -662,6 +711,7 @@ pub(crate) fn local_unarchive_message(alias: &str, msg_id: MessageId) {
 }
 
 pub(crate) fn local_delete_message(alias: &str, msg_id: MessageId) {
+    let alias = &state_key(alias);
     change(Change::DeleteMessage(alias.to_string(), msg_id));
     // Same as archive: delete supersedes a pending kept tombstone.
     PENDING_KEPT.with(|pending| {
@@ -687,6 +737,7 @@ pub(crate) fn local_delete_message(alias: &str, msg_id: MessageId) {
 }
 
 pub(crate) fn local_mark_read(alias: &str, msg_id: MessageId, kept: KeptMessage) {
+    let alias = &state_key(alias);
     change(Change::MarkRead(alias.to_string(), msg_id, kept.clone()));
     // Tombstone the optimistic write until the delegate echoes back a
     // snapshot that includes it — guards against the #113 race where a
@@ -700,6 +751,7 @@ pub(crate) fn local_mark_read(alias: &str, msg_id: MessageId, kept: KeptMessage)
 }
 
 pub(crate) fn local_set_identity_settings(alias: &str, settings: IdentitySettings) {
+    let alias = &state_key(alias);
     let before = identity_settings_for(alias);
     change(Change::IdentitySettings(
         alias.to_string(),
@@ -728,6 +780,7 @@ pub(crate) fn local_set_global_settings(settings: GlobalSettings) {
 /// needs a current scope and would also cancel the write if the calling
 /// component unmounted first.
 pub(crate) fn persist_identity_settings(alias: String, settings: IdentitySettings) {
+    let alias = state_key(&alias);
     let before = identity_settings_for(&alias);
     local_set_identity_settings(&alias, settings.clone());
     #[cfg(feature = "use-node")]
@@ -833,22 +886,77 @@ mod tests {
     /// single kept entry, not duplicates. The live UI path runs
     /// `OpenMessage` on every render, which re-fires `local_mark_read`
     /// — that must be a no-op on second call.
-    #[test]
-    fn a_new_identity_under_a_deleted_alias_starts_empty() {
-        fresh_snapshot();
-        local_save_draft("fa-alice", "d1", Draft::default());
-        assert_eq!(drafts_for("fa-alice").len(), 1);
-        forget_alias("fa-alice");
-        assert!(drafts_for("fa-alice").is_empty());
+    /// A live identity at `[byte; 24]` named `alias`, as startup announces
+    /// one.
+    fn live_identity(alias: &str, byte: u8) -> freenet_mail_protocol::Addr {
+        let addr = freenet_mail_protocol::Addr([byte; 24]);
+        let info = freenet_mail_protocol::IdentityInfo {
+            addr,
+            vk: Vec::new().into(),
+            ek: Vec::new().into(),
+            alias: alias.to_string(),
+            description: String::new(),
+            confirmed: true,
+            generation: 1,
+        };
+        crate::app::login::Identity::register_live_for_test(
+            crate::app::login::Identity::from_info(&info, crate::app::UserId::new()),
+        );
+        addr
     }
 
     #[test]
+    fn state_keys_round_trip_and_resolve_to_the_identitys_address() {
+        let addr = live_identity("sk-alice", 0x51);
+        let key = state_key("sk-alice");
+        assert_eq!(key, addr_key(&addr));
+        assert_eq!(addr_of_key(&key), Some(addr));
+        assert_eq!(state_key(&key), key, "a key resolves to itself");
+        assert_eq!(state_key("sk-nobody"), "sk-nobody");
+        assert_eq!(addr_of_key("@00"), None);
+    }
+
+    #[test]
+    fn a_new_identity_under_a_deleted_alias_starts_empty() {
+        fresh_snapshot();
+        let old = live_identity("fa-alice", 0x52);
+        local_save_draft("fa-alice", "d1", Draft::default());
+        assert_eq!(drafts_for("fa-alice").len(), 1);
+        forget_identity(&old);
+        crate::app::login::Identity::remove_in_place("fa-alice");
+        assert!(drafts_for("fa-alice").is_empty());
+    }
+
+    /// An identity whose deletion is unfinished is hidden, and a new one may
+    /// take its alias. Finishing the old deletion forgets by the old
+    /// address, so the new identity keeps its state.
+    #[test]
+    fn finishing_an_old_deletion_leaves_a_new_identity_with_its_alias_alone() {
+        fresh_snapshot();
+        let old = freenet_mail_protocol::Addr([0x53; 24]);
+        let new = live_identity("fd-alice", 0x54);
+        local_save_draft("fd-alice", "d1", Draft::default());
+        local_mark_read("fd-alice", 7, kept("bob", "hi"));
+        forget_identity(&old);
+        assert_eq!(drafts_for("fd-alice").len(), 1);
+        assert!(is_read("fd-alice", 7));
+        forget_identity(&new);
+        assert!(drafts_for("fd-alice").is_empty());
+    }
+
+    /// A rename changes the label, not the key: the state stays put, and
+    /// writes for the new alias resolve to the same address.
+    #[test]
     fn a_rename_keeps_the_identitys_state() {
         fresh_snapshot();
+        let addr = live_identity("rn-old", 0x55);
         local_save_draft("rn-old", "d1", Draft::default());
-        rename_alias("rn-old", "rn-new");
+        assert!(crate::app::login::Identity::rename_in_place(
+            "rn-old", "rn-new"
+        ));
         assert!(drafts_for("rn-old").is_empty());
         assert_eq!(drafts_for("rn-new").len(), 1);
+        assert_eq!(addr_of_key(&state_key("rn-new")), Some(addr));
     }
 
     #[test]
@@ -1057,25 +1165,36 @@ mod tests {
     fn an_identity_deleted_or_renamed_during_the_load_is_not_brought_back() {
         fresh_snapshot();
         fresh_pending();
+        let alice = live_identity("ld-alice", 0x56);
+        let bob = live_identity("ld-bob", 0x57);
         let mark = begin_load();
-        forget_alias("alice");
-        rename_alias("bob", "robert");
-        let mut loaded = loaded_alice(|a| a.read.push(1));
+        forget_identity(&alice);
+        crate::app::login::Identity::remove_in_place("ld-alice");
+        assert!(crate::app::login::Identity::rename_in_place(
+            "ld-bob",
+            "ld-robert"
+        ));
+        let mut loaded = LocalState::default();
         loaded
             .aliases_mut()
-            .entry("bob".into())
+            .entry(addr_key(&alice))
+            .or_default()
+            .read
+            .push(1);
+        loaded
+            .aliases_mut()
+            .entry(addr_key(&bob))
             .or_default()
             .read
             .push(2);
-        merge_loaded(loaded, &["alice".to_string(), "bob".to_string()], mark);
+        merge_loaded(loaded, &[addr_key(&alice), addr_key(&bob)], mark);
         assert!(
-            !is_read("alice", 1),
+            SNAPSHOT.with(|s| s.borrow().for_alias(&addr_key(&alice)).is_none()),
             "a deleted identity's loaded state is dropped"
         );
-        assert!(!is_read("bob", 2));
         assert!(
-            is_read("robert", 2),
-            "a renamed identity's loaded state follows the rename"
+            is_read("ld-robert", 2),
+            "a renamed identity's loaded state is still its own"
         );
     }
 

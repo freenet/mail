@@ -286,6 +286,13 @@ impl Identity {
         });
     }
 
+    /// Make `identity` a live identity, as the startup announcement does,
+    /// without touching anything else (unit tests).
+    #[cfg(test)]
+    pub(crate) fn register_live_for_test(identity: Identity) {
+        ALIASES.with(|aliases| aliases.borrow_mut().push(identity));
+    }
+
     /// Record a new delegate generation for the identity at `addr`.
     pub(crate) fn set_generation(
         addr: &freenet_mail_protocol::Addr,

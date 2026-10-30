@@ -119,7 +119,8 @@ pub(crate) async fn refresh_unfinished_deletions() {
 pub(crate) async fn finish_deletion(info: IdentityInfo) {
     match delete_with_progress(info.addr, info.generation, &info.alias).await {
         Ok(()) => {
-            crate::local_state::forget_alias(&info.alias);
+            // By address: a new identity may carry this one's alias.
+            crate::local_state::forget_identity(&info.addr);
             crate::toast::push_toast_detached(
                 format!("Identity `{}` deleted", info.alias),
                 crate::toast::ToastLevel::Success,
@@ -275,8 +276,13 @@ pub(crate) async fn load_and_report() {
             return;
         }
     };
+    // Local state is keyed by address (`local_state::addr_key`), never by
+    // alias, so a rename or a reused alias can't misfile it.
     #[cfg(feature = "use-node")]
-    let owners: Vec<(String, Addr)> = infos.iter().map(|i| (i.alias.clone(), i.addr)).collect();
+    let owners: Vec<(String, Addr)> = infos
+        .iter()
+        .map(|i| (crate::local_state::addr_key(&i.addr), i.addr))
+        .collect();
     let mut loaded = Vec::with_capacity(infos.len());
     for info in infos {
         loaded.push(prepare(info).await);
@@ -285,15 +291,20 @@ pub(crate) async fn load_and_report() {
     // marks and settings takes a delegate round trip per item, and while it
     // ran the user could create an identity that the late announcement then
     // hid (#286). Views opened before the load lands re-render when it does.
+    //
+    // Journaling starts BEFORE the announcement: every change the page makes
+    // from the moment the identities are usable is replayed over the load,
+    // including those made while unfinished deletions are listed below.
+    #[cfg(feature = "use-node")]
+    let mark = crate::local_state::begin_load();
     send_action(NodeAction::IdentitiesLoaded { identities: loaded });
     refresh_unfinished_deletions().await;
     #[cfg(feature = "use-node")]
     {
-        let mark = crate::local_state::begin_load();
         match crate::local_state::load(&owners).await {
             Ok(state) => {
-                let aliases: Vec<String> = owners.into_iter().map(|(alias, _)| alias).collect();
-                crate::local_state::merge_loaded(state, &aliases, mark);
+                let keys: Vec<String> = owners.into_iter().map(|(key, _)| key).collect();
+                crate::local_state::merge_loaded(state, &keys, mark);
             }
             Err(e) => {
                 crate::log::error(format!("loading local mail state failed: {e}"), None);
