@@ -1080,8 +1080,8 @@ mod tests {
                 let mut s = Space::new(&mut env, Origin([1; 32]));
                 s.write_if("a", 0, b"12345").unwrap()
             };
-            let key = String::from_utf8(Space::new(&mut env, Origin([1; 32])).full_key("a"))
-                .unwrap();
+            let key =
+                String::from_utf8(Space::new(&mut env, Origin([1; 32])).full_key("a")).unwrap();
             let mut faults = Faults::blind(&key);
             faults.rules = vec![Rule {
                 op: FaultOp::SetFail,
