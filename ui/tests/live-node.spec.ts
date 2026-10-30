@@ -135,28 +135,28 @@ async function attachEvidence(browser: Browser, testInfo: TestInfo) {
   browser.newContext = ev.newContext;
   EVIDENCE.delete(browser);
   if (testInfo.status === testInfo.expectedStatus) return;
+  // Written as files: test-results/ is uploaded, and an attachment with only
+  // a body is kept by a reporter, which CI does not upload.
+  const keep = async (name: string, body: string | Buffer, contentType: string) => {
+    const file = testInfo.outputPath(name);
+    fs.writeFileSync(file, body);
+    await testInfo.attach(name, { path: file, contentType });
+  };
   for (const [i, ctx] of ev.contexts.entries()) {
     for (const [j, page] of ctx.pages().entries()) {
       if (page.isClosed()) continue;
       const name = `ctx${i}-page${j}`;
       const shot = await page.screenshot({ fullPage: true }).catch(() => null);
-      if (shot) {
-        await testInfo.attach(`${name}.png`, { body: shot, contentType: "image/png" });
-      }
+      if (shot) await keep(`${name}.png`, shot, "image/png");
       const app = await page
         .$("iframe#app")
         .then((el) => el?.contentFrame() ?? null)
         .catch(() => null);
       const html = await (app ?? page.mainFrame()).content().catch(() => null);
-      if (html) {
-        await testInfo.attach(`${name}.html`, { body: html, contentType: "text/html" });
-      }
+      if (html) await keep(`${name}.html`, html, "text/html");
     }
   }
-  await testInfo.attach("console", {
-    body: ev.lines.join("\n"),
-    contentType: "text/plain",
-  });
+  await keep("console.txt", ev.lines.join("\n"), "text/plain");
   console.log(`── console of failed test "${testInfo.title}" ──`);
   for (const line of ev.lines) console.log(line);
 }
