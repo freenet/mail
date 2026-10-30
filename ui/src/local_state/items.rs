@@ -37,6 +37,33 @@ use crate::mail_delegate::{CallError, ops};
 thread_local! {
     /// The full 16-byte item id of every message id handed out this page.
     static FULL_IDS: RefCell<HashMap<MessageId, [u8; 16]>> = RefCell::new(HashMap::new());
+    /// Counts this page's mark writes; each mark remembers the count at its
+    /// last write, so a reclaim leaves alone marks written after it began.
+    static FLAG_WRITES: RefCell<(u64, HashMap<(Addr, Vec<u8>), u64>)> =
+        RefCell::new((0, HashMap::new()));
+}
+
+fn note_flag_write(item: &ItemRef) {
+    if let Some(owner) = item.owner {
+        FLAG_WRITES.with(|w| {
+            let w = &mut *w.borrow_mut();
+            w.0 += 1;
+            w.1.insert((owner, item.id.clone()), w.0);
+        });
+    }
+}
+
+fn flag_writes_so_far() -> u64 {
+    FLAG_WRITES.with(|w| w.borrow().0)
+}
+
+fn flag_written_since(owner: Addr, id: &[u8], since: u64) -> bool {
+    FLAG_WRITES.with(|w| {
+        w.borrow()
+            .1
+            .get(&(owner, id.to_vec()))
+            .is_some_and(|n| *n > since)
+    })
 }
 
 fn remember(full: [u8; 16]) -> MessageId {
@@ -103,6 +130,9 @@ async fn put(item: ItemRef, body: Vec<u8>) -> Result<(), CallError> {
 
 /// Change one message's flags.
 async fn set_flags(item: ItemRef, mut change: impl FnMut(&mut Flags)) -> Result<(), CallError> {
+    // Before the write: a reclaim that lists this mark while the write is
+    // in flight must already see it as new.
+    note_flag_write(&item);
     ops::put_item_merged(item, |stored| {
         let mut flags: Flags = stored
             .and_then(|b| serde_json::from_slice(b).ok())
@@ -528,20 +558,21 @@ fn message_id(id: &[u8]) -> Option<MessageId> {
     Some(remember(id.try_into().ok()?))
 }
 
-/// Everything stored for `identities` (alias, address), as one snapshot.
-/// Drop the read and deleted marks of messages that are gone for good: no
-/// longer in `owner`'s inbox state (`live`: every message of a WHOLE state)
-/// and with no kept or archived copy. Without this every message ever
-/// received keeps a flags item, and the per-identity cap eventually refuses
-/// every new mark. Returns how many were dropped.
+/// Drop the read and deleted marks of messages that are gone for good: in
+/// no inbox state the page has seen (`live`, asked at the moment each mark
+/// would go, so a state that arrived meanwhile counts), with no kept or
+/// archived copy, and not written since this reclaim began. Without this
+/// every message ever received keeps a flags item, and the per-identity cap
+/// eventually refuses every new mark. Returns how many were dropped.
 ///
 /// A deleted mark is safe to drop then: it only hides a message the inbox
 /// still holds, and this one is no longer there.
 pub(crate) async fn reclaim_flags(
     owner: Addr,
-    live: &HashSet<[u8; 16]>,
+    live: &dyn Fn(&[u8]) -> bool,
 ) -> Result<usize, CallError> {
-    let mut keep: HashSet<Vec<u8>> = live.iter().map(|id| id.to_vec()).collect();
+    let began = flag_writes_so_far();
+    let mut keep: HashSet<Vec<u8>> = HashSet::new();
     for kind in [ItemKind::Kept, ItemKind::Archived] {
         keep.extend(
             ops::list_all_items(kind, Some(owner))
@@ -552,7 +583,10 @@ pub(crate) async fn reclaim_flags(
     }
     let mut dropped = 0;
     for i in ops::list_all_items(ItemKind::Flags, Some(owner)).await? {
-        if keep.contains(&i.item.id) {
+        if keep.contains(&i.item.id)
+            || live(&i.item.id)
+            || flag_written_since(owner, &i.item.id, began)
+        {
             continue;
         }
         match ops::delete_item(i.item, i.generation).await {
@@ -570,6 +604,7 @@ pub(crate) async fn reclaim_flags(
     Ok(dropped)
 }
 
+/// Everything stored for `identities` (alias, address), as one snapshot.
 pub(crate) async fn load(identities: &[(String, Addr)]) -> Result<LocalState, CallError> {
     let mut state = LocalState::default();
     for (alias, addr) in identities {
@@ -810,11 +845,45 @@ mod delegate_tests {
         block_on(archive_message(alias.into(), saved, archived())).unwrap();
         assert_eq!(flag_ids(addr).len(), 4);
         let still: HashSet<[u8; 16]> = [full_message_id(b"still in the inbox")].into();
-        assert_eq!(block_on(reclaim_flags(addr, &still)).unwrap(), 2);
+        let live = |id: &[u8]| still.iter().any(|s| s.as_slice() == id);
+        assert_eq!(block_on(reclaim_flags(addr, &live)).unwrap(), 2);
         let left = flag_ids(addr);
         assert!(left.contains(full_message_id(b"still in the inbox").as_slice()));
         assert!(left.contains(full_message_id(b"archived").as_slice()));
         assert_eq!(left.len(), 2);
+    }
+
+    /// A mark written while a reclaim runs (after it listed the kept and
+    /// archived copies, before it reached the mark) is not dropped, and a
+    /// message that became live meanwhile keeps its mark too.
+    #[test]
+    fn a_reclaim_leaves_marks_written_or_made_live_while_it_runs() {
+        let alias = "items-reclaim-race";
+        let addr = identity(alias);
+        let written = message_id_for(b"marked during the reclaim");
+        let arrived = message_id_for(b"arrived during the reclaim");
+        let gone = message_id_for(b"gone for good");
+        for id in [written, arrived, gone] {
+            block_on(delete_message(alias.into(), id)).unwrap();
+        }
+        let written_full = full_message_id(b"marked during the reclaim");
+        let arrived_full = full_message_id(b"arrived during the reclaim");
+        let item = ItemRef {
+            kind: ItemKind::Flags,
+            owner: Some(addr),
+            id: written_full.to_vec(),
+        };
+        let live = |id: &[u8]| {
+            // Another task writes this mark now, and a new state brings this
+            // message: both happen after the reclaim began.
+            note_flag_write(&item);
+            id == arrived_full.as_slice()
+        };
+        assert_eq!(block_on(reclaim_flags(addr, &live)).unwrap(), 1);
+        let left = flag_ids(addr);
+        assert!(left.contains(written_full.as_slice()));
+        assert!(left.contains(arrived_full.as_slice()));
+        assert!(!left.contains(full_message_id(b"gone for good").as_slice()));
     }
 
     /// A kept copy too large for the delegate must not cost the read mark.

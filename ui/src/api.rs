@@ -1290,7 +1290,7 @@ fn set_inbox_state(
         "own inbox state loaded (key={key}, alias=`{}`)",
         identity.alias
     ));
-    reclaim_flags_once(
+    reclaim_flags_when_current(
         identity.addr,
         state
             .messages
@@ -1322,18 +1322,59 @@ thread_local! {
         RefCell::new(std::collections::HashSet::new());
 }
 
-/// Once per page and identity, on its first whole inbox state, drop the
-/// marks of messages that are gone ([`crate::local_state::reclaim_flags`]).
-/// A failure is retried on the next whole state.
+/// Per identity, the whole non-empty inbox states seen this page and every
+/// message any of them held. The first state can be stale (a copy the node
+/// cached, a state just re-published after a migration or self-heal), so a
+/// message is live if ANY state this page held it.
 #[cfg(feature = "use-node")]
-fn reclaim_flags_once(
+#[derive(Default)]
+pub(crate) struct SeenStates {
+    count: u32,
+    messages: std::collections::HashSet<[u8; 16]>,
+}
+
+#[cfg(feature = "use-node")]
+impl SeenStates {
+    /// Record a whole state; whether marks may now be reclaimed against
+    /// what has been seen. An empty state proves nothing and is not counted;
+    /// one state alone is not trusted.
+    pub(crate) fn note(&mut self, state: std::collections::HashSet<[u8; 16]>) -> bool {
+        if state.is_empty() {
+            return false;
+        }
+        self.count += 1;
+        self.messages.extend(state);
+        self.count >= 2
+    }
+
+    pub(crate) fn holds(&self, id: &[u8]) -> bool {
+        <[u8; 16]>::try_from(id).is_ok_and(|id| self.messages.contains(&id))
+    }
+}
+
+#[cfg(feature = "use-node")]
+thread_local! {
+    static SEEN_STATES: RefCell<std::collections::HashMap<freenet_mail_protocol::Addr, SeenStates>> =
+        RefCell::new(std::collections::HashMap::new());
+}
+
+/// Once per page and identity, once a second whole non-empty inbox state
+/// has arrived, drop the marks of messages that are gone
+/// ([`crate::local_state::reclaim_flags`]): in no state this page saw,
+/// asked when each mark would go. A failure is retried on the next state.
+#[cfg(feature = "use-node")]
+fn reclaim_flags_when_current(
     owner: freenet_mail_protocol::Addr,
-    live: std::collections::HashSet<[u8; 16]>,
+    state: std::collections::HashSet<[u8; 16]>,
 ) {
-    if !FLAGS_RECLAIMED.with(|r| r.borrow_mut().insert(owner)) {
+    let ready = SEEN_STATES.with(|s| s.borrow_mut().entry(owner).or_default().note(state));
+    if !ready || !FLAGS_RECLAIMED.with(|r| r.borrow_mut().insert(owner)) {
         return;
     }
     crate::app::identity_store::spawn_detached(async move {
+        let live = |id: &[u8]| {
+            SEEN_STATES.with(|s| s.borrow().get(&owner).is_some_and(|seen| seen.holds(id)))
+        };
         match crate::local_state::reclaim_flags(owner, &live).await {
             Ok(n) if n > 0 => crate::log::debug!("reclaimed {n} stale message marks"),
             Ok(_) => {}
@@ -3457,6 +3498,26 @@ impl std::fmt::Display for TryNodeAction {
                 write!(f, "creating AFT delegate")
             }
         }
+    }
+}
+
+#[cfg(all(test, feature = "use-node"))]
+mod seen_states_tests {
+    use super::SeenStates;
+
+    /// Marks are reclaimed only against what the page has seen of the inbox:
+    /// never on an empty state, never on the first state alone (it may be a
+    /// stale copy), and a message any seen state held stays live.
+    #[test]
+    fn marks_are_reclaimed_only_against_a_state_seen_twice() {
+        let mut seen = SeenStates::default();
+        assert!(!seen.note([].into()), "an empty state proves nothing");
+        assert!(!seen.note([[1; 16]].into()), "one state is not trusted");
+        // A later state without message 1 (an older copy, or 1 removed):
+        // 1 is still live, since a state this page saw held it.
+        assert!(seen.note([[2; 16]].into()));
+        assert!(seen.holds(&[1; 16]) && seen.holds(&[2; 16]));
+        assert!(!seen.holds(&[3; 16]));
     }
 }
 
