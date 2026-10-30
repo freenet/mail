@@ -73,7 +73,8 @@ pub(crate) struct Identity {
     /// False for an identity carried over from older data until the user
     /// confirms it is theirs (a UI hint, not a security boundary). Only the
     /// migration from v0.2.x delegates imports unconfirmed identities; the
-    /// confirm prompt lands with it.
+    /// confirm prompt lands with it (step B3 of the v0.3.0 chain; remove the
+    /// allow there).
     #[allow(dead_code)]
     pub confirmed: bool,
     /// The delegate record's generation, for compare-and-swap on rename,

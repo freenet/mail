@@ -96,6 +96,16 @@ pub(crate) fn new_request(op: Op) -> Request {
 /// the payload was a mail-delegate response with a waiting call; an answer
 /// whose caller already gave up (timed out) is dropped.
 pub(crate) fn deliver(payload: &[u8]) -> bool {
+    // Read the request id alone first: a reply nobody waits for (its call
+    // gave up or was dropped) is never decoded, so a late recovery key is
+    // never materialised as a plain string.
+    let Ok(ResponseId { request_id }) = from_cbor::<ResponseId>(payload) else {
+        crate::log::error("undecodable mail-delegate response", None);
+        return false;
+    };
+    if !PENDING.with(|p| p.borrow().contains_key(&request_id)) {
+        return false;
+    }
     let Ok(response) = from_cbor::<Response>(payload) else {
         crate::log::error("undecodable mail-delegate response", None);
         return false;
@@ -114,6 +124,22 @@ thread_local! {
     pub(crate) static V1_AFT_PARAMS_CALLS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
+/// Just the request id of a [`Response`]; the result is skipped unread.
+#[derive(serde::Deserialize)]
+struct ResponseId {
+    request_id: RequestId,
+}
+
+/// A call's slot in [`PENDING`], removed however the call ends, including
+/// when its future is dropped before an answer arrives.
+struct PendingSlot(RequestId);
+
+impl Drop for PendingSlot {
+    fn drop(&mut self) {
+        PENDING.with(|p| p.borrow_mut().remove(&self.0));
+    }
+}
+
 /// Send `op` to the mail delegate and wait for its answer.
 pub(crate) async fn call(op: Op) -> Result<Reply, CallError> {
     #[cfg(test)]
@@ -126,12 +152,9 @@ pub(crate) async fn call(op: Op) -> Result<Reply, CallError> {
     let bytes = to_cbor(&request).map_err(|e| CallError::Unknown(format!("encode: {e}")))?;
     let (tx, rx) = oneshot::channel();
     PENDING.with(|p| p.borrow_mut().insert(id, tx));
-    if let Err(e) = send(bytes).await {
-        PENDING.with(|p| p.borrow_mut().remove(&id));
-        return Err(CallError::Unknown(e));
-    }
+    let _slot = PendingSlot(id);
+    send(bytes).await.map_err(CallError::Unknown)?;
     let answer = wait(rx, timeout).await;
-    PENDING.with(|p| p.borrow_mut().remove(&id));
     match answer {
         Some(Ok(reply)) => Ok(reply),
         Some(Err(failure)) => Err(CallError::Failed(failure)),
@@ -281,6 +304,20 @@ mod tests {
         };
         assert!(deliver(&response(id, Err(failure.clone()))));
         assert_eq!(rx.try_recv().unwrap(), Some(Err(failure)));
+    }
+
+    #[test]
+    fn a_dropped_call_leaves_no_waiter_behind() {
+        let id = RequestId([5; 16]);
+        let (tx, _rx) = oneshot::channel();
+        PENDING.with(|p| p.borrow_mut().insert(id, tx));
+        drop(PendingSlot(id));
+        assert!(PENDING.with(|p| !p.borrow().contains_key(&id)));
+        // Its late answer reaches nobody.
+        assert!(!deliver(&response(
+            id,
+            Ok(Reply::RecoveryKey("fmail-key-1:late".into()))
+        )));
     }
 
     #[test]

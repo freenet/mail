@@ -9,6 +9,16 @@
     allow(dead_code, unused_imports, unused_variables, unused_mut)
 )]
 
+// The in-page mail delegate (`local-delegate`, which `example-data` and
+// `no-sync` turn on) answers its own prompts as a user would. It must never
+// be linked into a node build, where the node runs the published delegate
+// and the user answers.
+#[cfg(all(feature = "local-delegate", feature = "use-node"))]
+compile_error!(
+    "`local-delegate` (and `example-data` / `no-sync`) cannot be combined with `use-node`; \
+     build offline with --no-default-features --features example-data,no-sync"
+);
+
 extern crate core;
 
 pub(crate) mod aft;

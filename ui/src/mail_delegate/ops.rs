@@ -84,7 +84,8 @@ pub(crate) async fn update_identity(
 }
 
 // Used by the confirm-identity prompt, which lands with the migration that
-// can import unconfirmed identities.
+// can import unconfirmed identities (step B3 of the v0.3.0 chain, the next
+// PR after this one). Remove this allow there.
 #[allow(dead_code)]
 pub(crate) async fn confirm_identity(addr: Addr, expected_gen: u64) -> Result<u64, CallError> {
     call_ack(Op::ConfirmIdentity { addr, expected_gen }).await
