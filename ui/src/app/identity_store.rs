@@ -548,6 +548,9 @@ pub(crate) fn body_with_markers(body: Option<&[u8]>, markers: &MigrationMarkers)
     serde_json::to_vec(&value).expect("a JSON value always encodes")
 }
 
+/// The stored markers. Any failure, `Unreadable` included, is an error, so
+/// the caller treats the markers as unknown: never as absent, which would
+/// plan from defaults and write them back over a pending marker (B5).
 pub(crate) async fn load_markers(addr: Addr) -> Result<MigrationMarkers, DynError> {
     let item = ops::get_item(settings_item(addr)).await?;
     Ok(markers_from_body(item.as_ref().map(|i| i.body.as_slice())))

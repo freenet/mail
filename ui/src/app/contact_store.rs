@@ -141,14 +141,17 @@ pub(crate) async fn save(contact: &Contact) -> Result<(), CallError> {
     store_replacing(
         encode(contact),
         || ops::get_item(item.clone()),
-        |body, generation| ops::put_item(item.clone(), body, Some(generation)),
+        |body, generation| ops::put_item(item.clone(), body, generation),
     )
     .await
 }
 
 /// Write `body`, replacing whatever is stored, retrying a lost
 /// compare-and-swap from a fresh read. An item deleted meanwhile reads as
-/// absent and is created again (generation 0), never dropped.
+/// absent and is created again (generation 0), never dropped. A stored
+/// contact that cannot be read (`Unreadable`) is replaced: the write goes
+/// with no expected generation, which is what the delegate takes as
+/// "replace what cannot be read", and the user is told once.
 async fn store_replacing<G, GF, P, PF>(
     body: Vec<u8>,
     mut get: G,
@@ -157,15 +160,20 @@ async fn store_replacing<G, GF, P, PF>(
 where
     G: FnMut() -> GF,
     GF: std::future::Future<Output = Result<Option<freenet_mail_protocol::Item>, CallError>>,
-    P: FnMut(Vec<u8>, u64) -> PF,
+    P: FnMut(Vec<u8>, Option<u64>) -> PF,
     PF: std::future::Future<Output = Result<u64, CallError>>,
 {
     let mut attempt = 0;
     loop {
-        let generation = match get().await? {
-            Some(stored) if stored.body.as_slice() == body.as_slice() => return Ok(()),
-            Some(stored) => stored.generation,
-            None => 0,
+        let generation = match get().await {
+            Ok(Some(stored)) if stored.body.as_slice() == body.as_slice() => return Ok(()),
+            Ok(Some(stored)) => Some(stored.generation),
+            Ok(None) => Some(0),
+            Err(e) if ops::is_unreadable(&e) => {
+                ops::notice_unreadable();
+                None
+            }
+            Err(e) => return Err(e),
         };
         match put(body.clone(), generation).await {
             Ok(_) => return Ok(()),
@@ -187,9 +195,28 @@ where
 pub(crate) async fn remove(vk: &[u8]) -> Result<(), CallError> {
     note_changed(vk);
     let item = item_for(vk);
-    match ops::get_item(item.clone()).await? {
-        Some(stored) => ops::delete_item(item, stored.generation).await,
-        None => Ok(()),
+    remove_with(
+        || ops::get_item(item.clone()),
+        |generation| ops::delete_item(item.clone(), generation),
+    )
+    .await
+}
+
+/// Delete what `get` reads. A contact that cannot be read (`Unreadable`) is
+/// deleted all the same: the delegate removes an unreadable item without
+/// comparing its generation, so the user can still get rid of it.
+async fn remove_with<G, GF, D, DF>(get: G, delete: D) -> Result<(), CallError>
+where
+    G: FnOnce() -> GF,
+    GF: std::future::Future<Output = Result<Option<freenet_mail_protocol::Item>, CallError>>,
+    D: FnOnce(u64) -> DF,
+    DF: std::future::Future<Output = Result<(), CallError>>,
+{
+    match get().await {
+        Ok(Some(stored)) => delete(stored.generation).await,
+        Ok(None) => Ok(()),
+        Err(e) if ops::is_unreadable(&e) => delete(0).await,
+        Err(e) => Err(e),
     }
 }
 
@@ -306,8 +333,20 @@ thread_local! {
     static WRITES: std::cell::RefCell<KeyQueue<Write>> = std::cell::RefCell::new(KeyQueue::new());
 }
 
+/// Journal and queue `write`; `true` when it is the first for its contact
+/// (so a writer must be started).
+///
+/// Journalled when the change is made, not when its write starts: a write
+/// queued behind an earlier one for the same contact may start only after
+/// the startup load has read the contact, and the load must not bring back
+/// a removal (or undo an edit) the page already made.
+fn queue_write(vk: &[u8], write: Write) -> bool {
+    note_changed(vk);
+    WRITES.with(|w| w.borrow_mut().push(vk.to_vec(), write))
+}
+
 fn enqueue(vk: Vec<u8>, write: Write) {
-    let start = WRITES.with(|w| w.borrow_mut().push(vk.clone(), write));
+    let start = queue_write(&vk, write);
     if !start {
         return;
     }
@@ -415,6 +454,31 @@ mod tests {
         );
     }
 
+    /// A removal queued during the startup load behind an earlier write for
+    /// the same contact is journalled when it is made, not when its write
+    /// finally starts (after the load has read the contact): the load must
+    /// not bring the removed contact back.
+    #[test]
+    fn a_removal_queued_during_the_load_is_journalled_at_once() {
+        let vk = vec![0x73; 1952];
+        WRITES.with(|w| *w.borrow_mut() = KeyQueue::new());
+        // An earlier save, queued before the load began, is still running.
+        assert!(queue_write(&vk, Write::Save(contact(vk.clone()))));
+        let load = begin_load();
+        let starts_writer = queue_write(
+            &vk,
+            Write::Remove {
+                alias: "Bob".into(),
+            },
+        );
+        assert!(!starts_writer, "queued behind the running save");
+        assert!(
+            unchanged_since_load_began(&load, vec![contact(vk.clone())]).is_empty(),
+            "the load brought back a contact removed while it ran"
+        );
+        WRITES.with(|w| *w.borrow_mut() = KeyQueue::new());
+    }
+
     /// Writes for one contact run in the order they were made; a writer is
     /// started only for the first, and stops when the queue drains.
     #[test]
@@ -464,8 +528,9 @@ mod tests {
             }
             async move { Ok(now) }
         };
-        let put = |body: Vec<u8>, expected: u64| {
+        let put = |body: Vec<u8>, expected: Option<u64>| {
             let current = stored.borrow().as_ref().map_or(0, |i| i.generation);
+            let expected = expected.expect("a readable contact is written by generation");
             let result = if current == expected {
                 *stored.borrow_mut() = Some(Item {
                     item: item.clone(),
@@ -489,6 +554,46 @@ mod tests {
             Some(b"new".to_vec()),
             "the contact is stored, not dropped"
         );
+    }
+
+    fn unreadable() -> CallError {
+        use freenet_mail_protocol::{Failure, FailureCode};
+        CallError::Failed(Failure {
+            code: FailureCode::Unreadable,
+            detail: String::new(),
+        })
+    }
+
+    /// A stored contact that cannot be read is replaced by a save (the
+    /// write goes with no expected generation), instead of every save
+    /// failing for good.
+    #[test]
+    fn saving_a_contact_that_cannot_be_read_replaces_it() {
+        use futures::executor::block_on;
+        use std::cell::RefCell;
+        let written = RefCell::new(None);
+        let get = || async { Err(unreadable()) };
+        let put = |body: Vec<u8>, expected: Option<u64>| {
+            *written.borrow_mut() = Some((body, expected));
+            async { Ok(1) }
+        };
+        block_on(store_replacing(b"new".to_vec(), get, put)).unwrap();
+        assert_eq!(*written.borrow(), Some((b"new".to_vec(), None)));
+    }
+
+    /// A stored contact that cannot be read is still deleted by a remove.
+    #[test]
+    fn removing_a_contact_that_cannot_be_read_deletes_it() {
+        use futures::executor::block_on;
+        use std::cell::RefCell;
+        let deleted = RefCell::new(false);
+        let get = || async { Err(unreadable()) };
+        let delete = |_generation: u64| {
+            *deleted.borrow_mut() = true;
+            async { Ok(()) }
+        };
+        block_on(remove_with(get, delete)).unwrap();
+        assert!(*deleted.borrow(), "an unreadable contact must be removable");
     }
 
     /// A contact write refused at the contact cap says the limit was reached
