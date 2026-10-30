@@ -48,11 +48,11 @@ const PEER_BASE_URL = CONTRACT_ID
 
 // Iso harness wipes state per make-task invocation, but Playwright
 // retries reuse the same iso net — second attempt collides with the
-// first run's AFT slot / identity-management state. Keep this spec
+// first run's AFT slot / mail-delegate state. Keep this spec
 // single-shot; flake is a real bug, not a transient.
 test.describe.configure({ retries: 0 });
 
-// Each test gets unique alias names so identity-management delegate
+// Each test gets unique alias names so mail-delegate
 // state on the gw (and peer) doesn't collide across tests in the same
 // run. The harness wipes once at the start of `cargo make
 // test-e2e-real-node`, but the 3 specs run sequentially against the
@@ -326,7 +326,7 @@ test.describe("Live node E2E", () => {
 
   // Cross-node send: alice on gw (7510), bob on peer (7511). Each
   // Cross-node send + receive end-to-end. Each node has its own
-  // identity-management delegate state, so bob's keypair stays on
+  // mail-delegate state, so bob's keypair stays on
   // the peer and never lands in alice's ADDRESS_BOOK as Entry::Own.
   // Single-gateway-with-two-contexts is unsupported for this
   // verification — alice on gw, bob on peer is the canonical setup.
@@ -1303,7 +1303,7 @@ test.describe("Live node E2E", () => {
       });
       await aliceApp.locator('[data-testid="fm-import-submit"]').click();
 
-      // Wait for the import to commit to the local node + identity-management
+      // Wait for the import to commit to the local node + mail
       // delegate before reloading — otherwise the reload races the in-flight
       // CreateContact and the rehydrated address book lacks bob, so the
       // post-reload compose can't resolve bob's fingerprint.
