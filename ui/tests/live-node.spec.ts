@@ -2264,6 +2264,91 @@ test.describe("Live node E2E", () => {
       stopPump();
     }
   });
+
+  test("a renamed identity's draft and settings persist across reload", async ({
+    browser,
+  }) => {
+    // Local state is stored under the identity's address, not its alias.
+    // Writes made under the NEW alias after a rename must reach the same
+    // identity's items and come back after a reload (a lookup by the old
+    // alias failed every such write with "no identity").
+    const stopPump = startPermissionPump();
+    const ctx = await browser.newContext();
+    const run = `${Date.now().toString(36)}${test.info().repeatEachIndex}`;
+    const before = `rnold${run}`;
+    const after = `rnnew${run}`;
+    const subject = `renamed draft ${run}`;
+    try {
+      const page = await ctx.newPage();
+      await page.goto("");
+      await createIdentity(page, before);
+      const app = page.frameLocator("iframe#app");
+
+      // Rename.
+      await app
+        .locator(`[data-testid="fm-id-row"][data-alias="${before}"] [data-testid="fm-id-rename"]`)
+        .click();
+      await app.locator('[data-testid="fm-rename-input"]').fill(after);
+      await app.locator('[data-testid="fm-rename-submit"]').click();
+      await expect(
+        app.locator(`[data-testid="fm-id-row"][data-alias="${after}"]`),
+        "the row shows the new alias",
+      ).toBeVisible({ timeout: 30_000 });
+
+      // Under the new alias: save a draft, and change a setting.
+      await app
+        .locator(`[data-testid="fm-id-row"][data-alias="${after}"] [data-testid="fm-id-open"]`)
+        .first()
+        .click();
+      await app.locator('[data-testid="fm-compose-btn"]').click();
+      const sheet = app.locator('[data-testid="fm-compose-sheet"]');
+      await sheet.locator('input[placeholder="alias or address"]').fill(after);
+      await sheet.locator('input[placeholder="subject"]').fill(subject);
+      await sheet.locator("textarea.sheet-textarea").fill("written after the rename");
+      // Let the debounced autosave reach the delegate before closing.
+      await page.waitForTimeout(2_000);
+      await sheet.locator(".sheet-x").click();
+      await expect(sheet).toHaveCount(0);
+      await app.locator('[data-testid="fm-settings-btn"]').click();
+      await app
+        .locator('[data-testid="fm-settings-nav-item"][data-screen="inbox"]')
+        .click();
+      await app.locator('[data-testid="fm-thread-view-select"]').selectOption("compact");
+
+      // After a reload both are still there, under the renamed identity.
+      await expect
+        .poll(
+          async () => {
+            await page.reload();
+            const fresh = page.frameLocator("iframe#app");
+            await expect(fresh.locator(".brand-name").first()).toContainText(APP_NAME, {
+              timeout: 60_000,
+            });
+            await fresh
+              .locator(`[data-testid="fm-id-row"][data-alias="${after}"] [data-testid="fm-id-open"]`)
+              .first()
+              .click();
+            // Local state loads just after the identities appear.
+            await fresh.locator('[data-testid="fm-folder-drafts"]').click();
+            const card = fresh.locator('[data-testid="fm-draft-card"]', { hasText: subject });
+            await expect(card).toBeVisible({ timeout: 15_000 }).catch(() => {});
+            const draft = (await card.count()) > 0 ? "draft" : "no-draft";
+            await fresh.locator('[data-testid="fm-settings-btn"]').click();
+            await fresh
+              .locator('[data-testid="fm-settings-nav-item"][data-screen="inbox"]')
+              .click();
+            const viewSelect = fresh.locator('[data-testid="fm-thread-view-select"]');
+            await expect(viewSelect).toHaveValue("compact", { timeout: 15_000 }).catch(() => {});
+            return `${draft}/${await viewSelect.inputValue()}`;
+          },
+          { timeout: 120_000, intervals: [2_000] },
+        )
+        .toBe("draft/compact");
+    } finally {
+      await ctx.close().catch(() => {});
+      stopPump();
+    }
+  });
 });
 
 async function composeAndSend(
