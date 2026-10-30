@@ -439,6 +439,46 @@ fn a_create_that_never_finished_frees_its_slot_on_the_next_listing() {
     assert_eq!(identity_index_len(&mut env), 1, "the slot was freed");
 }
 
+/// The last step of a deletion removes its marker. If the marker cannot be
+/// read and its removal is refused every time, the deletion must not answer
+/// `Deleted` (the marker may remain): it reports that it may have happened,
+/// and a retry finishes it.
+#[test]
+fn a_deletion_is_not_reported_done_while_its_marker_may_remain() {
+    use crate::env::mem::{FaultOp, Rule};
+    let mut env = MemEnv::default();
+    let me = create(&mut env, PROD, "alice");
+    let marker_key = full(&mut env, &store::deleted_rel(&me.addr));
+    let rule = |op, key: &str, nth| Rule {
+        op,
+        key_contains: key.into(),
+        nth,
+    };
+    let mut faults = Faults::default();
+    faults.rules = vec![
+        rule(FaultOp::GetBlindFrom, &marker_key, 1),
+        rule(FaultOp::RemoveFail, "/dl/", 1),
+        rule(FaultOp::RemoveFail, "dl/", 2),
+        rule(FaultOp::RemoveFail, "/dl", 3),
+    ];
+    env.faults = Some(faults);
+    let out = send(
+        &mut env,
+        app(PROD),
+        Op::DeleteIdentity {
+            addr: me.addr,
+            expected_gen: me.generation,
+        },
+    );
+    let (id, _, _) = prompt(&out);
+    let out = answer(&mut env, PROD, id, crate::consent::DELETE);
+    assert_ne!(
+        response(&out).result,
+        Ok(Reply::Deleted),
+        "reported deleted while the marker may remain"
+    );
+}
+
 /// A create whose record write and its undo were refused, but whose marking
 /// as failed (`f`) went through, leaves an entry with no record: the next
 /// listing frees that slot.

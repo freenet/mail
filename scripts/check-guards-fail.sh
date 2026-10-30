@@ -248,11 +248,11 @@ dt "an import re-indexes a present, unindexed identity" "$D/handlers.rs" \
     importing_a_present_but_unindexed_identity_indexes_it_again
 dt "re-creating an identity clears its deletion marker" "$D/handlers.rs" \
     '            if s.del(&marker).is_err() && s.put(&marker, store::MARKER_SPENT).is_err() {' \
-    '            if false {' \
+    '            if false' \
     a_reimported_identity_clears_its_old_deletion_marker
 dt "a delete removes a key that reads as absent" "$D/store.rs" \
-    '            if !self.env.remove(&key) && !self.env.remove(&key) && self.fetch(&key).is_some() {' \
-    '            if false {' \
+    '            if !(self.env.remove(&key) || self.env.remove(&key) || self.env.remove(&key))' \
+    '            if false' \
     a_delete_removes_a_key_whose_reads_fail
 dt "an unreadable index is not taken for empty" "$D/store.rs" \
     'if self.get(&index_marker_rel(rel)).as_deref() == Some(MARKER_LIVE) {' 'if false {' \
@@ -282,8 +282,9 @@ dt "listing frees index entries whose item is gone" "$D/handlers.rs" \
     '        if s.index_remove_many(&ix, &ids).is_ok() {' '        if false && s.index_remove_many(&ix, &ids).is_ok() {' \
     listing_frees_an_index_entry_whose_item_is_gone
 dbt() { guard "$1" "$2" "$3" "$4" "tests:$BLIND_RUN" blind_tests; }
-dbt "a deletion answers Deleted only once its marker is confirmed removed" "$D/handlers.rs" \
-    '    s.del_written(&marker)?;' '    s.del(&marker)?;'
+dt "a deletion answers Deleted only once its marker is confirmed removed" "$D/handlers.rs" \
+    '    s.del_written(&marker)?;' '    s.del(&marker)?;' \
+    a_deletion_is_not_reported_done_while_its_marker_may_remain
 dt "an index that cannot be read may hold a failed create's entry" "$D/handlers.rs" \
     '            if s.index(&ix).is_ok_and(|(_, ids)| !ids.contains(&item.id)) {' \
     '            if !s.index(&ix).is_ok_and(|(_, ids)| ids.contains(&item.id)) {' \
