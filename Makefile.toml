@@ -1037,10 +1037,15 @@ CONTRACT_ID="$(cat "$ROOT/target/webapp/contract-id.txt")"
 BASE_URL="http://127.0.0.1:$GW_PORT/v1/contract/web/$CONTRACT_ID/"
 echo "running live-node spec against $BASE_URL"
 
+# E2E_PLAYWRIGHT_ARGS passes extra Playwright options through, split on
+# whitespace (no quoting), e.g.
+#   E2E_PLAYWRIGHT_ARGS='--repeat-each=5 --grep=closes.is.saved'
+# to show a live test is deterministic before relying on it.
+read -r -a extra_args <<< "${E2E_PLAYWRIGHT_ARGS:-}"
 cd "$ROOT/ui/tests" && \
     FREENET_EMAIL_BASE_URL="$BASE_URL" \
     FREENET_ISO_GW_PORT="$GW_PORT" \
     FREENET_ISO_GW_LOG_DIR="$ISO_ROOT/gw/logs" \
     FREENET_ISO_PEER_LOG_DIR="$ISO_ROOT/peer/logs" \
-    npx playwright test live-node.spec.ts --project=chromium
+    npx playwright test live-node.spec.ts --project=chromium ${extra_args[@]+"${extra_args[@]}"}
 '''
