@@ -511,3 +511,159 @@ mod tests {
         assert_eq!(uuid_string(&bytes).unwrap(), id);
     }
 }
+
+/// The writes and the load, run against the real mail delegate in the page
+/// (the offline build), so they are exercised without a node.
+#[cfg(all(test, feature = "local-delegate", not(feature = "use-node")))]
+mod delegate_tests {
+    use super::*;
+    use futures::executor::block_on;
+
+    /// An identity in the in-page delegate, registered under `alias` as the
+    /// startup load registers one, so writes for `alias` find their owner.
+    fn identity(alias: &str) -> Addr {
+        let (info, _) = block_on(ops::create_identity(alias.to_string(), String::new())).unwrap();
+        let identity = crate::app::login::Identity::from_info(&info, crate::app::UserId::new());
+        let key = crate::inbox::inbox_key_for(&identity.ml_dsa_vk()).unwrap();
+        crate::inbox::InboxModel::set_contract_identity(key, identity);
+        info.addr
+    }
+
+    fn loaded(alias: &str, addr: Addr) -> LocalState {
+        block_on(load(&[(alias.to_string(), addr)])).unwrap()
+    }
+
+    fn draft(subject: &str) -> Draft {
+        Draft {
+            to: "bob".into(),
+            subject: subject.into(),
+            body: String::new(),
+            updated_at: 0,
+            thread_id: None,
+            in_reply_to: None,
+            quoted_excerpt: None,
+        }
+    }
+
+    fn archived() -> ArchivedMessage {
+        ArchivedMessage {
+            from: "bob".into(),
+            title: "t".into(),
+            content: "c".into(),
+            archived_at: 0,
+            thread_id: None,
+            in_reply_to: None,
+            quoted_excerpt: None,
+        }
+    }
+
+    #[test]
+    fn drafts_are_stored_and_a_discard_removes_them() {
+        let addr = identity("items-drafts");
+        let id = uuid::Uuid::new_v4().to_string();
+        block_on(save_draft("items-drafts".into(), id.clone(), draft("one"))).unwrap();
+        // An autosave of the same draft replaces it.
+        block_on(save_draft("items-drafts".into(), id.clone(), draft("two"))).unwrap();
+        let state = loaded("items-drafts", addr);
+        let drafts: Vec<_> = state.drafts_of("items-drafts").collect();
+        assert_eq!(drafts.len(), 1);
+        assert_eq!(drafts[0].1.subject, "two");
+        block_on(delete_draft("items-drafts".into(), id)).unwrap();
+        assert_eq!(
+            loaded("items-drafts", addr)
+                .drafts_of("items-drafts")
+                .count(),
+            0
+        );
+    }
+
+    /// Archive, then the inbox removal: the removal runs only once the
+    /// delegate acknowledged the archived copy, which is then stored.
+    #[test]
+    fn the_inbox_removal_runs_after_the_archived_copy_is_stored() {
+        let addr = identity("items-archive");
+        let id = message_id_for(b"an archived ciphertext");
+        let removed = std::rc::Rc::new(std::cell::Cell::new(false));
+        let flag = removed.clone();
+        let outcome = block_on(crate::app::store_then(
+            archive_message("items-archive".into(), id, archived()),
+            move || async move { flag.set(true) },
+        ));
+        assert_eq!(outcome, super::super::Stored::Yes);
+        assert!(removed.get(), "the removal ran after the ack");
+        let state = loaded("items-archive", addr);
+        assert!(
+            state.is_archived("items-archive", id),
+            "the archived copy is stored"
+        );
+        assert!(
+            state.is_read("items-archive", id),
+            "archiving marks it read"
+        );
+    }
+
+    /// When the archived copy cannot be stored, nothing is removed.
+    #[test]
+    fn the_inbox_removal_does_not_run_when_the_archive_is_not_stored() {
+        // No identity holds this alias: the write fails.
+        let id = message_id_for(b"an unstorable ciphertext");
+        let removed = std::rc::Rc::new(std::cell::Cell::new(false));
+        let flag = removed.clone();
+        let outcome = block_on(crate::app::store_then(
+            archive_message("nobody-holds-this".into(), id, archived()),
+            move || async move { flag.set(true) },
+        ));
+        assert_ne!(outcome, super::super::Stored::Yes);
+        assert!(!removed.get(), "no removal without a stored archive");
+    }
+
+    #[test]
+    fn a_deleted_message_stays_deleted_and_loses_its_copies() {
+        let addr = identity("items-delete");
+        let id = message_id_for(b"a deleted ciphertext");
+        block_on(archive_message("items-delete".into(), id, archived())).unwrap();
+        block_on(delete_message("items-delete".into(), id)).unwrap();
+        let state = loaded("items-delete", addr);
+        assert!(state.is_deleted("items-delete", id));
+        assert!(!state.is_archived("items-delete", id));
+    }
+
+    /// Two tabs change different settings fields from the same starting
+    /// point; both changes are stored.
+    #[test]
+    fn two_tabs_changing_different_settings_keep_both() {
+        let addr = identity("items-settings");
+        let start = GlobalSettings::default();
+        let mut tab_a = start.clone();
+        tab_a.inbox.drafts_in_inbox = true;
+        let mut tab_b = start.clone();
+        tab_b.advanced.custom_relay_url = "ws://tab-b".into();
+        block_on(set_global_settings(start.clone(), tab_a)).unwrap();
+        block_on(set_global_settings(start, tab_b)).unwrap();
+        let state = loaded("items-settings", addr);
+        assert!(
+            state.global_settings().inbox.drafts_in_inbox,
+            "tab A's change kept"
+        );
+        assert_eq!(
+            state.global_settings().advanced.custom_relay_url,
+            "ws://tab-b"
+        );
+
+        let before = IdentitySettings::default();
+        let mut name = before.clone();
+        name.display_name = "Name".into();
+        let mut sig = before.clone();
+        sig.signature = "-- sig".into();
+        block_on(set_identity_settings(
+            "items-settings".into(),
+            before.clone(),
+            name,
+        ))
+        .unwrap();
+        block_on(set_identity_settings("items-settings".into(), before, sig)).unwrap();
+        let settings = loaded("items-settings", addr).identity_settings("items-settings");
+        assert_eq!(settings.display_name, "Name");
+        assert_eq!(settings.signature, "-- sig");
+    }
+}

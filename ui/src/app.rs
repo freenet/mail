@@ -5019,7 +5019,7 @@ const CONFIRM_ARCHIVE: Confirmation = Confirmation {
 /// Run `write`, then `then()` only if the write is stored. Returns the
 /// outcome. Shared by archive (the inbox removal must wait for the archived
 /// copy) and its tests.
-async fn store_then<W, F, R>(write: W, then: F) -> crate::local_state::Stored
+pub(crate) async fn store_then<W, F, R>(write: W, then: F) -> crate::local_state::Stored
 where
     W: std::future::Future<Output = Result<(), crate::DynError>>,
     F: FnOnce() -> R,
