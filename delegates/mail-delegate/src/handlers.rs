@@ -821,7 +821,20 @@ fn delete_step(s: &mut Space<'_>, addr: &Addr) -> OpResult {
     let mut remaining = 0usize;
     for kind in ALL_KINDS.into_iter().filter(|k| store::shape(*k).0) {
         let ix = index_rel(kind, Some(addr));
-        let (_, ids) = s.index(&ix)?;
+        let ids = match s.index(&ix) {
+            Ok((_, ids)) => ids,
+            // A list that keeps failing to read cannot be walked, and
+            // nothing lists the host's keys, so its items cannot be found.
+            // The user approved this deletion: forget the list (removal
+            // needs no read) and remove everything else, the record with
+            // its keys included, rather than keep it all because one list
+            // is unreadable. The items it named stay as unreachable bytes.
+            Err(_) if s.index_unreadable(&ix) => {
+                s.reset_index(&ix)?;
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
         let batch: Vec<Vec<u8>> = ids.iter().take(budget).cloned().collect();
         for id in &batch {
             s.del(&item_rel(&ItemRef {

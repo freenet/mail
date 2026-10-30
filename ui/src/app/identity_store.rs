@@ -292,6 +292,29 @@ pub(crate) async fn repair_identity_index() {
     }
 }
 
+/// Reset one of `owner`'s lists that cannot be read (the delegate asks the
+/// user, naming the list), then load again: the list starts empty.
+pub(crate) async fn repair_item_list(owner: Addr, kind: freenet_mail_protocol::ItemKind) {
+    let list = crate::local_state::list_name(kind);
+    match ops::repair_index(Some(kind), Some(owner)).await {
+        Ok(()) => {
+            crate::local_state::forget_unreadable_list(owner, kind);
+            crate::toast::push_toast_detached(
+                format!("Repaired. Your {list} list starts again; what it held can't be shown."),
+                crate::toast::ToastLevel::Success,
+            );
+            load_and_report().await;
+        }
+        Err(e) => {
+            crate::log::error(format!("repairing a list of {list} failed: {e}"), None);
+            crate::toast::push_toast_detached(
+                format!("Couldn't repair the {list} list: {e}"),
+                crate::toast::ToastLevel::Error,
+            );
+        }
+    }
+}
+
 fn startup_load_failure_text(what: &str, e: &crate::mail_delegate::CallError) -> String {
     format!("Couldn't load {what}: {e}. Reload the page to try again.")
 }

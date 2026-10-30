@@ -20,7 +20,9 @@
 //! storage writes fail, a stash is claimed in the prompt index before it is
 //! written, and is only answered once it has been removed.
 
-use freenet_mail_protocol::{Failure, FailureCode, Op, Reply, RequestId, from_cbor, to_cbor};
+use freenet_mail_protocol::{
+    Failure, FailureCode, ItemKind, Op, Reply, RequestId, from_cbor, to_cbor,
+};
 use freenet_stdlib::prelude::{
     ClientResponse, ContractInstanceId, DelegateError, NotificationMessage, OutboundDelegateMsg,
     UserInputRequest, UserInputResponse,
@@ -347,11 +349,29 @@ fn prompt_text(s: &Space<'_>, op: &Op) -> String {
              Your identities stay stored, but Mail will not show them until you restore \
              each one from its recovery key."
         ),
-        Op::RepairIndex { kind: Some(_), .. } => format!(
-            "{app} wants to repair a list of Mail's saved items, which can no longer be \
-             read.\n\n\
-             The items it listed will no longer be shown. New ones can be saved again."
-        ),
+        Op::RepairIndex {
+            kind: Some(kind),
+            owner,
+        } => {
+            let list = match kind {
+                ItemKind::Contact => "contacts",
+                ItemKind::Draft => "drafts",
+                ItemKind::Sent => "sent mail",
+                ItemKind::Kept => "saved mail",
+                ItemKind::Archived => "archived mail",
+                ItemKind::Flags => "read and deleted marks",
+                ItemKind::IdentitySettings | ItemKind::GlobalSettings => "settings",
+            };
+            let whose = owner
+                .as_ref()
+                .map(|o| format!(" of {}", name(o)))
+                .unwrap_or_default();
+            format!(
+                "{app} wants to repair Mail's list of {list}{whose}, which can no longer be \
+                 read.\n\n\
+                 The {list} it listed will no longer be shown. New ones can be saved again."
+            )
+        }
         Op::DeleteIdentity { addr, .. } => format!(
             "{app} wants to delete {} and everything stored for it: its keys, drafts \
              and saved mail.\n\n\

@@ -307,6 +307,10 @@ dt "a create's marker does not stop deleting an unreadable identity" "$D/consent
                     != Some(crate::store::MARKER_DELETING)' \
     '                && s.get(&crate::store::deleted_rel(addr)).is_none()' \
     a_spent_create_marker_does_not_stop_deleting_an_unreadable_identity
+dt "an unreadable list does not block deleting its identity" "$D/handlers.rs" \
+    '            Err(_) if s.index_unreadable(&ix) => {' \
+    '            Err(_) if false => {' \
+    an_unreadable_item_index_does_not_block_deleting_the_identity
 dt "an unreadable item is reported and a create replaces it" "$D/handlers.rs" \
     "fn listed_but_unreadable(s: &Space<'_>, item: &ItemRef) -> Result<bool, Failure> {" \
     "fn listed_but_unreadable(s: &Space<'_>, item: &ItemRef) -> Result<bool, Failure> {

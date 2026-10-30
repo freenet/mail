@@ -672,6 +672,7 @@ pub(crate) use items::{
     delete_sent, full_message_id, load, message_id_for, reclaim_flags, save_draft, save_sent,
     set_sent_delivery_state,
 };
+pub(crate) use items::{forget_unreadable_list, list_name, unreadable_lists};
 // `unarchive_message` is wired but unused until #60 (true unarchive).
 #[allow(unused_imports)]
 pub(crate) use items::unarchive_message;

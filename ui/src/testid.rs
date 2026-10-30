@@ -147,6 +147,8 @@ pub(crate) const FM_ID_UNFINISHED_DELETE: &str = "fm-id-unfinished-delete";
 pub(crate) const FM_ID_FINISH_DELETE: &str = "fm-id-finish-delete";
 pub(crate) const FM_ID_REPAIR_STORAGE: &str = "fm-id-repair-storage";
 pub(crate) const FM_ID_REPAIR_STORAGE_NOTE: &str = "fm-id-repair-storage-note";
+pub(crate) const FM_ID_REPAIR_LIST: &str = "fm-id-repair-list";
+pub(crate) const FM_ID_REPAIR_LIST_NOTE: &str = "fm-id-repair-list-note";
 pub(crate) const FM_RENAME_INPUT: &str = "fm-rename-input";
 pub(crate) const FM_RENAME_SUBMIT: &str = "fm-rename-submit";
 pub(crate) const FM_DELETE_CONFIRM_INPUT: &str = "fm-delete-confirm-input";
@@ -284,6 +286,8 @@ mod tests {
             ("fmIdFinishDelete", super::FM_ID_FINISH_DELETE),
             ("fmIdRepairStorage", super::FM_ID_REPAIR_STORAGE),
             ("fmIdRepairStorageNote", super::FM_ID_REPAIR_STORAGE_NOTE),
+            ("fmIdRepairList", super::FM_ID_REPAIR_LIST),
+            ("fmIdRepairListNote", super::FM_ID_REPAIR_LIST_NOTE),
             ("fmRenameInput", super::FM_RENAME_INPUT),
             ("fmRenameSubmit", super::FM_RENAME_SUBMIT),
             ("fmDeleteConfirmInput", super::FM_DELETE_CONFIRM_INPUT),

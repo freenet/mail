@@ -88,6 +88,8 @@
   "fmIdFinishDelete": "fm-id-finish-delete",
   "fmIdRepairStorage": "fm-id-repair-storage",
   "fmIdRepairStorageNote": "fm-id-repair-storage-note",
+  "fmIdRepairList": "fm-id-repair-list",
+  "fmIdRepairListNote": "fm-id-repair-list-note",
   "fmRenameInput": "fm-rename-input",
   "fmRenameSubmit": "fm-rename-submit",
   "fmDeleteConfirmInput": "fm-delete-confirm-input",

@@ -1267,6 +1267,26 @@ pub(super) fn Identities() -> Element {
     // The node can no longer read Mail's list of identities: offer to
     // reset it (the delegate asks first), then restore from recovery keys.
     let needs_repair = *crate::app::identity_store::IDENTITY_INDEX_NEEDS_REPAIR.read();
+    // One of an identity's lists (drafts, sent mail, ...) cannot be read:
+    // offer to repair that list alone. Reading GENERATION re-renders when
+    // the set changes.
+    let _ = crate::local_state::GENERATION();
+    let unreadable_lists: Vec<(
+        freenet_mail_protocol::Addr,
+        freenet_mail_protocol::ItemKind,
+        String,
+    )> = crate::local_state::unreadable_lists()
+        .into_iter()
+        .map(|(owner, kind)| {
+            let who = Identity::get_aliases()
+                .borrow()
+                .iter()
+                .find(|i| i.addr == owner)
+                .map(|i| i.alias.to_string())
+                .unwrap_or_else(|| "an identity".to_string());
+            (owner, kind, who)
+        })
+        .collect();
 
     rsx! {
         div { style: "display:flex; align-items:baseline; justify-content:space-between; margin-bottom:18px;",
@@ -1291,6 +1311,27 @@ pub(super) fn Identities() -> Element {
                         );
                     },
                     "Repair storage"
+                }
+            }
+        }
+        for (owner, kind, who) in unreadable_lists {
+            div {
+                class: "field-help",
+                "data-testid": testid::FM_ID_REPAIR_LIST_NOTE,
+                style: "display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:10px;",
+                span {
+                    "The {crate::local_state::list_name(kind)} of {who} can't be read on this node. \
+                     Repairing starts that list again; what it held can't be shown."
+                }
+                button {
+                    class: "btn btn-secondary",
+                    "data-testid": testid::FM_ID_REPAIR_LIST,
+                    onclick: move |_| {
+                        crate::app::identity_store::spawn_detached(
+                            crate::app::identity_store::repair_item_list(owner, kind),
+                        );
+                    },
+                    "Repair"
                 }
             }
         }

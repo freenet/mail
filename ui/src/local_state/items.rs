@@ -680,13 +680,97 @@ fn readable_or_default(
     }
 }
 
+thread_local! {
+    /// An identity's lists the delegate keeps answering `Busy` for: lists
+    /// it wrote but can no longer read (a file the node cannot read or
+    /// decrypt). "Your identities" offers to repair each one.
+    static UNREADABLE_LISTS: std::cell::RefCell<Vec<(Addr, ItemKind)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// How a list of `kind` is named to the user (the delegate's repair prompt
+/// names it the same way).
+pub(crate) fn list_name(kind: ItemKind) -> &'static str {
+    match kind {
+        ItemKind::Contact => "contacts",
+        ItemKind::Draft => "drafts",
+        ItemKind::Sent => "sent mail",
+        ItemKind::Kept => "saved mail",
+        ItemKind::Archived => "archived mail",
+        ItemKind::Flags => "read and deleted marks",
+        ItemKind::IdentitySettings | ItemKind::GlobalSettings => "settings",
+    }
+}
+
+/// The lists that could not be read on the last load, for the repair offer.
+pub(crate) fn unreadable_lists() -> Vec<(Addr, ItemKind)> {
+    UNREADABLE_LISTS.with(|u| u.borrow().clone())
+}
+
+/// A list was repaired: stop offering to repair it.
+pub(crate) fn forget_unreadable_list(owner: Addr, kind: ItemKind) {
+    UNREADABLE_LISTS.with(|u| u.borrow_mut().retain(|e| *e != (owner, kind)));
+    super::bump();
+}
+
+fn note_unreadable_list(owner: Addr, kind: ItemKind) {
+    UNREADABLE_LISTS.with(|u| {
+        let mut u = u.borrow_mut();
+        if !u.contains(&(owner, kind)) {
+            u.push((owner, kind));
+        }
+    });
+    super::bump();
+}
+
+/// Every item of `kind` that `owner` has. A list that still answers `Busy`
+/// after retries (unreadable, not merely busy) is recorded for repair and
+/// loads as empty, so one unreadable list does not stop the rest loading.
+async fn list_or_note_unreadable<L, LF>(
+    owner: Addr,
+    kind: ItemKind,
+    mut list: L,
+) -> Result<Vec<freenet_mail_protocol::Item>, CallError>
+where
+    L: FnMut() -> LF,
+    LF: std::future::Future<Output = Result<Vec<freenet_mail_protocol::Item>, CallError>>,
+{
+    let mut attempt = 0;
+    loop {
+        match list().await {
+            Ok(items) => return Ok(items),
+            Err(e) if matches!(e.code(), Some(freenet_mail_protocol::FailureCode::Busy)) => {
+                if attempt < 2 {
+                    attempt += 1;
+                    ops::pause_ms(200 * 2u32.pow(attempt)).await;
+                    continue;
+                }
+                crate::log::error(
+                    format!("a list of `{kind:?}` items cannot be read: {e}"),
+                    None,
+                );
+                note_unreadable_list(owner, kind);
+                return Ok(Vec::new());
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+async fn list_owned(
+    owner: Addr,
+    kind: ItemKind,
+) -> Result<Vec<freenet_mail_protocol::Item>, CallError> {
+    list_or_note_unreadable(owner, kind, || ops::list_all_items(kind, Some(owner))).await
+}
+
 /// Everything stored for `identities` (alias, address), as one snapshot.
 pub(crate) async fn load(identities: &[(String, Addr)]) -> Result<LocalState, CallError> {
     let mut state = LocalState::default();
     for (alias, addr) in identities {
         let owner = Some(*addr);
         let entry = state.aliases_mut().entry(alias.clone()).or_default();
-        for i in ops::list_all_items(ItemKind::Draft, owner).await? {
+        for i in list_owned(*addr, ItemKind::Draft).await? {
             if let (Some(id), Some(d)) = (
                 uuid_string(&i.item.id),
                 decode::<StoredDraft>("draft", &i.body),
@@ -696,25 +780,25 @@ pub(crate) async fn load(identities: &[(String, Addr)]) -> Result<LocalState, Ca
                 entry.drafts.insert(id, d.draft);
             }
         }
-        for i in ops::list_all_items(ItemKind::Sent, owner).await? {
+        for i in list_owned(*addr, ItemKind::Sent).await? {
             if let (Some(id), Some(s)) = (uuid_string(&i.item.id), decode("sent message", &i.body))
             {
                 entry.sent.insert(id, s);
             }
         }
-        for i in ops::list_all_items(ItemKind::Kept, owner).await? {
+        for i in list_owned(*addr, ItemKind::Kept).await? {
             if let (Some(id), Some(k)) = (message_id(&i.item.id), decode("kept message", &i.body)) {
                 entry.kept.insert(id.to_string(), k);
             }
         }
-        for i in ops::list_all_items(ItemKind::Archived, owner).await? {
+        for i in list_owned(*addr, ItemKind::Archived).await? {
             if let (Some(id), Some(a)) =
                 (message_id(&i.item.id), decode("archived message", &i.body))
             {
                 entry.archived.insert(id.to_string(), a);
             }
         }
-        for i in ops::list_all_items(ItemKind::Flags, owner).await? {
+        for i in list_owned(*addr, ItemKind::Flags).await? {
             if let (Some(id), Some(f)) = (
                 message_id(&i.item.id),
                 decode::<Flags>("message flags", &i.body),
@@ -745,6 +829,41 @@ pub(crate) async fn load(identities: &[(String, Addr)]) -> Result<LocalState, Ca
 
 #[cfg(test)]
 mod tests {
+    fn failure(code: freenet_mail_protocol::FailureCode) -> CallError {
+        CallError::Failed(freenet_mail_protocol::Failure {
+            code,
+            detail: String::new(),
+        })
+    }
+
+    /// Round 10: a list that keeps answering `Busy` (unreadable) loads as
+    /// empty and is recorded for the repair offer, so one unreadable list
+    /// does not fail the whole load; other failures still fail it.
+    #[test]
+    fn an_unreadable_list_loads_empty_and_is_offered_for_repair() {
+        use super::*;
+        use futures::executor::block_on;
+        let owner = Addr([0x41; 24]);
+        UNREADABLE_LISTS.with(|u| u.borrow_mut().clear());
+        let tries = std::cell::Cell::new(0);
+        let items = block_on(list_or_note_unreadable(owner, ItemKind::Draft, || {
+            tries.set(tries.get() + 1);
+            async { Err(failure(freenet_mail_protocol::FailureCode::Busy)) }
+        }))
+        .unwrap();
+        assert!(items.is_empty());
+        assert_eq!(tries.get(), 3, "retried before giving up");
+        assert_eq!(unreadable_lists(), vec![(owner, ItemKind::Draft)]);
+        forget_unreadable_list(owner, ItemKind::Draft);
+        assert!(unreadable_lists().is_empty());
+
+        let other = block_on(list_or_note_unreadable(owner, ItemKind::Sent, || async {
+            Err(failure(freenet_mail_protocol::FailureCode::Internal))
+        }));
+        assert!(other.is_err(), "a non-Busy failure still fails the load");
+        assert!(unreadable_lists().is_empty());
+    }
+
     /// A deleted identity's page bookkeeping goes with it: its pending mark
     /// writes and the delivery states waiting for its Sent items (round-8
     /// X12), and only its own.

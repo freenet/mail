@@ -231,7 +231,7 @@ fn an_unreadable_item_index_can_be_reset() {
         limit: 10,
     };
     assert_eq!(call(&mut env, PROD, list.clone()), Err(FailureCode::Busy));
-    let (id, _, _) = prompt(&send(
+    let (id, _, text) = prompt(&send(
         &mut env,
         app(PROD),
         Op::RepairIndex {
@@ -239,6 +239,11 @@ fn an_unreadable_item_index_can_be_reset() {
             owner: Some(me.addr),
         },
     ));
+    // The user is told which list, and whose, is reset.
+    assert!(
+        text.contains("list of drafts of \"alice\""),
+        "the prompt does not name the list: {text}"
+    );
     assert_eq!(
         response(&answer(&mut env, PROD, id, crate::consent::REPAIR)).result,
         Ok(Reply::Ack { generation: 0 })
@@ -251,6 +256,46 @@ fn an_unreadable_item_index_can_be_reset() {
         vec![vec![2; 16]]
     );
     assert_eq!(list_ids(&mut env, PROD, ItemKind::Contact, None).len(), 1);
+}
+
+/// Round 10: one of an identity's lists that keeps failing to read does not
+/// block deleting the identity. The deletion forgets that list and removes
+/// everything else, the record with its keys included.
+#[test]
+fn an_unreadable_item_index_does_not_block_deleting_the_identity() {
+    let mut env = MemEnv::default();
+    let me = create(&mut env, PROD, "alice");
+    ack(put(&mut env, draft(me.addr, 1), b"d", None));
+    let sent = ItemRef {
+        kind: ItemKind::Sent,
+        owner: Some(me.addr),
+        id: vec![2; 16],
+    };
+    ack(put(&mut env, sent, b"s", None));
+    blind(&mut env, &store::index_rel(ItemKind::Draft, Some(&me.addr)));
+    let out = send(
+        &mut env,
+        app(PROD),
+        Op::DeleteIdentity {
+            addr: me.addr,
+            expected_gen: me.generation,
+        },
+    );
+    let (id, _, _) = prompt(&out);
+    let out = answer(&mut env, PROD, id, crate::consent::DELETE);
+    assert_eq!(response(&out).result, Ok(Reply::Deleted));
+    env.faults = None;
+    assert!(listed(&mut env).is_empty());
+    let s = Space::new(&mut env, Origin([PROD; 32]));
+    assert!(
+        s.get(&store::identity_rel(&me.addr)).is_none(),
+        "keys left behind"
+    );
+    assert!(
+        s.get(&store::index_rel(ItemKind::Sent, Some(&me.addr)))
+            .is_none(),
+        "a readable list left behind"
+    );
 }
 
 /// Y2: another app cannot reset this app's index (namespaced like every
