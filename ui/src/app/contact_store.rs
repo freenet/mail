@@ -100,7 +100,11 @@ pub(crate) async fn save(contact: &Contact) -> Result<(), CallError> {
 /// Write `body`, replacing whatever is stored, retrying a lost
 /// compare-and-swap from a fresh read. An item deleted meanwhile reads as
 /// absent and is created again (generation 0), never dropped.
-async fn store_replacing<G, GF, P, PF>(body: Vec<u8>, mut get: G, mut put: P) -> Result<(), CallError>
+async fn store_replacing<G, GF, P, PF>(
+    body: Vec<u8>,
+    mut get: G,
+    mut put: P,
+) -> Result<(), CallError>
 where
     G: FnMut() -> GF,
     GF: std::future::Future<Output = Result<Option<freenet_mail_protocol::Item>, CallError>>,
@@ -343,13 +347,22 @@ mod tests {
     fn contact_writes_run_in_the_order_they_were_made() {
         let mut q: KeyQueue<&str> = KeyQueue::new();
         let k = b"bob".to_vec();
-        assert!(q.push(k.clone(), "remove"), "the first write starts a writer");
+        assert!(
+            q.push(k.clone(), "remove"),
+            "the first write starts a writer"
+        );
         assert!(!q.push(k.clone(), "save"), "a later one waits its turn");
-        assert!(q.push(b"carol".to_vec(), "save"), "other contacts are independent");
+        assert!(
+            q.push(b"carol".to_vec(), "save"),
+            "other contacts are independent"
+        );
         assert_eq!(q.front(&k), Some(&"remove"));
         assert_eq!(q.finish_and_next(&k), Some(&"save"));
         assert_eq!(q.finish_and_next(&k), None, "drained: the writer stops");
-        assert!(q.push(k.clone(), "save"), "and the next write starts a new one");
+        assert!(
+            q.push(k.clone(), "save"),
+            "and the next write starts a new one"
+        );
     }
 
     /// A contact deleted between a save's read and its put (another tab's
@@ -388,7 +401,9 @@ mod tests {
                 Ok(expected + 1)
             } else {
                 Err(CallError::Failed(Failure {
-                    code: FailureCode::Conflict { current_gen: current },
+                    code: FailureCode::Conflict {
+                        current_gen: current,
+                    },
                     detail: String::new(),
                 }))
             };

@@ -68,8 +68,8 @@ fn publish(n: u32) {
                 }
             },
         );
-        let _ = window
-            .add_event_listener_with_callback("beforeunload", warn.as_ref().unchecked_ref());
+        let _ =
+            window.add_event_listener_with_callback("beforeunload", warn.as_ref().unchecked_ref());
         // Lives for the page.
         warn.forget();
     }

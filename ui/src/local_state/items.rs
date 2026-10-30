@@ -831,8 +831,7 @@ mod tests {
         // This tab forgot bob's decision.
         let after = j!({ "decisions": { "alice": "accept" }, "theme": "dark" });
         // Another tab added carol's decision and stored it first.
-        let mut stored =
-            j!({ "decisions": { "alice": "accept", "bob": "deny", "carol": "accept" }, "theme": "dark" });
+        let mut stored = j!({ "decisions": { "alice": "accept", "bob": "deny", "carol": "accept" }, "theme": "dark" });
         assert!(apply_changes(&mut stored, &before, &after));
         assert_eq!(
             stored,

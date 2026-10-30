@@ -1388,10 +1388,7 @@ impl SeenStates {
     /// A delta was applied to this page's copy of the inbox, so the node's
     /// copy is current. Messages it added are live. True the first time,
     /// when the caller should fetch the whole state once.
-    pub(crate) fn live_update(
-        &mut self,
-        added: impl IntoIterator<Item = [u8; 16]>,
-    ) -> bool {
+    pub(crate) fn live_update(&mut self, added: impl IntoIterator<Item = [u8; 16]>) -> bool {
         self.messages.extend(added);
         self.live_update_seen = true;
         if self.current_seen || self.refetch_requested {
@@ -1468,8 +1465,7 @@ fn reclaim_flags_when_current(
     state: std::collections::HashSet<[u8; 16]>,
     source: StateSource,
 ) {
-    let ready =
-        SEEN_STATES.with(|s| s.borrow_mut().entry(owner).or_default().note(state, source));
+    let ready = SEEN_STATES.with(|s| s.borrow_mut().entry(owner).or_default().note(state, source));
     if !ready || !FLAGS_RECLAIMED.with(|r| r.borrow_mut().insert(owner)) {
         return;
     }
@@ -2887,7 +2883,9 @@ pub(crate) async fn node_comms(
                                                 };
                                                 if let Err(e) = client.send(req.into()).await {
                                                     crate::log::error(
-                                                        format!("fetching inbox {key} after an update: {e}"),
+                                                        format!(
+                                                            "fetching inbox {key} after an update: {e}"
+                                                        ),
                                                         None,
                                                     );
                                                 }
@@ -3704,8 +3702,14 @@ mod seen_states_tests {
     #[test]
     fn marks_are_reclaimed_only_against_two_different_fetched_states() {
         let mut seen = SeenStates::default();
-        assert!(!seen.note([].into(), Fetched), "an empty state proves nothing");
-        assert!(!seen.note([[1; 16]].into(), Fetched), "one state is not trusted");
+        assert!(
+            !seen.note([].into(), Fetched),
+            "an empty state proves nothing"
+        );
+        assert!(
+            !seen.note([[1; 16]].into(), Fetched),
+            "one state is not trusted"
+        );
         // A later state without message 1 (an older copy, or 1 removed):
         // 1 is still live, since a state this page saw held it.
         assert!(seen.note([[2; 16]].into(), Fetched));
@@ -3743,7 +3747,10 @@ mod seen_states_tests {
     fn a_live_delta_asks_once_for_a_fresh_state_which_is_then_current() {
         let mut seen = SeenStates::default();
         assert!(!seen.note([[1; 16]].into(), Fetched));
-        assert!(seen.live_update([[5; 16]]), "the first delta asks for a fetch");
+        assert!(
+            seen.live_update([[5; 16]]),
+            "the first delta asks for a fetch"
+        );
         assert!(!seen.live_update([]), "and only once");
         assert!(seen.holds(&[5; 16]), "a message a delta added is live");
         // The refetch returns the same message set (a settings-only delta):
