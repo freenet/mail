@@ -1946,6 +1946,13 @@ test.describe("Live node E2E", () => {
       ).toHaveText("");
 
       // ── Reload (the #286 trigger) ─────────────────────────────────
+      // The Sent copy reaches the delegate a few round trips after Send, in
+      // a task a reload ends. A reload before that loses it for a real user
+      // too, so wait for the page to say every write is answered.
+      await expect(
+        aliceApp.locator("html"),
+        "the page says no write is still in flight",
+      ).toHaveAttribute("data-pending-saves", "0", { timeout: 30_000 });
       await alicePage.reload();
       const aliceAfter = alicePage.frameLocator("iframe#app");
       await expect(
