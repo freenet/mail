@@ -528,6 +528,11 @@ pub(super) fn apply_changes(
                 let slot = fields.entry(field.clone()).or_insert_with(|| was.clone());
                 changed |= apply_changes(slot, was, value);
             }
+            // A key this tab removed (a forgotten map entry) is removed from
+            // the stored copy too; keys only another tab added stay.
+            for field in b.keys().filter(|f| !a.contains_key(*f)) {
+                changed |= fields.remove(field).is_some();
+            }
             changed
         }
         _ if before == after => false,
@@ -817,6 +822,26 @@ mod tests {
         let fresh: GlobalSettings =
             serde_json::from_slice(&merge_changed_fields(None, &before, &mine).unwrap()).unwrap();
         assert_eq!(fresh.appearance.theme, Theme::Light);
+    }
+
+    #[test]
+    fn a_map_key_removed_by_this_tab_is_removed_from_the_stored_copy() {
+        use serde_json::json as j;
+        let before = j!({ "decisions": { "alice": "accept", "bob": "deny" }, "theme": "dark" });
+        // This tab forgot bob's decision.
+        let after = j!({ "decisions": { "alice": "accept" }, "theme": "dark" });
+        // Another tab added carol's decision and stored it first.
+        let mut stored =
+            j!({ "decisions": { "alice": "accept", "bob": "deny", "carol": "accept" }, "theme": "dark" });
+        assert!(apply_changes(&mut stored, &before, &after));
+        assert_eq!(
+            stored,
+            j!({ "decisions": { "alice": "accept", "carol": "accept" }, "theme": "dark" }),
+            "bob is gone, carol (another tab's addition) is kept"
+        );
+        // Removing a key another tab already removed changes nothing.
+        let mut already = j!({ "decisions": { "alice": "accept" }, "theme": "dark" });
+        assert!(!apply_changes(&mut already, &before, &after));
     }
 
     #[test]
