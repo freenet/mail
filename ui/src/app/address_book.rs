@@ -257,6 +257,118 @@ thread_local! {
     /// some writers (own-identity register, offline seed) don't bump that
     /// signal.
     static ADDRESS_BOOK_GEN: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+
+    /// Contacts shown under a clash label because their alias was ambiguous:
+    /// label → the alias they clashed on. Tracked explicitly, not inferred
+    /// from the label's shape, so a contact the user named `bob~work` is an
+    /// ordinary contact.
+    static RELABELLED: RefCell<HashMap<String, Rc<str>>> = RefCell::new(HashMap::new());
+}
+
+/// Record that the contact now shown as `label` lost the alias `original`.
+pub(crate) fn note_relabelled(label: &str, original: &str) {
+    RELABELLED.with(|r| r.borrow_mut().insert(label.to_string(), original.into()));
+}
+
+/// Whether `label` is a clash label given to a contact (see
+/// [`note_relabelled`]).
+fn is_relabelled(label: &str) -> bool {
+    RELABELLED.with(|r| r.borrow().contains_key(label))
+}
+
+/// The labels of contacts moved off `alias` because it was ambiguous.
+pub fn relabelled_from(alias: &str) -> Vec<String> {
+    let mut labels: Vec<String> = RELABELLED.with(|r| {
+        r.borrow()
+            .iter()
+            .filter(|(_, original)| original.as_ref() == alias)
+            .map(|(label, _)| label.clone())
+            .collect()
+    });
+    labels.sort();
+    labels
+}
+
+/// Whether typing `alias` is ambiguous: it resolves to a recipient, but a
+/// contact that used to answer to it was moved to a clash label, so what
+/// the user means by it is not certain.
+pub fn is_ambiguous_name(alias: &str) -> bool {
+    !relabelled_from(alias).is_empty()
+}
+
+/// `base`, or the first `base-2`, `base-3`, … that no entry holds.
+fn free_label(ab: &HashMap<String, Entry>, base: Rc<str>) -> Rc<str> {
+    if !ab.contains_key(base.as_ref()) {
+        return base;
+    }
+    (2..)
+        .map(|n| Rc::<str>::from(format!("{base}-{n}")))
+        .find(|label| !ab.contains_key(label.as_ref()))
+        .expect("an unused label exists")
+}
+
+/// The address to record when the user puts `typed` in the To field: the
+/// one recipient it names, or `None` when it names nobody or is ambiguous
+/// (see [`is_ambiguous_name`]).
+pub fn address_choice(typed: &str) -> Option<String> {
+    if is_ambiguous_name(typed) {
+        return None;
+    }
+    lookup(typed)
+        .or_else(|| lookup_by_bs58(typed))
+        .as_ref()
+        .and_then(recipient_address)
+}
+
+/// The recipient to send to, given what the To field says (`typed`) and
+/// the address recorded when the recipient was chosen (`chosen`). Mail
+/// goes to the recorded address and nowhere else: if `typed` has since
+/// come to name a different key (an identity created under a contact's
+/// name), or the recorded recipient is gone, the send is refused with a
+/// message saying so, and the user chooses again.
+pub fn resolve_for_send(typed: &str, chosen: Option<&str>) -> Result<Recipient, String> {
+    let named = lookup(typed).or_else(|| lookup_by_bs58(typed));
+    match chosen {
+        Some(address) => {
+            let recorded = lookup_by_bs58(address).ok_or_else(|| {
+                "The recipient this message was addressed to is no longer in your address book. Choose the recipient again.".to_string()
+            })?;
+            match named.as_ref().and_then(recipient_address) {
+                Some(now) if now != address => Err(format!(
+                    "\"{typed}\" now names a different key than the recipient this message was addressed to. Retype the recipient to choose again."
+                )),
+                _ => Ok(recorded),
+            }
+        }
+        None => {
+            let labels = relabelled_from(typed);
+            if !labels.is_empty() {
+                return Err(format!(
+                    "\"{typed}\" is ambiguous: a contact that used that name is now shown as {}. Type the name of the one you mean.",
+                    labels.join(", ")
+                ));
+            }
+            named.ok_or_else(|| {
+                format!(
+                    "Recipient `{typed}` is not in your address book. Import their contact before sending."
+                )
+            })
+        }
+    }
+}
+
+/// A recipient's address: the bs58 id of their inbox contract, which is
+/// what [`lookup_by_bs58`] resolves. Unlike an alias it names exactly one
+/// key, so it is what a draft records as its recipient.
+pub fn recipient_address(recipient: &Recipient) -> Option<String> {
+    use crate::inbox::{INBOX_CODE_HASH, inbox_key_for_with_hash};
+    let vk = vk_from_bytes(&recipient.ml_dsa_vk_bytes).ok()?;
+    let code_hash = recipient
+        .inbox_wasm_hash
+        .as_deref()
+        .unwrap_or(INBOX_CODE_HASH);
+    let key = inbox_key_for_with_hash(&vk, code_hash).ok()?;
+    Some(key.id().encode())
 }
 
 /// Bump the address-book generation so the bs58 lookup cache rebuilds on next
@@ -282,7 +394,9 @@ pub fn register_identity(identity: &Identity) {
         };
         let moved = displaced.map(|mut c| {
             let original = c.local_alias.clone();
-            c.local_alias = super::contact_store::clash_label(&c);
+            // Never onto an entry that already holds the clash label.
+            c.local_alias = free_label(&ab, super::contact_store::clash_label(&c));
+            note_relabelled(&c.local_alias, &original);
             ab.insert(c.local_alias.to_string(), Entry::Contact(c));
             original
         });
@@ -369,6 +483,7 @@ pub fn remove_contact(alias: &str) {
         }
     });
     if removed {
+        RELABELLED.with(|r| r.borrow_mut().remove(alias));
         bump_address_book_gen();
     }
 }
@@ -425,15 +540,13 @@ pub fn lookup(alias: &str) -> Option<Recipient> {
         }
         // Fallback: the one contact whose sender-advertised suggested_alias
         // matches. Only contacts carry a suggested_alias, so this never
-        // collides with an own identity. A contact moved to its clash label
-        // (`alias~<address>`) lost the bare alias because it is ambiguous,
-        // and two contacts advertising the same name are ambiguous too:
-        // neither resolves it, or mail could go to whichever matched first.
-        let clash_prefix = format!("{alias}~");
+        // collides with an own identity. A contact moved to a clash label
+        // lost the bare alias because it is ambiguous, and two contacts
+        // advertising the same name are ambiguous too: neither resolves
+        // it, or mail could go to whichever matched first.
         let mut matches = ab.values().filter(|entry| match entry {
             Entry::Contact(c) => {
-                c.suggested_alias.as_deref() == Some(alias)
-                    && !c.local_alias.starts_with(&clash_prefix)
+                c.suggested_alias.as_deref() == Some(alias) && !is_relabelled(&c.local_alias)
             }
             Entry::Own(_) => false,
         });
@@ -664,6 +777,7 @@ pub fn contact_by_vk(vk_bytes: &[u8]) -> Option<Contact> {
 #[cfg(test)]
 pub fn clear_for_test() {
     ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
+    RELABELLED.with(|r| r.borrow_mut().clear());
     bump_address_book_gen();
 }
 
@@ -776,8 +890,7 @@ mod tests {
     /// would otherwise persist across tests. A bare `ADDRESS_BOOK.clear()`
     /// alone leaves the cache stale.
     fn reset_address_book() {
-        ADDRESS_BOOK.with(|ab| ab.borrow_mut().clear());
-        bump_address_book_gen();
+        clear_for_test();
     }
 
     #[test]
@@ -995,6 +1108,107 @@ mod tests {
         Identity::from_info(&info, crate::app::UserId::new())
     }
 
+    /// A contact with a real verifying key, so its inbox address derives.
+    fn real_contact(alias: &str, seed: u8) -> Contact {
+        Contact {
+            ml_dsa_vk_bytes: crate::test_util::real_vk_bytes(seed),
+            ..make_contact(alias, 0, seed)
+        }
+    }
+
+    /// An identity with a real verifying key.
+    fn real_own_identity(alias: &str, seed: u8) -> Identity {
+        let info = freenet_mail_protocol::IdentityInfo {
+            addr: freenet_mail_protocol::Addr([seed; 24]),
+            vk: crate::test_util::real_vk_bytes(seed).into(),
+            ek: vec![seed; 1184].into(),
+            alias: alias.to_string(),
+            description: String::new(),
+            confirmed: true,
+            generation: 1,
+        };
+        Identity::from_info(&info, crate::app::UserId::new())
+    }
+
+    /// A draft addressed to contact "alice" must not go to your own
+    /// identity once one takes the name "alice": the draft recorded the
+    /// contact's address, and the send is refused with a message instead of
+    /// silently routing elsewhere.
+    #[test]
+    fn a_draft_for_a_contact_is_not_sent_to_an_identity_that_took_its_name() {
+        reset_address_book();
+        insert_contact(real_contact("rfs-alice", 21)).unwrap();
+        let chosen = address_choice("rfs-alice").expect("the contact resolves to an address");
+        assert_eq!(
+            resolve_for_send("rfs-alice", Some(&chosen)).map(|r| r.is_own),
+            Ok(false)
+        );
+
+        // An identity named "rfs-alice" arrives; the contact is relabelled.
+        register_identity(&real_own_identity("rfs-alice", 22));
+        let err = resolve_for_send("rfs-alice", Some(&chosen)).unwrap_err();
+        assert!(err.contains("now names a different key"), "got: {err}");
+
+        // Choosing the contact again by its label goes to the contact.
+        let label = relabelled_from("rfs-alice")
+            .pop()
+            .expect("the contact was relabelled");
+        let again = address_choice(&label).expect("the label resolves");
+        assert_eq!(again, chosen, "same contact, same address");
+        let r = resolve_for_send(&label, Some(&again)).unwrap();
+        assert!(!r.is_own);
+    }
+
+    /// An older draft with no recorded address whose name became ambiguous
+    /// is not resolved to a guess: the user is asked to choose.
+    #[test]
+    fn an_unaddressed_draft_with_an_ambiguous_name_asks_the_user() {
+        reset_address_book();
+        insert_contact(real_contact("amb-bob", 31)).unwrap();
+        register_identity(&real_own_identity("amb-bob", 32));
+        assert_eq!(
+            address_choice("amb-bob"),
+            None,
+            "nothing is recorded for it"
+        );
+        let err = resolve_for_send("amb-bob", None).unwrap_err();
+        assert!(err.contains("ambiguous"), "got: {err}");
+    }
+
+    /// A recorded recipient that has since been removed is refused, not
+    /// replaced by whoever now has the name.
+    #[test]
+    fn a_removed_recorded_recipient_is_refused() {
+        reset_address_book();
+        insert_contact(real_contact("gone-carol", 41)).unwrap();
+        let chosen = address_choice("gone-carol").unwrap();
+        remove_contact("gone-carol");
+        insert_contact(real_contact("gone-carol", 42)).unwrap();
+        let err = resolve_for_send("gone-carol", Some(&chosen)).unwrap_err();
+        assert!(err.contains("no longer in your address book"), "got: {err}");
+    }
+
+    /// Moving a contact to its clash label never overwrites whatever holds
+    /// that label already.
+    #[test]
+    fn a_clash_label_never_overwrites_an_existing_entry() {
+        reset_address_book();
+        let contact = make_contact("lbl-dan", 5, 6);
+        let label = crate::app::contact_store::clash_label(&contact);
+        // Something already holds the clash label.
+        insert_contact(make_contact(&label, 7, 8)).unwrap();
+        insert_contact(contact).unwrap();
+        register_identity(&own_identity("lbl-dan"));
+        let holder = ADDRESS_BOOK.with(|ab| match ab.borrow().get(label.as_ref()) {
+            Some(Entry::Contact(c)) => Some(c.ml_dsa_vk_bytes[0]),
+            _ => None,
+        });
+        assert_eq!(holder, Some(7), "the existing entry keeps the label");
+        let moved = relabelled_from("lbl-dan");
+        assert_eq!(moved, vec![format!("{label}-2")]);
+        assert_eq!(entry_is_own(&moved[0]), Some(false));
+    }
+
     fn entry_is_own(alias: &str) -> Option<bool> {
         ADDRESS_BOOK.with(|ab| ab.borrow().get(alias).map(|e| matches!(e, Entry::Own(_))))
     }
@@ -1044,9 +1258,24 @@ mod tests {
             ..make_contact_suggested("x", Some("bob"), 1, 2)
         };
         insert_contact(relabelled).unwrap();
+        note_relabelled("bob~0a0b0c", "bob");
         assert!(
             lookup("bob").is_none(),
             "a relabelled contact does not get its bare alias back"
+        );
+
+        // A contact the user deliberately named with a `~` is not a clash
+        // label, so its suggested alias still resolves.
+        reset_address_book();
+        let named = Contact {
+            local_alias: "bob~work".into(),
+            ..make_contact_suggested("x", Some("bob"), 1, 2)
+        };
+        insert_contact(named).unwrap();
+        assert_eq!(
+            lookup("bob").map(|r| r.local_alias.to_string()).as_deref(),
+            Some("bob~work"),
+            "a `~` in a name the user chose is not a relabel"
         );
 
         reset_address_book();

@@ -33,6 +33,16 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// Real ML-DSA-65 verifying-key bytes for `seed`, for tests that derive
+/// inbox ids (an arbitrary byte pattern is not a verifying key).
+pub(crate) fn real_vk_bytes(seed: u8) -> Vec<u8> {
+    use ml_dsa::signature::Keypair;
+    ml_dsa::SigningKey::<ml_dsa::MlDsa65>::from_seed(&[seed; 32].into())
+        .verifying_key()
+        .encode()
+        .to_vec()
+}
+
 /// The signing key the frozen-key fixtures were captured with.
 pub(crate) fn frozen_fixture_vk() -> ml_dsa::VerifyingKey<ml_dsa::MlDsa65> {
     use ml_dsa::signature::Keypair;

@@ -147,7 +147,9 @@ pub(crate) fn disambiguate(
             if !clashed.iter().any(|a| **a == *c.local_alias) {
                 clashed.push(c.local_alias.to_string());
             }
+            let original = c.local_alias.clone();
             c.local_alias = clash_label(c);
+            super::address_book::note_relabelled(&c.local_alias, &original);
         }
     }
     (contacts, clashed)
