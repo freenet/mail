@@ -41,7 +41,8 @@ impl Drop for PendingSave {
     }
 }
 
-/// How many saves are in flight.
+/// How many saves are in flight. Read by the browser's leave-page warning.
+#[cfg(any(target_family = "wasm", test))]
 pub(crate) fn pending() -> u32 {
     PENDING.with(Cell::get)
 }
