@@ -370,6 +370,62 @@ fn a_stash_dated_in_the_future_is_treated_as_expired() {
     );
 }
 
+/// Listing unfinished deletions also prunes recordless identity index
+/// entries. If that prune cannot write the index, the listing must still
+/// answer with the deletions that can be finished; the prune runs again on
+/// the next listing.
+#[test]
+fn a_failed_prune_does_not_fail_the_deletion_listing() {
+    let mut env = MemEnv::default();
+    let me = create(&mut env, PROD, "alice");
+    let carol = create(&mut env, PROD, "carol");
+    // alice: an approved deletion interrupted midway.
+    fill_archive(&mut env, me.addr, 600);
+    let del = Op::DeleteIdentity {
+        addr: me.addr,
+        expected_gen: me.generation,
+    };
+    let (id, _, _) = prompt(&send(&mut env, app(PROD), del));
+    assert!(matches!(
+        response(&answer(&mut env, PROD, id, DELETE)).result,
+        Ok(Reply::Continue { .. })
+    ));
+    // carol: deleted, but the index update failed, leaving a recordless entry.
+    let del = Op::DeleteIdentity {
+        addr: carol.addr,
+        expected_gen: carol.generation,
+    };
+    let (id, _, _) = prompt(&send(&mut env, app(PROD), del));
+    env.fail_keys_containing = Some("/ix/id".into());
+    assert!(
+        response(&answer(&mut env, PROD, id, DELETE))
+            .result
+            .is_err()
+    );
+    let index_len = |env: &mut MemEnv| {
+        let s = Space::new(env, Origin([PROD; 32]));
+        s.index(crate::store::IDENTITY_INDEX).unwrap().1.len()
+    };
+    assert_eq!(index_len(&mut env), 2);
+
+    // The index is still unwritable while the UI lists.
+    match call(&mut env, PROD, Op::ListDeletingIdentities) {
+        Ok(Reply::Identities(v)) => {
+            assert_eq!(v.iter().map(|i| i.addr).collect::<Vec<_>>(), vec![me.addr]);
+        }
+        other => panic!("the listing failed with the prune: {other:?}"),
+    }
+    assert_eq!(index_len(&mut env), 2, "the prune could not run");
+
+    // Once the index is writable again, the next listing prunes.
+    env.fail_keys_containing = None;
+    assert!(matches!(
+        call(&mut env, PROD, Op::ListDeletingIdentities),
+        Ok(Reply::Identities(v)) if v.len() == 1
+    ));
+    assert_eq!(index_len(&mut env), 1, "the stale entry is gone");
+}
+
 /// An approved deletion interrupted midway (the tab closed) is listed by
 /// `ListDeletingIdentities`, only for the app that owns it, and finishing it
 /// asks nothing.

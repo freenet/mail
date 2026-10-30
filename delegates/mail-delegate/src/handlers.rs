@@ -322,15 +322,18 @@ fn prune_recordless_identities(s: &mut Space<'_>) -> Result<(), Failure> {
 }
 
 fn list_deleting_identities(s: &mut Space<'_>) -> OpResult {
-    prune_recordless_identities(s)?;
+    // Housekeeping, not the answer: a prune that cannot write the index
+    // must not hide the deletions the user can finish. Every startup lists,
+    // so a failed prune runs again on the next listing.
+    let _ = prune_recordless_identities(s);
     let (_, ids) = s.index(IDENTITY_INDEX)?;
     let mut out = Vec::new();
     for id in ids {
-        let addr = Addr(
-            id.as_slice()
-                .try_into()
-                .map_err(|_| fail(FailureCode::Internal, "the identity index is unreadable"))?,
-        );
+        // An entry the prune could not drop (malformed, or with no record)
+        // names no deletion to finish.
+        let Ok(addr) = <[u8; 24]>::try_from(id.as_slice()).map(Addr) else {
+            continue;
+        };
         if let Some((g, r)) = load_identity(s, &addr)?
             && r.deleting
         {
