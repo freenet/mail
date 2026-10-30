@@ -97,8 +97,9 @@ pub(crate) fn new_request(op: Op) -> Request {
 /// whose caller already gave up (timed out) is dropped.
 pub(crate) fn deliver(payload: &[u8]) -> bool {
     // Read the request id alone first: a reply nobody waits for (its call
-    // gave up or was dropped) is never decoded, so a late recovery key is
-    // never materialised as a plain string.
+    // gave up or was dropped) is never decoded into a `Reply`, so a late
+    // recovery key is not copied into a plain string. It is still in
+    // `payload`, the bytes the node delivered, which this does not wipe.
     let Ok(ResponseId { request_id }) = from_cbor::<ResponseId>(payload) else {
         crate::log::error("undecodable mail-delegate response", None);
         return false;
@@ -306,6 +307,11 @@ mod tests {
         assert_eq!(rx.try_recv().unwrap(), Some(Err(failure)));
     }
 
+    /// `PendingSlot`'s drop, which `call()` holds across both its awaits,
+    /// so a call future dropped mid-wait removes its slot. This drops the
+    /// slot directly: dropping a real `call()` mid-wait needs a transport
+    /// that pends, and the test builds have none (the node build's `send`
+    /// fails at once without a node; the in-page delegate answers at once).
     #[test]
     fn a_dropped_call_leaves_no_waiter_behind() {
         let id = RequestId([5; 16]);

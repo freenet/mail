@@ -731,7 +731,6 @@ pub(crate) fn local_archive_message(alias: &str, msg_id: MessageId, archived: Ar
     bump();
 }
 
-#[allow(dead_code)] // Wired for #60 (true unarchive).
 pub(crate) fn local_unarchive_message(alias: &str, msg_id: MessageId) {
     let alias = &state_key(alias);
     change(Change::Unarchive(alias.to_string(), msg_id));
