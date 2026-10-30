@@ -5960,8 +5960,10 @@ fn ComposeSheet() -> Element {
                 futs.into_iter().for_each(|f| {
                     // Counted from now, not from the task's first poll, so a
                     // reload in between is not an uncounted loss. This covers
-                    // the send until its token is requested; the inbox update
-                    // that follows the token's answer is not counted.
+                    // the send until its token is requested; the pending-ack
+                    // entry queued below (`enqueue_pending_sent_ack`) counts
+                    // it from the Send click until its inbox update is
+                    // answered, failed or swept.
                     let in_flight = crate::pending_saves::begin();
                     let _task = dioxus_core::spawn_forever(async move {
                         let _in_flight = in_flight;
@@ -6014,7 +6016,7 @@ fn ComposeSheet() -> Element {
             // Enqueue against the recipient's inbox key so the
             // UpdateResponse handler can flip the right Sent row.
             #[cfg(feature = "use-node")]
-            match inbox_key_for_ack {
+            let unanswerable = match inbox_key_for_ack {
                 Ok(inbox_key) => {
                     crate::inbox::enqueue_pending_sent_ack(
                         inbox_key,
@@ -6022,17 +6024,30 @@ fn ComposeSheet() -> Element {
                         sent_id.clone(),
                         sent_at_ms,
                     );
+                    false
                 }
                 Err(e) => {
+                    // Nothing will ever answer this send, so the row must not
+                    // stay Pending: fail it now, and store it Failed below.
                     crate::log::error(
-                        format!("inbox_key_for failed; sent row will stay Pending: {e}"),
+                        format!("inbox_key_for failed; marking the sent row failed: {e}"),
                         None,
                     );
+                    let _ = crate::local_state::local_set_sent_delivery_state(
+                        &sender_alias,
+                        &sent_id,
+                        freenet_mail_wire_v1::local_state::DeliveryState::Failed,
+                    );
+                    true
                 }
-            }
+            };
 
             #[cfg(feature = "use-node")]
             {
+                let mut sent = sent;
+                if unanswerable {
+                    sent.delivery_state = freenet_mail_wire_v1::local_state::DeliveryState::Failed;
+                }
                 let alias_async = sender_alias.clone();
                 let id_async = sent_id.clone();
                 // spawn_forever, not spawn: the send handler navigates away

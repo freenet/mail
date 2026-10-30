@@ -669,12 +669,23 @@ pub(crate) async fn load_and_report() {
             },
         )
         .await;
-        if let Err(e) = merged {
-            crate::log::error(format!("loading local mail state failed: {e}"), None);
-            crate::toast::push_toast_detached(
-                startup_load_failure_text("your drafts, sent mail and settings", &e),
-                crate::toast::ToastLevel::Error,
-            );
+        match merged {
+            Ok(()) => {
+                let stranded = crate::inbox::fail_stranded_pending_sent(&keys);
+                if stranded > 0 {
+                    crate::toast::push_toast_detached(
+                        stranded_sends_notice(stranded),
+                        crate::toast::ToastLevel::Warning,
+                    );
+                }
+            }
+            Err(e) => {
+                crate::log::error(format!("loading local mail state failed: {e}"), None);
+                crate::toast::push_toast_detached(
+                    startup_load_failure_text("your drafts, sent mail and settings", &e),
+                    crate::toast::ToastLevel::Error,
+                );
+            }
         }
     }
     #[cfg(not(feature = "use-node"))]
@@ -682,6 +693,19 @@ pub(crate) async fn load_and_report() {
         send_action(NodeAction::IdentitiesLoaded { identities: loaded });
         report_unknown_unfinished_deletions(refresh_unfinished_deletions().await);
     }
+}
+
+/// The notice for Sent rows an earlier page session left unconfirmed
+/// (`inbox::fail_stranded_pending_sent`). They are marked failed, but the
+/// message may still have gone out, so the user is told not to assume
+/// either way before sending again.
+#[cfg(any(test, feature = "use-node"))]
+fn stranded_sends_notice(n: usize) -> String {
+    format!(
+        "{n} message(s) sent before the page was last closed or reloaded were never confirmed \
+         as delivered and are marked failed. They may still have arrived: check with the \
+         recipient before sending again."
+    )
 }
 
 /// Announce the identities, let `meanwhile` run, then load their local state

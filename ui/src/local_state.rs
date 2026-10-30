@@ -804,6 +804,34 @@ pub(crate) fn local_set_sent_delivery_state(alias: &str, id: &str, state: Delive
     changed
 }
 
+/// Sent rows of `owners` still `Pending` that no send in this page is
+/// waiting on: `in_flight` holds the `(state key, sent id)` of every send
+/// whose inbox update this page has queued. Such a row was left by an
+/// earlier page session that ended (reload, closed tab, crash) before the
+/// update was answered; nothing in this page will ever resolve it, and
+/// re-sending would seal a new ciphertext, so a message that did go out
+/// would arrive twice.
+pub(crate) fn stranded_pending_sent(
+    owners: &[String],
+    in_flight: &HashSet<(String, String)>,
+) -> Vec<(String, String)> {
+    SNAPSHOT.with(|s| {
+        let snapshot = s.borrow();
+        let mut out = Vec::new();
+        for owner in owners {
+            for (sent_id, sent) in snapshot.sent_of(owner) {
+                if !delivery_state_is_terminal(sent.delivery_state)
+                    && !in_flight.contains(&(owner.clone(), sent_id.to_string()))
+                {
+                    out.push((owner.clone(), sent_id.to_string()));
+                }
+            }
+        }
+        out.sort();
+        out
+    })
+}
+
 /// `Delivered` and `Failed` are terminal; `Pending` is the only state a
 /// later transition may overwrite. Centralised so the local stash and the
 /// delegate writer agree on the guard.
@@ -1875,6 +1903,26 @@ mod tests {
             .find(|(i, _)| i == id)
             .map(|(_, m)| m.delivery_state)
             .expect("sent row present")
+    }
+
+    /// #286: a Sent row still Pending after a reload, with no send in this
+    /// page waiting on it, was left by a session that ended mid-send. It is
+    /// reported as stranded; a row this page is still sending, and terminal
+    /// rows, are not.
+    #[test]
+    fn a_pending_row_no_send_is_waiting_on_is_stranded_286() {
+        fresh_snapshot();
+        local_save_sent("alice", "left", sent_row("bob"));
+        local_save_sent("alice", "sending", sent_row("bob"));
+        local_save_sent("alice", "done", sent_row("bob"));
+        let _ = local_set_sent_delivery_state("alice", "done", DeliveryState::Delivered);
+        local_save_sent("carol", "elsewhere", sent_row("bob"));
+        let in_flight: HashSet<(String, String)> =
+            [("alice".to_string(), "sending".to_string())].into();
+        assert_eq!(
+            stranded_pending_sent(&["alice".to_string()], &in_flight),
+            vec![("alice".to_string(), "left".to_string())]
+        );
     }
 
     #[test]

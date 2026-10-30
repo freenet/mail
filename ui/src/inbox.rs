@@ -263,6 +263,12 @@ pub(crate) struct PendingSentEntry {
     pub sent_id: String,
     /// `chrono::Utc::now().timestamp_millis()` at enqueue time.
     pub enqueued_at_ms: i64,
+    /// Counts the send as unfinished page work for as long as the entry is
+    /// queued: from the Send click until its inbox update is answered, fails
+    /// or is swept. A reload in that window would end the page with the
+    /// message possibly never handed to the node, so the page warns before
+    /// leaving and tests wait for it (#286).
+    pub _in_flight: std::rc::Rc<crate::pending_saves::PendingSave>,
 }
 
 /// Record that a send to `inbox_key` is awaiting an UpdateResponse to flip
@@ -283,8 +289,38 @@ pub(crate) fn enqueue_pending_sent_ack(
                 sender_alias,
                 sent_id,
                 enqueued_at_ms,
+                _in_flight: std::rc::Rc::new(crate::pending_saves::begin()),
             });
     });
+}
+
+/// The `(state key, sent id)` of every send this page has queued and not
+/// yet seen answered, failed or swept.
+pub(crate) fn in_flight_sent() -> std::collections::HashSet<(String, String)> {
+    PENDING_SENT_ACK.with(|m| {
+        m.borrow()
+            .values()
+            .flatten()
+            .map(|e| {
+                (
+                    crate::local_state::state_key(&e.sender_alias),
+                    e.sent_id.clone(),
+                )
+            })
+            .collect()
+    })
+}
+
+/// Mark Failed every Sent row of `owners` left `Pending` by an earlier page
+/// session (see `local_state::stranded_pending_sent`), locally and in the
+/// mail delegate. Returns how many were marked, for one notice to the user.
+#[cfg(feature = "use-node")]
+pub(crate) fn fail_stranded_pending_sent(owners: &[String]) -> usize {
+    let stranded = crate::local_state::stranded_pending_sent(owners, &in_flight_sent());
+    for (key, sent_id) in &stranded {
+        fail_one_sent(key, sent_id);
+    }
+    stranded.len()
 }
 
 /// Pop the next pending sent record for `inbox_key`, if any.
@@ -2447,6 +2483,40 @@ mod tests {
 
     fn clear_pending_sent_ack() {
         PENDING_SENT_ACK.with(|m| m.borrow_mut().clear());
+    }
+
+    /// #286: a send counts as unfinished page work from the Send click until
+    /// its inbox update is answered, failed or swept, so a reload in that
+    /// window warns instead of silently ending the send.
+    #[test]
+    fn a_queued_send_counts_as_pending_until_it_resolves_286() {
+        clear_pending_sent_ack();
+        let base = crate::pending_saves::pending();
+        let key = pending_sent_key(7);
+        enqueue_pending_sent_ack(key, "alice".into(), "answered".into(), 0);
+        enqueue_pending_sent_ack(key, "alice".into(), "removed".into(), 0);
+        enqueue_pending_sent_ack(key, "alice".into(), "swept".into(), 100_000);
+        assert_eq!(crate::pending_saves::pending(), base + 3);
+
+        assert!(take_next_pending_sent_ack(&key).is_some());
+        assert_eq!(crate::pending_saves::pending(), base + 2);
+        remove_pending_sent_ack(&key, "alice", "removed");
+        assert_eq!(crate::pending_saves::pending(), base + 1);
+        assert_eq!(drain_stale_pending_sent(60, 200_000).len(), 1);
+        assert_eq!(crate::pending_saves::pending(), base);
+        clear_pending_sent_ack();
+    }
+
+    #[test]
+    fn in_flight_sent_lists_every_queued_send() {
+        clear_pending_sent_ack();
+        enqueue_pending_sent_ack(pending_sent_key(8), "k1".into(), "s1".into(), 0);
+        enqueue_pending_sent_ack(pending_sent_key(9), "k2".into(), "s2".into(), 0);
+        let in_flight = in_flight_sent();
+        assert!(in_flight.contains(&("k1".to_string(), "s1".to_string())));
+        assert!(in_flight.contains(&("k2".to_string(), "s2".to_string())));
+        assert_eq!(in_flight.len(), 2);
+        clear_pending_sent_ack();
     }
 
     #[test]
