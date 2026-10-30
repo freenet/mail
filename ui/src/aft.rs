@@ -403,6 +403,9 @@ impl AftRecords {
         // delegate hands them out for this transitional path only
         // (`V1AftParams`, removed with the anti-flood tokens); the
         // generator-identity in TokenAssignment is the encoded verifying key.
+        // The decoded `DelegateParameters`/`Parameters` below are plain
+        // copies of the seed held across the awaits that follow; they are
+        // freed, not zeroized (see `ops::v1_aft_params`).
         let sender_vk = generator_id.ml_dsa_vk();
         let params_json = crate::mail_delegate::ops::v1_aft_params(generator_id.addr)
             .await

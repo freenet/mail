@@ -418,6 +418,13 @@ impl std::fmt::Debug for SecretString {
 /// The v1 token-generator delegate's parameters, which carry the identity's
 /// ML-DSA signing seed (transitional; removed with the anti-flood tokens).
 /// Fetch them only where they are used, and let them drop promptly.
+///
+/// Only the buffer returned here is zeroized. Using the parameters means
+/// decoding them into stdlib `DelegateParameters`/`Parameters` (plain
+/// `Vec<u8>` inside) and handing them to the node's client API, and those
+/// copies are not zeroized: they live across the awaits of the send path
+/// and are freed, not wiped. That holds only until the anti-flood tokens
+/// go; the release guard refuses a delegate that still serves this.
 pub(crate) async fn v1_aft_params(addr: Addr) -> Result<zeroize::Zeroizing<Vec<u8>>, CallError> {
     match call(Op::V1AftParams { addr }).await? {
         Reply::AftParams(params) => Ok(zeroize::Zeroizing::new(params.into_vec())),
