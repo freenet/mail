@@ -18,7 +18,7 @@
 //!   A UI id is never ordered on: it carries no time and no position.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use freenet_mail_protocol::{Addr, ItemKind, ItemRef};
 use freenet_mail_wire_v1::local_state::{
@@ -134,17 +134,71 @@ fn boxed(e: CallError) -> DynError {
 
 // ── Writes ────────────────────────────────────────────────────────────────
 
-/// An autosave still in flight when the draft is discarded must not bring
-/// it back: the discard is checked at the last moment before each write.
-pub(crate) async fn save_draft(alias: String, id: String, draft: Draft) -> Result<(), DynError> {
-    let item = item(ItemKind::Draft, Some(owner(&alias)?), uuid_id(&id)?);
+/// What a draft save did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DraftSave {
+    /// The draft is stored.
+    Stored,
+    /// This page discarded the draft; nothing was written.
+    Discarded,
+    /// The draft was stored once and is gone now: another tab discarded or
+    /// sent it. Nothing was written, so it is not brought back (and cannot
+    /// be sent twice); the compose sheet stops autosaving it.
+    GoneElsewhere,
+}
+
+thread_local! {
+    /// Drafts this page has seen stored, by (state key, draft id): loaded
+    /// at startup or saved here. A save that finds one of them missing
+    /// knows another tab removed it, which a page-local discard tombstone
+    /// cannot know.
+    static SEEN_DRAFTS: RefCell<HashSet<(String, String)>> = RefCell::new(HashSet::new());
+}
+
+fn seen_draft(key: String, id: String) {
+    SEEN_DRAFTS.with(|s| s.borrow_mut().insert((key, id)));
+}
+
+/// Save a draft unless it is gone. An autosave still in flight when the
+/// draft is discarded here must not bring it back: the discard is checked
+/// at the last moment before each write. A draft discarded or sent in
+/// another tab is gone from the delegate while this page still edits it;
+/// one this page has seen stored is not recreated
+/// ([`DraftSave::GoneElsewhere`]).
+pub(crate) async fn save_draft(
+    alias: String,
+    id: String,
+    draft: Draft,
+) -> Result<DraftSave, DynError> {
+    let owner = owner(&alias)?;
+    let key = super::addr_key(&owner);
+    let item = item(ItemKind::Draft, Some(owner), uuid_id(&id)?);
+    let seen = SEEN_DRAFTS.with(|s| s.borrow().contains(&(key.clone(), id.clone())));
     let body = json(&draft);
-    ops::put_item_merged(item, |_| {
-        (!super::draft_discarded(&alias, &id)).then(|| body.clone())
+    let mut outcome = DraftSave::Stored;
+    let written = ops::put_item_merged(item, |stored| {
+        if super::draft_discarded(&alias, &id) {
+            outcome = DraftSave::Discarded;
+            return None;
+        }
+        if stored.is_none() && seen {
+            outcome = DraftSave::GoneElsewhere;
+            return None;
+        }
+        Some(body.clone())
     })
     .await
-    .map(|_| ())
-    .map_err(boxed)
+    .map_err(boxed)?;
+    match (written, outcome) {
+        (Some(_), _) => {
+            seen_draft(key, id);
+            Ok(DraftSave::Stored)
+        }
+        // `put_item_merged` declines on its own when the draft existed at its
+        // first read and was gone at a retry: removed by another tab too.
+        (None, DraftSave::Stored) => Ok(DraftSave::GoneElsewhere),
+        (None, other) => Ok(other),
+    }
 }
 
 /// Whether message `msg_id` is gone, as far as anything here knows: deleted
@@ -417,6 +471,7 @@ pub(crate) async fn load(identities: &[(String, Addr)]) -> Result<LocalState, Ca
         let entry = state.aliases_mut().entry(alias.clone()).or_default();
         for i in ops::list_all_items(ItemKind::Draft, owner).await? {
             if let (Some(id), Some(d)) = (uuid_string(&i.item.id), decode("draft", &i.body)) {
+                seen_draft(super::addr_key(addr), id.clone());
                 entry.drafts.insert(id, d);
             }
         }
@@ -737,6 +792,65 @@ mod delegate_tests {
                 .count(),
             0
         );
+    }
+
+    /// Another tab discarding or sending a draft deletes it from the
+    /// delegate while this page still edits it. This page's next autosave
+    /// must not bring it back (a sent draft would reappear and could be sent
+    /// twice). This page is tab B; tab A is a second client on the same
+    /// in-page store, writing through the protocol directly.
+    #[test]
+    fn a_draft_removed_in_another_tab_is_not_brought_back() {
+        let addr = identity("items-other-tab");
+        let draft_item = |id: &str| ItemRef {
+            kind: ItemKind::Draft,
+            owner: Some(addr),
+            id: uuid_id(id).unwrap(),
+        };
+        let other_tab_deletes = |item: ItemRef| {
+            let stored = block_on(ops::get_item(item.clone())).unwrap().unwrap();
+            block_on(ops::delete_item(item, stored.generation)).unwrap();
+        };
+
+        // A draft this page saved.
+        let id = uuid::Uuid::new_v4().to_string();
+        let saved = block_on(save_draft(
+            "items-other-tab".into(),
+            id.clone(),
+            draft("one"),
+        ));
+        assert_eq!(saved.unwrap(), DraftSave::Stored);
+        other_tab_deletes(draft_item(&id));
+        let late = block_on(save_draft(
+            "items-other-tab".into(),
+            id.clone(),
+            draft("late"),
+        ));
+        assert_eq!(late.unwrap(), DraftSave::GoneElsewhere);
+        assert!(block_on(ops::get_item(draft_item(&id))).unwrap().is_none());
+
+        // A draft this page only loaded (the other tab wrote it).
+        let id2 = uuid::Uuid::new_v4().to_string();
+        block_on(ops::put_item(
+            draft_item(&id2),
+            json(&draft("from A")),
+            None,
+        ))
+        .unwrap();
+        let _ = loaded("items-other-tab", addr);
+        other_tab_deletes(draft_item(&id2));
+        let late2 = block_on(save_draft(
+            "items-other-tab".into(),
+            id2.clone(),
+            draft("late"),
+        ));
+        assert_eq!(late2.unwrap(), DraftSave::GoneElsewhere);
+        assert!(block_on(ops::get_item(draft_item(&id2))).unwrap().is_none());
+
+        // A brand-new draft is still stored on its first save.
+        let fresh = uuid::Uuid::new_v4().to_string();
+        let first = block_on(save_draft("items-other-tab".into(), fresh, draft("new")));
+        assert_eq!(first.unwrap(), DraftSave::Stored);
     }
 
     /// A read mark racing a delete, including one made in another tab

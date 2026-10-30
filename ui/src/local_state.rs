@@ -513,19 +513,59 @@ pub(crate) fn should_persist_read(alias: &str, id: MessageId) -> bool {
     READ_SENT.with(|sent| sent.borrow_mut().insert((alias.to_string(), id)))
 }
 
-/// A read mark that failed to reach the delegate: the next render sends it
-/// again.
+/// How many times a read mark is tried before this page gives up on it.
 #[cfg(any(test, feature = "use-node"))]
-fn read_mark_failed(alias: &str, id: MessageId) {
-    let key = state_key(alias);
-    READ_SENT.with(|sent| sent.borrow_mut().remove(&(key, id)));
+const READ_MARK_ATTEMPTS: u32 = 3;
+
+/// Whether a failed read mark may succeed if tried again: the delegate never
+/// answered, or answered that it was busy or lost a compare-and-swap. Any
+/// other failure (the identity is gone or being deleted, the message is not
+/// loaded) fails the same way every time.
+#[cfg(any(test, feature = "use-node"))]
+fn read_mark_is_transient(e: &crate::DynError) -> bool {
+    use freenet_mail_protocol::FailureCode;
+    match e.downcast_ref::<crate::mail_delegate::CallError>() {
+        Some(crate::mail_delegate::CallError::Unknown(_)) => true,
+        Some(failure) => matches!(
+            failure.code(),
+            Some(FailureCode::Busy | FailureCode::Conflict { .. })
+        ),
+        None => false,
+    }
+}
+
+/// Send a read mark with `send`, retrying a transient failure
+/// ([`read_mark_is_transient`]) with a growing pause, at most
+/// [`READ_MARK_ATTEMPTS`] times in all. The last error comes back; the
+/// caller reports it once. A render never re-sends a read mark: a mark that
+/// failed for good would otherwise be retried, and reported, on every
+/// render of the open message.
+#[cfg(any(test, feature = "use-node"))]
+async fn send_read_mark_with_retry<F, Fut>(mut send: F) -> Result<(), crate::DynError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<(), crate::DynError>>,
+{
+    let mut attempt = 1;
+    loop {
+        match send().await {
+            Ok(()) => return Ok(()),
+            Err(e) if attempt < READ_MARK_ATTEMPTS && read_mark_is_transient(&e) => {
+                crate::mail_delegate::ops::pause_ms(500 * 2u32.pow(attempt)).await;
+                attempt += 1;
+            }
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 /// Send message `id`'s read mark (and its kept copy) to the delegate, once
-/// per page: a render while one is in flight sends nothing, and one that
-/// failed is sent again by the next render. Runs in a task that outlives
-/// the view: opening a message and navigating straight away unmounts it,
-/// and a scoped task would be cancelled (#286 read-state variant).
+/// per page: a render while one is in flight, or after it was sent or given
+/// up, sends nothing. A transient failure is retried a few times inside the
+/// task ([`send_read_mark_with_retry`]); a failure that remains is reported
+/// once. Runs in a task that outlives the view: opening a message and
+/// navigating straight away unmounts it, and a scoped task would be
+/// cancelled (#286 read-state variant).
 #[cfg(feature = "use-node")]
 pub(crate) fn persist_read(alias: &str, id: MessageId, kept: KeptMessage, what: &'static str) {
     if !should_persist_read(alias, id) {
@@ -533,8 +573,9 @@ pub(crate) fn persist_read(alias: &str, id: MessageId, kept: KeptMessage, what: 
     }
     let key = state_key(alias);
     let _task = dioxus::core::spawn_forever(async move {
-        if let Err(e) = items::mark_read(key.clone(), id, kept).await {
-            read_mark_failed(&key, id);
+        let result =
+            send_read_mark_with_retry(|| items::mark_read(key.clone(), id, kept.clone())).await;
+        if let Err(e) = result {
             crate::log::local_state_failure(what, e);
         }
     });
@@ -573,8 +614,8 @@ pub(crate) fn global_settings() -> GlobalSettings {
 
 mod items;
 pub(crate) use items::{
-    archive_message, delete_draft, delete_message, delete_sent, load, message_id_for, save_draft,
-    save_sent, set_sent_delivery_state,
+    DraftSave, archive_message, delete_draft, delete_message, delete_sent, load, message_id_for,
+    save_draft, save_sent, set_sent_delivery_state,
 };
 // `unarchive_message` is wired but unused until #60 (true unarchive).
 #[allow(unused_imports)]
@@ -955,8 +996,14 @@ mod tests {
         let old = live_identity("fa-alice", 0x52);
         local_save_draft("fa-alice", "d1", Draft::default());
         assert_eq!(drafts_for("fa-alice").len(), 1);
+        let old_key = addr_key(&old);
+        assert_eq!(drafts_for(&old_key).len(), 1, "stored under the address");
         forget_identity(&old);
         crate::app::login::Identity::remove_in_place("fa-alice");
+        // Asserted on the old identity's key: once the alias names no live
+        // identity, `state_key("fa-alice")` falls back to the bare alias,
+        // which holds nothing whether or not the forget worked.
+        assert!(drafts_for(&old_key).is_empty());
         assert!(drafts_for("fa-alice").is_empty());
     }
 
@@ -992,17 +1039,58 @@ mod tests {
         assert_eq!(addr_of_key(&state_key("rn-new")), Some(addr));
     }
 
-    /// A read mark that failed is sent again by the next render, not given
-    /// up for the rest of the page.
+    /// A read mark that keeps failing is tried a bounded number of times,
+    /// once per transient failure, and never again by later renders, so an
+    /// open message that cannot be marked read is reported once, not once
+    /// per render (R12).
     #[test]
-    fn a_failed_read_mark_is_sent_again() {
+    fn a_failing_read_mark_is_retried_only_while_transient_and_only_a_few_times() {
+        use crate::mail_delegate::CallError;
+        use freenet_mail_protocol::{Failure, FailureCode};
+        use futures::executor::block_on;
+        use std::cell::Cell;
+
+        let tries = Cell::new(0);
+        let unknown = || -> crate::DynError { CallError::Unknown("timeout".into()).into() };
+        let result = block_on(send_read_mark_with_retry(|| {
+            tries.set(tries.get() + 1);
+            async { Err(unknown()) }
+        }));
+        assert!(result.is_err());
+        assert_eq!(
+            tries.get(),
+            READ_MARK_ATTEMPTS,
+            "a timeout is retried, a bounded number of times"
+        );
+
+        tries.set(0);
+        let result = block_on(send_read_mark_with_retry(|| {
+            tries.set(tries.get() + 1);
+            async {
+                Err(CallError::Failed(Failure {
+                    code: FailureCode::NotFound,
+                    detail: "identity is being deleted".into(),
+                })
+                .into())
+            }
+        }));
+        assert!(result.is_err());
+        assert_eq!(tries.get(), 1, "a permanent failure is not retried");
+
+        tries.set(0);
+        let result = block_on(send_read_mark_with_retry(|| {
+            tries.set(tries.get() + 1);
+            let n = tries.get();
+            async move { if n < 2 { Err(unknown()) } else { Ok(()) } }
+        }));
+        assert!(result.is_ok(), "a transient failure that clears succeeds");
+        assert_eq!(tries.get(), 2);
+
         fresh_snapshot();
         assert!(should_persist_read("rf-alice", 51));
-        assert!(!should_persist_read("rf-alice", 51), "in flight");
-        read_mark_failed("rf-alice", 51);
         assert!(
-            should_persist_read("rf-alice", 51),
-            "retried after a failure"
+            !should_persist_read("rf-alice", 51),
+            "a later render never re-sends a mark, failed or not"
         );
     }
 

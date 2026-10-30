@@ -5467,6 +5467,10 @@ fn ComposeSheet() -> Element {
     // it still matches when the timer elapses — older keystrokes are silently
     // dropped. Send / Discard bump the token to cancel a pending save.
     let mut autosave_token = use_signal(|| 0u64);
+    // Set when an autosave finds this draft removed in another tab
+    // (discarded or sent there): autosave stops, so the draft is not brought
+    // back, and the sheet says so.
+    let draft_gone = use_signal(|| false);
     /// Idle window before a draft is flushed to the delegate. Picked to feel
     /// instant for normal typing while still coalescing fast bursts.
     const AUTOSAVE_DEBOUNCE_MS: u32 = 500;
@@ -5480,7 +5484,7 @@ fn ComposeSheet() -> Element {
         let to_v = to.read().clone();
         let subj_v = title.read().clone();
         let body_v = content.read().clone();
-        if to_v.is_empty() && subj_v.is_empty() && body_v.is_empty() {
+        if (to_v.is_empty() && subj_v.is_empty() && body_v.is_empty()) || *draft_gone.read() {
             return;
         }
         let id = draft_id.read().clone();
@@ -5513,8 +5517,17 @@ fn ComposeSheet() -> Element {
                 if *token_signal.read() != my_token {
                     return;
                 }
-                if let Err(e) = crate::local_state::save_draft(alias, id, draft).await {
-                    crate::log::local_state_failure("save draft", e);
+                match crate::local_state::save_draft(alias.clone(), id.clone(), draft).await {
+                    Ok(crate::local_state::DraftSave::GoneElsewhere) => {
+                        // Discarded or sent in another tab: stop autosaving
+                        // and drop the local copy, so it neither comes back
+                        // here nor gets sent twice.
+                        let mut gone = draft_gone;
+                        gone.set(true);
+                        crate::local_state::local_delete_draft(&alias, &id);
+                    }
+                    Ok(_) => {}
+                    Err(e) => crate::log::local_state_failure("save draft", e),
                 }
             });
         }
@@ -6050,6 +6063,15 @@ fn ComposeSheet() -> Element {
                         }
                     } else {
                         rsx! {}
+                    }
+                }
+                if *draft_gone.read() {
+                    div {
+                        class: "sheet-recipient-hint",
+                        "data-testid": "compose-draft-gone",
+                        role: "status",
+                        "aria-live": "polite",
+                        "This draft was discarded or sent in another tab, so it is no longer saved. You can still send it from here."
                     }
                 }
                 div { class: "sheet-field",
