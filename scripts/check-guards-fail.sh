@@ -254,8 +254,9 @@ dft "a deletion answers Deleted only once its marker is gone" "$D/handlers.rs" \
     '    s.del(&marker)?;
     Ok(Reply::Deleted)' '    let _ = s.del(&marker);
     Ok(Reply::Deleted)'
-dft "listing frees index entries whose item is gone" "$D/handlers.rs" \
-    '        let _ = s.index_remove_many(&ix, &recordless);' '        let _ = &recordless;'
+dt "listing frees index entries whose item is gone" "$D/handlers.rs" \
+    '        let _ = s.index_remove_many(&ix, &recordless);' '        let _ = &recordless;' \
+    listing_frees_an_index_entry_whose_item_is_gone
 dt "a failed prune does not fail the deletion listing" "$D/handlers.rs" \
     '    let _ = prune_recordless_identities(s);' '    prune_recordless_identities(s)?;' \
     a_failed_prune_does_not_fail_the_deletion_listing

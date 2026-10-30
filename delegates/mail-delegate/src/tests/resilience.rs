@@ -18,13 +18,46 @@ fn an_item_delete_interrupted_before_the_index_update_is_finished_by_its_retry()
         Err(FailureCode::Internal)
     );
     env.fail_keys_containing = None;
-    // The stale index entry is invisible to readers...
+    // The retry removes the stale index entry by itself (no listing first:
+    // a listing would free it too, see the next test)...
+    assert_eq!(call(&mut env, PROD, del), Ok(Reply::Deleted));
+    let index = |env: &mut MemEnv| {
+        let s = Space::new(env, Origin([PROD; 32]));
+        let (_, ids) = s
+            .index(&store::index_rel(ItemKind::Draft, Some(&me.addr)))
+            .unwrap();
+        ids.into_iter().collect::<Vec<_>>()
+    };
+    assert_eq!(index(&mut env), vec![vec![2; 16]]);
+    // ...and readers never saw it.
     assert_eq!(
         list_ids(&mut env, PROD, ItemKind::Draft, Some(me.addr)),
         vec![vec![2; 16]]
     );
-    // ...and the retry removes it.
-    assert_eq!(call(&mut env, PROD, del), Ok(Reply::Deleted));
+}
+
+/// An index entry whose record a failed delete or rollback removed holds a
+/// slot of its kind's cap. Listing the kind frees it.
+#[test]
+fn listing_frees_an_index_entry_whose_item_is_gone() {
+    let mut env = MemEnv::default();
+    let me = create(&mut env, PROD, "alice");
+    let g = ack(put(&mut env, draft(me.addr, 1), b"d", None));
+    ack(put(&mut env, draft(me.addr, 2), b"e", None));
+    env.fail_keys_containing = Some("/ix/dr/".into());
+    let _ = call(
+        &mut env,
+        PROD,
+        Op::DeleteItem {
+            item: draft(me.addr, 1),
+            expected_gen: g,
+        },
+    );
+    env.fail_keys_containing = None;
+    assert_eq!(
+        list_ids(&mut env, PROD, ItemKind::Draft, Some(me.addr)),
+        vec![vec![2; 16]]
+    );
     let s = Space::new(&mut env, Origin([PROD; 32]));
     let (_, ids) = s
         .index(&store::index_rel(ItemKind::Draft, Some(&me.addr)))
