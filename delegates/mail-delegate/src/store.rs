@@ -643,8 +643,16 @@ impl<'a> Space<'a> {
     /// Callers use this only where the record is the user's own and
     /// rebuildable from what they supply (an item, or an identity whose
     /// keys they are importing: same address, same seeds), so replacing an
-    /// unusable value loses nothing. An unreadable value is removed first,
-    /// so the key is counted once rather than as a second key.
+    /// unusable value loses nothing.
+    ///
+    /// The stored value is written over in place, never removed first: a
+    /// write that is then refused (the generation counter, the usage record
+    /// or the value itself) leaves the store as it was. Removing an
+    /// unreadable value first counted its key exactly, but a refusal after
+    /// the removal left the record gone and nothing written (fault seed
+    /// 2404). Writing over an unreadable value counts its key a second
+    /// time instead: the usage record runs one key high, which a recount
+    /// corrects, and never low.
     pub fn write_over_unusable(
         &mut self,
         rel: &str,
@@ -663,12 +671,7 @@ impl<'a> Space<'a> {
                 Some((g, _)) => g,
                 None => 0,
             },
-            None => {
-                if self.env.remove(&key) || self.env.remove(&key) {
-                    self.forget_unsized_key();
-                }
-                0
-            }
+            None => 0,
         };
         let generation = self.next_generation(floor)?;
         self.put(rel, &encode_versioned(generation, body))?;
@@ -1041,10 +1044,10 @@ mod tests {
         assert_eq!(after.bytes, before.bytes, "unknown sizes stay counted");
     }
 
-    /// Writing over a value that cannot be read counts its key once, not as
-    /// a second key.
+    /// Writing over a value that cannot be read replaces it, and never
+    /// counts low: at most its key a second time.
     #[test]
-    fn replacing_an_unreadable_value_counts_its_key_once() {
+    fn replacing_an_unreadable_value_never_counts_low() {
         let mut env = MemEnv::default();
         {
             let mut s = Space::new(&mut env, Origin([1; 32]));
@@ -1058,7 +1061,48 @@ mod tests {
         env.faults = None;
         let s = Space::new(&mut env, Origin([1; 32]));
         assert_eq!(s.read("a").unwrap(), Some((g, b"x".to_vec())));
-        assert_eq!(s.usage().keys, before.keys);
+        let keys = s.usage().keys;
+        assert!(
+            keys == before.keys || keys == before.keys + 1,
+            "{keys} keys counted, {} stored",
+            before.keys
+        );
+    }
+
+    /// A write over an unreadable value that is refused part-way leaves the
+    /// value where it was: nothing is removed before the write lands.
+    #[test]
+    fn a_refused_write_over_an_unreadable_value_keeps_it() {
+        use crate::env::mem::{FaultOp, Faults, Rule};
+        for refused in ["mt/gen", "mt/usage", "/a"] {
+            let mut env = MemEnv::default();
+            let old = {
+                let mut s = Space::new(&mut env, Origin([1; 32]));
+                s.write_if("a", 0, b"12345").unwrap()
+            };
+            let key = String::from_utf8(Space::new(&mut env, Origin([1; 32])).full_key("a"))
+                .unwrap();
+            let mut faults = Faults::blind(&key);
+            faults.rules = vec![Rule {
+                op: FaultOp::SetFail,
+                key_contains: refused.into(),
+                nth: 1,
+            }];
+            env.faults = Some(faults);
+            assert!(
+                Space::new(&mut env, Origin([1; 32]))
+                    .write_over_unusable("a", b"x", |_| true)
+                    .is_err(),
+                "refusing {refused}"
+            );
+            env.faults = None;
+            let s = Space::new(&mut env, Origin([1; 32]));
+            assert_eq!(
+                s.read("a").unwrap(),
+                Some((old, b"12345".to_vec())),
+                "refusing {refused} lost the value"
+            );
+        }
     }
 
     /// A stored value that does not decode is replaced exactly (its size is

@@ -1163,6 +1163,63 @@ fn the_invariant_check_fails_on_a_leaked_identity_slot() {
     assert!(check(&mut run).is_err());
 }
 
+/// Seed 2404 of the unreadable-key run, at 100 ops (found on fa3641a),
+/// replayed from its trace as a script of the two faults that mattered, not
+/// from the seed: a listed identity's record goes unreadable, the user
+/// restores it from its keys, and the restore's generation write is refused.
+/// The restore used to remove the unreadable record before taking the
+/// generation, so the refusal left the entry naming no record and no marker
+/// to free it: a leaked slot, and a stored record destroyed by a write that
+/// never happened. A failed restore must leave the store as it found it.
+#[test]
+fn a_restore_refused_its_generation_keeps_the_unreadable_record() {
+    use crate::env::mem::Rule;
+    let mut run = Run {
+        env: MemEnv::default(),
+        rng: Rng(2404),
+        m: Model::default(),
+        lose_reply: 0,
+        blinded: None,
+        next_request: 0,
+        prompts: BTreeMap::new(),
+    };
+    run.create();
+    let addr = *run.m.ids.keys().next().expect("created");
+    let (dsa, kem) = run.m.seeds[0].clone();
+    let full = |run: &mut Run, rel: &str| {
+        String::from_utf8(Space::new(&mut run.env, Origin([PROD; 32])).full_key(rel)).unwrap()
+    };
+    let record = full(&mut run, &store::identity_rel(&addr));
+    // `mt/gen` also matches its copy `mt/gen2`; the first match is the
+    // counter's first copy, written first.
+    let counter = full(&mut run, "mt/gen");
+    let mut faults = Faults::default();
+    faults.rules = vec![
+        Rule {
+            op: FaultOp::GetBlindFrom,
+            key_contains: record,
+            nth: 1,
+        },
+        Rule {
+            op: FaultOp::SetFail,
+            key_contains: counter,
+            nth: 1,
+        },
+    ];
+    run.env.faults = Some(faults);
+    match run.send(Op::ImportIdentity {
+        source: ImportSource::Seeds { dsa, kem },
+        kind: ImportKind::UserRestore,
+        alias: "restored".into(),
+        description: String::new(),
+    }) {
+        Seen::Reply(Err(f)) if f.code == FailureCode::Internal => {}
+        other => panic!("the scripted refusal was not reached: {}", describe(&other)),
+    }
+    run.env.faults = None;
+    check(&mut run).unwrap();
+}
+
 #[test]
 fn a_targeted_rule_fails_exactly_the_nth_matching_call() {
     let env = MemEnv {

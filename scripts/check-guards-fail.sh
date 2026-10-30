@@ -263,13 +263,19 @@ dt "removing an unreadable key counts one key fewer" "$D/store.rs" \
                 self.forget_unsized_key();' \
     '                // It was there, unreadable: one key fewer.' \
     removing_an_unreadable_key_counts_one_key_fewer
-dt "replacing an unreadable value counts its key once" "$D/store.rs" \
-    '                if self.env.remove(&key) || self.env.remove(&key) {
+dt "a refused write over an unreadable value keeps it" "$D/store.rs" \
+    '            None => 0,
+        };
+        let generation = self.next_generation(floor)?;' \
+    '            None => {
+                if self.env.remove(&key) || self.env.remove(&key) {
                     self.forget_unsized_key();
                 }
-                0' \
-    '                0' \
-    replacing_an_unreadable_value_counts_its_key_once
+                0
+            }
+        };
+        let generation = self.next_generation(floor)?;' \
+    a_refused_write_over_an_unreadable_value_keeps_it,a_restore_refused_its_generation_keeps_the_unreadable_record
 dt "a delete removes a key that reads as absent" "$D/store.rs" \
     '            if self.env.remove(&key) || self.env.remove(&key) || self.env.remove(&key) {' \
     '            if false {' \
