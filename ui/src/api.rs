@@ -1678,7 +1678,7 @@ pub(crate) async fn node_comms(
                     }
                     if conflicting {
                         crate::toast::push_toast_detached(
-                            "Two contacts have the same signing key with different encryption keys, so one may be forged. Mail to them is held until you verify with the contact and delete the wrong entry in Contacts.".to_string(),
+                            "Two contacts have the same signing key with different encryption keys, so one may be forged. Sending to them is refused until you verify with the contact and delete the wrong entry in Contacts.".to_string(),
                             crate::toast::ToastLevel::Warning,
                         );
                     }

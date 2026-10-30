@@ -152,7 +152,10 @@ async fn delete(item: ItemRef) -> Result<(), CallError> {
     loop {
         // "Already gone" only when a second read agrees: one lost read must
         // not leave the item in place while the caller goes on as if
-        // deleted.
+        // deleted. The cost is one extra delegate round trip, paid only
+        // when the item reads as absent (so a delete of something already
+        // deleted costs two reads; `delete_message`, deleting a message's
+        // kept and archived copies, pays it for each copy that is absent).
         let current = match ops::get_item(item.clone()).await? {
             Some(current) => current,
             None => match ops::get_item(item.clone()).await? {

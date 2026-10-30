@@ -719,6 +719,34 @@ mod tests {
         }
     }
 
+    /// A host whose first `misses` reads fail, then read normally.
+    struct BlindAtFirst(MemEnv, std::cell::Cell<u32>);
+
+    impl Env for BlindAtFirst {
+        fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
+            if self.1.get() > 0 {
+                self.1.set(self.1.get() - 1);
+                return None;
+            }
+            self.0.get(key)
+        }
+        fn set(&mut self, key: &[u8], value: &[u8]) -> bool {
+            self.0.set(key, value)
+        }
+        fn remove(&mut self, key: &[u8]) -> bool {
+            self.0.remove(key)
+        }
+        fn host_random(&mut self) -> [u8; 32] {
+            self.0.host_random()
+        }
+        fn now_secs(&self) -> Option<u64> {
+            None
+        }
+        fn contract_state(&self, _: &[u8; 32]) -> Option<Vec<u8>> {
+            None
+        }
+    }
+
     /// `del` answering `Ok` means the key is gone, even when reads of it
     /// fail: a failed read looks like absence, so it is removed anyway.
     #[test]
@@ -728,15 +756,24 @@ mod tests {
         env.0.secrets.insert(key.clone(), b"secret".to_vec());
         Space::new(&mut env, Origin([1; 32])).del("blind").unwrap();
         assert!(!env.0.secrets.contains_key(&key));
-        // A removal the host refuses, of a key that is really there, is an
-        // error, not "already gone".
+    }
+
+    /// The read-miss path: the key reads as absent (the read and its
+    /// re-read both fail), the host refuses both removals, and a later read
+    /// finds the key still there. That is an error, never "already gone":
+    /// answering `Ok` would report a deletion that did not happen.
+    #[test]
+    fn a_refused_delete_of_a_key_that_read_as_absent_is_an_error() {
+        let mut env = BlindAtFirst(MemEnv::default(), std::cell::Cell::new(0));
+        let key = Space::new(&mut env, Origin([1; 32])).full_key("item");
         env.0.secrets.insert(key.clone(), b"secret".to_vec());
-        env.0.fail_keys_containing = Some("blind".into());
-        let mut plain = env.0.clone();
+        env.0.fail_keys_containing = Some("item".into());
+        // The fetch and its confirming re-read miss; later reads see it.
+        env.1.set(2);
         assert!(
-            Space::new(&mut plain, Origin([1; 32]))
-                .del("blind")
-                .is_err()
+            Space::new(&mut env, Origin([1; 32])).del("item").is_err(),
+            "a key still there after refused removals is not deleted"
         );
+        assert!(env.0.secrets.contains_key(&key));
     }
 }
