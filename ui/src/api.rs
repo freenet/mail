@@ -1282,6 +1282,7 @@ fn set_inbox_state(
     identity: &crate::app::Identity,
     key: freenet_stdlib::prelude::ContractKey,
     state: freenet_mail_wire_v1::inbox::Inbox,
+    source: StateSource,
 ) {
     use crate::inbox::InboxModel;
     // Release-visible: the live-node suite reads it as proof the node holds
@@ -1297,6 +1298,7 @@ fn set_inbox_state(
             .iter()
             .map(|m| crate::local_state::full_message_id(&m.content))
             .collect(),
+        source,
     );
     let mut models = inboxes.0.write();
     let pending = match models.iter().position(|e| e.borrow().key == key) {
@@ -1330,34 +1332,93 @@ pub(crate) fn forget_inbox_states(addr: &freenet_mail_protocol::Addr) {
     FLAGS_RECLAIMED.with(|r| r.borrow_mut().remove(addr));
 }
 
-/// Per identity, the whole non-empty inbox states seen this page and every
-/// message any of them held. The first state can be stale (a copy the node
-/// cached, a state just re-published after a migration or self-heal), so a
-/// message is live if ANY state this page held it.
+/// Where a whole inbox state came from.
+#[cfg(feature = "use-node")]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum StateSource {
+    /// A GET answered by the node: possibly a stale local copy.
+    Fetched,
+    /// A whole state the node pushed with an update: current.
+    Pushed,
+}
+
+/// Per identity, what this page has seen of the inbox, and whether that is
+/// enough to reclaim the marks of messages that are gone.
+///
+/// The first fetched state can be stale (a copy the node cached, a state
+/// re-published after a migration or self-heal), so a message is live if
+/// ANY state this page saw held it, and reclaiming waits until the page has
+/// seen the current state: one the node pushed, one fetched after a live
+/// update (the node had applied it, so its copy was current), or two
+/// DIFFERENT fetched states. Two copies of the same stale state count once.
+/// Subscriptions usually deliver deltas, not whole states, so a live delta
+/// asks for one fresh whole state ([`SeenStates::live_update`]); otherwise
+/// a page that only ever got deltas would never reclaim, and marks would
+/// grow toward the delegate's cap.
 #[cfg(feature = "use-node")]
 #[derive(Default)]
 pub(crate) struct SeenStates {
-    count: u32,
+    /// Fingerprints of the distinct message sets seen.
+    distinct: std::collections::HashSet<u64>,
     messages: std::collections::HashSet<[u8; 16]>,
+    current_seen: bool,
+    live_update_seen: bool,
+    refetch_requested: bool,
 }
 
 #[cfg(feature = "use-node")]
 impl SeenStates {
     /// Record a whole state; whether marks may now be reclaimed against
-    /// what has been seen. An empty state proves nothing and is not counted;
-    /// one state alone is not trusted.
-    pub(crate) fn note(&mut self, state: std::collections::HashSet<[u8; 16]>) -> bool {
-        if state.is_empty() {
+    /// what has been seen. An empty fetched state proves nothing.
+    pub(crate) fn note(
+        &mut self,
+        state: std::collections::HashSet<[u8; 16]>,
+        source: StateSource,
+    ) -> bool {
+        let current = source == StateSource::Pushed || self.live_update_seen;
+        if state.is_empty() && !current {
+            return self.ready();
+        }
+        self.distinct.insert(fingerprint(&state));
+        self.messages.extend(state);
+        self.current_seen |= current;
+        self.ready()
+    }
+
+    /// A delta was applied to this page's copy of the inbox, so the node's
+    /// copy is current. Messages it added are live. True the first time,
+    /// when the caller should fetch the whole state once.
+    pub(crate) fn live_update(
+        &mut self,
+        added: impl IntoIterator<Item = [u8; 16]>,
+    ) -> bool {
+        self.messages.extend(added);
+        self.live_update_seen = true;
+        if self.current_seen || self.refetch_requested {
             return false;
         }
-        self.count += 1;
-        self.messages.extend(state);
-        self.count >= 2
+        self.refetch_requested = true;
+        true
+    }
+
+    fn ready(&self) -> bool {
+        self.current_seen || self.distinct.len() >= 2
     }
 
     pub(crate) fn holds(&self, id: &[u8]) -> bool {
         <[u8; 16]>::try_from(id).is_ok_and(|id| self.messages.contains(&id))
     }
+}
+
+/// A fingerprint of a message set, independent of order.
+#[cfg(feature = "use-node")]
+fn fingerprint(state: &std::collections::HashSet<[u8; 16]>) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut ids: Vec<&[u8; 16]> = state.iter().collect();
+    ids.sort_unstable();
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    ids.hash(&mut h);
+    h.finish()
 }
 
 #[cfg(feature = "use-node")]
@@ -1397,16 +1458,18 @@ fn self_heal_acked(id: &freenet_stdlib::prelude::ContractInstanceId) {
     }
 }
 
-/// Once per page and identity, once a second whole non-empty inbox state
-/// has arrived, drop the marks of messages that are gone
+/// Once per page and identity, once the page has seen the inbox's current
+/// state ([`SeenStates`]), drop the marks of messages that are gone
 /// ([`crate::local_state::reclaim_flags`]): in no state this page saw,
 /// asked when each mark would go. A failure is retried on the next state.
 #[cfg(feature = "use-node")]
 fn reclaim_flags_when_current(
     owner: freenet_mail_protocol::Addr,
     state: std::collections::HashSet<[u8; 16]>,
+    source: StateSource,
 ) {
-    let ready = SEEN_STATES.with(|s| s.borrow_mut().entry(owner).or_default().note(state));
+    let ready =
+        SEEN_STATES.with(|s| s.borrow_mut().entry(owner).or_default().note(state, source));
     if !ready || !FLAGS_RECLAIMED.with(|r| r.borrow_mut().insert(owner)) {
         return;
     }
@@ -2495,7 +2558,7 @@ pub(crate) async fn node_comms(
                             "GetResponse: StoredInbox decoded, {} messages",
                             parsed.messages.len()
                         ));
-                        set_inbox_state(inboxes, &identity, key, parsed);
+                        set_inbox_state(inboxes, &identity, key, parsed, StateSource::Fetched);
                     }
                     _ => {
                         match token_rec_to_id.remove(&key) {
@@ -2788,6 +2851,15 @@ pub(crate) async fn node_comms(
                                 >(delta.as_ref())
                                 {
                                     Ok(parsed) => {
+                                        let added: Vec<[u8; 16]> = match &parsed {
+                                            freenet_mail_wire_v1::inbox::UpdateInbox::AddMessages {
+                                                messages,
+                                            } => messages
+                                                .iter()
+                                                .map(|m| crate::local_state::full_message_id(&m.content))
+                                                .collect(),
+                                            _ => Vec::new(),
+                                        };
                                         let models = inboxes.0.write();
                                         if let Some(pos) =
                                             models.iter().position(|e| e.borrow().key == key)
@@ -2796,6 +2868,30 @@ pub(crate) async fn node_comms(
                                                 models[pos].borrow_mut().apply_delta(parsed);
                                             drop(models);
                                             spawn_decrypt(inboxes, key, pending);
+                                            // The node applied this update, so its
+                                            // copy is current: fetch the whole state
+                                            // once, which lets stale message marks be
+                                            // reclaimed even when only deltas arrive.
+                                            let refetch = SEEN_STATES.with(|s| {
+                                                s.borrow_mut()
+                                                    .entry(identity.addr)
+                                                    .or_default()
+                                                    .live_update(added)
+                                            });
+                                            if refetch {
+                                                let req = freenet_stdlib::client_api::ContractRequest::Get {
+                                                    key: key.into(),
+                                                    return_contract_code: false,
+                                                    subscribe: false,
+                                                    blocking_subscribe: false,
+                                                };
+                                                if let Err(e) = client.send(req.into()).await {
+                                                    crate::log::error(
+                                                        format!("fetching inbox {key} after an update: {e}"),
+                                                        None,
+                                                    );
+                                                }
+                                            }
                                         } else {
                                             // Notification raced GetResponse: a
                                             // Delta on its own can't materialise
@@ -2819,7 +2915,13 @@ pub(crate) async fn node_comms(
                             }
                             UpdateData::State(state) => {
                                 match serde_json::from_slice::<StoredInbox>(state.as_ref()) {
-                                    Ok(parsed) => set_inbox_state(inboxes, &identity, key, parsed),
+                                    Ok(parsed) => set_inbox_state(
+                                        inboxes,
+                                        &identity,
+                                        key,
+                                        parsed,
+                                        StateSource::Pushed,
+                                    ),
                                     Err(e) => crate::log::error(
                                         format!(
                                             "UpdateNotification: bad inbox state for {key}: {e}"
@@ -3593,21 +3695,60 @@ impl std::fmt::Display for TryNodeAction {
 
 #[cfg(all(test, feature = "use-node"))]
 mod seen_states_tests {
-    use super::SeenStates;
+    use super::{SeenStates, StateSource::*};
 
     /// Marks are reclaimed only against what the page has seen of the inbox:
-    /// never on an empty state, never on the first state alone (it may be a
-    /// stale copy), and a message any seen state held stays live.
+    /// never on an empty fetched state, never on the first fetched state
+    /// alone (it may be a stale copy), and a message any seen state held
+    /// stays live.
     #[test]
-    fn marks_are_reclaimed_only_against_a_state_seen_twice() {
+    fn marks_are_reclaimed_only_against_two_different_fetched_states() {
         let mut seen = SeenStates::default();
-        assert!(!seen.note([].into()), "an empty state proves nothing");
-        assert!(!seen.note([[1; 16]].into()), "one state is not trusted");
+        assert!(!seen.note([].into(), Fetched), "an empty state proves nothing");
+        assert!(!seen.note([[1; 16]].into(), Fetched), "one state is not trusted");
         // A later state without message 1 (an older copy, or 1 removed):
         // 1 is still live, since a state this page saw held it.
-        assert!(seen.note([[2; 16]].into()));
+        assert!(seen.note([[2; 16]].into(), Fetched));
         assert!(seen.holds(&[1; 16]) && seen.holds(&[2; 16]));
         assert!(!seen.holds(&[3; 16]));
+    }
+
+    /// Two copies of the same (possibly stale) state are one state: they
+    /// prove nothing new about what the inbox holds now.
+    #[test]
+    fn the_same_state_fetched_twice_counts_once() {
+        let mut seen = SeenStates::default();
+        assert!(!seen.note([[1; 16], [2; 16]].into(), Fetched));
+        assert!(
+            !seen.note([[2; 16], [1; 16]].into(), Fetched),
+            "the same message set again, in any order, is not a second state"
+        );
+    }
+
+    /// A state the node pushed with an update is current on its own, even
+    /// an empty one (every message removed).
+    #[test]
+    fn a_pushed_state_is_current() {
+        let mut seen = SeenStates::default();
+        assert!(seen.note([[1; 16]].into(), Pushed));
+        let mut empty = SeenStates::default();
+        assert!(empty.note([].into(), Pushed));
+    }
+
+    /// With deltas only (the usual subscription), the first live delta asks
+    /// for one fresh whole state, which is then trusted: without that, a
+    /// page that only got deltas never reclaimed, and marks grew toward the
+    /// delegate's cap. Messages a delta added are live.
+    #[test]
+    fn a_live_delta_asks_once_for_a_fresh_state_which_is_then_current() {
+        let mut seen = SeenStates::default();
+        assert!(!seen.note([[1; 16]].into(), Fetched));
+        assert!(seen.live_update([[5; 16]]), "the first delta asks for a fetch");
+        assert!(!seen.live_update([]), "and only once");
+        assert!(seen.holds(&[5; 16]), "a message a delta added is live");
+        // The refetch returns the same message set (a settings-only delta):
+        // still current, because the node had applied an update.
+        assert!(seen.note([[1; 16]].into(), Fetched));
     }
 }
 
