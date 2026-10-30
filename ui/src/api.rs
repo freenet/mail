@@ -2173,17 +2173,23 @@ pub(crate) async fn node_comms(
                     .into_iter()
                     .find(|c| &*c.local_alias == alias.as_str())
                     .map(|c| c.ml_dsa_vk_bytes);
-                let removed: Result<(), DynError> = match vk {
-                    Some(vk) => {
-                        crate::app::contact_store::remove_in_background(alias.clone(), vk);
-                        Ok(())
-                    }
-                    None => Err(format!("no contact named {alias}").into()),
-                };
-                if let Err(e) = removed {
+                let removed: Result<Vec<u8>, DynError> =
+                    vk.ok_or_else(|| format!("no contact named {alias}").into());
+                if let Err(e) = &removed {
                     crate::log::error(format!("failed to delete contact {alias}: {e}"), None);
-                } else {
+                } else if let Ok(vk) = removed {
                     crate::app::address_book::remove_contact(&alias);
+                    // One stored record per signing key: when the deleted
+                    // entry was one side of a key conflict, the record is
+                    // the kept entry's too (round-8 X4).
+                    match crate::app::address_book::persist_after_removal(&vk) {
+                        crate::app::address_book::PersistAfterRemoval::Delete => {
+                            crate::app::contact_store::remove_in_background(alias.clone(), vk);
+                        }
+                        crate::app::address_book::PersistAfterRemoval::Rewrite(kept) => {
+                            crate::app::contact_store::save_in_background(kept);
+                        }
+                    }
                     login_controller.write().updated = true;
                     // Bump generation so inbox rows that showed the
                     // removed contact as "verified" revert to

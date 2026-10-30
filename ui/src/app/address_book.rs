@@ -617,6 +617,23 @@ fn insert(contact: Contact, keep_shared_signing_key: bool) -> Result<(), String>
         .inspect(|()| bump_address_book_gen())
 }
 
+/// What deleting the contact with signing key `vk` must do to the stored
+/// record, once it is gone from the address book. The delegate keeps one
+/// record per signing key, so when the deleted entry was one side of a key
+/// conflict the record is the KEPT entry's too: it is rewritten to the
+/// kept entry, not deleted (deleting it lost the kept contact on reload).
+pub enum PersistAfterRemoval {
+    Delete,
+    Rewrite(Contact),
+}
+
+pub fn persist_after_removal(vk: &[u8]) -> PersistAfterRemoval {
+    match all_contacts().into_iter().find(|c| c.ml_dsa_vk_bytes == vk) {
+        Some(kept) => PersistAfterRemoval::Rewrite(kept),
+        None => PersistAfterRemoval::Delete,
+    }
+}
+
 /// Remove a contact by alias.  No-op if the alias does not exist or is an
 /// own identity (own identities are never removed via this path).
 ///
@@ -1704,6 +1721,15 @@ mod tests {
             remove_contact("bob2");
             assert!(!key_conflict(&real.ml_dsa_vk_bytes));
             assert!(resolve_for_send("bob", None, false).is_ok());
+            // The one stored record (one per signing key) is rewritten to
+            // the kept entry, not deleted with the other (round-8 X4).
+            match persist_after_removal(&real.ml_dsa_vk_bytes) {
+                PersistAfterRemoval::Rewrite(kept) => {
+                    assert_eq!(&*kept.local_alias, "bob");
+                    assert_eq!(kept.ml_kem_ek_bytes, real.ml_kem_ek_bytes);
+                }
+                PersistAfterRemoval::Delete => panic!("the kept contact's record was deleted"),
+            }
         }
         // A new import still refuses a second entry for one signing key.
         reset_address_book();
