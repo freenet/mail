@@ -14,7 +14,9 @@ The release that ships them moves them into `../wasm/v2/`, pins them in
 | `mail_delegate_code_hash` | `fdev inspect` code hash of `mail_delegate`. |
 
 Rebuild after changing the delegate, its lockfile or anything it depends on
-(`protocol/`, `wire-v1/`):
+(`protocol/`, `wire-v1/`). That includes test-only edits: a change confined
+to a `#[cfg(test)]` module of a delegate source file has been seen to change
+the built bytes, so do not assume a test change leaves the candidate alone.
 
 ```bash
 scripts/build-wasm.sh delegates/mail-delegate delegate freenet-main-delegate,v1-transition \

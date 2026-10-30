@@ -84,7 +84,8 @@ Its WASM lives under `published-contract/candidate/` until a release
 freezes it into `published-contract/wasm/v2/`.
 `scripts/check-delegate-candidate.sh` (CI `check-drift`) fails unless the
 committed bytes are exactly what the source builds. Rebuild it after
-changing the delegate, `protocol/` or `wire-v1/`
+changing the delegate, `protocol/` or `wire-v1/`, test-only edits
+included (they have been seen to change the bytes)
 (`published-contract/candidate/README.md`). `scripts/check-release-delegate.sh`,
 run by `release.sh`, refuses a release whose UI embeds the candidate or whose
 delegate was built with the `v1-transition` feature.
