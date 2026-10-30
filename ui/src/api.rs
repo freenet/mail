@@ -1322,6 +1322,14 @@ thread_local! {
         RefCell::new(std::collections::HashSet::new());
 }
 
+/// Forget the inbox states seen, and the reclaim done, for a deleted
+/// identity, so a new identity at a reused address starts afresh.
+#[cfg(feature = "use-node")]
+pub(crate) fn forget_inbox_states(addr: &freenet_mail_protocol::Addr) {
+    SEEN_STATES.with(|s| s.borrow_mut().remove(addr));
+    FLAGS_RECLAIMED.with(|r| r.borrow_mut().remove(addr));
+}
+
 /// Per identity, the whole non-empty inbox states seen this page and every
 /// message any of them held. The first state can be stale (a copy the node
 /// cached, a state just re-published after a migration or self-heal), so a
@@ -1445,6 +1453,11 @@ fn spawn_decrypt(
             let hashes = pending.hashes();
             let retry_with = pending.messages.clone();
             let outcome = crate::inbox::decrypt_pending(pending).await;
+            // The identity was deleted meanwhile: nothing to show, and no
+            // error to report.
+            if crate::inbox::InboxModel::contract_identity(&key).is_none() {
+                return;
+            }
             let models = inboxes.0.write();
             let Some(model) = models.iter().find(|e| e.borrow().key == key) else {
                 return;

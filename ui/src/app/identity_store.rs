@@ -274,14 +274,25 @@ pub(crate) fn settle_after_failed_deletion(
 /// Take a deleted identity out of this page: the live identities, the
 /// identities list, the signed-in identity and its in-page state.
 pub(crate) fn drop_from_page(identity: &crate::app::login::Identity, user: &mut crate::app::User) {
-    crate::app::login::Identity::remove_in_place_by_addr(&identity.addr);
-    crate::local_state::forget_identity(&identity.addr);
+    forget_everywhere(&identity.addr, &identity.alias);
     crate::app::address_book::remove_own_identity(identity);
     let was_logged_in = user.logged_id().is_some_and(|i| i.addr == identity.addr);
     user.identities.retain(|i| i.addr != identity.addr);
     if was_logged_in {
         user.logout();
     }
+}
+
+/// Everything this page holds for a deleted identity, by address: the
+/// live identity, its local state and bookkeeping, its inbox routing and
+/// the inbox states seen for it (round-8 X5, X12).
+pub(crate) fn forget_everywhere(addr: &freenet_mail_protocol::Addr, alias: &str) {
+    crate::app::login::Identity::remove_in_place_by_addr(addr);
+    crate::local_state::forget_identity(addr);
+    crate::local_state::forget_identity_bookkeeping(addr, alias);
+    crate::inbox::InboxModel::forget_identity(addr);
+    #[cfg(feature = "use-node")]
+    crate::api::forget_inbox_states(addr);
 }
 
 /// After a deletion that did not finish: once the delegate lists the
@@ -314,8 +325,7 @@ pub(crate) async fn finish_deletion(info: IdentityInfo) {
     match delete_with_progress(info.addr, info.generation, &info.alias).await {
         Ok(()) => {
             // By address: a new identity may carry this one's alias.
-            crate::app::login::Identity::remove_in_place_by_addr(&info.addr);
-            crate::local_state::forget_identity(&info.addr);
+            forget_everywhere(&info.addr, &info.alias);
             crate::toast::push_toast_detached(
                 format!("Identity `{}` deleted", info.alias),
                 crate::toast::ToastLevel::Success,
@@ -1003,6 +1013,38 @@ mod tests {
                 "selecting the second identity must act as the second"
             );
         });
+    }
+
+    /// A deleted identity stops being routed, and a new identity under its
+    /// alias is the one sends resolve to: by address, never by an alias
+    /// scan that could pick the deleted one (round-8 X5). A sender that is
+    /// not routed is an error the user sees, not a silent no-op (X6).
+    #[test]
+    fn a_deleted_identity_is_unrouted_and_its_alias_resolves_to_the_new_one() {
+        use crate::app::UserId;
+        use crate::inbox::InboxModel;
+        use freenet_stdlib::prelude::{ContractKey, Parameters};
+        let key = |n: u8| {
+            ContractKey::from_params(crate::inbox::INBOX_CODE_HASH, Parameters::from(vec![n; 8]))
+                .unwrap()
+        };
+        let old = Identity::from_info(&info("rt-dup", 0x51), UserId::new());
+        let new = Identity::from_info(&info("rt-dup", 0x52), UserId::new());
+        InboxModel::set_contract_identity(key(0x51), old.clone());
+        forget_everywhere(&old.addr, &old.alias);
+        InboxModel::set_contract_identity(key(0x52), new.clone());
+        assert!(InboxModel::contract_identity(&key(0x51)).is_none());
+        assert!(InboxModel::id_for_addr(&old.addr).is_none());
+        let err = InboxModel::sender_identity(&old.addr, "rt-dup").unwrap_err();
+        assert!(err.contains("reload"), "{err}");
+        assert_eq!(
+            InboxModel::sender_identity(&new.addr, "rt-dup").map(|i| i.addr),
+            Ok(new.addr)
+        );
+        assert_eq!(
+            InboxModel::id_for_alias("rt-dup").map(|i| i.addr),
+            Some(new.addr)
+        );
     }
 
     /// When it cannot be known whether a failed deletion began, the

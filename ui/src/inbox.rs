@@ -1130,12 +1130,42 @@ impl InboxModel {
         Ok(contract_key)
     }
 
+    /// The routed identity named `alias`. Only a fallback for finding an
+    /// identity's state key; sending resolves by address
+    /// ([`Self::sender_identity`]). A deleted identity is not routed any more
+    /// ([`Self::forget_identity`]), so its alias cannot shadow a new one's.
     pub fn id_for_alias(alias: &str) -> Option<Identity> {
         INBOX_TO_ID.with(|map| {
             map.borrow()
                 .values()
                 .find_map(|id| (id.alias() == alias).then(|| id.clone()))
         })
+    }
+
+    /// The routed identity at `addr`. By address, never by alias: a
+    /// deleted identity's alias can be taken by a new one, and an alias
+    /// scan of the routing map could pick either.
+    pub fn id_for_addr(addr: &freenet_mail_protocol::Addr) -> Option<Identity> {
+        INBOX_TO_ID.with(|map| map.borrow().values().find(|id| id.addr == *addr).cloned())
+    }
+
+    /// The identity to send as, or why there is none. A missing sender is
+    /// an error the user sees (the draft stays), never a silent no-op that
+    /// reads as a successful send.
+    pub fn sender_identity(
+        addr: &freenet_mail_protocol::Addr,
+        alias: &str,
+    ) -> Result<Identity, String> {
+        Self::id_for_addr(addr).ok_or_else(|| {
+            format!("your identity `{alias}` is not ready on this page; reload and try again")
+        })
+    }
+
+    /// Stop routing a deleted identity's inbox: a state that still arrives
+    /// for it (the node keeps the subscription) is then ignored, rather than
+    /// decrypted with keys that no longer exist.
+    pub fn forget_identity(addr: &freenet_mail_protocol::Addr) {
+        INBOX_TO_ID.with(|map| map.borrow_mut().retain(|_, id| id.addr != *addr));
     }
 
     /// Relabel the identity at `addr` in the routing map after a rename.

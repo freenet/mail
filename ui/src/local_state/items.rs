@@ -206,6 +206,13 @@ fn seen_draft(key: String, id: String) {
     SEEN_DRAFTS.with(|s| s.borrow_mut().insert((key, id)));
 }
 
+/// Forget this page's bookkeeping for a deleted identity: its pending
+/// mark writes and the delivery states waiting for its Sent items.
+pub(crate) fn forget_identity_bookkeeping(addr: &Addr, alias: &str) {
+    FLAG_WRITES.with(|w| w.borrow_mut().1.retain(|(a, _), _| a != addr));
+    EARLY_DELIVERY.with(|e| e.borrow_mut().retain(|(a, _), _| a != alias));
+}
+
 /// Forget the drafts seen for state key `key` (its identity is gone).
 pub(super) fn forget_seen_drafts(key: &str) {
     SEEN_DRAFTS.with(|s| s.borrow_mut().retain(|(k, _)| k != key));
@@ -699,6 +706,38 @@ pub(crate) async fn load(identities: &[(String, Addr)]) -> Result<LocalState, Ca
 
 #[cfg(test)]
 mod tests {
+    /// A deleted identity's page bookkeeping goes with it: its pending mark
+    /// writes and the delivery states waiting for its Sent items (round-8
+    /// X12), and only its own.
+    #[test]
+    fn forgetting_an_identity_clears_its_bookkeeping() {
+        use super::*;
+        let (gone, kept) = (Addr([0x31; 24]), Addr([0x32; 24]));
+        for owner in [gone, kept] {
+            note_flag_write(&ItemRef {
+                kind: freenet_mail_protocol::ItemKind::Flags,
+                owner: Some(owner),
+                id: vec![7; 16],
+            });
+        }
+        EARLY_DELIVERY.with(|e| {
+            let mut e = e.borrow_mut();
+            e.insert(("fg-gone".into(), "s1".into()), DeliveryState::Delivered);
+            e.insert(("fg-kept".into(), "s1".into()), DeliveryState::Delivered);
+        });
+        forget_identity_bookkeeping(&gone, "fg-gone");
+        FLAG_WRITES.with(|w| {
+            let w = w.borrow();
+            assert!(!w.1.keys().any(|(a, _)| *a == gone));
+            assert!(w.1.keys().any(|(a, _)| *a == kept));
+        });
+        EARLY_DELIVERY.with(|e| {
+            let e = e.borrow();
+            assert!(!e.contains_key(&("fg-gone".to_string(), "s1".to_string())));
+            assert!(e.contains_key(&("fg-kept".to_string(), "s1".to_string())));
+        });
+    }
+
     use super::*;
 
     #[test]

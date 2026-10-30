@@ -652,6 +652,7 @@ pub(crate) fn global_settings() -> GlobalSettings {
 }
 
 mod items;
+pub(crate) use items::forget_identity_bookkeeping;
 pub(crate) use items::{
     DraftCheck, DraftSave, archive_message, check_draft_before_send, delete_draft, delete_message,
     delete_sent, full_message_id, load, message_id_for, reclaim_flags, save_draft, save_sent,

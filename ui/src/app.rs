@@ -439,6 +439,7 @@ impl InboxView {
         &mut self,
         client: WebApiRequestClient,
         from: &str,
+        from_addr: freenet_mail_protocol::Addr,
         recipient_ek: EncapsulationKey<MlKem768>,
         recipient_ml_dsa_vk: ml_dsa::VerifyingKey<MlDsa65>,
         recipient_required_tier: freenet_mail_wire_v1::aft::Tier,
@@ -477,13 +478,7 @@ impl InboxView {
             crate::log::debug!("sending message from {from}");
             let content_clone = content.clone();
             let mut client = client.clone();
-            let Some(id) = crate::inbox::InboxModel::id_for_alias(from) else {
-                crate::log::error(
-                    format!("alias `{from}` not stored"),
-                    Some(TryNodeAction::SendMessage),
-                );
-                return Ok(futs);
-            };
+            let id = crate::inbox::InboxModel::sender_identity(&from_addr, from)?;
             let ack_meta_async = ack_meta.clone();
             let recipient_hash_async = recipient_inbox_wasm_hash.clone();
             let f = async move {
@@ -5498,6 +5493,7 @@ fn ComposeSheet() -> Element {
     let mut inbox = use_context::<Signal<InboxView>>();
     let user = use_context::<Signal<User>>();
     let user_alias = user.read().logged_id().unwrap().alias.to_string();
+    let sender_addr = user.read().logged_id().unwrap().addr;
     // "Sending as <fingerprint>" surface (#51) — shows the user which
     // ML-DSA key the outgoing message will be signed under.
     let (sender_fp_short, sender_fp_full) = {
@@ -5865,6 +5861,7 @@ fn ComposeSheet() -> Element {
         let send_succeeded = match inbox.write().send_message(
             client.clone(),
             &alias,
+            sender_addr,
             recipient_ek,
             recipient_vk,
             recipient_required_tier,
