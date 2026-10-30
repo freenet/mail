@@ -21,9 +21,16 @@ use freenet_mail_wire_v1::local_state::{
 };
 
 thread_local! {
-    /// Most recent snapshot returned by the delegate. Replaced wholesale on
-    /// each `GetAll` response; mutations in the UI optimistically patch this
-    /// copy and also send the corresponding `LocalStateMsg` to the delegate.
+    /// The page's view of local mail state. Filled once per page by
+    /// `items::load`; every change patches it here and is written to its
+    /// item in the mail delegate, which acknowledges it.
+    ///
+    /// The optimistic stashes below were written for the v0.2.x delegate,
+    /// which echoed whole snapshots that could predate a change. Items are
+    /// not echoed any more, so the stashes now matter in one place only:
+    /// the startup merge ([`merge_loaded`]), where a load that began before a
+    /// change could otherwise undo it. Their "echo" wording below means that
+    /// load.
     static SNAPSHOT: RefCell<LocalState> = RefCell::new(LocalState::default());
 
     /// Draft ids the UI has optimistically deleted. Stale `replace_snapshot`

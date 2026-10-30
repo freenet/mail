@@ -1182,21 +1182,24 @@ impl InboxModel {
             let key = self.key;
             let f = async move {
                 let r: Result<(), DynError> = async {
-                    // The delegate signs only strictly ascending hashes, so
-                    // the removal lists them in that order.
-                    let ids = crate::mail_delegate::ops::removal_order(hashes);
-                    let signature = crate::mail_delegate::ops::sign_v1_removal(addr, ids.clone())
-                        .await
-                        .map_err(|e| format!("could not sign the removal: {e}"))?;
-                    let delta = UpdateInbox::RemoveMessages {
-                        signature: signature.into_boxed_slice(),
-                        ids,
-                    };
-                    let request = ContractRequest::Update {
-                        key,
-                        data: UpdateData::Delta(serde_json::to_vec(&delta)?.into()),
-                    };
-                    client.send(request.into()).await?;
+                    // The delegate signs only strictly ascending hashes, at
+                    // most MAX_REMOVAL_BATCH at a time: a larger removal
+                    // goes out as several, each signed on its own.
+                    for ids in removal_batches(hashes) {
+                        let signature =
+                            crate::mail_delegate::ops::sign_v1_removal(addr, ids.clone())
+                                .await
+                                .map_err(|e| format!("could not sign the removal: {e}"))?;
+                        let delta = UpdateInbox::RemoveMessages {
+                            signature: signature.into_boxed_slice(),
+                            ids,
+                        };
+                        let request = ContractRequest::Update {
+                            key,
+                            data: UpdateData::Delta(serde_json::to_vec(&delta)?.into()),
+                        };
+                        client.send(request.into()).await?;
+                    }
                     Ok(())
                 }
                 .await;
@@ -1210,7 +1213,34 @@ impl InboxModel {
             Ok(async {}.boxed_local())
         }
     }
+}
 
+/// What the user sees when decrypting `count` messages kept failing: they
+/// are not lost, and say how to get them back now.
+pub(crate) fn decrypt_gave_up_text(count: usize) -> String {
+    let what = if count == 1 {
+        "1 message".to_string()
+    } else {
+        format!("{count} messages")
+    };
+    format!(
+        "{what} couldn't be opened right now. Mail will try again when the inbox next \
+         updates; reload the page to try again now."
+    )
+}
+
+/// A removal as the delegate will sign it: strictly ascending hashes, in
+/// batches of at most [`freenet_mail_protocol::MAX_REMOVAL_BATCH`]. A larger
+/// single batch is refused as bad input after the page has already hidden
+/// the messages, so they would come back on the next state.
+pub(crate) fn removal_batches(hashes: Vec<TokenAssignmentHash>) -> Vec<Vec<TokenAssignmentHash>> {
+    crate::mail_delegate::ops::removal_order(hashes)
+        .chunks(freenet_mail_protocol::MAX_REMOVAL_BATCH)
+        .map(<[TokenAssignmentHash]>::to_vec)
+        .collect()
+}
+
+impl InboxModel {
     /// The model for an inbox state. Its messages are returned for the
     /// delegate to decrypt ([`decrypt_pending`]); the model starts without
     /// them.
@@ -1861,6 +1891,31 @@ mod tests {
         // Sanity: the rest of the message survives too.
         assert_eq!(back.title, "Re: design review");
         assert_eq!(back.from, "bob");
+    }
+
+    #[test]
+    fn a_failed_decryption_tells_the_user_how_to_retry() {
+        assert!(decrypt_gave_up_text(1).starts_with("1 message couldn't"));
+        let t = decrypt_gave_up_text(3);
+        assert!(t.starts_with("3 messages") && t.contains("reload"), "{t}");
+    }
+
+    /// A removal larger than the delegate signs at once goes out as several
+    /// batches, each within the limit, together strictly ascending and
+    /// without duplicates, so no part is refused after the page hid it.
+    #[test]
+    fn a_large_removal_is_signed_in_batches_within_the_limit() {
+        let max = freenet_mail_protocol::MAX_REMOVAL_BATCH;
+        let mut hashes: Vec<[u8; 32]> = (0..2 * max + 7)
+            .map(|i| *blake3::hash(&(i as u64).to_le_bytes()).as_bytes())
+            .collect();
+        hashes.push(hashes[3]);
+        let batches = removal_batches(hashes);
+        assert_eq!(batches.len(), 3);
+        assert!(batches.iter().all(|b| !b.is_empty() && b.len() <= max));
+        let all: Vec<_> = batches.concat();
+        assert_eq!(all.len(), 2 * max + 7, "duplicates dropped");
+        assert!(all.windows(2).all(|w| w[0] < w[1]), "strictly ascending");
     }
 
     /// `from_state` decrypts nothing itself: every stored message is handed

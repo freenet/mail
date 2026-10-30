@@ -104,17 +104,54 @@ pub(crate) static UNFINISHED_DELETIONS: GlobalSignal<Vec<IdentityInfo>> = Signal
 
 /// Ask the delegate which deletions are unfinished and show them. Returns
 /// the list (empty if the delegate could not be asked).
-pub(crate) async fn refresh_unfinished_deletions() -> Vec<IdentityInfo> {
-    match ops::list_deleting_identities().await {
-        Ok(list) => {
-            if dioxus::core::Runtime::try_current().is_some() {
-                *UNFINISHED_DELETIONS.write() = list.clone();
+///
+/// `None` when the delegate could not be asked, after a few tries: unknown,
+/// never "none", since it is asked right after a deletion failed, which is
+/// when it is most likely to fail too.
+pub(crate) async fn refresh_unfinished_deletions() -> Option<Vec<IdentityInfo>> {
+    let mut attempt = 0u32;
+    loop {
+        match ops::list_deleting_identities().await {
+            Ok(list) => {
+                if dioxus::core::Runtime::try_current().is_some() {
+                    *UNFINISHED_DELETIONS.write() = list.clone();
+                }
+                return Some(list);
             }
-            list
+            Err(e) => {
+                crate::log::error(format!("listing unfinished deletions failed: {e}"), None);
+                if attempt >= UNFINISHED_LIST_RETRIES {
+                    return None;
+                }
+                attempt += 1;
+                ops::pause_ms(500 << attempt).await;
+            }
         }
-        Err(e) => {
-            crate::log::error(format!("listing unfinished deletions failed: {e}"), None);
-            Vec::new()
+    }
+}
+
+/// Retries of the unfinished-deletions listing before it counts as unknown.
+const UNFINISHED_LIST_RETRIES: u32 = 2;
+
+/// After a failed deletion: take the identity out of the page if its
+/// deletion began ([`drop_if_deletion_started`]); if that cannot be known,
+/// say so rather than guess. Returns whether it was taken out.
+pub(crate) fn settle_after_failed_deletion(
+    identity: &crate::app::login::Identity,
+    unfinished: Option<&[IdentityInfo]>,
+    user: &mut crate::app::User,
+) -> bool {
+    match unfinished {
+        Some(list) => drop_if_deletion_started(identity, list, user),
+        None => {
+            crate::toast::push_toast_detached(
+                format!(
+                    "Couldn't check whether deleting `{}` began. Reload to see it under Your identities, finished or offered to finish.",
+                    identity.alias
+                ),
+                crate::toast::ToastLevel::Warning,
+            );
+            false
         }
     }
 }
@@ -667,6 +704,26 @@ mod tests {
             confirmed: true,
             generation: 1,
         }
+    }
+
+    /// When it cannot be known whether a failed deletion began, the
+    /// identity stays on the page (with a message) rather than being taken
+    /// out, or kept, on a guess that "nothing is unfinished".
+    #[test]
+    fn an_unknown_deletion_state_keeps_the_identity_and_says_so() {
+        use crate::app::{User, UserId, login::Identity};
+        let id = Identity::from_info(&info("unk-del", 0x74), UserId(0));
+        let mut user = User {
+            logged: false,
+            identified: false,
+            active_id: None,
+            identities: vec![id.clone()],
+        };
+        assert!(!settle_after_failed_deletion(&id, None, &mut user));
+        assert_eq!(user.identities.len(), 1);
+        let began = [info("unk-del", 0x74)];
+        assert!(settle_after_failed_deletion(&id, Some(&began), &mut user));
+        assert!(user.identities.is_empty());
     }
 
     /// A create whose answer was lost never reads as a plain failure while

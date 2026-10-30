@@ -1284,6 +1284,12 @@ fn set_inbox_state(
     state: freenet_mail_wire_v1::inbox::Inbox,
 ) {
     use crate::inbox::InboxModel;
+    // Release-visible: the live-node suite reads it as proof the node holds
+    // this identity's inbox (#288 self-heal).
+    crate::log::info(format!(
+        "own inbox state loaded (key={key}, alias=`{}`)",
+        identity.alias
+    ));
     reclaim_flags_once(
         identity.addr,
         state
@@ -1343,6 +1349,10 @@ fn reclaim_flags_once(
 #[cfg(feature = "use-node")]
 const DECRYPT_RETRIES: u32 = 3;
 
+/// Retries of the startup contacts load before it is reported as failed.
+#[cfg(feature = "use-node")]
+const CONTACT_LOAD_RETRIES: u32 = 3;
+
 /// Decrypt `pending` in the mail delegate and add the messages to inbox
 /// `key`. Runs in a task: the node loop delivers the delegate's answers, so
 /// it must never wait for one.
@@ -1380,6 +1390,12 @@ fn spawn_decrypt(
                     model.borrow_mut().release(&hashes);
                     crate::log::error(format!("inbox {key}: {e}"), None);
                     if attempt >= DECRYPT_RETRIES {
+                        // Not silently: the messages stay hidden until a
+                        // later inbox state (or a reload) asks again.
+                        crate::toast::push_toast_detached(
+                            crate::inbox::decrypt_gave_up_text(hashes.len()),
+                            crate::toast::ToastLevel::Warning,
+                        );
                         return;
                     }
                     attempt += 1;
@@ -1465,7 +1481,20 @@ pub(crate) async fn node_comms(
         // spawn_forever: this loop can be polled with no scope on the stack,
         // where a scoped `spawn` panics (empty scope stack).
         let _task = dioxus::core::spawn_forever(async move {
-            match crate::app::contact_store::load_all().await {
+            // A failed load is retried a few times, then reported: an empty
+            // address book must never look like having no contacts.
+            let mut attempt = 0u32;
+            let loaded = loop {
+                match crate::app::contact_store::load_all().await {
+                    Err(e) if attempt < CONTACT_LOAD_RETRIES => {
+                        crate::log::error(format!("loading contacts failed, retrying: {e}"), None);
+                        attempt += 1;
+                        gloo_timers::future::TimeoutFuture::new(1_000 << attempt).await;
+                    }
+                    other => break other,
+                }
+            };
+            match loaded {
                 Ok(contacts) => {
                     let (contacts, clashed) =
                         crate::app::contact_store::disambiguate(contacts, |alias| {
@@ -1498,7 +1527,15 @@ pub(crate) async fn node_comms(
                     let prev = *ab_gen.0.read();
                     *ab_gen.0.write() = prev.wrapping_add(1);
                 }
-                Err(e) => crate::log::error(format!("loading contacts failed: {e}"), None),
+                Err(e) => {
+                    crate::log::error(format!("loading contacts failed: {e}"), None);
+                    crate::toast::push_toast_detached(
+                        format!(
+                            "Couldn't load your contacts ({e}). Your address book looks empty until it loads: reload the page to try again."
+                        ),
+                        crate::toast::ToastLevel::Error,
+                    );
+                }
             }
         });
     }
@@ -2181,9 +2218,9 @@ pub(crate) async fn node_comms(
                             );
                             let unfinished =
                                 crate::app::identity_store::refresh_unfinished_deletions().await;
-                            if crate::app::identity_store::drop_if_deletion_started(
+                            if crate::app::identity_store::settle_after_failed_deletion(
                                 &identity,
-                                &unfinished,
+                                unfinished.as_deref(),
                                 &mut user.write(),
                             ) {
                                 let prev = *ab_gen.0.read();
@@ -2300,7 +2337,7 @@ pub(crate) async fn node_comms(
                                 // rather than let them wait out their whole
                                 // timeout.
                                 if crate::mail_delegate::may_be_mail_delegate_error(
-                                    &error,
+                                    error,
                                     crate::mail_delegate::node::key(),
                                 ) {
                                     crate::mail_delegate::fail_all_pending();

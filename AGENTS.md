@@ -49,8 +49,12 @@ files and the procedure for adding a generation.
 
 `delegates/mail-delegate` holds every identity's private keys, the contacts
 and the local mail state (drafts, sent, kept, archived, flags, settings). It
-signs and decrypts on the UI's behalf; keys leave it only through an export
-the user approves. The UI and the delegate speak the CBOR protocol in
+signs and decrypts on the UI's behalf. Keys leave it only through an export
+the user approves, with one exception: `CreateIdentity` returns the new
+identity's recovery key once, in its reply, so it can be backed up as it is
+made (the page asked for that identity, so no stored key is exposed). If
+that reply is lost, the UI finds the identity and asks for the key through
+the consented export. The UI and the delegate speak the CBOR protocol in
 `protocol/` (`freenet-mail-protocol`), which also holds the `fmail-key-1:`
 recovery-key codec. Its encoding is pinned per variant in
 `protocol/src/golden_v1.txt` (append-only).

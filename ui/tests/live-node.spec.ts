@@ -2406,25 +2406,43 @@ test.describe("Live node E2E", () => {
           intervals: [2_000],
         })
         .toBe(true);
-      const failed = lines.filter((t) => t.includes("re-PUT failed") && t.includes(alias));
-      expect(failed, `no self-heal PUT failed: ${failed.join(" | ")}`).toEqual([]);
-
-      // And they are held now: a further load finds them.
-      lines.length = 0;
+      // And they are held now: a further load FINDS the inbox (a positive
+      // signal, not the mere absence of a self-heal line). Later lines are
+      // read from `mark` on, so nothing logged before is discarded.
+      const mark = lines.length;
+      const since = () => lines.slice(mark);
       await page.reload();
       await expect(
         page
           .frameLocator("iframe#app")
           .locator(`[data-testid="fm-id-row"][data-alias="${alias}"]`),
       ).toBeVisible({ timeout: 60_000 });
-      // An absence: give the load's GETs time to answer. The node holds
-      // both contracts since the self-heal PUT (subscribe: true), so they
-      // answer from the local store well within this.
-      await page.waitForTimeout(20_000);
+      await expect
+        .poll(
+          () =>
+            since().some(
+              (t) => t.includes("own inbox state loaded") && t.includes(`alias=\`${alias}\``),
+            ),
+          {
+            message: "the next load found the self-healed inbox on the node",
+            timeout: 120_000,
+            intervals: [2_000],
+          },
+        )
+        .toBe(true);
       expect(
-        healed("inbox") || healed("AFT record"),
+        since().some(
+          (t) =>
+            t.includes("not found on the network") &&
+            t.includes(`alias=\`${alias}\``) &&
+            t.includes("self-heal"),
+        ),
         "after the self-heal the contracts are found, not re-published again",
       ).toBe(false);
+      // Checked last, over every line of the test: a self-heal PUT that
+      // failed after the first poll passed still shows up here.
+      const failed = lines.filter((t) => t.includes("re-PUT failed") && t.includes(alias));
+      expect(failed, `no self-heal PUT failed: ${failed.join(" | ")}`).toEqual([]);
     } finally {
       await ctx.close().catch(() => {});
       stopPump();

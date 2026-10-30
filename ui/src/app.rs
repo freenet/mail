@@ -305,9 +305,9 @@ pub(crate) fn app() -> Element {
                                 );
                                 let unfinished =
                                     identity_store::refresh_unfinished_deletions().await;
-                                if identity_store::drop_if_deletion_started(
+                                if identity_store::settle_after_failed_deletion(
                                     &identity,
-                                    &unfinished,
+                                    unfinished.as_deref(),
                                     &mut user_sig.write(),
                                 ) {
                                     login_ctl.write().updated = true;
@@ -1194,6 +1194,37 @@ pub(crate) fn claim_send(sending: &mut bool) -> bool {
 /// failed), so Send works again.
 pub(crate) fn release_send(sending: &mut bool) {
     *sending = false;
+}
+
+/// What the user sees when closing the compose sheet cancelled a send that
+/// was still being checked.
+#[cfg_attr(not(feature = "use-node"), allow(dead_code))]
+const SEND_CANCELLED_BY_CLOSE: &str = "The message was not sent: the compose window closed before it went. Your draft is saved; open it and send again.";
+
+/// Runs its action if dropped before [`OnCancel::disarm`]: for a task that
+/// the page can drop midway (a component unmounting), so being cut off is
+/// reported instead of passing silently.
+#[cfg_attr(not(feature = "use-node"), allow(dead_code))]
+pub(crate) struct OnCancel<F: FnOnce()>(Option<F>);
+
+#[cfg_attr(not(feature = "use-node"), allow(dead_code))]
+impl<F: FnOnce()> OnCancel<F> {
+    pub(crate) fn new(action: F) -> Self {
+        Self(Some(action))
+    }
+
+    /// The task got past the point where dropping it mattered.
+    pub(crate) fn disarm(mut self) {
+        self.0 = None;
+    }
+}
+
+impl<F: FnOnce()> Drop for OnCancel<F> {
+    fn drop(&mut self) {
+        if let Some(action) = self.0.take() {
+            action();
+        }
+    }
 }
 
 /// All-or-nothing decision driven by `send_succeeded`. Encodes the
@@ -5962,9 +5993,21 @@ fn ComposeSheet() -> Element {
             let alias = alias_for_check.clone();
             let id = draft_id.read().clone();
             spawn(async move {
+                // Closing the sheet while this check runs drops the task:
+                // the message is then not sent, and the user is told so
+                // rather than left to assume it went.
+                let cancelled = OnCancel::new(|| {
+                    crate::toast::push_toast_detached(
+                        SEND_CANCELLED_BY_CLOSE,
+                        crate::toast::ToastLevel::Warning,
+                    );
+                });
+                let checked =
+                    crate::local_state::check_draft_before_send(alias.clone(), id.clone()).await;
+                cancelled.disarm();
                 // `send_now` is synchronous, so the sheet is still mounted
                 // when the send is released below, whatever it did.
-                match crate::local_state::check_draft_before_send(alias.clone(), id.clone()).await {
+                match checked {
                     Ok(crate::local_state::DraftCheck::Current) => send_now(()),
                     Ok(crate::local_state::DraftCheck::GoneElsewhere) => {
                         let mut gone = draft_gone;
@@ -6345,7 +6388,21 @@ mod deferred_removal_tests {
 
 #[cfg(test)]
 mod compose_post_send_tests {
-    use super::{claim_send, compose_post_send, release_send};
+    use super::{OnCancel, claim_send, compose_post_send, release_send};
+
+    /// A send task dropped midway (the compose sheet closed during the
+    /// check) reports it; one that got past the check does not.
+    #[test]
+    fn a_send_cut_off_by_closing_the_sheet_is_reported() {
+        let fired = std::rc::Rc::new(std::cell::Cell::new(false));
+        let f = fired.clone();
+        drop(OnCancel::new(move || f.set(true)));
+        assert!(fired.get(), "dropped before the check finished");
+        let fired = std::rc::Rc::new(std::cell::Cell::new(false));
+        let f = fired.clone();
+        OnCancel::new(move || f.set(true)).disarm();
+        assert!(!fired.get(), "disarmed after the check");
+    }
 
     /// A second Send while the first is still being checked or sent is
     /// ignored, so one message is not sent twice from one tab; once the

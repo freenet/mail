@@ -15,6 +15,9 @@
 //!   bit cleared (see [`super::RECEIVED_ID_LIMIT`]); the full 16 are
 //!   remembered per page for writes ([`message_id_for`]). Two messages of one
 //!   identity share a UI id with probability about n²/2^64 for n messages.
+//!   A sender can grind two of their OWN messages to one id (2^32 work for
+//!   63 bits); that only merges the marks of those two messages, both from
+//!   them, so it is accepted rather than defended.
 //!   A UI id is never ordered on: it carries no time and no position.
 
 use std::cell::RefCell;
@@ -809,8 +812,8 @@ mod delegate_tests {
         let still: HashSet<[u8; 16]> = [full_message_id(b"still in the inbox")].into();
         assert_eq!(block_on(reclaim_flags(addr, &still)).unwrap(), 2);
         let left = flag_ids(addr);
-        assert!(left.contains(&full_message_id(b"still in the inbox").to_vec()));
-        assert!(left.contains(&full_message_id(b"archived").to_vec()));
+        assert!(left.contains(full_message_id(b"still in the inbox").as_slice()));
+        assert!(left.contains(full_message_id(b"archived").as_slice()));
         assert_eq!(left.len(), 2);
     }
 
