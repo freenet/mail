@@ -305,7 +305,8 @@ fn a_failed_add_to_an_unreadable_index_leaves_its_entry_reclaimable() {
         rule(FaultOp::RemoveFail, "1/ix/dr/", 1),
         rule(FaultOp::RemoveFail, "/ix/dr/", 2),
         rule(FaultOp::RemoveFail, "ix/dr/", 3),
-        rule(FaultOp::GetBlindFrom, &ix_key, 3),
+        // Its first present read is the undo's; from the next it stops.
+        rule(FaultOp::GetBlindFrom, &ix_key, 2),
     ];
     env.faults = Some(faults);
     assert!(put(&mut env, draft(me.addr, 1), b"d", None).is_err());
@@ -326,10 +327,7 @@ fn a_delete_whose_index_update_fails_after_the_record_went_is_partial() {
     let mut env = MemEnv::default();
     let me = create(&mut env, PROD, "alice");
     let g = ack(put(&mut env, draft(me.addr, 1), b"d", None));
-    let ix_key = full(
-        &mut env,
-        &store::index_rel(ItemKind::Draft, Some(&me.addr)),
-    );
+    let ix_key = full(&mut env, &store::index_rel(ItemKind::Draft, Some(&me.addr)));
     // The index reads for the delete's first check, then stops.
     let mut faults = Faults::default();
     faults.rules = vec![Rule {
