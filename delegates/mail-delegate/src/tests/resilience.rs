@@ -76,6 +76,38 @@ fn an_identity_delete_interrupted_before_the_index_update_is_finished_without_as
     );
 }
 
+/// A deletion that removed the identity's record and then failed to
+/// update the index left an entry nothing lists. Listing unfinished
+/// deletions (which every startup does) frees it, so it neither strands a
+/// slot nor needs a deletion the UI cannot offer.
+#[test]
+fn a_recordless_identity_index_entry_is_pruned_when_deletions_are_listed() {
+    let mut env = MemEnv::default();
+    let me = create(&mut env, PROD, "alice");
+    let del = Op::DeleteIdentity {
+        addr: me.addr,
+        expected_gen: me.generation,
+    };
+    let (id, _, _) = prompt(&send(&mut env, app(PROD), del));
+    env.fail_keys_containing = Some("/ix/id".into());
+    assert!(
+        response(&answer(&mut env, PROD, id, DELETE))
+            .result
+            .is_err()
+    );
+    env.fail_keys_containing = None;
+    let index_len = |env: &mut MemEnv| {
+        let s = Space::new(env, Origin([PROD; 32]));
+        s.index(store::IDENTITY_INDEX).unwrap().1.len()
+    };
+    assert_eq!(index_len(&mut env), 1, "the stale entry is there");
+    assert_eq!(
+        call(&mut env, PROD, Op::ListDeletingIdentities),
+        Ok(Reply::Identities(vec![]))
+    );
+    assert_eq!(index_len(&mut env), 0, "listing pruned it");
+}
+
 #[derive(serde::Serialize)]
 enum FutureOp {
     Teleport { to: u8 },

@@ -215,6 +215,10 @@ dt "an interrupted delete is finished by its retry" "$D/handlers.rs" \
 dt "a request for an unknown operation gets a typed answer" "$D/handlers.rs" \
     'FailureCode::UnknownOperation,' 'FailureCode::BadInput,' \
     a_request_from_a_newer_ui_gets_a_typed_answer_with_its_id
+dt "a recordless identity index entry is pruned" "$D/handlers.rs" \
+    'fn list_deleting_identities(s: &mut Space<'"'"'_>) -> OpResult {
+    prune_recordless_identities(s)?;' 'fn list_deleting_identities(s: &mut Space<'"'"'_>) -> OpResult {' \
+    a_recordless_identity_index_entry_is_pruned_when_deletions_are_listed
 # A rename that still compiles: only the pinned bytes can catch it. (A new
 # variant is caught earlier, by the wildcard-free match in golden.rs, at
 # compile time.)

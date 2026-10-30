@@ -298,7 +298,31 @@ fn status(s: &Space<'_>) -> OpResult {
 }
 
 /// Identities whose approved deletion has not finished.
-fn list_deleting_identities(s: &Space<'_>) -> OpResult {
+/// Drop identity index entries whose record is gone: a deletion that
+/// removed the record and then failed to update the index. The deletion
+/// removes everything the identity owns before its record, so nothing is
+/// left to finish, but the stale entry would hold one of the
+/// `MAX_IDENTITIES` slots for good and could not be listed to clean up.
+fn prune_recordless_identities(s: &mut Space<'_>) -> Result<(), Failure> {
+    let (_, ids) = s.index(IDENTITY_INDEX)?;
+    let mut gone = Vec::new();
+    for id in ids {
+        let Ok(addr) = <[u8; 24]>::try_from(id.as_slice()) else {
+            gone.push(id);
+            continue;
+        };
+        if load_identity(s, &Addr(addr))?.is_none() {
+            gone.push(id);
+        }
+    }
+    if !gone.is_empty() {
+        s.index_remove_many(IDENTITY_INDEX, &gone)?;
+    }
+    Ok(())
+}
+
+fn list_deleting_identities(s: &mut Space<'_>) -> OpResult {
+    prune_recordless_identities(s)?;
     let (_, ids) = s.index(IDENTITY_INDEX)?;
     let mut out = Vec::new();
     for id in ids {
@@ -356,7 +380,9 @@ fn store_new_identity(
     };
     let body = to_cbor(&record).map_err(|e| fail(FailureCode::Internal, e))?;
     // Claim the index slot first (it enforces the cap), then write; undo the
-    // claim if the write fails.
+    // claim if the write fails. A slot a half-finished deletion left behind
+    // is freed first.
+    prune_recordless_identities(s)?;
     s.index_add(IDENTITY_INDEX, &addr.0, MAX_IDENTITIES)?;
     match s.write_if(&identity_rel(&addr), 0, &body) {
         Ok(generation) => Ok(info(addr, generation, &record)),
