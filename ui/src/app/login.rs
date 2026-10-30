@@ -1215,6 +1215,7 @@ pub(super) fn Identities() -> Element {
                 button {
                     class: "btn btn-secondary",
                     "data-testid": testid::FM_ID_FINISH_DELETE,
+                    disabled: crate::app::identity_store::is_finishing(&info.addr),
                     onclick: move |_| {
                         let info = info.clone();
                         crate::app::identity_store::spawn_detached(

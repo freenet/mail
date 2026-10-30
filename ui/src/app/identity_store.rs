@@ -117,6 +117,12 @@ pub(crate) async fn refresh_unfinished_deletions() {
 /// Finish an interrupted deletion. The user approved it before, so the
 /// delegate does not ask again.
 pub(crate) async fn finish_deletion(info: IdentityInfo) {
+    // A second click while this runs must not start a second paged
+    // deletion of the same identity.
+    if !begin_finishing(info.addr) {
+        return;
+    }
+    let _done = FinishingGuard(info.addr);
     match delete_with_progress(info.addr, info.generation, &info.alias).await {
         Ok(()) => {
             // By address: a new identity may carry this one's alias.
@@ -131,6 +137,32 @@ pub(crate) async fn finish_deletion(info: IdentityInfo) {
         }
     }
     refresh_unfinished_deletions().await;
+}
+
+thread_local! {
+    /// Identities whose unfinished deletion is being finished now.
+    static FINISHING: std::cell::RefCell<std::collections::HashSet<Addr>> =
+        std::cell::RefCell::new(std::collections::HashSet::new());
+}
+
+/// Claim the right to finish `addr`'s deletion; `false` if it is already
+/// being finished.
+fn begin_finishing(addr: Addr) -> bool {
+    FINISHING.with(|f| f.borrow_mut().insert(addr))
+}
+
+/// Whether `addr`'s deletion is being finished now (the button shows it).
+pub(crate) fn is_finishing(addr: &Addr) -> bool {
+    FINISHING.with(|f| f.borrow().contains(addr))
+}
+
+/// Releases the claim when the attempt ends, however it ends.
+struct FinishingGuard(Addr);
+
+impl Drop for FinishingGuard {
+    fn drop(&mut self) {
+        FINISHING.with(|f| f.borrow_mut().remove(&self.0));
+    }
 }
 
 /// What a restore says when the delegate refuses an identity because its
@@ -488,6 +520,21 @@ pub(crate) async fn publish(identity: Identity, backed_up: bool) -> Result<(), D
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// "Finish deleting" clicked twice starts one deletion; the claim is
+    /// released when that attempt ends, so a later retry can run.
+    #[test]
+    fn finishing_a_deletion_runs_once_at_a_time() {
+        let addr = Addr([0x61; 24]);
+        assert!(begin_finishing(addr));
+        let guard = FinishingGuard(addr);
+        assert!(!begin_finishing(addr), "a second click is ignored");
+        assert!(is_finishing(&addr));
+        drop(guard);
+        assert!(!is_finishing(&addr));
+        assert!(begin_finishing(addr), "a later retry may run");
+        drop(FinishingGuard(addr));
+    }
 
     #[test]
     fn a_deletion_that_may_be_partly_done_is_never_called_not_deleted() {

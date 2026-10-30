@@ -4103,22 +4103,7 @@ fn ThreadDetail(group: crate::app::threads::ThreadGroup) -> Element {
                 };
                 crate::local_state::local_mark_read(&alias, m.id, kept.clone());
                 #[cfg(feature = "use-node")]
-                if crate::local_state::should_persist_read(&alias, m.id) {
-                    let alias_for_send = alias.clone();
-                    let mid = m.id;
-                    // spawn_forever: opening a message then immediately
-                    // navigating away (archive/delete/back) unmounts this
-                    // view; a bare spawn() would cancel the MarkRead delegate
-                    // write, so the message resurfaced as unread on reload
-                    // (#286 read-state variant).
-                    let _task = dioxus_core::spawn_forever(async move {
-                        if let Err(e) =
-                            crate::local_state::mark_read(alias_for_send, mid, kept).await
-                        {
-                            crate::log::local_state_failure("mark thread message read", e);
-                        }
-                    });
-                }
+                crate::local_state::persist_read(&alias, m.id, kept, "mark thread message read");
             }
         }
     }
@@ -5223,20 +5208,7 @@ fn OpenMessage(msg: Message) -> Element {
             };
             crate::local_state::local_mark_read(&alias, msg.id, kept.clone());
             #[cfg(feature = "use-node")]
-            if crate::local_state::should_persist_read(&alias, msg.id) {
-                let alias_for_send = alias.clone();
-                // spawn_forever: same as the group-open path — navigating
-                // away right after opening unmounts this view and a bare
-                // spawn() would cancel the MarkRead write, resurfacing the
-                // message as unread on reload (#286 read-state variant).
-                let _task = dioxus_core::spawn_forever(async move {
-                    if let Err(e) =
-                        crate::local_state::mark_read(alias_for_send, msg.id, kept).await
-                    {
-                        crate::log::local_state_failure("mark message read", e);
-                    }
-                });
-            }
+            crate::local_state::persist_read(&alias, msg.id, kept, "mark message read");
         }
     }
 
