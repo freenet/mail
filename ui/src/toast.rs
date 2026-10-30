@@ -121,9 +121,8 @@ pub(crate) fn push_toast(message: impl Into<String>, level: ToastLevel) -> Toast
     // read, and reading it panicked the task, silently losing the toast.
     // Such a caller should use `push_toast_detached`; this falls back to
     // the root queue and says so.
-    let in_scope = dioxus::core::Runtime::try_current()
-        .and_then(|rt| rt.try_current_scope_id())
-        .is_some();
+    let in_scope =
+        in_component(dioxus::core::Runtime::try_current().and_then(|rt| rt.try_current_scope_id()));
     if in_scope && let Some(queue) = dioxus::core::try_consume_context::<ToastQueue>() {
         return push_toast_to(queue, message, level);
     }
@@ -137,6 +136,23 @@ pub(crate) fn push_toast(message: impl Into<String>, level: ToastLevel) -> Toast
         "push_toast in a scope with no toast queue: {message}"
     );
     push_toast_detached(message, level).unwrap_or_else(ToastId::next)
+}
+
+/// Whether code running in `scope` is inside the app's component tree,
+/// where the app's context (the toast queue) is visible. Dioxus wraps the
+/// app in its own root, suspense and error-boundary scopes; `spawn_forever`
+/// runs tasks in that root (`ScopeId::ROOT`), which sits above the app and
+/// cannot see its context, so it counts as outside, like no scope at all.
+fn in_component(scope: Option<dioxus::core::ScopeId>) -> bool {
+    use dioxus::core::ScopeId;
+    scope.is_some_and(|id| {
+        ![
+            ScopeId::ROOT,
+            ScopeId::ROOT_SUSPENSE_BOUNDARY,
+            ScopeId::ROOT_ERROR_BOUNDARY,
+        ]
+        .contains(&id)
+    })
 }
 
 thread_local! {
@@ -304,6 +320,25 @@ pub(crate) fn ToastView() -> Element {
 // ────────────────────────────────────────────────────────────────────────────
 // Tests
 // ────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod scope_tests {
+    use super::in_component;
+    use dioxus::core::ScopeId;
+
+    /// A `spawn_forever` task runs in Dioxus's root scope, above the app,
+    /// where the toast queue is not visible: that must count as outside the
+    /// component tree, or the `debug_assert` in `push_toast` fires.
+    #[test]
+    fn the_root_scopes_spawn_forever_uses_are_outside_the_app() {
+        assert!(!in_component(None));
+        assert!(!in_component(Some(ScopeId::ROOT)));
+        assert!(!in_component(Some(ScopeId::ROOT_SUSPENSE_BOUNDARY)));
+        assert!(!in_component(Some(ScopeId::ROOT_ERROR_BOUNDARY)));
+        assert!(in_component(Some(ScopeId::APP)));
+        assert!(in_component(Some(ScopeId(ScopeId::APP.0 + 5))));
+    }
+}
 
 #[cfg(test)]
 mod tests {
