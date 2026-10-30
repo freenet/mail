@@ -142,13 +142,21 @@ pub(crate) fn disambiguate(
         *uses.entry(c.local_alias.clone()).or_default() += 1;
     }
     let mut clashed: Vec<String> = Vec::new();
+    // A clash label must not land on a name another contact keeps, on an
+    // identity's name, or on a label already given out here: inserting it
+    // would then fail and the contact would be dropped.
+    let mut assigned: std::collections::HashSet<std::rc::Rc<str>> =
+        std::collections::HashSet::new();
     for c in &mut contacts {
         if uses[&c.local_alias] > 1 || taken(&c.local_alias) {
             if !clashed.iter().any(|a| **a == *c.local_alias) {
                 clashed.push(c.local_alias.to_string());
             }
             let original = c.local_alias.clone();
-            c.local_alias = clash_label(c);
+            c.local_alias = super::address_book::free_label_by(clash_label(c), |label| {
+                uses.contains_key(label) || taken(label) || assigned.contains(label)
+            });
+            assigned.insert(c.local_alias.clone());
             super::address_book::note_relabelled(&c.local_alias, &original);
         }
     }

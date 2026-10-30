@@ -5506,11 +5506,18 @@ fn ComposeSheet() -> Element {
     // (`address_book::resolve_for_send`).
     let reopened_draft = prefill.as_ref().and_then(|p| p.draft_id.clone());
     let alias_for_choice = user_alias.clone();
-    let mut chosen_address = use_signal(move || {
-        reopened_draft
-            .and_then(|id| crate::local_state::draft_recipient(&alias_for_choice, &id))
-            .or_else(|| address_book::address_choice(&initial_to))
+    // A reopened draft that recorded nothing and whose name has become
+    // ambiguous starts with no recipient (`ambiguous_draft`): sending asks
+    // the user to choose, and typing or picking a recipient chooses.
+    let initial_to_for_choice = initial_to.clone();
+    let (initial_address, initially_ambiguous) = use_hook(move || {
+        let recorded = reopened_draft
+            .as_ref()
+            .and_then(|id| crate::local_state::draft_recipient(&alias_for_choice, id));
+        address_book::initial_choice(recorded, reopened_draft.is_some(), &initial_to_for_choice)
     });
+    let mut chosen_address = use_signal(move || initial_address);
+    let mut ambiguous_draft = use_signal(move || initially_ambiguous);
     let mut title = use_signal(|| initial_subj.clone());
     let mut content = use_signal(|| initial_body.clone());
     let draft_id = use_signal(|| initial_draft_id.clone());
@@ -5662,18 +5669,21 @@ fn ComposeSheet() -> Element {
         // Mail goes to the address recorded when the recipient was chosen
         // (an alias, a clash label or a pasted bs58 inbox address), and is
         // refused if the field now names a different key.
-        let recipient =
-            match address_book::resolve_for_send(&to_val, chosen_address.read().as_deref()) {
-                Ok(r) => r,
-                Err(message) => {
-                    crate::log::error(
-                        format!("couldn't resolve the recipient `{to_val}`: {message}"),
-                        Some(TryNodeAction::GetAlias),
-                    );
-                    crate::toast::push_toast(message, crate::toast::ToastLevel::Error);
-                    return;
-                }
-            };
+        let recipient = match address_book::resolve_for_send(
+            &to_val,
+            chosen_address.read().as_deref(),
+            *ambiguous_draft.read(),
+        ) {
+            Ok(r) => r,
+            Err(message) => {
+                crate::log::error(
+                    format!("couldn't resolve the recipient `{to_val}`: {message}"),
+                    Some(TryNodeAction::GetAlias),
+                );
+                crate::toast::push_toast(message, crate::toast::ToastLevel::Error);
+                return;
+            }
+        };
         // IdentityPrivacyPrefs.verify_on_send: refuse to send if the
         // address-book contact has not been confirmed by the user. Own-
         // identity sends bypass (no verification required to message self).
@@ -6032,6 +6042,7 @@ fn ComposeSheet() -> Element {
                                 oninput: move |ev| {
                                     to.set(ev.value());
                                     chosen_address.set(address_book::address_choice(&to.read()));
+                                    ambiguous_draft.set(false);
                                     ac_highlighted.set(-1);
                                     ac_open.set(true);
                                     autosave(());
@@ -6063,6 +6074,7 @@ fn ComposeSheet() -> Element {
                                             if idx >= 0 && idx < len {
                                                 let alias = suggestions[idx as usize].local_alias.to_string();
                                                 chosen_address.set(address_book::address_choice(&alias));
+                                                ambiguous_draft.set(false);
                                                 to.set(alias);
                                                 ac_highlighted.set(-1);
                                                 ac_open.set(false);
@@ -6133,6 +6145,7 @@ fn ComposeSheet() -> Element {
                                                         ev.prevent_default();
                                                         ac_ignore_blur.set(true);
                                                         chosen_address.set(address_book::address_choice(&alias_fill));
+                                                        ambiguous_draft.set(false);
                                                         to.set(alias_fill.clone());
                                                         ac_highlighted.set(-1);
                                                         ac_open.set(false);
