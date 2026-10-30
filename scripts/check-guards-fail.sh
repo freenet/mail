@@ -248,7 +248,7 @@ dt "an import re-indexes a present, unindexed identity" "$D/handlers.rs" \
     importing_a_present_but_unindexed_identity_indexes_it_again
 dt "re-creating an identity clears its deletion marker" "$D/handlers.rs" \
     '            if s.del(&marker).is_err() && s.put(&marker, store::MARKER_SPENT).is_err() {' \
-    '            if false' \
+    '            if false {' \
     a_reimported_identity_clears_its_old_deletion_marker
 dt "a delete removes a key that reads as absent" "$D/store.rs" \
     '            if !(self.env.remove(&key) || self.env.remove(&key) || self.env.remove(&key))' \
