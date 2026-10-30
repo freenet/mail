@@ -145,13 +145,29 @@ thread_local! {
         std::cell::RefCell::new(std::collections::HashSet::new());
 }
 
+/// The deletions being finished, for the identities screen to render from:
+/// the thread-local above is the guard, and a render reading it would not
+/// re-run when it changes, so the "Finish deleting" button would stay
+/// enabled (or stay disabled) until something else re-rendered the screen.
+pub(crate) static FINISHING_VIEW: GlobalSignal<std::collections::HashSet<Addr>> =
+    Signal::global(std::collections::HashSet::new);
+
+fn sync_finishing_view() {
+    if dioxus::core::Runtime::try_current().is_some() {
+        *FINISHING_VIEW.write() = FINISHING.with(|f| f.borrow().clone());
+    }
+}
+
 /// Claim the right to finish `addr`'s deletion; `false` if it is already
 /// being finished.
 fn begin_finishing(addr: Addr) -> bool {
-    FINISHING.with(|f| f.borrow_mut().insert(addr))
+    let claimed = FINISHING.with(|f| f.borrow_mut().insert(addr));
+    sync_finishing_view();
+    claimed
 }
 
-/// Whether `addr`'s deletion is being finished now (the button shows it).
+/// Whether `addr`'s deletion is being finished now.
+#[cfg(test)]
 pub(crate) fn is_finishing(addr: &Addr) -> bool {
     FINISHING.with(|f| f.borrow().contains(addr))
 }
@@ -162,6 +178,7 @@ struct FinishingGuard(Addr);
 impl Drop for FinishingGuard {
     fn drop(&mut self) {
         FINISHING.with(|f| f.borrow_mut().remove(&self.0));
+        sync_finishing_view();
     }
 }
 
@@ -534,6 +551,33 @@ mod tests {
         assert!(!is_finishing(&addr));
         assert!(begin_finishing(addr), "a later retry may run");
         drop(FinishingGuard(addr));
+    }
+
+    /// The button's `disabled` reads `FINISHING_VIEW`, a signal, so a render
+    /// re-runs when a deletion starts or ends. The signal must follow the
+    /// claim and its release inside a real runtime.
+    #[test]
+    fn the_finish_button_state_is_a_signal_that_follows_the_claim() {
+        use dioxus::prelude::*;
+        fn app() -> Element {
+            rsx! {}
+        }
+        let mut dom = VirtualDom::new(app);
+        dom.rebuild_in_place();
+        let addr = Addr([0x62; 24]);
+        dom.in_scope(ScopeId::ROOT, || {
+            assert!(!FINISHING_VIEW.read().contains(&addr));
+            assert!(begin_finishing(addr));
+            assert!(
+                FINISHING_VIEW.read().contains(&addr),
+                "the button disables while the deletion runs"
+            );
+            drop(FinishingGuard(addr));
+            assert!(
+                !FINISHING_VIEW.read().contains(&addr),
+                "and re-enables when it ends"
+            );
+        });
     }
 
     #[test]

@@ -267,13 +267,39 @@ fn bump_address_book_gen() {
 
 /// Ensure an own `Identity` is registered.  Idempotent — a second call for
 /// the same alias updates the stored identity (covers the reload path).
+///
+/// Contacts and identities load in separate tasks, so a stored contact can
+/// take an alias before the identity of the same name arrives. The contact
+/// is never overwritten silently: it moves to its clash label
+/// (`alias~<address>`, as [`super::contact_store::disambiguate`] would have
+/// given it) and the user is told, whichever loaded first.
 pub fn register_identity(identity: &Identity) {
-    ADDRESS_BOOK.with(|ab| {
-        ab.borrow_mut().insert(
+    let moved = ADDRESS_BOOK.with(|ab| {
+        let mut ab = ab.borrow_mut();
+        let displaced = match ab.get(identity.alias.as_ref()) {
+            Some(Entry::Contact(c)) => Some(c.clone()),
+            _ => None,
+        };
+        let moved = displaced.map(|mut c| {
+            let original = c.local_alias.clone();
+            c.local_alias = super::contact_store::clash_label(&c);
+            ab.insert(c.local_alias.to_string(), Entry::Contact(c));
+            original
+        });
+        ab.insert(
             identity.alias.to_string(),
             Entry::Own(Box::new(identity.clone())),
         );
+        moved
     });
+    if let Some(alias) = moved {
+        crate::toast::push_toast_detached(
+            format!(
+                "A contact shares the name \"{alias}\" with your identity. The contact is shown with the start of its address; rename it in Contacts."
+            ),
+            crate::toast::ToastLevel::Warning,
+        );
+    }
     bump_address_book_gen();
 }
 
@@ -397,15 +423,25 @@ pub fn lookup(alias: &str) -> Option<Recipient> {
         if let Some(entry) = ab.get(alias) {
             return Some(entry_to_recipient(entry));
         }
-        // Fallback: a contact whose sender-advertised suggested_alias
+        // Fallback: the one contact whose sender-advertised suggested_alias
         // matches. Only contacts carry a suggested_alias, so this never
-        // collides with an own identity.
-        ab.values().find_map(|entry| match entry {
-            Entry::Contact(c) if c.suggested_alias.as_deref() == Some(alias) => {
-                Some(entry_to_recipient(entry))
+        // collides with an own identity. A contact moved to its clash label
+        // (`alias~<address>`) lost the bare alias because it is ambiguous,
+        // and two contacts advertising the same name are ambiguous too:
+        // neither resolves it, or mail could go to whichever matched first.
+        let clash_prefix = format!("{alias}~");
+        let mut matches = ab.values().filter(|entry| match entry {
+            Entry::Contact(c) => {
+                c.suggested_alias.as_deref() == Some(alias)
+                    && !c.local_alias.starts_with(&clash_prefix)
             }
-            _ => None,
-        })
+            Entry::Own(_) => false,
+        });
+        let only = matches.next()?;
+        if matches.next().is_some() {
+            return None;
+        }
+        Some(entry_to_recipient(only))
     })
 }
 
@@ -944,6 +980,90 @@ mod tests {
         insert_contact(make_contact_suggested("7511", None, 1, 2)).unwrap();
         assert!(lookup("7511").is_some());
         assert!(lookup("anything-else").is_none());
+    }
+
+    fn own_identity(alias: &str) -> Identity {
+        let info = freenet_mail_protocol::IdentityInfo {
+            addr: freenet_mail_protocol::Addr([0x77; 24]),
+            vk: Vec::new().into(),
+            ek: Vec::new().into(),
+            alias: alias.to_string(),
+            description: String::new(),
+            confirmed: true,
+            generation: 1,
+        };
+        Identity::from_info(&info, crate::app::UserId::new())
+    }
+
+    fn entry_is_own(alias: &str) -> Option<bool> {
+        ADDRESS_BOOK.with(|ab| ab.borrow().get(alias).map(|e| matches!(e, Entry::Own(_))))
+    }
+
+    /// Contacts and identities load in separate tasks. Whichever arrives
+    /// first, an identity and a stored contact sharing an alias both stay
+    /// in the address book: the identity has the bare alias, and the contact
+    /// moves to its clash label rather than being silently overwritten.
+    #[test]
+    fn an_identity_arriving_after_a_same_named_contact_does_not_drop_it() {
+        reset_address_book();
+        let contact = make_contact("clash-alice", 5, 6);
+        let label = crate::app::contact_store::clash_label(&contact);
+        insert_contact(contact).unwrap();
+        register_identity(&own_identity("clash-alice"));
+        assert_eq!(entry_is_own("clash-alice"), Some(true));
+        assert_eq!(
+            entry_is_own(&label),
+            Some(false),
+            "the contact is kept, under its clash label"
+        );
+
+        // Identity first, then the contact: the load's `disambiguate` sees
+        // the identity and labels the contact the same way.
+        reset_address_book();
+        register_identity(&own_identity("clash-alice"));
+        let (contacts, clashed) = crate::app::contact_store::disambiguate(
+            vec![make_contact("clash-alice", 5, 6)],
+            |alias| entry_is_own(alias) == Some(true),
+        );
+        assert_eq!(clashed, vec!["clash-alice".to_string()]);
+        for c in contacts {
+            insert_contact(c).unwrap();
+        }
+        assert_eq!(entry_is_own("clash-alice"), Some(true));
+        assert_eq!(entry_is_own(&label), Some(false));
+    }
+
+    /// A contact moved to its clash label lost the bare alias because it is
+    /// ambiguous; the suggested-alias fallback must not hand that alias back
+    /// to it, and two contacts advertising one name resolve to neither.
+    #[test]
+    fn the_suggested_alias_fallback_never_resolves_an_ambiguous_alias() {
+        reset_address_book();
+        let relabelled = Contact {
+            local_alias: "bob~0a0b0c".into(),
+            ..make_contact_suggested("x", Some("bob"), 1, 2)
+        };
+        insert_contact(relabelled).unwrap();
+        assert!(
+            lookup("bob").is_none(),
+            "a relabelled contact does not get its bare alias back"
+        );
+
+        reset_address_book();
+        insert_contact(make_contact_suggested("bob-one", Some("bob"), 1, 2)).unwrap();
+        insert_contact(make_contact_suggested("bob-two", Some("bob"), 3, 4)).unwrap();
+        assert!(
+            lookup("bob").is_none(),
+            "two contacts suggest it: neither wins"
+        );
+
+        reset_address_book();
+        insert_contact(make_contact_suggested("bob-one", Some("bob"), 1, 2)).unwrap();
+        assert_eq!(
+            lookup("bob").map(|r| r.local_alias.to_string()).as_deref(),
+            Some("bob-one"),
+            "a single unambiguous suggestion still resolves"
+        );
     }
 
     #[test]

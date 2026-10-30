@@ -117,7 +117,7 @@ fn accept_with(contact: Contact, persist: impl FnOnce(Contact)) -> Result<(), St
 /// The label a stored contact is shown under when its alias clashes:
 /// the alias plus the start of its address, which is what tells the
 /// contacts apart.
-fn clash_label(contact: &Contact) -> std::rc::Rc<str> {
+pub(crate) fn clash_label(contact: &Contact) -> std::rc::Rc<str> {
     let addr = address_of(&contact.ml_dsa_vk_bytes);
     let prefix: String = addr.0[..3].iter().map(|b| format!("{b:02x}")).collect();
     format!("{}~{prefix}", contact.local_alias).into()
