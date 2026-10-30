@@ -1356,6 +1356,37 @@ impl SeenStates {
 thread_local! {
     static SEEN_STATES: RefCell<std::collections::HashMap<freenet_mail_protocol::Addr, SeenStates>> =
         RefCell::new(std::collections::HashMap::new());
+    /// #288 self-heal PUTs sent and not yet acknowledged: the contract, what
+    /// it is ("inbox" or "AFT record") and the identity's alias. The
+    /// "not found ... re-PUTting" line is logged before the PUT is sent, so
+    /// only the node's acknowledgement says the contract is held again.
+    static SELF_HEAL_PUTS: RefCell<Vec<(freenet_stdlib::prelude::ContractInstanceId, &'static str, Rc<str>)>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+/// Remember a #288 self-heal PUT, so its acknowledgement is reported.
+#[cfg(feature = "use-node")]
+fn await_self_heal_ack(
+    id: freenet_stdlib::prelude::ContractInstanceId,
+    what: &'static str,
+    alias: Rc<str>,
+) {
+    SELF_HEAL_PUTS.with(|p| p.borrow_mut().push((id, what, alias)));
+}
+
+/// If `id` is a #288 self-heal PUT, report that the node now holds it.
+#[cfg(feature = "use-node")]
+fn self_heal_acked(id: &freenet_stdlib::prelude::ContractInstanceId) {
+    let acked = SELF_HEAL_PUTS.with(|p| {
+        let mut p = p.borrow_mut();
+        let pos = p.iter().position(|(k, ..)| k == id)?;
+        Some(p.remove(pos))
+    });
+    if let Some((_, what, alias)) = acked {
+        crate::log::info(format!(
+            "own {what} re-published (key={id}, alias=`{alias}`) — self-heal stored (#288)"
+        ));
+    }
 }
 
 /// Once per page and identity, once a second whole non-empty inbox state
@@ -2960,6 +2991,7 @@ pub(crate) async fn node_comms(
                 }
             }
             HostResponse::ContractResponse(ContractResponse::PutResponse { key: contract_key }) => {
+                self_heal_acked(contract_key.id());
                 let found = inbox_management::CREATED_INBOX.with(|keys| {
                     let pos = keys.borrow().iter().position(|(_, k)| k == &contract_key);
                     if let Some(pos) = pos {
@@ -3292,6 +3324,7 @@ pub(crate) async fn node_comms(
                             "own inbox not found on the network (key={key}, alias=`{}`) — re-PUTting to self-heal (#288)",
                             identity.alias()
                         ));
+                        await_self_heal_ack(instance_id, "inbox", Rc::from(identity.alias()));
                         let mut client = client.clone();
                         crate::app::identity_store::spawn_detached(async move {
                             let put = async {
@@ -3323,6 +3356,7 @@ pub(crate) async fn node_comms(
                             "own AFT record not found on the network (key={key}, alias=`{}`) — re-PUTting to self-heal (#288)",
                             identity.alias()
                         ));
+                        await_self_heal_ack(instance_id, "AFT record", Rc::from(identity.alias()));
                         if let Err(e) =
                             token_record_management::create_contract(&mut client.clone(), &identity)
                                 .await

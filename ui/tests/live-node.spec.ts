@@ -2406,6 +2406,23 @@ test.describe("Live node E2E", () => {
           intervals: [2_000],
         })
         .toBe(true);
+      // The lines above are logged as each re-PUT is SENT. Reloading before
+      // the node has stored them cancels them, and the next load then (rightly)
+      // self-heals again, so wait for the node to acknowledge both PUTs.
+      const stored = (what: string) =>
+        lines.some(
+          (t) =>
+            t.includes(`own ${what} re-published`) &&
+            t.includes(`alias=\`${alias}\``) &&
+            t.includes("self-heal stored"),
+        );
+      await expect
+        .poll(() => stored("inbox") && stored("AFT record"), {
+          message: "the node acknowledged both self-heal PUTs",
+          timeout: 120_000,
+          intervals: [1_000],
+        })
+        .toBe(true);
       // And they are held now: a further load FINDS the inbox (a positive
       // signal, not the mere absence of a self-heal line). Later lines are
       // read from `mark` on, so nothing logged before is discarded.
