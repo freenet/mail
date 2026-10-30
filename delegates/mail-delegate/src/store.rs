@@ -75,9 +75,10 @@ pub fn identity_rel(addr: &Addr) -> String {
     format!("id/{}", hex(&addr.0))
 }
 
-/// Written by the last deletion step just before the identity record is
-/// removed, and cleared once its index entry is gone. It is the only proof
-/// that a recordless index entry was really deleted: the host cannot tell a
+/// "This identity's index entry may have no record": written by a create
+/// before it claims the slot and by the last deletion step before it
+/// removes the record, and cleared once entry and record agree again. It is
+/// the only licence to drop a recordless entry: the host cannot tell a
 /// failed read from an absent key, so a missing record alone proves nothing.
 pub fn deleted_rel(addr: &Addr) -> String {
     format!("dl/{}", hex(&addr.0))
@@ -213,7 +214,16 @@ impl<'a> Space<'a> {
     }
 
     pub fn get(&self, rel: &str) -> Option<Vec<u8>> {
-        self.env.get(&self.full_key(rel))
+        self.fetch(&self.full_key(rel))
+    }
+
+    /// Read `key`, re-reading once on a miss. The host cannot tell a failed
+    /// read from an absent key, and every "absent" this delegate concludes
+    /// can destroy something (a create over an existing record, an index
+    /// rewritten without its entries, a reused generation), so absence is
+    /// only believed when an immediate re-read agrees.
+    fn fetch(&self, key: &[u8]) -> Option<Vec<u8>> {
+        self.env.get(key).or_else(|| self.env.get(key))
     }
 
     pub fn usage(&self) -> Usage {
@@ -239,7 +249,7 @@ impl<'a> Space<'a> {
     /// over-counts, which only ever costs capacity.
     pub fn put(&mut self, rel: &str, value: &[u8]) -> Result<(), Failure> {
         let key = self.full_key(rel);
-        let old = self.env.get(&key);
+        let old = self.fetch(&key);
         let before = self.usage();
         let old_size = old.as_ref().map_or(0, |v| (key.len() + v.len()) as u64);
         let after = Usage {
@@ -264,9 +274,16 @@ impl<'a> Space<'a> {
 
     /// Remove `rel` if present. The usage record is updated after the
     /// removal, so a failed update over-counts rather than under-counts.
+    ///
+    /// `Ok` means the key is gone. A key that reads as absent is removed
+    /// anyway (the read may have failed), and a refused removal is an error
+    /// unless the key really is absent.
     pub fn del(&mut self, rel: &str) -> Result<(), Failure> {
         let key = self.full_key(rel);
-        let Some(old) = self.env.get(&key) else {
+        let Some(old) = self.fetch(&key) else {
+            if !self.env.remove(&key) && self.fetch(&key).is_some() {
+                return Err(fail(FailureCode::Internal, "the host refused the delete"));
+            }
             return Ok(());
         };
         if !self.env.remove(&key) {
@@ -516,5 +533,53 @@ mod tests {
         assert_eq!(decode_versioned(&enc), Some((42, &b"body"[..])));
         assert_eq!(decode_versioned(&[9; 20]), None);
         assert_eq!(decode_versioned(&[1, 2]), None);
+    }
+
+    /// A host whose reads of one key keep failing.
+    struct Blind(MemEnv);
+
+    impl Env for Blind {
+        fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
+            if key.ends_with(b"blind") {
+                return None;
+            }
+            self.0.get(key)
+        }
+        fn set(&mut self, key: &[u8], value: &[u8]) -> bool {
+            self.0.set(key, value)
+        }
+        fn remove(&mut self, key: &[u8]) -> bool {
+            self.0.remove(key)
+        }
+        fn host_random(&mut self) -> [u8; 32] {
+            self.0.host_random()
+        }
+        fn now_secs(&self) -> Option<u64> {
+            None
+        }
+        fn contract_state(&self, _: &[u8; 32]) -> Option<Vec<u8>> {
+            None
+        }
+    }
+
+    /// `del` answering `Ok` means the key is gone, even when reads of it
+    /// fail: a failed read looks like absence, so it is removed anyway.
+    #[test]
+    fn a_delete_removes_a_key_whose_reads_fail() {
+        let mut env = Blind(MemEnv::default());
+        let key = Space::new(&mut env, Origin([1; 32])).full_key("blind");
+        env.0.secrets.insert(key.clone(), b"secret".to_vec());
+        Space::new(&mut env, Origin([1; 32])).del("blind").unwrap();
+        assert!(!env.0.secrets.contains_key(&key));
+        // A removal the host refuses, of a key that is really there, is an
+        // error, not "already gone".
+        env.0.secrets.insert(key.clone(), b"secret".to_vec());
+        env.0.fail_keys_containing = Some("blind".into());
+        let mut plain = env.0.clone();
+        assert!(
+            Space::new(&mut plain, Origin([1; 32]))
+                .del("blind")
+                .is_err()
+        );
     }
 }

@@ -303,10 +303,12 @@ fn status(s: &Space<'_>) -> OpResult {
 /// left to finish, but the stale entry would hold one of the
 /// `MAX_IDENTITIES` slots for good and could not be listed to clean up.
 ///
-/// An entry is pruned only when the deletion's own marker proves the record
-/// was removed on purpose. A record that merely fails to read (the host
-/// cannot tell a failed read from an absent key) keeps its entry, so a
-/// transient miss never leaves a private key unlisted.
+/// An entry is pruned only when the marker its create or deletion wrote
+/// says the record may legitimately be absent, and the record is confirmed
+/// absent. A record that merely fails to read (the host cannot tell a failed
+/// read from an absent key) keeps its entry, so a transient miss never
+/// leaves a private key unlisted. The same pass frees the slot of a create
+/// that failed after claiming it.
 fn prune_recordless_identities(s: &mut Space<'_>) -> Result<(), Failure> {
     let (_, ids) = s.index(IDENTITY_INDEX)?;
     let mut gone = Vec::new();
@@ -317,9 +319,18 @@ fn prune_recordless_identities(s: &mut Space<'_>) -> Result<(), Failure> {
             continue;
         };
         let marker = store::deleted_rel(&addr);
-        if s.get(&marker).is_some() && load_identity(s, &addr)?.is_none() {
-            gone.push(id);
-            markers.push(marker);
+        if s.get(&marker).is_none() {
+            continue;
+        }
+        match load_identity(s, &addr)? {
+            None => {
+                gone.push(id);
+                markers.push(marker);
+            }
+            // A marker beside a live record (its create or deletion ended,
+            // its cleanup failed) proves nothing any more.
+            Some((_, r)) if !r.deleting => markers.push(marker),
+            Some(_) => {}
         }
     }
     if !gone.is_empty() {
@@ -398,17 +409,27 @@ fn store_new_identity(
     // claim if the write fails. A slot a half-finished deletion left behind
     // is freed first.
     prune_recordless_identities(s)?;
-    // A deletion marker for this address (the same keys deleted before)
-    // must not outlive the new record, or a later failed read would prune it.
+    // The marker says "this entry may have no record". It is written before
+    // the slot is claimed, so a create that fails after claiming it, and
+    // whose undo fails too, leaves an entry the next listing can free.
     let marker = store::deleted_rel(&addr);
-    if s.get(&marker).is_some() {
-        s.del(&marker)?;
+    s.put(&marker, b"")?;
+    if let Err(e) = s.index_add(IDENTITY_INDEX, &addr.0, MAX_IDENTITIES) {
+        let _ = s.del(&marker);
+        return Err(e);
     }
-    s.index_add(IDENTITY_INDEX, &addr.0, MAX_IDENTITIES)?;
     match s.write_if(&identity_rel(&addr), 0, &body) {
-        Ok(generation) => Ok(info(addr, generation, &record)),
+        Ok(generation) => {
+            // A marker left beside the record licenses nothing (an entry is
+            // only pruned when its record is confirmed absent), and the next
+            // listing cleans it.
+            let _ = s.del(&marker);
+            Ok(info(addr, generation, &record))
+        }
         Err(e) => {
-            let _ = s.index_remove(IDENTITY_INDEX, &addr.0);
+            if s.index_remove(IDENTITY_INDEX, &addr.0).is_ok() {
+                let _ = s.del(&marker);
+            }
             Err(e)
         }
     }
@@ -596,7 +617,9 @@ pub fn delete_identity_now(s: &mut Space<'_>, addr: &Addr, expected_gen: u64) ->
         }
         // Record gone: only the index entry can be left.
         s.index_remove(IDENTITY_INDEX, &addr.0)?;
-        let _ = s.del(&marker);
+        // `Deleted` means nothing is left, the marker (which names the
+        // address) included; a retry finishes a failed removal.
+        s.del(&marker)?;
         return Ok(Reply::Deleted);
     };
     if !record.deleting {
@@ -620,10 +643,9 @@ pub fn delete_identity_now(s: &mut Space<'_>, addr: &Addr, expected_gen: u64) ->
 pub fn deletion_in_progress(s: &Space<'_>, addr: &Addr) -> Result<bool, Failure> {
     Ok(match load_identity(s, addr)? {
         Some((_, r)) => r.deleting,
-        None => {
-            s.get(&store::deleted_rel(addr)).is_some()
-                && s.index(IDENTITY_INDEX)?.1.contains(&addr.0[..])
-        }
+        // No record (confirmed) and a marker: only bookkeeping is left (an
+        // index entry, the marker itself), and nothing of the user's to lose.
+        None => s.get(&store::deleted_rel(addr)).is_some(),
     })
 }
 
@@ -657,7 +679,9 @@ fn delete_step(s: &mut Space<'_>, addr: &Addr) -> OpResult {
     s.put(&marker, b"")?;
     s.del(&identity_rel(addr))?;
     s.index_remove(IDENTITY_INDEX, &addr.0)?;
-    let _ = s.del(&marker);
+    // Only once the marker is gone too: a failure here is retried, and the
+    // retry (record gone, marker present) finishes it without asking.
+    s.del(&marker)?;
     Ok(Reply::Deleted)
 }
 
@@ -771,7 +795,7 @@ fn delete_item(s: &mut Space<'_>, item: ItemRef, expected_gen: u64) -> OpResult 
 const MAX_PAGE: usize = 256;
 
 fn list_items(
-    s: &Space<'_>,
+    s: &mut Space<'_>,
     kind: ItemKind,
     owner: Option<Addr>,
     after: Option<&[u8]>,
@@ -784,18 +808,23 @@ fn list_items(
     if let Some(o) = &owner {
         require_identity(s, o)?;
     }
-    let (_, ids) = s.index(&index_rel(kind, owner.as_ref()))?;
+    let ix = index_rel(kind, owner.as_ref());
+    let (_, ids) = s.index(&ix)?;
     let limit = (limit as usize).clamp(1, MAX_PAGE);
     let budget = MAX_RESPONSE_BYTES - RESPONSE_HEADROOM;
     let mut used = 0;
     let mut items = Vec::new();
     let mut more = false;
+    let mut recordless = Vec::new();
     for id in ids
         .into_iter()
         .filter(|id| after.is_none_or(|a| id.as_slice() > a))
     {
         let item = ItemRef { kind, owner, id };
         let Some((generation, body)) = s.read(&item_rel(&item))? else {
+            // An entry a failed write or delete left behind (its record is
+            // confirmed absent): it would hold a slot of the kind's cap.
+            recordless.push(item.id);
             continue;
         };
         if items.len() == limit || used + body.len() + 64 > budget {
@@ -808,6 +837,10 @@ fn list_items(
             body: ByteBuf::from(body),
             generation,
         });
+    }
+    if !recordless.is_empty() {
+        // Housekeeping: a failure here leaves the entries for the next list.
+        let _ = s.index_remove_many(&ix, &recordless);
     }
     Ok(Reply::Items { items, more })
 }

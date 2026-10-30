@@ -47,3 +47,9 @@ freenet-main-delegate = []
 # Keeps the operations the v0.2.x (v1 inbox) send path needs. Removed with
 # that path when the v2 inbox lands.
 v1-transition = []
+
+# The fault-injection runs generate post-quantum keys thousands of times;
+# optimise dependencies in dev and test builds. The shipped WASM is a
+# release build, which this does not touch.
+[profile.dev.package."*"]
+opt-level = 2

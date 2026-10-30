@@ -1,5 +1,6 @@
 //! Behaviour through the delegate's entry point, over an in-memory host.
 
+mod faults;
 mod resilience;
 mod round2;
 mod round3;

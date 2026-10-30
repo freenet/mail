@@ -61,9 +61,122 @@ impl Env for DelegateCtx {
 
 #[cfg(test)]
 pub mod mem {
+    use std::cell::{Cell, RefCell};
     use std::collections::BTreeMap;
 
     use super::Env;
+
+    /// A host call that a fault can hit.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug, PartialOrd, Ord)]
+    pub enum FaultOp {
+        /// `get` returns `None` for a key that is present.
+        GetMiss,
+        /// `set` is refused.
+        SetFail,
+        /// `remove` is refused (the key stays).
+        RemoveFail,
+    }
+
+    /// Fail the `nth` (1-based) host call of `op` on a key containing
+    /// `key_contains`.
+    #[derive(Clone, PartialEq, Eq, Debug)]
+    pub struct Rule {
+        pub op: FaultOp,
+        pub key_contains: String,
+        pub nth: u32,
+    }
+
+    /// Seeded, deterministic host faults.
+    ///
+    /// The host model the delegate defends against: any call may fail, and
+    /// a failed read looks exactly like an absent key, but a read failure is
+    /// transient: an immediate re-read of the key that just missed succeeds.
+    /// A key that stays unreadable is indistinguishable from data loss, and
+    /// nothing above the host can recover from that.
+    #[derive(Default, Clone, PartialEq, Eq, Debug)]
+    pub struct Faults {
+        rng: Cell<u64>,
+        /// Chance per call, in thousandths.
+        pub get_miss: u32,
+        pub set_fail: u32,
+        pub remove_fail: u32,
+        pub rules: Vec<Rule>,
+        counts: RefCell<BTreeMap<(FaultOp, String), u32>>,
+        last_miss: RefCell<Option<Vec<u8>>>,
+        /// How many faults were injected.
+        pub injected: Cell<u64>,
+    }
+
+    impl Faults {
+        pub fn seeded(seed: u64, per_mille: u32) -> Self {
+            Faults {
+                rng: Cell::new(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1),
+                get_miss: per_mille,
+                set_fail: per_mille,
+                remove_fail: per_mille,
+                ..Faults::default()
+            }
+        }
+
+        pub fn rule(op: FaultOp, key_contains: &str, nth: u32) -> Self {
+            Faults {
+                rules: vec![Rule {
+                    op,
+                    key_contains: key_contains.into(),
+                    nth,
+                }],
+                ..Faults::default()
+            }
+        }
+
+        fn roll(&self, per_mille: u32) -> bool {
+            if per_mille == 0 {
+                return false;
+            }
+            // xorshift64
+            let mut x = self.rng.get();
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.rng.set(x);
+            (x % 1000) < u64::from(per_mille)
+        }
+
+        fn hit(&self, op: FaultOp, key: &[u8]) -> bool {
+            let text = String::from_utf8_lossy(key);
+            let mut targeted = false;
+            for r in self.rules.iter().filter(|r| r.op == op) {
+                if text.contains(r.key_contains.as_str()) {
+                    let mut counts = self.counts.borrow_mut();
+                    let n = counts.entry((op, r.key_contains.clone())).or_default();
+                    *n += 1;
+                    targeted |= *n == r.nth;
+                }
+            }
+            let chance = match op {
+                FaultOp::GetMiss => self.get_miss,
+                FaultOp::SetFail => self.set_fail,
+                FaultOp::RemoveFail => self.remove_fail,
+            };
+            let hit = targeted || self.roll(chance);
+            if hit {
+                self.injected.set(self.injected.get() + 1);
+            }
+            hit
+        }
+
+        fn miss(&self, key: &[u8]) -> bool {
+            let mut last = self.last_miss.borrow_mut();
+            if last.as_deref() == Some(key) {
+                // The immediate re-read of a key that just missed succeeds.
+                *last = None;
+                return false;
+            }
+            let miss = self.hit(FaultOp::GetMiss, key);
+            *last = miss.then(|| key.to_vec());
+            miss
+        }
+    }
 
     /// In-memory host for tests. Randomness is a counter, so runs repeat.
     #[derive(Default, Clone, PartialEq, Eq, Debug)]
@@ -76,6 +189,8 @@ pub mod mem {
         pub fail_keys_containing: Option<String>,
         pub now: Option<u64>,
         pub contracts: BTreeMap<[u8; 32], Vec<u8>>,
+        /// Injected host faults (`None` = a perfect host).
+        pub faults: Option<Faults>,
     }
 
     impl MemEnv {
@@ -84,21 +199,34 @@ pub mod mem {
                 .as_ref()
                 .is_some_and(|t| String::from_utf8_lossy(key).contains(t.as_str()))
         }
+
+        fn fault(&self, op: FaultOp, key: &[u8]) -> bool {
+            self.faults.as_ref().is_some_and(|f| match op {
+                FaultOp::GetMiss => f.miss(key),
+                _ => f.hit(op, key),
+            })
+        }
     }
 
     impl Env for MemEnv {
         fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
+            if self.fault(FaultOp::GetMiss, key) {
+                return None;
+            }
             self.secrets.get(key).cloned()
         }
         fn set(&mut self, key: &[u8], value: &[u8]) -> bool {
-            if self.fail_writes || self.fails(key) {
+            if self.fail_writes || self.fails(key) || self.fault(FaultOp::SetFail, key) {
                 return false;
             }
             self.secrets.insert(key.to_vec(), value.to_vec());
             true
         }
         fn remove(&mut self, key: &[u8]) -> bool {
-            !self.fails(key) && self.secrets.remove(key).is_some()
+            if self.fails(key) || self.fault(FaultOp::RemoveFail, key) {
+                return false;
+            }
+            self.secrets.remove(key).is_some()
         }
         fn host_random(&mut self) -> [u8; 32] {
             self.rng_counter += 1;

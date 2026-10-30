@@ -33,8 +33,16 @@ export CARGO_TARGET_DIR="$ROOT/target/guards-cargo"
 find "$STAGE" -type f -exec touch {} +
 D="$STAGE/delegates/mail-delegate/src"
 
+# The seeded fault-injection run is slow, so the per-guard delegate runs skip
+# it and the guards it backs run it alone.
+FAULT_RUN=invariants_hold_over_a_host_that_misses_reads_and_refuses_writes
 delegate_tests() {
-    cargo test --manifest-path "$STAGE/delegates/mail-delegate/Cargo.toml" --features v1-transition
+    cargo test --manifest-path "$STAGE/delegates/mail-delegate/Cargo.toml" --features v1-transition \
+        -- --skip "$FAULT_RUN"
+}
+fault_tests() {
+    cargo test --manifest-path "$STAGE/delegates/mail-delegate/Cargo.toml" --features v1-transition \
+        -- --exact "tests::faults::$FAULT_RUN"
 }
 protocol_tests() {
     cargo test --manifest-path "$STAGE/Cargo.toml" -p freenet-mail-protocol
@@ -57,6 +65,7 @@ baseline() { # name command...
     fi
 }
 baseline "delegate tests" delegate_tests
+baseline "delegate fault-injection runs" fault_tests
 baseline "protocol tests" protocol_tests
 baseline "release freeze tests" freeze_tests
 [ "$WASM" -eq 1 ] && baseline "candidate check" candidate_check
@@ -219,15 +228,34 @@ dt "a recordless identity index entry is pruned" "$D/handlers.rs" \
     '    let _ = prune_recordless_identities(s);' '    let _ = s;' \
     a_recordless_identity_index_entry_is_pruned_when_deletions_are_listed
 dt "a record that fails to read is never pruned" "$D/handlers.rs" \
-    'if s.get(&marker).is_some() && load_identity(s, &addr)?.is_none() {' \
-    'if load_identity(s, &addr)?.is_none() {' \
+    '        if s.get(&marker).is_none() {
+            continue;
+        }' '' \
     a_record_that_fails_to_read_is_never_pruned_from_the_index
 dt "an import re-indexes a present, unindexed identity" "$D/handlers.rs" \
     'if !s.index(IDENTITY_INDEX)?.1.contains(&addr.0[..]) {' 'if false {' \
     importing_a_present_but_unindexed_identity_indexes_it_again
 dt "re-creating an identity clears its deletion marker" "$D/handlers.rs" \
-    '        s.del(&marker)?;' '        let _ = &marker;' \
+    '            let _ = s.del(&marker);
+            Ok(info(addr, generation, &record))' '            Ok(info(addr, generation, &record))' \
     a_reimported_identity_clears_its_old_deletion_marker
+dt "a delete removes a key that reads as absent" "$D/store.rs" \
+    '            if !self.env.remove(&key) && self.fetch(&key).is_some() {' \
+    '            if false {' \
+    a_delete_removes_a_key_whose_reads_fail
+dft() { guard "$1" "$2" "$3" "$4" "tests:$FAULT_RUN" fault_tests; }
+dft "absence is believed only when a re-read agrees" "$D/store.rs" \
+    'self.env.get(key).or_else(|| self.env.get(key))' 'self.env.get(key)'
+dft "a create's marker lets a failed create's slot be freed" "$D/handlers.rs" \
+    '    s.put(&marker, b"")?;
+    if let Err(e) = s.index_add(IDENTITY_INDEX, &addr.0, MAX_IDENTITIES) {' \
+    '    if let Err(e) = s.index_add(IDENTITY_INDEX, &addr.0, MAX_IDENTITIES) {'
+dft "a deletion answers Deleted only once its marker is gone" "$D/handlers.rs" \
+    '    s.del(&marker)?;
+    Ok(Reply::Deleted)' '    let _ = s.del(&marker);
+    Ok(Reply::Deleted)'
+dft "listing frees index entries whose item is gone" "$D/handlers.rs" \
+    '        let _ = s.index_remove_many(&ix, &recordless);' '        let _ = &recordless;'
 dt "a failed prune does not fail the deletion listing" "$D/handlers.rs" \
     '    let _ = prune_recordless_identities(s);' '    prune_recordless_identities(s)?;' \
     a_failed_prune_does_not_fail_the_deletion_listing
