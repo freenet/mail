@@ -967,6 +967,44 @@ mod tests {
         });
     }
 
+    /// Two identities added with the same placeholder id (the create and
+    /// import forms used `UserId(0)`) get distinct ids, so selecting the
+    /// second one selects it, not the first (round-8 X1).
+    #[test]
+    fn identities_added_with_the_same_id_stay_distinct() {
+        use crate::app::{User, UserId};
+        use dioxus::prelude::*;
+        fn app() -> Element {
+            rsx! {}
+        }
+        let mut dom = VirtualDom::new(app);
+        dom.rebuild_in_place();
+        dom.in_scope(ScopeId::ROOT, || {
+            let user = Signal::new(User {
+                logged: true,
+                identified: true,
+                active_id: None,
+                identities: vec![],
+            });
+            let first = Identity::upsert(
+                Identity::from_info(&info("same-id-1", 0x61), UserId(0)),
+                user,
+            );
+            let second = Identity::upsert(
+                Identity::from_info(&info("same-id-2", 0x62), UserId(0)),
+                user,
+            );
+            assert_ne!(first.id, second.id);
+            let mut user = user;
+            user.write().set_logged_id(second.id);
+            assert_eq!(
+                user.read().logged_id().map(|i| i.addr),
+                Some(second.addr),
+                "selecting the second identity must act as the second"
+            );
+        });
+    }
+
     /// When it cannot be known whether a failed deletion began, the
     /// identity stays on the page (with a message) rather than being taken
     /// out, or kept, on a guess that "nothing is unfinished".

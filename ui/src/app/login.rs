@@ -160,7 +160,7 @@ impl Identity {
     /// named no identity, and every write under it failed with "no
     /// identity"). Returns the identity as the page now holds it, with the
     /// `UserId` of the slot it fills (#81, #114).
-    fn upsert(mut identity: Identity, mut user: Signal<crate::app::User>) -> Identity {
+    pub(crate) fn upsert(mut identity: Identity, mut user: Signal<crate::app::User>) -> Identity {
         let held = user
             .read()
             .identities
@@ -172,6 +172,11 @@ impl Identity {
                 return held;
             }
             identity.id = held.id;
+        } else if user.read().identities.iter().any(|i| i.id == identity.id) {
+            // A new identity takes a page-unique id: two built with the same
+            // placeholder id would both answer `logged_id`, so selecting the
+            // second acted (and sent) as the first.
+            identity.id = crate::app::UserId::new();
         }
         {
             let mut user_w = user.write();
@@ -1422,7 +1427,7 @@ pub(super) fn CreateAliasForm() -> Element {
             };
             match created {
                 Ok((info, recovery_key)) => {
-                    let identity = Identity::from_info(&info, UserId(0));
+                    let identity = Identity::from_info(&info, UserId::new());
                     let words = crate::app::address_book::fingerprint_words(
                         &identity.ml_dsa_vk_bytes(),
                         &identity.ml_kem_ek_bytes(),
@@ -2143,7 +2148,7 @@ fn ImportForm() -> Element {
                                                 return;
                                             }
                                         }
-                                        let identity = Identity::from_info(&info, UserId(0));
+                                        let identity = Identity::from_info(&info, UserId::new());
                                         // Restored from a recovery key or
                                         // backup file, so the user
                                         // demonstrably holds one.
