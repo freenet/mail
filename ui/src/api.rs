@@ -1301,6 +1301,10 @@ fn set_inbox_state(
     }
 }
 
+/// Retries of a decryption call that failed as a whole.
+#[cfg(feature = "use-node")]
+const DECRYPT_RETRIES: u32 = 3;
+
 /// Decrypt `pending` in the mail delegate and add the messages to inbox
 /// `key`. Runs in a task: the node loop delivers the delegate's answers, so
 /// it must never wait for one.
@@ -1315,14 +1319,44 @@ fn spawn_decrypt(
     }
     let mut inboxes = inboxes;
     crate::app::identity_store::spawn_detached(async move {
-        match crate::inbox::decrypt_pending(pending).await {
-            Ok(decrypted) => {
-                let models = inboxes.0.write();
-                if let Some(model) = models.iter().find(|e| e.borrow().key == key) {
+        let mut pending = pending;
+        let mut attempt = 0u32;
+        loop {
+            let hashes = pending.hashes();
+            let retry_with = pending.messages.clone();
+            let outcome = crate::inbox::decrypt_pending(pending).await;
+            let models = inboxes.0.write();
+            let Some(model) = models.iter().find(|e| e.borrow().key == key) else {
+                return;
+            };
+            match outcome {
+                Ok(decrypted) => {
                     model.borrow_mut().add_decrypted(decrypted);
+                    return;
+                }
+                Err(e) => {
+                    // The call failed as a whole (no answer, a busy or
+                    // failing delegate): nothing was learned about the
+                    // messages, so they are released and tried again,
+                    // after a pause, a few times.
+                    model.borrow_mut().release(&hashes);
+                    crate::log::error(format!("inbox {key}: {e}"), None);
+                    if attempt >= DECRYPT_RETRIES {
+                        return;
+                    }
+                    attempt += 1;
+                    drop(models);
+                    gloo_timers::future::TimeoutFuture::new(2_000 << attempt).await;
+                    let models = inboxes.0.write();
+                    let Some(model) = models.iter().find(|e| e.borrow().key == key) else {
+                        return;
+                    };
+                    pending = model.borrow_mut().retake(retry_with);
+                    if pending.is_empty() {
+                        return;
+                    }
                 }
             }
-            Err(e) => crate::log::error(format!("inbox {key}: {e}"), None),
         }
     });
 }

@@ -234,13 +234,16 @@ pub(crate) async fn put_item_merged(
 ///
 /// A batch whose plaintexts would exceed the reply budget comes back with
 /// `CapReached` for the entries that did not fit; those are asked for again
-/// in later calls until each has been answered alone. Only a plaintext too
-/// large to fit any reply on its own ends as `None`.
+/// in later calls until each has been answered alone. Each entry keeps the
+/// delegate's answer: `BadInput` for a ciphertext this identity cannot
+/// decrypt, `CapReached` for a plaintext too large to fit any reply on its
+/// own. A call that fails as a whole is the error.
 pub(crate) async fn decrypt_v1(
     addr: Addr,
     ciphertexts: Vec<Vec<u8>>,
-) -> Result<Vec<Option<Vec<u8>>>, CallError> {
-    let mut out: Vec<Option<Vec<u8>>> = vec![None; ciphertexts.len()];
+) -> Result<Vec<Result<Vec<u8>, FailureCode>>, CallError> {
+    let mut out: Vec<Result<Vec<u8>, FailureCode>> =
+        vec![Err(FailureCode::Internal); ciphertexts.len()];
     let mut pending: std::collections::VecDeque<usize> = (0..ciphertexts.len()).collect();
     while !pending.is_empty() {
         let batch: Vec<usize> = pending
@@ -267,13 +270,16 @@ pub(crate) async fn decrypt_v1(
         let mut retry = Vec::new();
         for (&i, result) in batch.iter().zip(results) {
             match result {
-                Ok(plain) => out[i] = Some(plain.into_vec()),
-                Err(FailureCode::CapReached) => retry.push(i),
-                Err(_) => {}
+                Ok(plain) => out[i] = Ok(plain.into_vec()),
+                Err(FailureCode::CapReached) => {
+                    out[i] = Err(FailureCode::CapReached);
+                    retry.push(i);
+                }
+                Err(code) => out[i] = Err(code),
             }
         }
         // Nothing in the batch fitted: its first entry does not fit a reply
-        // even on its own.
+        // even on its own, and keeps its `CapReached`.
         if retry.len() == batch.len() {
             retry.remove(0);
         }
@@ -549,7 +555,7 @@ mod tests {
             })
             .collect();
         let out = block_on(decrypt_v1(recipient.addr, ciphertexts)).unwrap();
-        let got: Vec<Option<Vec<u8>>> = plaintexts.into_iter().map(Some).collect();
+        let got: Vec<Result<Vec<u8>, FailureCode>> = plaintexts.into_iter().map(Ok).collect();
         assert!(out == got, "every message must come back readable");
     }
 
@@ -595,8 +601,12 @@ mod tests {
             vec![ct, b"not a ciphertext".to_vec()],
         ))
         .unwrap();
-        assert_eq!(out[0].as_deref(), Some(&b"hello from v0.2"[..]));
-        assert_eq!(out[1], None);
+        assert_eq!(out[0].as_deref(), Ok(&b"hello from v0.2"[..]));
+        assert_eq!(
+            out[1],
+            Err(FailureCode::BadInput),
+            "a ciphertext this identity can't read is told apart from a failed call"
+        );
     }
 
     #[test]

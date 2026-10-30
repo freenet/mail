@@ -984,6 +984,16 @@ pub(crate) struct InboxModel {
     /// Assignment hashes removed from this inbox, so a decryption still in
     /// flight when the removal lands does not bring the message back.
     removed: HashSet<TokenAssignmentHash>,
+    /// Assignment hashes the latest state holds (a whole state replaces
+    /// them; deltas add and remove). A decryption started from an older
+    /// state is dropped for any message no longer in it.
+    known: HashSet<TokenAssignmentHash>,
+    /// Messages handed to the delegate and not answered yet, so a repeated
+    /// state does not decrypt them twice. Released on failure.
+    in_flight: HashSet<TokenAssignmentHash>,
+    /// Messages this identity can never read (not for it, corrupt, or too
+    /// large to return); not asked for again.
+    unreadable: HashSet<TokenAssignmentHash>,
 }
 
 /// Messages of an inbox that the mail delegate still has to decrypt. The
@@ -1000,30 +1010,50 @@ impl PendingDecrypt {
     pub(crate) fn is_empty(&self) -> bool {
         self.messages.is_empty()
     }
+
+    /// The assignment hashes of the messages to decrypt.
+    pub(crate) fn hashes(&self) -> Vec<TokenAssignmentHash> {
+        self.messages
+            .iter()
+            .map(|m| m.token_assignment.assignment_hash)
+            .collect()
+    }
+}
+
+/// What the delegate made of a [`PendingDecrypt`]: the messages to show,
+/// and the hashes of those this identity can never read.
+#[derive(Debug, Default)]
+pub(crate) struct Decrypted {
+    pub messages: Vec<(StoredMessage, DecryptedMessage)>,
+    pub unreadable: Vec<TokenAssignmentHash>,
 }
 
 /// Decrypt `pending` in the mail delegate. Messages this identity cannot
 /// decrypt (foreign or malformed entries in shared inbox state) are skipped,
 /// never fatal (#267).
-pub(crate) async fn decrypt_pending(
-    pending: PendingDecrypt,
-) -> Result<Vec<(StoredMessage, DecryptedMessage)>, DynError> {
+///
+/// A call that fails as a whole (no answer, a busy or failing delegate) is
+/// an error, and its messages are asked for again with the next state; a
+/// message the delegate answers it cannot decrypt is reported unreadable.
+pub(crate) async fn decrypt_pending(pending: PendingDecrypt) -> Result<Decrypted, DynError> {
     let Some(addr) = pending.addr else {
-        return Ok(Vec::new());
+        return Ok(Decrypted::default());
     };
     let ciphertexts = pending.messages.iter().map(|m| m.content.clone()).collect();
     let plaintexts = crate::mail_delegate::ops::decrypt_v1(addr, ciphertexts)
         .await
         .map_err(|e| format!("could not decrypt inbox messages: {e}"))?;
-    Ok(pending
-        .messages
-        .into_iter()
-        .zip(plaintexts)
-        .filter_map(|(stored, plaintext)| {
-            let content = DecryptedMessage::from_plaintext(&plaintext?)?;
-            Some((stored, content))
-        })
-        .collect())
+    let mut out = Decrypted::default();
+    for (stored, plaintext) in pending.messages.into_iter().zip(plaintexts) {
+        match plaintext
+            .ok()
+            .and_then(|p| DecryptedMessage::from_plaintext(&p))
+        {
+            Some(content) => out.messages.push((stored, content)),
+            None => out.unreadable.push(stored.token_assignment.assignment_hash),
+        }
+    }
+    Ok(out)
 }
 
 impl InboxModel {
@@ -1195,12 +1225,66 @@ impl InboxModel {
             key,
             messages: Vec::new(),
             removed: HashSet::new(),
+            known: HashSet::new(),
+            in_flight: HashSet::new(),
+            unreadable: HashSet::new(),
         };
-        let pending = PendingDecrypt {
-            addr: Some(addr),
-            messages: state.messages,
-        };
+        let mut model = model;
+        let pending = model.take_new(state.messages, true);
         Ok((model, pending))
+    }
+
+    /// The messages of a state (`whole`) or delta that still need
+    /// decrypting, marked in flight; records which messages the inbox now
+    /// holds.
+    fn take_new(&mut self, messages: Vec<StoredMessage>, whole: bool) -> PendingDecrypt {
+        if whole {
+            self.known = messages
+                .iter()
+                .map(|m| m.token_assignment.assignment_hash)
+                .collect();
+        } else {
+            self.known
+                .extend(messages.iter().map(|m| m.token_assignment.assignment_hash));
+        }
+        let mut pending = PendingDecrypt {
+            addr: Some(self.settings.addr),
+            messages: Vec::new(),
+        };
+        for m in messages {
+            let hash = m.token_assignment.assignment_hash;
+            if self.has_message(&hash)
+                || self.in_flight.contains(&hash)
+                || self.unreadable.contains(&hash)
+            {
+                continue;
+            }
+            self.in_flight.insert(hash);
+            pending.messages.push(m);
+        }
+        pending
+    }
+
+    /// A decryption that failed as a whole: its messages may be asked for
+    /// again.
+    pub fn release(&mut self, hashes: &[TokenAssignmentHash]) {
+        for hash in hashes {
+            self.in_flight.remove(hash);
+        }
+    }
+
+    /// Of `messages` (from a decryption that failed and was released), the
+    /// ones still worth retrying: still in the latest state, not decrypted
+    /// or being decrypted since, and not unreadable. Marked in flight.
+    pub fn retake(&mut self, messages: Vec<StoredMessage>) -> PendingDecrypt {
+        let messages = messages
+            .into_iter()
+            .filter(|m| self.known.contains(&m.token_assignment.assignment_hash))
+            .collect();
+        let known = std::mem::take(&mut self.known);
+        let pending = self.take_new(messages, false);
+        self.known = known;
+        pending
     }
 
     /// Replace this inbox with a whole new state: keeps the messages already
@@ -1219,15 +1303,7 @@ impl InboxModel {
             .collect();
         self.messages
             .retain(|m| present.contains(&m.token_assignment.assignment_hash));
-        let messages = state
-            .messages
-            .into_iter()
-            .filter(|m| !self.has_message(&m.token_assignment.assignment_hash))
-            .collect();
-        Ok(PendingDecrypt {
-            addr: Some(self.settings.addr),
-            messages,
-        })
+        Ok(self.take_new(state.messages, true))
     }
 
     fn has_message(&self, hash: &TokenAssignmentHash) -> bool {
@@ -1248,13 +1324,12 @@ impl InboxModel {
         };
         match delta {
             UpdateInbox::AddMessages { messages } => {
-                for m in messages {
-                    if !self.has_message(&m.token_assignment.assignment_hash) {
-                        pending.messages.push(m);
-                    }
-                }
+                pending = self.take_new(messages, false);
             }
             UpdateInbox::RemoveMessages { ids, .. } => {
+                for id in &ids {
+                    self.known.remove(id);
+                }
                 self.removed.extend(ids.iter().copied());
                 let drop: HashSet<TokenAssignmentHash> = HashSet::from_iter(ids);
                 self.messages
@@ -1268,12 +1343,21 @@ impl InboxModel {
         pending
     }
 
-    /// Add messages the delegate decrypted, skipping any already present or
-    /// removed while the decryption was in flight.
-    pub fn add_decrypted(&mut self, decrypted: Vec<(StoredMessage, DecryptedMessage)>) {
-        for (m, content) in decrypted {
+    /// Add messages the delegate decrypted, skipping any already present,
+    /// removed while the decryption was in flight, or no longer in the
+    /// latest state (a newer state superseded the one they came from).
+    pub fn add_decrypted(&mut self, decrypted: Decrypted) {
+        for hash in decrypted.unreadable {
+            self.in_flight.remove(&hash);
+            self.unreadable.insert(hash);
+        }
+        for (m, content) in decrypted.messages {
             let hash = m.token_assignment.assignment_hash;
-            if self.has_message(&hash) || self.removed.contains(&hash) {
+            self.in_flight.remove(&hash);
+            if self.has_message(&hash)
+                || self.removed.contains(&hash)
+                || !self.known.contains(&hash)
+            {
                 continue;
             }
             let signature_valid = verify_message_signature(&m.content, &m.sender_vk, &m.signature);
@@ -1567,6 +1651,9 @@ mod tests {
                     ContractCode::from([].as_slice()),
                 ),
                 removed: HashSet::new(),
+                known: HashSet::new(),
+                in_flight: HashSet::new(),
+                unreadable: HashSet::new(),
             }
         }
     }
@@ -1755,27 +1842,104 @@ mod tests {
     /// to the delegate, and the model starts without them.
     #[test]
     fn from_state_hands_every_message_to_the_delegate() {
-        let state = StoredInbox::with_signature(
+        let (model, pending) = model_with(&[1, 2]);
+        assert!(model.messages.is_empty());
+        assert_eq!(pending.messages.len(), 2);
+        assert_eq!(pending.addr, Some(freenet_mail_protocol::Addr([1; 24])));
+    }
+
+    fn stored(n: u8) -> StoredMessage {
+        let mut token_assignment = crate::test_util::test_assignment();
+        token_assignment.assignment_hash = [n; 32];
+        StoredMessage {
+            content: vec![n; 1200],
+            token_assignment,
+            sender_vk: Vec::new(),
+            signature: Vec::new(),
+        }
+    }
+
+    fn state_of(hashes: &[u8]) -> StoredInbox {
+        StoredInbox::with_signature(
             StoredSettings::default(),
-            vec![
-                StoredMessage {
-                    content: vec![1; 1200],
-                    token_assignment: crate::test_util::test_assignment(),
-                    sender_vk: Vec::new(),
-                    signature: Vec::new(),
-                };
-                2
-            ],
+            hashes.iter().map(|&n| stored(n)).collect(),
             Utc::now(),
             vec![3; 1184],
             Box::new([]),
-        );
+        )
+    }
+
+    fn model_with(hashes: &[u8]) -> (InboxModel, PendingDecrypt) {
         let addr = freenet_mail_protocol::Addr([1; 24]);
         let key = InboxModel::new(addr, &[2; 1952], vec![3; 1184]).key;
-        let (model, pending) = InboxModel::from_state(addr, vec![3; 1184], state, key).unwrap();
-        assert!(model.messages.is_empty());
+        InboxModel::from_state(addr, vec![3; 1184], state_of(hashes), key).unwrap()
+    }
+
+    /// What the delegate would answer for `pending`: every message readable.
+    fn all_readable(pending: &PendingDecrypt) -> Decrypted {
+        Decrypted {
+            messages: pending
+                .messages
+                .iter()
+                .map(|m| (m.clone(), DecryptedMessage::default()))
+                .collect(),
+            unreadable: Vec::new(),
+        }
+    }
+
+    /// A decryption started from an older state, answered after a newer
+    /// state dropped one of its messages, must not bring that message back.
+    #[test]
+    fn a_decryption_from_a_superseded_state_does_not_resurrect_a_message() {
+        let (mut model, pending) = model_with(&[1, 2]);
+        let answer = all_readable(&pending);
+        let again = model.replace_state(state_of(&[1])).unwrap();
+        assert!(again.is_empty(), "message 1 is already being decrypted");
+        model.add_decrypted(answer);
+        let hashes: Vec<_> = model
+            .messages
+            .iter()
+            .map(|m| m.token_assignment.assignment_hash)
+            .collect();
+        assert_eq!(hashes, vec![[1; 32]]);
+    }
+
+    /// A repeated state does not hand the delegate messages it is already
+    /// decrypting; one it could never read is not asked for again.
+    #[test]
+    fn in_flight_and_unreadable_messages_are_not_asked_for_twice() {
+        let (mut model, pending) = model_with(&[1, 2]);
         assert_eq!(pending.messages.len(), 2);
-        assert_eq!(pending.addr, Some(addr));
+        assert!(model.replace_state(state_of(&[1, 2])).unwrap().is_empty());
+        model.add_decrypted(Decrypted {
+            messages: vec![(stored(1), DecryptedMessage::default())],
+            unreadable: vec![[2; 32]],
+        });
+        assert!(model.replace_state(state_of(&[1, 2])).unwrap().is_empty());
+        assert_eq!(model.messages.len(), 1);
+    }
+
+    /// A call that failed as a whole releases its messages: a retry takes
+    /// the ones still in the inbox, and the next state may too.
+    #[test]
+    fn a_failed_decryption_is_released_and_retried() {
+        let (mut model, pending) = model_with(&[1, 2]);
+        let hashes = pending.hashes();
+        let messages = pending.messages.clone();
+        model.release(&hashes);
+        // Meanwhile a delta removes message 2.
+        let _ = model.apply_delta(UpdateInbox::RemoveMessages {
+            signature: Box::new([]),
+            ids: vec![[2; 32]],
+        });
+        let retry = model.retake(messages);
+        assert_eq!(retry.hashes(), vec![[1; 32]]);
+        assert!(
+            model.replace_state(state_of(&[1])).unwrap().is_empty(),
+            "the retry holds message 1 in flight"
+        );
+        model.add_decrypted(all_readable(&retry));
+        assert_eq!(model.messages.len(), 1);
     }
 
     /// Repro for #267: an inbox whose stored messages include an entry
@@ -1844,7 +2008,10 @@ mod tests {
             signature: Box::new([]),
             ids: vec![[9; 32]],
         });
-        inbox.add_decrypted(vec![(stored, DecryptedMessage::default())]);
+        inbox.add_decrypted(Decrypted {
+            messages: vec![(stored, DecryptedMessage::default())],
+            unreadable: Vec::new(),
+        });
         assert!(inbox.messages.is_empty());
     }
 
