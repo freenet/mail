@@ -81,13 +81,53 @@ pub(crate) async fn load_all() -> Result<Vec<Contact>, CallError> {
 }
 
 /// Store `contact`, replacing what is stored for its address.
+///
+/// Saving a contact is the user asking for it to exist, so it is created
+/// even if a deletion lands between this write's read and its put (another
+/// tab removing it, or this page's own remove of a contact it is re-adding).
+/// That is why this does not use `put_item_merged`, whose "existed, then
+/// gone" rule is right for drafts and wrong here.
 pub(crate) async fn save(contact: &Contact) -> Result<(), CallError> {
-    let body = encode(contact);
-    ops::put_item_merged(item_for(&contact.ml_dsa_vk_bytes), |stored| {
-        (stored != Some(body.as_slice())).then(|| body.clone())
-    })
+    let item = item_for(&contact.ml_dsa_vk_bytes);
+    store_replacing(
+        encode(contact),
+        || ops::get_item(item.clone()),
+        |body, generation| ops::put_item(item.clone(), body, Some(generation)),
+    )
     .await
-    .map(|_| ())
+}
+
+/// Write `body`, replacing whatever is stored, retrying a lost
+/// compare-and-swap from a fresh read. An item deleted meanwhile reads as
+/// absent and is created again (generation 0), never dropped.
+async fn store_replacing<G, GF, P, PF>(body: Vec<u8>, mut get: G, mut put: P) -> Result<(), CallError>
+where
+    G: FnMut() -> GF,
+    GF: std::future::Future<Output = Result<Option<freenet_mail_protocol::Item>, CallError>>,
+    P: FnMut(Vec<u8>, u64) -> PF,
+    PF: std::future::Future<Output = Result<u64, CallError>>,
+{
+    let mut attempt = 0;
+    loop {
+        let generation = match get().await? {
+            Some(stored) if stored.body.as_slice() == body.as_slice() => return Ok(()),
+            Some(stored) => stored.generation,
+            None => 0,
+        };
+        match put(body.clone(), generation).await {
+            Ok(_) => return Ok(()),
+            Err(e)
+                if matches!(
+                    e.code(),
+                    Some(freenet_mail_protocol::FailureCode::Conflict { .. })
+                ) && attempt < ops::MERGE_RETRIES =>
+            {
+                attempt += 1;
+                ops::pause_ms(50 * 2u32.pow(attempt)).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 /// Remove the contact with verifying key `vk`. Absent is success.
@@ -163,25 +203,104 @@ pub(crate) fn disambiguate(
     (contacts, clashed)
 }
 
-/// Persist `contact` in the background, reporting a failure.
-pub(crate) fn save_in_background(contact: Contact) {
+/// A contact write waiting its turn.
+enum Write {
+    Save(Contact),
+    Remove { alias: String },
+}
+
+/// Writes for one contact, run strictly in the order the user made them.
+/// Independent tasks could interleave: a remove landing after the save that
+/// re-added the contact would delete what the user just added back.
+struct KeyQueue<T> {
+    pending: std::collections::HashMap<Vec<u8>, std::collections::VecDeque<T>>,
+}
+
+impl<T> KeyQueue<T> {
+    fn new() -> Self {
+        Self {
+            pending: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Queue `op` for `key`. True when no writer is running for `key`, so
+    /// the caller must start one.
+    fn push(&mut self, key: Vec<u8>, op: T) -> bool {
+        let queue = self.pending.entry(key).or_default();
+        queue.push_back(op);
+        queue.len() == 1
+    }
+
+    /// The next write for `key` once the current one (at the front) is done,
+    /// or `None` when the queue is empty and the writer must stop.
+    fn finish_and_next(&mut self, key: &[u8]) -> Option<&T> {
+        let queue = self.pending.get_mut(key)?;
+        queue.pop_front();
+        if queue.is_empty() {
+            self.pending.remove(key);
+            return None;
+        }
+        self.pending.get(key).and_then(|q| q.front())
+    }
+
+    fn front(&self, key: &[u8]) -> Option<&T> {
+        self.pending.get(key).and_then(|q| q.front())
+    }
+}
+
+thread_local! {
+    static WRITES: std::cell::RefCell<KeyQueue<Write>> = std::cell::RefCell::new(KeyQueue::new());
+}
+
+fn enqueue(vk: Vec<u8>, write: Write) {
+    let start = WRITES.with(|w| w.borrow_mut().push(vk.clone(), write));
+    if !start {
+        return;
+    }
     let _task = dioxus::core::spawn_forever(async move {
-        if let Err(e) = save(&contact).await {
-            report(
-                &format!("Couldn't save contact {}", contact.local_alias),
-                &e,
-            );
+        loop {
+            // Take what to do without holding the borrow across an await.
+            let op = WRITES.with(|w| {
+                w.borrow().front(&vk).map(|op| match op {
+                    Write::Save(contact) => Write::Save(contact.clone()),
+                    Write::Remove { alias } => Write::Remove {
+                        alias: alias.clone(),
+                    },
+                })
+            });
+            match op {
+                Some(Write::Save(contact)) => {
+                    if let Err(e) = save(&contact).await {
+                        report(
+                            &format!("Couldn't save contact {}", contact.local_alias),
+                            &e,
+                        );
+                    }
+                }
+                Some(Write::Remove { alias }) => {
+                    if let Err(e) = remove(&vk).await {
+                        report(&format!("Couldn't remove contact {alias}"), &e);
+                    }
+                }
+                None => return,
+            }
+            if WRITES.with(|w| w.borrow_mut().finish_and_next(&vk).is_none()) {
+                return;
+            }
         }
     });
 }
 
-/// Remove a contact in the background, reporting a failure.
+/// Persist `contact` in the background, after any earlier write for the
+/// same contact, reporting a failure.
+pub(crate) fn save_in_background(contact: Contact) {
+    enqueue(contact.ml_dsa_vk_bytes.clone(), Write::Save(contact));
+}
+
+/// Remove a contact in the background, after any earlier write for the same
+/// contact, reporting a failure.
 pub(crate) fn remove_in_background(alias: String, vk: Vec<u8>) {
-    let _task = dioxus::core::spawn_forever(async move {
-        if let Err(e) = remove(&vk).await {
-            report(&format!("Couldn't remove contact {alias}"), &e);
-        }
-    });
+    enqueue(vk, Write::Remove { alias });
 }
 
 fn report(what: &str, e: &CallError) {
@@ -216,6 +335,71 @@ mod tests {
             inbox_wasm_hash: Some("hash".into()),
         }
         .into_contact("Bob".into(), "from work".into())
+    }
+
+    /// Writes for one contact run in the order they were made; a writer is
+    /// started only for the first, and stops when the queue drains.
+    #[test]
+    fn contact_writes_run_in_the_order_they_were_made() {
+        let mut q: KeyQueue<&str> = KeyQueue::new();
+        let k = b"bob".to_vec();
+        assert!(q.push(k.clone(), "remove"), "the first write starts a writer");
+        assert!(!q.push(k.clone(), "save"), "a later one waits its turn");
+        assert!(q.push(b"carol".to_vec(), "save"), "other contacts are independent");
+        assert_eq!(q.front(&k), Some(&"remove"));
+        assert_eq!(q.finish_and_next(&k), Some(&"save"));
+        assert_eq!(q.finish_and_next(&k), None, "drained: the writer stops");
+        assert!(q.push(k.clone(), "save"), "and the next write starts a new one");
+    }
+
+    /// A contact deleted between a save's read and its put (another tab's
+    /// remove, or this page's remove of a contact it re-adds) is created
+    /// again. The earlier merged-write path took "existed, then gone" as a
+    /// reason to stop, so the re-added contact was silently not stored.
+    #[test]
+    fn a_save_racing_a_delete_still_stores_the_contact() {
+        use freenet_mail_protocol::{Failure, FailureCode, Item};
+        use futures::executor::block_on;
+        use std::cell::RefCell;
+        let item = item_for(&[7; 1952]);
+        let stored: RefCell<Option<Item>> = RefCell::new(Some(Item {
+            item: item.clone(),
+            body: serde_bytes::ByteBuf::from(b"old".to_vec()),
+            generation: 4,
+        }));
+        let reads = RefCell::new(0);
+        let get = || {
+            *reads.borrow_mut() += 1;
+            let now = stored.borrow().clone();
+            // Right after the first read, the contact is deleted.
+            if *reads.borrow() == 1 {
+                *stored.borrow_mut() = None;
+            }
+            async move { Ok(now) }
+        };
+        let put = |body: Vec<u8>, expected: u64| {
+            let current = stored.borrow().as_ref().map_or(0, |i| i.generation);
+            let result = if current == expected {
+                *stored.borrow_mut() = Some(Item {
+                    item: item.clone(),
+                    body: serde_bytes::ByteBuf::from(body),
+                    generation: expected + 1,
+                });
+                Ok(expected + 1)
+            } else {
+                Err(CallError::Failed(Failure {
+                    code: FailureCode::Conflict { current_gen: current },
+                    detail: String::new(),
+                }))
+            };
+            async move { result }
+        };
+        block_on(store_replacing(b"new".to_vec(), get, put)).unwrap();
+        assert_eq!(
+            stored.borrow().as_ref().map(|i| i.body.to_vec()),
+            Some(b"new".to_vec()),
+            "the contact is stored, not dropped"
+        );
     }
 
     /// A contact write refused at the contact cap says the limit was reached
