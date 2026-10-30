@@ -150,8 +150,15 @@ async fn set_flags(item: ItemRef, mut change: impl FnMut(&mut Flags)) -> Result<
 async fn delete(item: ItemRef) -> Result<(), CallError> {
     let mut attempt = 0;
     loop {
-        let Some(current) = ops::get_item(item.clone()).await? else {
-            return Ok(());
+        // "Already gone" only when a second read agrees: one lost read must
+        // not leave the item in place while the caller goes on as if
+        // deleted.
+        let current = match ops::get_item(item.clone()).await? {
+            Some(current) => current,
+            None => match ops::get_item(item.clone()).await? {
+                Some(current) => current,
+                None => return Ok(()),
+            },
         };
         match ops::delete_item(item.clone(), current.generation).await {
             Err(e)
@@ -469,19 +476,25 @@ pub(crate) async fn unarchive_message(alias: String, msg_id: MessageId) -> Resul
 }
 
 /// Deleting leaves no copy, and a mark so the message stays hidden.
+///
+/// The copies go first. A copy whose removal failed would otherwise
+/// survive the deletion beside a mark saying it is deleted, holding the
+/// message's content the user asked to remove, and pinning that mark
+/// against reclamation (a kept copy keeps its mark). This way a failure
+/// leaves the message visible and the deletion retryable.
 pub(crate) async fn delete_message(alias: String, msg_id: MessageId) -> Result<(), DynError> {
-    set_flags(message_item(ItemKind::Flags, &alias, msg_id)?, |f| {
-        f.deleted = true;
-        f.read = false;
-    })
-    .await
-    .map_err(boxed)?;
     delete(message_item(ItemKind::Kept, &alias, msg_id)?)
         .await
         .map_err(boxed)?;
     delete(message_item(ItemKind::Archived, &alias, msg_id)?)
         .await
-        .map_err(boxed)
+        .map_err(boxed)?;
+    set_flags(message_item(ItemKind::Flags, &alias, msg_id)?, |f| {
+        f.deleted = true;
+        f.read = false;
+    })
+    .await
+    .map_err(boxed)
 }
 
 /// Set in `stored` every leaf field that differs between `before` and
@@ -1195,6 +1208,42 @@ mod delegate_tests {
             id: uuid_id(&id).unwrap(),
         };
         assert!(block_on(ops::get_item(item)).unwrap().is_some());
+    }
+
+    /// A deletion whose kept copy cannot be removed fails before it marks
+    /// the message deleted: no copy survives beside a "deleted" mark.
+    #[cfg(feature = "local-delegate")]
+    #[test]
+    fn a_deletion_that_cannot_remove_a_copy_marks_nothing() {
+        let alias = "items-del-order";
+        let addr = identity(alias);
+        let id = message_id_for(b"kept, then deleted");
+        block_on(mark_read(alias.into(), id, kept("k".into()))).unwrap();
+        let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+        let kept_rel = format!(
+            "it/kp/{}/{}",
+            hex(&addr.0),
+            hex(&full_message_id(b"kept, then deleted"))
+        );
+        // The copy's current generation cannot be read: its delete cannot
+        // go ahead (a failed read looks like "already gone" only when it
+        // misses twice, then the delete is a no-op and the copy stays).
+        crate::mail_delegate::local::miss_next_reads(&kept_rel, 2);
+        let _ = block_on(delete_message(alias.into(), id));
+        crate::mail_delegate::local::miss_next_reads("", 0);
+        let flags = block_on(ops::get_item(
+            message_item(ItemKind::Flags, alias, id).unwrap(),
+        ))
+        .unwrap()
+        .map(|i| serde_json::from_slice::<Flags>(&i.body).unwrap());
+        let copy = block_on(ops::get_item(
+            message_item(ItemKind::Kept, alias, id).unwrap(),
+        ))
+        .unwrap();
+        assert!(
+            !(copy.is_some() && flags.is_some_and(|f| f.deleted)),
+            "a kept copy survived beside a deleted mark"
+        );
     }
 
     /// The recipient address a draft was addressed to survives a reload,
