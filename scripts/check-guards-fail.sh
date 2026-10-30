@@ -224,8 +224,10 @@ dt "an answer survives a failed index cleanup" "$D/consent.rs" \
     's.index_remove(PROMPT_INDEX, &answer.request_id.to_be_bytes()).map_err(|_| DelegateError::Other("x".into()))?;' \
     an_answer_whose_index_cleanup_fails_still_gets_its_response
 dt "an interrupted delete is finished by its retry" "$D/handlers.rs" \
-    'finish that now.
-        s.index_remove(&ix, &item.id)?;' 'finish that now.' \
+    '        s.index_remove(&ix, &item.id).map_err(partial)?;
+        let _ = s.del(&marker);
+        return Ok(Reply::Deleted);' '        let _ = s.del(&marker);
+        return Ok(Reply::Deleted);' \
     an_item_delete_interrupted_before_the_index_update_is_finished_by_its_retry
 dt "a request for an unknown operation gets a typed answer" "$D/handlers.rs" \
     'FailureCode::UnknownOperation,' 'FailureCode::BadInput,' \
@@ -234,16 +236,16 @@ dt "a recordless identity index entry is pruned" "$D/handlers.rs" \
     '    let _ = prune_recordless_identities(s);' '    let _ = s;' \
     a_recordless_identity_index_entry_is_pruned_when_deletions_are_listed
 dt "a record that fails to read is never pruned" "$D/handlers.rs" \
-    '        if s.get(&marker).is_none() {
+    '        let Some(kind) = s.get(&marker) else {
             continue;
-        }' '' \
+        };' '        let kind = s.get(&marker).unwrap_or_else(|| store::MARKER_DELETING.to_vec());' \
     a_record_that_fails_to_read_is_never_pruned_from_the_index
 dt "an import re-indexes a present, unindexed identity" "$D/handlers.rs" \
     'if !s.index(IDENTITY_INDEX)?.1.contains(&addr.0[..]) {' 'if false {' \
     importing_a_present_but_unindexed_identity_indexes_it_again
 dt "re-creating an identity clears its deletion marker" "$D/handlers.rs" \
-    '            let _ = s.del(&marker);
-            Ok(info(addr, generation, &record))' '            Ok(info(addr, generation, &record))' \
+    '            if s.del(&marker).is_err() && s.put(&marker, store::MARKER_SPENT).is_err() {' \
+    '            if false {' \
     a_reimported_identity_clears_its_old_deletion_marker
 dt "a delete removes a key that reads as absent" "$D/store.rs" \
     '            if !self.env.remove(&key) && !self.env.remove(&key) && self.fetch(&key).is_some() {' \
@@ -267,10 +269,11 @@ dt "only a deletion's marker skips the prompt" "$D/handlers.rs" \
 dft() { guard "$1" "$2" "$3" "$4" "tests:$FAULT_RUN" fault_tests; }
 dft "absence is believed only when a re-read agrees" "$D/store.rs" \
     'self.env.get(key).or_else(|| self.env.get(key))' 'self.env.get(key)'
-dft "a create's marker lets a failed create's slot be freed" "$D/handlers.rs" \
-    '    s.put(&marker, store::MARKER_CREATING)?;
-    if let Err(e) = s.index_add(IDENTITY_INDEX, &addr.0, MAX_IDENTITIES) {' \
-    '    if let Err(e) = s.index_add(IDENTITY_INDEX, &addr.0, MAX_IDENTITIES) {'
+dft "a failed create marks its slot free to reclaim" "$D/handlers.rs" \
+    '                // say so, so a listing can free it.
+                let _ = retried(|| s.put(&marker, store::MARKER_FAILED));' \
+    '                // say so, so a listing can free it.
+                let _ = &marker;'
 dft "a deletion answers Deleted only once its marker is gone" "$D/handlers.rs" \
     '    s.del(&marker)?;
     Ok(Reply::Deleted)' '    let _ = s.del(&marker);

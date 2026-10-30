@@ -26,6 +26,14 @@ const PINNED_SEEDS: &[u64] = &[1, 2, 3, 4, 5, 10, 29, 43, 129, 162, 203];
 /// Seeds that broke an invariant while a key stayed unreadable.
 const PINNED_BLIND_SEEDS: &[u64] = &[19, 38, 41, 46, 51, 270];
 
+/// The same, found at other settings: (seed, ops, fault rate, blind rate).
+const PINNED_BLIND_RUNS: &[(u64, usize, u32, u32)] = &[
+    (596, 80, 60, 20),
+    (1855, 80, 60, 20),
+    (1871, 80, 60, 20),
+    (1389, 80, 200, 100),
+];
+
 const KINDS: [ItemKind; 5] = [
     ItemKind::Draft,
     ItemKind::Sent,
@@ -671,8 +679,9 @@ fn unhex(h: &str) -> Vec<u8> {
         .collect()
 }
 
-fn run_seed(seed: u64, ops: usize, per_mille: u32) -> Result<u64, String> {
-    run_seed_with(seed, ops, Faults::seeded(seed, per_mille), per_mille).map(|(i, _, _)| i)
+/// Run one seed over transient faults; returns (faults injected, leaks).
+fn run_seed(seed: u64, ops: usize, per_mille: u32) -> Result<(u64, u64), String> {
+    run_seed_with(seed, ops, Faults::seeded(seed, per_mille), per_mille).map(|(i, _, l)| (i, l))
 }
 
 /// Run one seed over `faults`; returns (faults injected, misses observed,
@@ -726,10 +735,14 @@ fn invariants_hold_over_a_host_that_misses_reads_and_refuses_writes() {
     let ops = env_or("FAULT_OPS", 60) as usize;
     let rate = env_or("FAULT_RATE", 60) as u32;
     let mut injected = 0;
+    let mut leaks = 0;
     let mut failures = Vec::new();
     for seed in PINNED_SEEDS.iter().copied().chain(1..=seeds) {
         match run_seed(seed, ops, rate) {
-            Ok(n) => injected += n,
+            Ok((n, l)) => {
+                injected += n;
+                leaks += l;
+            }
             Err(e) => failures.push(e),
         }
     }
@@ -747,6 +760,12 @@ fn invariants_hold_over_a_host_that_misses_reads_and_refuses_writes() {
     );
     // The faults really fired.
     assert!(injected > seeds, "only {injected} faults injected");
+    // A slot left under a create's marker takes a record write, its
+    // rollback and three tries at marking it failed all being refused: at
+    // the default rate, none. (Higher FAULT_RATE runs may leak a few.)
+    if rate <= 60 {
+        assert_eq!(leaks, 0, "{leaks} index slots leaked");
+    }
 }
 
 /// One present key at a time goes persistently unreadable (freenet-core
@@ -763,7 +782,14 @@ fn invariants_hold_while_a_key_stays_unreadable() {
     let blind = env_or("FAULT_BLIND_RATE", 20) as u32;
     let mut observed = 0;
     let mut failures = Vec::new();
-    for seed in PINNED_BLIND_SEEDS.iter().copied().chain(1..=seeds) {
+    let runs = PINNED_BLIND_RUNS.iter().copied().chain(
+        PINNED_BLIND_SEEDS
+            .iter()
+            .copied()
+            .chain(1..=seeds)
+            .map(|seed| (seed, ops, rate, blind)),
+    );
+    for (seed, ops, rate, blind) in runs {
         let faults = Faults::seeded_with_blindness(seed, rate, blind);
         match run_seed_with(seed, ops, faults, rate) {
             Ok((_, o, _)) => observed += o,
