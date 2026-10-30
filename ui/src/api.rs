@@ -2121,18 +2121,10 @@ pub(crate) async fn node_comms(
                             // The on-chain inbox + AFT contracts stay (no
                             // delete primitive); without the keys nobody can
                             // sign for them.
-                            crate::app::login::Identity::remove_in_place(&alias);
-                            crate::local_state::forget_identity(&identity.addr);
-                            let mut user_w = user.write();
-                            let was_logged_in = user_w
-                                .logged_id()
-                                .map(|i| i.id == identity.id)
-                                .unwrap_or(false);
-                            user_w.identities.retain(|i| i.id != identity.id);
-                            if was_logged_in {
-                                user_w.logout();
-                            }
-                            drop(user_w);
+                            crate::app::identity_store::drop_from_page(
+                                &identity,
+                                &mut user.write(),
+                            );
                             // Re-render inbox rows that had this identity
                             // wired up as a sender.
                             let prev = *ab_gen.0.read();
@@ -2142,12 +2134,24 @@ pub(crate) async fn node_comms(
                         Err(text) => {
                             // Detached task: no component scope for
                             // `push_toast`'s `use_context`. A deletion that
-                            // stopped midway is offered for finishing.
+                            // stopped midway is offered for finishing, and
+                            // the identity, which the delegate no longer
+                            // lets anyone use, leaves the page.
                             crate::toast::push_toast_detached(
                                 text,
                                 crate::toast::ToastLevel::Error,
                             );
-                            crate::app::identity_store::refresh_unfinished_deletions().await;
+                            let unfinished =
+                                crate::app::identity_store::refresh_unfinished_deletions().await;
+                            if crate::app::identity_store::drop_if_deletion_started(
+                                &identity,
+                                &unfinished,
+                                &mut user.write(),
+                            ) {
+                                let prev = *ab_gen.0.read();
+                                ab_gen.0.set(prev.wrapping_add(1));
+                                login_controller.write().updated = true;
+                            }
                         }
                     }
                 });

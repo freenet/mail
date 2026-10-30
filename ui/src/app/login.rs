@@ -343,6 +343,17 @@ impl Identity {
             aliases.len() != before
         })
     }
+
+    /// Remove the live identity at `addr`. By address, not alias: another
+    /// identity may carry the same alias.
+    pub(crate) fn remove_in_place_by_addr(addr: &freenet_mail_protocol::Addr) -> bool {
+        ALIASES.with(|aliases| {
+            let aliases = &mut *aliases.borrow_mut();
+            let before = aliases.len();
+            aliases.retain(|a| a.addr != *addr);
+            aliases.len() != before
+        })
+    }
 }
 
 impl std::hash::Hash for Identity {

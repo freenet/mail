@@ -303,21 +303,20 @@ pub(crate) fn app() -> Element {
                                     e,
                                     crate::toast::ToastLevel::Error,
                                 );
-                                identity_store::refresh_unfinished_deletions().await;
+                                let unfinished =
+                                    identity_store::refresh_unfinished_deletions().await;
+                                if identity_store::drop_if_deletion_started(
+                                    &identity,
+                                    &unfinished,
+                                    &mut user_sig.write(),
+                                ) {
+                                    login_ctl.write().updated = true;
+                                    let prev = *ab_gen.0.read();
+                                    ab_gen.0.set(prev.wrapping_add(1));
+                                }
                                 continue;
                             }
-                            Identity::remove_in_place(&identity.alias);
-                            crate::local_state::forget_identity(&identity.addr);
-                            let mut user_w = user_sig.write();
-                            let was_logged_in = user_w
-                                .logged_id()
-                                .map(|i| i.id == identity.id)
-                                .unwrap_or(false);
-                            user_w.identities.retain(|i| i.id != identity.id);
-                            if was_logged_in {
-                                user_w.logout();
-                            }
-                            drop(user_w);
+                            identity_store::drop_from_page(&identity, &mut user_sig.write());
                             login_ctl.write().updated = true;
                             address_book::remove_contact(&identity.alias);
                             let prev = *ab_gen.0.read();

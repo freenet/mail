@@ -102,16 +102,51 @@ pub(crate) fn deletion_failure_text(
 /// offers to finish each.
 pub(crate) static UNFINISHED_DELETIONS: GlobalSignal<Vec<IdentityInfo>> = Signal::global(Vec::new);
 
-/// Ask the delegate which deletions are unfinished and show them.
-pub(crate) async fn refresh_unfinished_deletions() {
+/// Ask the delegate which deletions are unfinished and show them. Returns
+/// the list (empty if the delegate could not be asked).
+pub(crate) async fn refresh_unfinished_deletions() -> Vec<IdentityInfo> {
     match ops::list_deleting_identities().await {
         Ok(list) => {
             if dioxus::core::Runtime::try_current().is_some() {
-                *UNFINISHED_DELETIONS.write() = list;
+                *UNFINISHED_DELETIONS.write() = list.clone();
             }
+            list
         }
-        Err(e) => crate::log::error(format!("listing unfinished deletions failed: {e}"), None),
+        Err(e) => {
+            crate::log::error(format!("listing unfinished deletions failed: {e}"), None);
+            Vec::new()
+        }
     }
+}
+
+/// Take a deleted identity out of this page: the live identities, the
+/// identities list, the signed-in identity and its in-page state.
+pub(crate) fn drop_from_page(identity: &crate::app::login::Identity, user: &mut crate::app::User) {
+    crate::app::login::Identity::remove_in_place_by_addr(&identity.addr);
+    crate::local_state::forget_identity(&identity.addr);
+    let was_logged_in = user.logged_id().is_some_and(|i| i.addr == identity.addr);
+    user.identities.retain(|i| i.addr != identity.addr);
+    if was_logged_in {
+        user.logout();
+    }
+}
+
+/// After a deletion that did not finish: once the delegate lists the
+/// identity in `unfinished`, its deletion has begun, and the delegate hides
+/// it and refuses to use it. Take it out of the page as well, so the user
+/// sees the "Finish deleting" entry rather than that plus a row that no
+/// longer works, and nothing is left behind once it is finished. Returns
+/// whether it was taken out.
+pub(crate) fn drop_if_deletion_started(
+    identity: &crate::app::login::Identity,
+    unfinished: &[IdentityInfo],
+    user: &mut crate::app::User,
+) -> bool {
+    let started = unfinished.iter().any(|i| i.addr == identity.addr);
+    if started {
+        drop_from_page(identity, user);
+    }
+    started
 }
 
 /// Finish an interrupted deletion. The user approved it before, so the
@@ -126,6 +161,7 @@ pub(crate) async fn finish_deletion(info: IdentityInfo) {
     match delete_with_progress(info.addr, info.generation, &info.alias).await {
         Ok(()) => {
             // By address: a new identity may carry this one's alias.
+            crate::app::login::Identity::remove_in_place_by_addr(&info.addr);
             crate::local_state::forget_identity(&info.addr);
             crate::toast::push_toast_detached(
                 format!("Identity `{}` deleted", info.alias),
@@ -346,7 +382,9 @@ pub(crate) async fn load_and_report() {
         let merged = announce_then_merge(
             &keys,
             || send_action(NodeAction::IdentitiesLoaded { identities: loaded }),
-            refresh_unfinished_deletions(),
+            async {
+                refresh_unfinished_deletions().await;
+            },
             || crate::local_state::load(&owners),
         )
         .await;
@@ -565,6 +603,58 @@ pub(crate) async fn publish(identity: Identity, backed_up: bool) -> Result<(), D
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn info(alias: &str, seed: u8) -> IdentityInfo {
+        IdentityInfo {
+            addr: Addr([seed; 24]),
+            vk: vec![seed; 1952].into(),
+            ek: vec![seed; 1184].into(),
+            alias: alias.to_string(),
+            description: String::new(),
+            confirmed: true,
+            generation: 1,
+        }
+    }
+
+    /// A deletion that stopped after it began leaves the identity hidden
+    /// and refused by the delegate. The page must drop it too (and sign it
+    /// out if it was open), leaving only the "Finish deleting" entry; one
+    /// whose deletion never began stays.
+    #[test]
+    fn an_identity_whose_deletion_began_leaves_the_page() {
+        use crate::app::{User, UserId, login::Identity};
+        let gone = Identity::from_info(&info("dl-gone", 0x71), UserId(0));
+        let kept = Identity::from_info(&info("dl-kept", 0x72), UserId(1));
+        Identity::register_live_for_test(gone.clone());
+        Identity::register_live_for_test(kept.clone());
+        let mut user = User {
+            logged: true,
+            identified: true,
+            active_id: Some(UserId(0)),
+            identities: vec![gone.clone(), kept.clone()],
+        };
+
+        // Nothing listed: the deletion never began, so nothing changes.
+        assert!(!drop_if_deletion_started(&gone, &[], &mut user));
+        assert_eq!(user.identities.len(), 2);
+
+        let unfinished = [info("dl-gone", 0x71)];
+        assert!(drop_if_deletion_started(&gone, &unfinished, &mut user));
+        assert_eq!(
+            user.identities.iter().map(|i| i.addr).collect::<Vec<_>>(),
+            vec![kept.addr],
+            "only the identity being deleted is dropped"
+        );
+        assert!(
+            user.logged_id().is_none(),
+            "it was open, so it is signed out"
+        );
+        assert!(
+            Identity::get_alias("dl-gone").is_none(),
+            "not a live identity"
+        );
+        assert!(Identity::get_alias("dl-kept").is_some());
+    }
 
     /// "Finish deleting" clicked twice starts one deletion; the claim is
     /// released when that attempt ends, so a later retry can run.
