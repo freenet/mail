@@ -102,6 +102,24 @@ jobs:
       - name: Run workspace tests
         run: cargo make test
 
+      # `cargo make test` runs the mail delegate's fault harness at its
+      # defaults (6% faults). Bugs that need several refusals in a row, such
+      # as fault-harness seeds 765 and 934, only appear at higher rates, and
+      # were found outside CI. This sweep runs the unreadable-key harness at
+      # a 20% fault rate on every PR. Release, because the debug build takes
+      # ~15x longer per seed: a clean release build is ~45 s and 2000 seeds
+      # ~10 s on a dev machine.
+      - name: Mail delegate fault sweep (20% faults, unreadable keys)
+        working-directory: delegates/mail-delegate
+        env:
+          FAULT_SEEDS: "2000"
+          FAULT_OPS: "80"
+          FAULT_RATE: "200"
+          FAULT_BLIND_RATE: "20"
+        run: >-
+          cargo test --release --locked --lib --features v1-transition
+          tests::faults::invariants_hold_while_a_key_stays_unreadable -- --exact
+
       - name: Run inbox integration tests
         run: cargo make test-inbox
 
