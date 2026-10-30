@@ -25,6 +25,11 @@ publish = false
 # and orphans every user's inbox + AFT token ledger; do not loosen these
 # pins without a paired migration plan (issue #199 Phase B).
 
+# Its own workspace root, like every excluded crate: otherwise cargo run
+# here searches upward past the excluding root (into a parent checkout, for
+# a worktree nested in one) and refuses to build.
+[workspace]
+
 [dependencies]
 bincode = "=1.3.3"
 bs58 = "=0.5.1"
