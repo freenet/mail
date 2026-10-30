@@ -81,6 +81,20 @@ type Waiter = oneshot::Sender<Result<Reply, Failure>>;
 thread_local! {
     /// Calls waiting for their answer, by request id.
     static PENDING: RefCell<HashMap<RequestId, Waiter>> = RefCell::new(HashMap::new());
+    /// The waiting calls that may be holding a consent prompt open.
+    static CONSENTED: RefCell<std::collections::HashSet<RequestId>> =
+        RefCell::new(std::collections::HashSet::new());
+}
+
+/// Whether `op` may wait on the user's answer to a prompt.
+fn consented(op: &Op) -> bool {
+    matches!(
+        op,
+        Op::ExportRecoveryKey { .. }
+            | Op::ExportProfile { .. }
+            | Op::ExportForSuccessor { .. }
+            | Op::DeleteIdentity { .. }
+    )
 }
 
 /// A request with a fresh random id.
@@ -138,6 +152,7 @@ struct PendingSlot(RequestId);
 impl Drop for PendingSlot {
     fn drop(&mut self) {
         PENDING.with(|p| p.borrow_mut().remove(&self.0));
+        CONSENTED.with(|c| c.borrow_mut().remove(&self.0));
     }
 }
 
@@ -148,11 +163,15 @@ pub(crate) async fn call(op: Op) -> Result<Reply, CallError> {
         V1_AFT_PARAMS_CALLS.with(|c| c.set(c.get() + 1));
     }
     let timeout = timeout_ms(&op);
+    let holds_prompt = consented(&op);
     let request = new_request(op);
     let id = request.request_id;
     let bytes = to_cbor(&request).map_err(|e| CallError::Unknown(format!("encode: {e}")))?;
     let (tx, rx) = oneshot::channel();
     PENDING.with(|p| p.borrow_mut().insert(id, tx));
+    if holds_prompt {
+        CONSENTED.with(|c| c.borrow_mut().insert(id));
+    }
     let _slot = PendingSlot(id);
     send(bytes).await.map_err(CallError::Unknown)?;
     let answer = wait(rx, timeout).await;
@@ -165,31 +184,44 @@ pub(crate) async fn call(op: Op) -> Result<Reply, CallError> {
 
 /// Whether a node delegate error can belong to a mail-delegate call
 /// (`mail` is the mail delegate's key): one naming another delegate (the v1
-/// token generator, say) cannot, and must not end mail calls.
+/// token generator, say) cannot, and must not end mail calls. An error that
+/// names no delegate (an execution or secret-access error) is the request
+/// in flight's: while a call to another delegate is waiting
+/// (`other_in_flight`), it is attributed there.
 pub(crate) fn may_be_mail_delegate_error(
     error: &freenet_stdlib::client_api::DelegateError,
     mail: &freenet_stdlib::prelude::DelegateKey,
+    other_in_flight: bool,
 ) -> bool {
     use freenet_stdlib::client_api::DelegateError as E;
     match error {
         E::RegisterError(key) | E::Missing(key) | E::MissingSecret { key, .. } => key == mail,
         // Execution errors and secret-access errors carry no key.
-        _ => true,
+        _ => !other_in_flight,
     }
 }
 
-/// Why a waiting call was ended by [`fail_all_pending`].
+/// Why a waiting call was ended by [`fail_pending_calls`].
 const NODE_DELEGATE_ERROR: &str = "the node reported an error running the mail delegate";
 
-/// End every waiting call now, as [`CallError::Unknown`]: the node reported
+/// End the waiting calls now, as [`CallError::Unknown`]: the node reported
 /// a delegate error that names no request (it carries no request id), so
 /// which call it belongs to cannot be told, and the delegate may have done
 /// part of the work before it failed. Without this each call would wait out
-/// its whole timeout (up to the 10-minute consent window) for an answer that
-/// never comes. Returns how many calls were ended.
-pub(crate) fn fail_all_pending() -> usize {
+/// its whole timeout for an answer that never comes.
+///
+/// A call that may be holding a consent prompt open is left to its own
+/// timeout: ending it would send the user's later answer to no one.
+/// Returns how many calls were ended.
+pub(crate) fn fail_pending_calls() -> usize {
+    let held = CONSENTED.with(|c| c.borrow().clone());
     // Dropping a waiter's sender ends its call with NODE_DELEGATE_ERROR.
-    PENDING.with(|p| p.borrow_mut().drain().count())
+    PENDING.with(|p| {
+        let mut p = p.borrow_mut();
+        let before = p.len();
+        p.retain(|id, _| held.contains(id));
+        before - p.len()
+    })
 }
 
 /// `call`, expecting `Reply::Ack`: the new generation.
@@ -309,9 +341,17 @@ mod tests {
     fn a_node_delegate_error_ends_waiting_calls_as_unknown() {
         let (tx, rx) = oneshot::channel();
         PENDING.with(|p| p.borrow_mut().insert(RequestId([9; 16]), tx));
-        assert_eq!(fail_all_pending(), 1);
+        // A call holding a consent prompt open is left to its own timeout:
+        // the user's answer may still come, and must reach it.
+        let (held_tx, mut held_rx) = oneshot::channel();
+        PENDING.with(|p| p.borrow_mut().insert(RequestId([8; 16]), held_tx));
+        CONSENTED.with(|c| c.borrow_mut().insert(RequestId([8; 16])));
+        assert_eq!(fail_pending_calls(), 1);
         let ended = futures::executor::block_on(wait(rx, 1_000));
         assert_eq!(ended, Err(NODE_DELEGATE_ERROR));
+        assert!(matches!(held_rx.try_recv(), Ok(None)), "still waiting");
+        PENDING.with(|p| p.borrow_mut().clear());
+        CONSENTED.with(|c| c.borrow_mut().clear());
     }
 
     /// An error naming another delegate (the v1 token generator) never ends
@@ -324,14 +364,23 @@ mod tests {
         let other = DelegateKey::new([3; 32], CodeHash::new([4; 32]));
         assert!(!may_be_mail_delegate_error(
             &E::Missing(other.clone()),
-            &mail
+            &mail,
+            false
         ));
-        assert!(!may_be_mail_delegate_error(&E::RegisterError(other), &mail));
-        assert!(may_be_mail_delegate_error(&E::Missing(mail.clone()), &mail));
+        assert!(!may_be_mail_delegate_error(
+            &E::RegisterError(other),
+            &mail,
+            false
+        ));
         assert!(may_be_mail_delegate_error(
-            &E::ExecutionError("trap".into()),
-            &mail
+            &E::Missing(mail.clone()),
+            &mail,
+            true
         ));
+        let trap = E::ExecutionError("trap".into());
+        assert!(may_be_mail_delegate_error(&trap, &mail, false));
+        // A trap with a token-generator call in flight is that call's.
+        assert!(!may_be_mail_delegate_error(&trap, &mail, true));
     }
 
     #[test]

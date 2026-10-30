@@ -2367,8 +2367,9 @@ pub(crate) async fn node_comms(
                                 if crate::mail_delegate::may_be_mail_delegate_error(
                                     error,
                                     crate::mail_delegate::node::key(),
+                                    crate::aft::token_request_in_flight(),
                                 ) {
-                                    crate::mail_delegate::fail_all_pending();
+                                    crate::mail_delegate::fail_pending_calls();
                                 }
                             }
                             RequestError::Disconnect => {

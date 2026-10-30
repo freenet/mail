@@ -76,6 +76,13 @@ thread_local! {
     static PENDING_INBOXES_UPDATES: RefCell<Vec<(InboxContract, AssignmentHash)>> = const { RefCell::new(Vec::new()) };
 }
 
+/// Whether a token-generator request is waiting for its answer: a node
+/// delegate error naming no delegate is then that request's, not the mail
+/// delegate's.
+pub(crate) fn token_request_in_flight() -> bool {
+    PENDING_INBOXES_UPDATES.with(|q| !q.borrow().is_empty())
+}
+
 /// Default timeout for pending AFT confirmations. If the host's
 /// `UpdateResponse` summary doesn't acknowledge the assignment within
 /// this window, `expire_stale` reaps the entry and surfaces an error to
