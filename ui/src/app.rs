@@ -44,6 +44,11 @@ thread_local! {
         RefCell::new(HashMap::new());
 }
 
+thread_local! {
+    /// The branch `app()` rendered last, so a change can be logged.
+    static LAST_BODY: std::cell::Cell<&'static str> = const { std::cell::Cell::new("none") };
+}
+
 #[derive(Clone, Debug)]
 pub(crate) enum NodeAction {
     LoadMessages(Box<Identity>),
@@ -329,6 +334,27 @@ pub(crate) fn app() -> Element {
         };
     }
 
+    {
+        let u = user.read();
+        let branch = if !u.identified {
+            "login"
+        } else if u.logged_id().is_some() {
+            "inbox"
+        } else {
+            "identities"
+        };
+        LAST_BODY.with(|last| {
+            if last.get() != branch {
+                crate::log::info(format!(
+                    "app body: {} -> {branch} (active_id={:?}, identities={})",
+                    last.get(),
+                    u.active_id.map(|id| id.0),
+                    u.identities.len()
+                ));
+                last.set(branch);
+            }
+        });
+    }
     // Render login page if user not identified, otherwise render the inbox or identifiers list based on user's logged in state
     let body = if !user.read().identified {
         rsx! {
@@ -3158,6 +3184,8 @@ fn matches_search(m: &Message, q: &str) -> bool {
 #[allow(non_snake_case)]
 fn UserInbox() -> Element {
     use_context_provider(|| Signal::new(menu::MenuSelection::default()));
+    use_hook(|| crate::log::info("inbox view: mounted"));
+    use_drop(|| crate::log::info("inbox view: unmounted"));
     // ImportBackup / ImportContact / ShareContact / SharePending are all
     // provided by app() at the root (lifted in #158 fix) so that the modals
     // are reachable from both the login pane and the inbox view.
@@ -3422,9 +3450,11 @@ fn Sidebar() -> Element {
                             let testid = format!("fm-folder-{}", f.label().to_lowercase());
                             rsx! {
                                 button {
+                                    key: "{testid}",
                                     class: "{cls}",
                                     "data-testid": "{testid}",
                                     onclick: move |_| {
+                                        crate::log::info(format!("folder: clicked {}", f.label()));
                                         menu_selection.write().set_folder(f);
                                         drawer_open.set(false);
                                     },
