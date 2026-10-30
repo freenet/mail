@@ -393,3 +393,99 @@ fn a_create_that_never_finished_frees_its_slot_on_the_next_listing() {
     call(&mut env, PROD, Op::ListDeletingIdentities).unwrap();
     assert_eq!(identity_index_len(&mut env), 1, "the slot was freed");
 }
+
+/// Round 10: an approved deletion that takes several steps records the
+/// approval durably at its first step. If the record then stops reading,
+/// neither a restore nor a migration import may write it back with
+/// `deleting: false`, undoing a deletion the user approved.
+#[test]
+fn a_restore_cannot_undo_an_approved_deletion_whose_record_went_unreadable() {
+    let mut env = MemEnv::default();
+    let me = import_fixture(&mut env, PROD);
+    // More items than one deletion step removes, across two kinds (ids are
+    // one repeated byte, so one kind holds at most 256).
+    for n in 0..200u8 {
+        ack(put(&mut env, draft(me, n), b"d", None));
+    }
+    for n in 0..100u8 {
+        let sent = ItemRef {
+            kind: ItemKind::Sent,
+            owner: Some(me),
+            id: vec![n; 16],
+        };
+        ack(put(&mut env, sent, b"s", None));
+    }
+    const { assert!(300 > crate::handlers::DELETE_STEP) };
+    let generation = match call(&mut env, PROD, Op::ListIdentities) {
+        Ok(Reply::Identities(v)) => v[0].generation,
+        other => panic!("{other:?}"),
+    };
+    let out = send(
+        &mut env,
+        app(PROD),
+        Op::DeleteIdentity {
+            addr: me,
+            expected_gen: generation,
+        },
+    );
+    let (id, _, _) = prompt(&out);
+    let out = answer(&mut env, PROD, id, crate::consent::DELETE);
+    assert!(
+        matches!(response(&out).result, Ok(Reply::Continue { .. })),
+        "{:?}",
+        response(&out).result
+    );
+    blind(&mut env, &store::identity_rel(&me));
+    for kind in [ImportKind::UserRestore, ImportKind::Migration] {
+        let (dsa, kem) = fixture_seeds();
+        let restored = import(
+            &mut env,
+            PROD,
+            ImportSource::Seeds { dsa, kem },
+            kind,
+            "back",
+        );
+        assert!(restored.is_err(), "{kind:?} undid an approved deletion");
+    }
+    // The approved deletion still finishes without asking again.
+    env.faults = None;
+    let s = Space::new(&mut env, Origin([PROD; 32]));
+    assert!(crate::handlers::deletion_in_progress(&s, &me).unwrap());
+}
+
+/// Round 10: a create's leftover marker (`s`, a create whose marker could
+/// not be removed) beside a record that cannot be read must not stop the
+/// user deleting that identity: only a deletion marker means "approved".
+#[test]
+fn a_spent_create_marker_does_not_stop_deleting_an_unreadable_identity() {
+    let mut env = MemEnv::default();
+    let me = import_fixture(&mut env, PROD);
+    {
+        let mut s = Space::new(&mut env, Origin([PROD; 32]));
+        s.put(&store::deleted_rel(&me), store::MARKER_SPENT)
+            .unwrap();
+    }
+    blind(&mut env, &store::identity_rel(&me));
+    let out = send(
+        &mut env,
+        app(PROD),
+        Op::DeleteIdentity {
+            addr: me,
+            expected_gen: 0,
+        },
+    );
+    let (id, _, _) = prompt(&out);
+    let out = answer(&mut env, PROD, id, crate::consent::DELETE);
+    assert_eq!(response(&out).result, Ok(Reply::Deleted));
+    env.faults = None;
+    assert!(listed(&mut env).is_empty());
+    let s = Space::new(&mut env, Origin([PROD; 32]));
+    assert!(
+        s.get(&store::deleted_rel(&me)).is_none(),
+        "marker left behind"
+    );
+    assert!(
+        s.get(&store::identity_rel(&me)).is_none(),
+        "record left behind"
+    );
+}

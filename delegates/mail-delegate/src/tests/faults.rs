@@ -34,6 +34,9 @@ const PINNED_BLIND_RUNS: &[(u64, usize, u32, u32)] = &[
     (1389, 80, 200, 100),
     // A deletion marker that could not be read or removed, reported gone.
     (1072, 80, 60, 20),
+    // A delete of an unreadable contact answered Deleted while its removal
+    // had been refused twice; the contact came back once it read again.
+    (1284, 100, 60, 60),
     // An index created but left marked "may be absent", rebuilt from
     // nothing once it failed to read.
     (339, 80, 200, 100),
@@ -82,6 +85,9 @@ struct Model {
     /// Index entries left naming no record after healing: a leaked slot.
     /// Always an invariant failure; counted so the test reports it.
     leaks: u64,
+    /// The first reply that brought back an identity whose approved
+    /// deletion had started.
+    undone: Option<String>,
     log: Vec<String>,
 }
 
@@ -89,6 +95,9 @@ struct Model {
 struct IdModel {
     generation: u64,
     deleting: bool,
+    /// A step of the approved deletion answered `Continue`: it has
+    /// certainly started, so nothing may bring the identity back.
+    started: bool,
     deleted: bool,
 }
 
@@ -249,6 +258,53 @@ impl Run {
         let addr = freenet_mail_protocol::address::address_of(
             &crate::crypto::Keys::from_seeds(&dsa, &kem).vk_bytes(),
         );
+        // A started deletion whose finishing reply was lost: if neither the
+        // record nor the deletion marker is stored any more, it finished,
+        // and an import now is a fresh restore, which is allowed.
+        if self
+            .m
+            .ids
+            .get(&addr)
+            .is_some_and(|i| i.started && !i.deleted)
+        {
+            let stored = rel_keys(&self.env);
+            if !stored.contains_key(&store::identity_rel(&addr))
+                && !stored.contains_key(&store::deleted_rel(&addr))
+            {
+                self.m.ids.get_mut(&addr).unwrap().deleted = true;
+                for ((_, owner, _), possible) in self.m.items.iter_mut() {
+                    if *owner == Some(addr) {
+                        *possible = BTreeSet::from([None]);
+                    }
+                }
+            }
+        }
+        if self
+            .m
+            .ids
+            .get(&addr)
+            .is_some_and(|i| i.started && !i.deleted)
+        {
+            // A restore (or a migration import) of an identity whose
+            // approved deletion has started must be refused, whichever key
+            // is unreadable: it would undo the deletion.
+            self.m
+                .log
+                .push(format!("import mid-deletion {}", store::hex(&addr.0[..4])));
+            let alias = format!("mid{}", self.rng.below(1000));
+            if let Seen::Reply(Ok(reply)) = self.send(Op::ImportIdentity {
+                source: ImportSource::Seeds { dsa, kem },
+                kind: ImportKind::Migration,
+                alias,
+                description: String::new(),
+            }) {
+                self.m.undone.get_or_insert(format!(
+                    "an import mid-deletion of {} answered {reply:?}",
+                    store::hex(&addr.0[..4])
+                ));
+            }
+            return;
+        }
         if self
             .m
             .ids
@@ -358,10 +414,18 @@ impl Run {
                     }
                     return;
                 }
-                Seen::Reply(Ok(Reply::Continue { .. })) | Seen::Lost => {}
+                Seen::Reply(Ok(Reply::Continue { .. })) => {
+                    self.m.ids.get_mut(&addr).unwrap().started = true;
+                    // Sometimes leave it there: the next page may try to
+                    // bring it back before it finishes.
+                    if self.rng.chance(3) {
+                        break;
+                    }
+                }
+                Seen::Lost => {}
                 Seen::Reply(Err(f))
                     if f.code == FailureCode::Internal || f.code == FailureCode::Busy => {}
-                _ => return,
+                _ => break,
             }
             if !self.m.ids[&addr].deleting {
                 return;
@@ -370,6 +434,13 @@ impl Run {
             if let Seen::Prompt(id) = seen {
                 seen = self.answer(id, crate::consent::DELETE);
             }
+        }
+        // Left unfinished. A deletion listed as in progress has certainly
+        // started (its record is marked), so nothing may bring it back.
+        if let Seen::Reply(Ok(Reply::Identities(deleting))) = self.send(Op::ListDeletingIdentities)
+            && deleting.iter().any(|i| i.addr == addr)
+        {
+            self.m.ids.get_mut(&addr).unwrap().started = true;
         }
     }
 
@@ -633,8 +704,16 @@ fn check(run: &mut Run) -> Result<(), String> {
         Seen::Reply(Ok(Reply::Identities(l))) => l.into_iter().map(|i| i.addr).collect(),
         other => return Err(format!("list: {}", describe(&other))),
     };
+    if let Some(undone) = &run.m.undone {
+        return Err(undone.clone());
+    }
     for (addr, i) in &run.m.ids {
         let hex = store::hex(&addr.0);
+        // An approved deletion that certainly started is finished by the
+        // next page; it never comes back as a live identity.
+        if i.started && listed.contains(addr) {
+            return Err(format!("the approved deletion of {} was undone", &hex[..8]));
+        }
         if i.deleted {
             if let Some(k) = keys.keys().find(|k| k.contains(&hex)) {
                 return Err(format!("a deleted identity left {k}"));

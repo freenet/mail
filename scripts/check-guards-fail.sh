@@ -297,6 +297,16 @@ dt "an identity whose record cannot be read can be deleted" "$D/handlers.rs" \
     '            s.put_for_delete(&marker, store::MARKER_DELETING)?;' \
     '            return Err(fail(FailureCode::Busy, "unreadable"));' \
     an_identity_whose_record_cannot_be_read_can_be_deleted_after_asking
+dt "an approved deletion is recorded before the record is touched" "$D/handlers.rs" \
+    "        // \`deleting: false\`, undoing a deletion the user approved.
+        s.put_for_delete(&marker, store::MARKER_DELETING)?;" \
+    "        // \`deleting: false\`, undoing a deletion the user approved." \
+    a_restore_cannot_undo_an_approved_deletion_whose_record_went_unreadable
+dt "a create's marker does not stop deleting an unreadable identity" "$D/consent.rs" \
+    '                && s.get(&crate::store::deleted_rel(addr)).as_deref()
+                    != Some(crate::store::MARKER_DELETING)' \
+    '                && s.get(&crate::store::deleted_rel(addr)).is_none()' \
+    a_spent_create_marker_does_not_stop_deleting_an_unreadable_identity
 dt "an unreadable item is reported and a create replaces it" "$D/handlers.rs" \
     "fn listed_but_unreadable(s: &Space<'_>, item: &ItemRef) -> Result<bool, Failure> {" \
     "fn listed_but_unreadable(s: &Space<'_>, item: &ItemRef) -> Result<bool, Failure> {

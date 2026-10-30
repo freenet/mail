@@ -245,7 +245,8 @@ fn precheck(s: &Space<'_>, op: &Op) -> Result<(), Failure> {
                 && s.index(crate::store::IDENTITY_INDEX)?
                     .1
                     .contains(&addr.0[..])
-                && s.get(&crate::store::deleted_rel(addr)).is_none()
+                && s.get(&crate::store::deleted_rel(addr)).as_deref()
+                    != Some(crate::store::MARKER_DELETING)
             {
                 return Ok(());
             }

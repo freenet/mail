@@ -343,9 +343,14 @@ impl<'a> Space<'a> {
         let key = self.full_key(rel);
         let Some(old) = self.fetch(&key) else {
             // The host answers "not found" both for an absent key and for a
-            // removal it failed, so a refusal is retried once: a key that
-            // keeps failing to read may still be there.
-            if !self.env.remove(&key) && !self.env.remove(&key) && self.fetch(&key).is_some() {
+            // removal it failed, so a refusal is retried: a key that keeps
+            // failing to read may still be there. Three attempts, as for a
+            // key known present (`del_written`). What remains is a limit of
+            // the host API: a key that cannot be read AND whose removal is
+            // refused every time is indistinguishable from an absent one.
+            if !(self.env.remove(&key) || self.env.remove(&key) || self.env.remove(&key))
+                && self.fetch(&key).is_some()
+            {
                 return Err(fail(FailureCode::Internal, "the host refused the delete"));
             }
             return Ok(());

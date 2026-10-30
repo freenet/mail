@@ -744,10 +744,19 @@ pub const DELETE_STEP: usize = 256;
 /// removes the record and, last, its index entry. A retry after a failure
 /// resumes where it stopped.
 pub fn delete_identity_now(s: &mut Space<'_>, addr: &Addr, expected_gen: u64) -> OpResult {
+    let marker = store::deleted_rel(addr);
     let Some((generation, mut record)) = load_identity(s, addr)? else {
-        let marker = store::deleted_rel(addr);
-        if s.get(&marker).is_none() {
+        // Only a deletion marker records an approved deletion; a create's
+        // marker (`c`, `f`, `s`) licenses nothing and must not stop one.
+        let held = s.get(&marker);
+        if held.as_deref() != Some(store::MARKER_DELETING) {
             if !s.index(IDENTITY_INDEX)?.1.contains(&addr.0[..]) {
+                if held.is_some() {
+                    // A create's leftover marker for an identity that does
+                    // not exist: clear it; there is nothing to delete.
+                    let _ = s.del(&marker);
+                    return Err(fail(FailureCode::NotFound, "no such identity"));
+                }
                 // No record and no entry. A deletion marker that cannot be
                 // read may still be there (the last step of an approved
                 // deletion whose cleanup failed): removing it, which needs
@@ -777,9 +786,18 @@ pub fn delete_identity_now(s: &mut Space<'_>, addr: &Addr, expected_gen: u64) ->
                 "stale generation",
             ));
         }
+        // The approval is recorded durably BEFORE the record is touched: if
+        // the record later reads as missing mid-deletion, this marker is what
+        // stops a restore or a migration import from writing it back with
+        // `deleting: false`, undoing a deletion the user approved.
+        s.put_for_delete(&marker, store::MARKER_DELETING)?;
         record.deleting = true;
         let body = to_cbor(&record).map_err(|e| fail(FailureCode::Internal, e))?;
         s.write_if(&identity_rel(addr), generation, &body)?;
+    } else if s.get(&marker).as_deref() != Some(store::MARKER_DELETING) {
+        // A deletion approved before its marker was written first, or whose
+        // marker no longer reads: record the approval again.
+        s.put_for_delete(&marker, store::MARKER_DELETING)?;
     }
     // The record is marked `deleting`: from here a failure is partial.
     delete_step(s, addr).map_err(partial)
@@ -791,8 +809,8 @@ pub fn deletion_in_progress(s: &Space<'_>, addr: &Addr) -> Result<bool, Failure>
     Ok(match load_identity(s, addr)? {
         Some((_, r)) => r.deleting,
         // No readable record and a deletion marker: the user approved this
-        // deletion (the marker is written only after the record was marked
-        // `deleting`). A create's marker licenses nothing here: beside a
+        // deletion (the marker is written only once the user approved, as
+        // its first step). A create's marker licenses nothing here: beside a
         // record that keeps failing to read it would skip the prompt.
         None => s.get(&store::deleted_rel(addr)).as_deref() == Some(store::MARKER_DELETING),
     })
