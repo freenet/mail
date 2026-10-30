@@ -139,7 +139,12 @@ function watchContext(ctx: BrowserContext, ev: Evidence) {
       ),
     );
     p.on("crash", () => ev.lines.push(`[${label}:crash]`));
-    p.on("dialog", (d) => ev.lines.push(`[${label}:dialog] ${d.type()} ${d.message()}`));
+    // A dialog listener turns off Playwright's own handling, so do what it
+    // does: let a leave-page prompt through and dismiss anything else.
+    p.on("dialog", (d) => {
+      ev.lines.push(`[${label}:dialog] ${d.type()} ${d.message()}`);
+      void (d.type() === "beforeunload" ? d.accept() : d.dismiss()).catch(() => {});
+    });
     p.on("close", () => ev.lines.push(`[${label}:close]`));
   };
   ctx.pages().forEach(watchPage);
