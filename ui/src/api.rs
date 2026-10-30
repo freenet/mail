@@ -1551,18 +1551,41 @@ pub(crate) async fn node_comms(
                         );
                     }
                     let mut client = WEB_API_SENDER.get().cloned();
+                    let (mut conflicting, mut rejected) = (false, 0u32);
                     for contact in contacts {
                         // #191: contacts arrive here after a reload, so prime
                         // their inboxes as the rehydrate path does.
                         if let Some(client) = client.as_mut() {
                             prime_contact_inbox(client, &contact).await;
                         }
-                        if let Err(e) = crate::app::address_book::insert_contact(contact) {
-                            crate::log::error(
-                                format!("address book rejected stored contact: {e}"),
-                                None,
-                            );
+                        let vk = contact.ml_dsa_vk_bytes.clone();
+                        match crate::app::address_book::load_contact(contact) {
+                            Ok(()) if crate::app::address_book::key_conflict(&vk) => {
+                                conflicting = true;
+                            }
+                            Ok(()) => {}
+                            Err(e) => {
+                                crate::log::error(
+                                    format!("address book rejected stored contact: {e}"),
+                                    None,
+                                );
+                                rejected += 1;
+                            }
                         }
+                    }
+                    if conflicting {
+                        crate::toast::push_toast_detached(
+                            "Two contacts have the same signing key with different encryption keys, so one may be forged. Mail to them is held until you verify with the contact and delete the wrong entry in Contacts.".to_string(),
+                            crate::toast::ToastLevel::Warning,
+                        );
+                    }
+                    if rejected > 0 {
+                        crate::toast::push_toast_detached(
+                            format!(
+                                "{rejected} stored contact(s) couldn't be shown (they carry the key of one of your identities)."
+                            ),
+                            crate::toast::ToastLevel::Warning,
+                        );
                     }
                     login_controller.write().updated = true;
                     let prev = *ab_gen.0.read();

@@ -444,19 +444,30 @@ pub fn resolve_for_send(
                 Some(now) if !same_keys(&now, &recorded) => Err(format!(
                     "\"{typed}\" now names a different key than the recipient this message was addressed to. Retype the recipient to choose again."
                 )),
-                _ => Ok(recorded),
+                _ => refuse_conflicting(recorded),
             }
         }
         None if ambiguous => Err(format!(
             "\"{typed}\" is ambiguous: a contact that used that name is now shown as {}. Retype or pick the recipient you mean.",
             relabelled_from(typed).join(", ")
         )),
-        None => named.ok_or_else(|| {
-            format!(
-                "Recipient `{typed}` is not in your address book. Import their contact before sending."
-            )
-        }),
+        None => named
+            .ok_or_else(|| {
+                format!(
+                    "Recipient `{typed}` is not in your address book. Import their contact before sending."
+                )
+            })
+            .and_then(refuse_conflicting),
     }
+}
+
+/// Mail never goes to a signing key two contacts carry with different
+/// encryption keys: one card may be forged, and nothing says which.
+fn refuse_conflicting(recipient: Recipient) -> Result<Recipient, String> {
+    if key_conflict(&recipient.ml_dsa_vk_bytes) {
+        return Err("Two contacts have this recipient's signing key with different encryption keys, so one may be forged. Verify with them, then delete the wrong one in Contacts.".to_string());
+    }
+    Ok(recipient)
 }
 
 /// Bump the address-book generation so the bs58 lookup cache rebuilds on next
@@ -513,6 +524,34 @@ pub fn register_identity(identity: &Identity) {
 /// Re-inserting a contact with the same alias and same fingerprint succeeds
 /// (allows overwrite of metadata like description / verified flag).
 pub fn insert_contact(contact: Contact) -> Result<(), String> {
+    insert(contact, false)
+}
+
+/// Add a contact the mail delegate already holds (the startup load). Unlike
+/// [`insert_contact`] it keeps a contact whose signing key another one
+/// shares: stored data must not vanish on load (which of the two survived
+/// would depend on load order). Two entries with one signing key and
+/// different encryption keys are a conflict that [`resolve_for_send`]
+/// refuses to send to until the user deletes one ([`key_conflict`]).
+pub fn load_contact(contact: Contact) -> Result<(), String> {
+    insert(contact, true)
+}
+
+/// Whether two contacts carry `vk` with different encryption keys: one of
+/// the cards may be forged, so neither is sent to.
+pub fn key_conflict(vk: &[u8]) -> bool {
+    ADDRESS_BOOK.with(|ab| {
+        let ab = ab.borrow();
+        let mut eks = ab.values().filter_map(|e| match e {
+            Entry::Contact(c) if c.ml_dsa_vk_bytes == vk => Some(&c.ml_kem_ek_bytes),
+            _ => None,
+        });
+        let first = eks.next();
+        eks.any(|ek| Some(ek) != first)
+    })
+}
+
+fn insert(contact: Contact, keep_shared_signing_key: bool) -> Result<(), String> {
     ADDRESS_BOOK
         .with(|ab| {
             let mut ab = ab.borrow_mut();
@@ -535,7 +574,8 @@ pub fn insert_contact(contact: Contact) -> Result<(), String> {
                     // with a substituted encryption key could pass for the
                     // real contact.
                     Entry::Contact(c)
-                        if c.ml_dsa_vk_bytes == contact.ml_dsa_vk_bytes
+                        if !keep_shared_signing_key
+                            && c.ml_dsa_vk_bytes == contact.ml_dsa_vk_bytes
                             && *alias != *contact.local_alias =>
                     {
                         return Err(format!(
@@ -1193,11 +1233,13 @@ mod tests {
         insert_contact(make_contact("dupvk-bob", 41, 2)).unwrap();
     }
 
-    /// Two entries with one signing key (data from before keys were kept
-    /// unique): a draft recorded for that key goes only to the entry the To
-    /// field names, compared on both key halves, never to a random one.
+    /// Two entries with one signing key and different encryption keys (data
+    /// from before keys were kept unique, or a forged card): a draft recorded
+    /// for that key goes to neither, whichever name the To field holds,
+    /// since nothing says which card is real. Same keys under two names
+    /// are not a conflict.
     #[test]
-    fn a_recorded_key_shared_by_two_entries_resolves_to_the_named_one() {
+    fn a_recorded_key_shared_by_two_entries_is_held_until_resolved() {
         reset_address_book();
         let real = make_contact("shared-bob", 42, 2);
         let forged = make_contact("shared-bob2", 42, 9);
@@ -1208,14 +1250,25 @@ mod tests {
         });
         bump_address_book_gen();
         // Both names record the same address (it derives from the signing
-        // key alone); each must still go to its own entry's keys.
+        // key alone); neither may be sent to while the cards disagree.
         let chosen = recipient_address(&lookup("shared-bob").unwrap());
-        let r = resolve_for_send("shared-bob", Some(&chosen), false).unwrap();
-        assert_eq!(r.ml_kem_ek_bytes, real.ml_kem_ek_bytes);
-        let r = resolve_for_send("shared-bob2", Some(&chosen), false).unwrap();
-        assert_eq!(r.ml_kem_ek_bytes, vec![9; 1184]);
+        for typed in ["shared-bob", "shared-bob2"] {
+            let err = resolve_for_send(typed, Some(&chosen), false).unwrap_err();
+            assert!(err.contains("may be forged"), "{typed}: {err}");
+        }
         // Naming neither settles nothing.
         assert!(resolve_for_send("someone-else", Some(&chosen), false).is_err());
+        // The same keys under a second name are no conflict.
+        ADDRESS_BOOK.with(|ab| {
+            ab.borrow_mut().remove("shared-bob2");
+            ab.borrow_mut().insert(
+                "shared-bob-too".into(),
+                Entry::Contact(make_contact("shared-bob-too", 42, 2)),
+            );
+        });
+        bump_address_book_gen();
+        let r = resolve_for_send("shared-bob", Some(&chosen), false).unwrap();
+        assert_eq!(r.ml_kem_ek_bytes, real.ml_kem_ek_bytes);
     }
 
     fn make_contact_suggested(local: &str, suggested: Option<&str>, vk: u8, ek: u8) -> Contact {
@@ -1620,6 +1673,42 @@ mod tests {
         let err = insert_contact(make_contact("alice", 4, 9))
             .expect_err("different EK should be rejected");
         assert!(err.contains("different contact"), "got: {err}");
+    }
+
+    /// Contacts the delegate holds that share a signing key with different
+    /// encryption keys (data from before each key was kept unique, or a
+    /// forged card) are both kept on load, whatever their order, and mail
+    /// to that key is refused until one is deleted.
+    #[test]
+    fn stored_contacts_sharing_a_signing_key_are_kept_and_held() {
+        for order in [["bob", "bob2"], ["bob2", "bob"]] {
+            reset_address_book();
+            for alias in order {
+                let ek = if alias == "bob" { 5 } else { 9 };
+                load_contact(make_contact(alias, 4, ek)).unwrap();
+            }
+            assert!(lookup("bob").is_some() && lookup("bob2").is_some());
+            let real = lookup("bob").unwrap();
+            assert!(key_conflict(&real.ml_dsa_vk_bytes));
+            // Neither by name, nor by an address recorded earlier.
+            let chosen = recipient_address(&real);
+            for (typed, chosen) in [
+                ("bob", None),
+                ("bob2", None),
+                ("bob", Some(chosen.as_str())),
+            ] {
+                let err = resolve_for_send(typed, chosen, false).unwrap_err();
+                assert!(err.contains("may be forged"), "{typed}: {err}");
+            }
+            // Resolved by deleting the wrong one.
+            remove_contact("bob2");
+            assert!(!key_conflict(&real.ml_dsa_vk_bytes));
+            assert!(resolve_for_send("bob", None, false).is_ok());
+        }
+        // A new import still refuses a second entry for one signing key.
+        reset_address_book();
+        insert_contact(make_contact("bob", 4, 5)).unwrap();
+        assert!(insert_contact(make_contact("bob2", 4, 9)).is_err());
     }
 
     #[test]
