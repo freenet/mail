@@ -199,6 +199,55 @@ pub(crate) async fn refresh_unfinished_deletions() -> Option<Vec<IdentityInfo>> 
 /// Retries of the unfinished-deletions listing before it counts as unknown.
 const UNFINISHED_LIST_RETRIES: u32 = 2;
 
+/// Retries of a startup load (identities, local mail state) before it is
+/// reported: the first call to a cold node often waits out its timeout.
+const STARTUP_LOAD_RETRIES: u32 = 3;
+
+/// Run `op` until it succeeds or `retries` retries have also failed,
+/// pausing longer before each retry. Every failure is logged as `what`;
+/// the last one is returned for the caller to report.
+pub(crate) async fn with_retries<T, F, Fut>(
+    what: &str,
+    retries: u32,
+    mut op: F,
+) -> Result<T, crate::mail_delegate::CallError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, crate::mail_delegate::CallError>>,
+{
+    let mut attempt = 0u32;
+    loop {
+        match op().await {
+            Ok(value) => return Ok(value),
+            Err(e) if attempt < retries => {
+                crate::log::error(format!("{what} failed, retrying: {e}"), None);
+                attempt += 1;
+                ops::pause_ms(500 << attempt).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// At startup, say so when the unfinished deletions could not be listed:
+/// "Finish deleting" would otherwise just be missing, with no hint why.
+fn report_unknown_unfinished_deletions(listed: Option<Vec<IdentityInfo>>) {
+    if listed.is_none() {
+        crate::toast::push_toast_detached(
+            UNFINISHED_UNKNOWN_TEXT.to_string(),
+            crate::toast::ToastLevel::Warning,
+        );
+    }
+}
+
+/// Shown when the startup check for interrupted deletions got no answer.
+const UNFINISHED_UNKNOWN_TEXT: &str = "Couldn't check whether an identity deletion was left unfinished. Reload the page to check again.";
+
+/// The text shown when a startup load still fails after its retries.
+fn startup_load_failure_text(what: &str, e: &crate::mail_delegate::CallError) -> String {
+    format!("Couldn't load {what}: {e}. Reload the page to try again.")
+}
+
 /// After a failed deletion: take the identity out of the page if its
 /// deletion began ([`drop_if_deletion_started`]); if that cannot be known,
 /// say so rather than guess. Returns whether it was taken out.
@@ -506,12 +555,18 @@ pub(crate) fn plan_migration(
 /// Read the identities from the mail delegate and hand them to the node
 /// loop ([`NodeAction::IdentitiesLoaded`]).
 pub(crate) async fn load_and_report() {
-    let infos = match ops::list_identities().await {
+    let infos = match with_retries(
+        "loading identities",
+        STARTUP_LOAD_RETRIES,
+        ops::list_identities,
+    )
+    .await
+    {
         Ok(infos) => infos,
         Err(e) => {
             crate::log::error(format!("loading identities failed: {e}"), None);
             crate::toast::push_toast_detached(
-                format!("Couldn't load your identities: {e}"),
+                startup_load_failure_text("your identities", &e),
                 crate::toast::ToastLevel::Error,
             );
             return;
@@ -539,15 +594,19 @@ pub(crate) async fn load_and_report() {
             &keys,
             || send_action(NodeAction::IdentitiesLoaded { identities: loaded }),
             async {
-                refresh_unfinished_deletions().await;
+                report_unknown_unfinished_deletions(refresh_unfinished_deletions().await);
             },
-            || crate::local_state::load(&owners),
+            || {
+                with_retries("loading local mail state", STARTUP_LOAD_RETRIES, || {
+                    crate::local_state::load(&owners)
+                })
+            },
         )
         .await;
         if let Err(e) = merged {
             crate::log::error(format!("loading local mail state failed: {e}"), None);
             crate::toast::push_toast_detached(
-                format!("Couldn't load your drafts, sent mail and settings: {e}"),
+                startup_load_failure_text("your drafts, sent mail and settings", &e),
                 crate::toast::ToastLevel::Error,
             );
         }
@@ -555,7 +614,7 @@ pub(crate) async fn load_and_report() {
     #[cfg(not(feature = "use-node"))]
     {
         send_action(NodeAction::IdentitiesLoaded { identities: loaded });
-        refresh_unfinished_deletions().await;
+        report_unknown_unfinished_deletions(refresh_unfinished_deletions().await);
     }
 }
 
@@ -711,6 +770,46 @@ pub(crate) async fn initial_inbox_state(
     Ok(inbox.serialize()?)
 }
 
+/// [`publish`], and if it fails, keep the identity on the page anyway: the
+/// delegate already holds it, so it is announced as loaded, and the load's
+/// GETs of its contracts find nothing and re-publish them (the #288
+/// self-heal). The user is told, with a reload hint, instead of the row
+/// silently not appearing until the next load.
+pub(crate) async fn publish_or_recover(identity: Identity, backed_up: bool) {
+    let alias = identity.alias.clone();
+    let addr = identity.addr;
+    let Err(e) = publish(identity, backed_up).await else {
+        return;
+    };
+    crate::log::error(format!("publishing identity `{alias}` failed: {e}"), None);
+    crate::toast::push_toast_detached(
+        publish_failure_text(&alias, &e.to_string()),
+        crate::toast::ToastLevel::Error,
+    );
+    match with_retries(
+        "re-reading identities",
+        STARTUP_LOAD_RETRIES,
+        ops::list_identities,
+    )
+    .await
+    {
+        Ok(listed) => {
+            if let Some(info) = listed.into_iter().find(|i| i.addr == addr) {
+                let loaded = vec![prepare(info).await];
+                send_action(NodeAction::IdentitiesLoaded { identities: loaded });
+            }
+        }
+        Err(e) => crate::log::error(format!("re-reading identities failed: {e}"), None),
+    }
+}
+
+/// The text shown when publishing a new or restored identity failed.
+fn publish_failure_text(alias: &str, error: &str) -> String {
+    format!(
+        "Couldn't finish setting up `{alias}`: {error}. It is saved, and its setup is retried automatically; if it doesn't appear, reload the page."
+    )
+}
+
 /// Publish a new or restored identity: its inbox, its AFT record and its
 /// token-generator delegate, then the identity itself. Runs in a task; the
 /// node work is handed to the node loop.
@@ -770,6 +869,49 @@ mod tests {
             confirmed: true,
             generation: 1,
         }
+    }
+
+    /// A failed publish says the identity is saved and its setup retried,
+    /// with a reload hint, not only that publishing failed.
+    #[test]
+    fn a_failed_publish_says_the_identity_is_kept() {
+        let text = publish_failure_text("pf-1", "no answer");
+        assert!(text.contains("is saved"), "{text}");
+        assert!(text.contains("reload the page"), "{text}");
+    }
+
+    /// A startup load that times out (a cold node often does on its first
+    /// call) is tried again, and only the last failure is reported, with a
+    /// reload hint.
+    #[test]
+    fn a_startup_load_is_retried_then_reported_with_a_reload_hint() {
+        use crate::mail_delegate::CallError;
+        use std::cell::Cell;
+        let calls = Cell::new(0u32);
+        let flaky = || {
+            calls.set(calls.get() + 1);
+            let n = calls.get();
+            async move {
+                if n < 3 {
+                    Err(CallError::Unknown("timed out".into()))
+                } else {
+                    Ok(n)
+                }
+            }
+        };
+        let got = futures::executor::block_on(with_retries("test load", 3, flaky));
+        assert_eq!(got.unwrap(), 3);
+        assert_eq!(calls.get(), 3);
+
+        calls.set(0);
+        let down = || {
+            calls.set(calls.get() + 1);
+            async { Err::<(), _>(CallError::Unknown("down".into())) }
+        };
+        let err = futures::executor::block_on(with_retries("test load", 3, down)).unwrap_err();
+        assert_eq!(calls.get(), 4, "one try and three retries");
+        let text = startup_load_failure_text("your identities", &err);
+        assert!(text.contains("Reload the page"), "{text}");
     }
 
     /// The startup load lists the identities, then prepares each one (a

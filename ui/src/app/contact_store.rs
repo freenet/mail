@@ -186,13 +186,19 @@ pub(crate) fn remove_in_background(alias: String, vk: Vec<u8>) {
 
 fn report(what: &str, e: &CallError) {
     crate::log::error(format!("{what}: {e}"), None);
-    crate::toast::push_toast_detached(
-        match e {
-            CallError::Unknown(_) => format!("{what}: no answer from your node"),
-            CallError::Failed(_) => what.to_string(),
+    crate::toast::push_toast_detached(report_text(what, e), crate::toast::ToastLevel::Error);
+}
+
+/// The user-facing text for a failed contact write: a reached storage limit
+/// says so rather than hiding behind a bare "couldn't save".
+fn report_text(what: &str, e: &CallError) -> String {
+    match e {
+        CallError::Unknown(_) => format!("{what}: no answer from your node"),
+        CallError::Failed(_) => match crate::mail_delegate::cap_reached_text(&e.to_string()) {
+            Some(cap) => format!("{what}: {cap}"),
+            None => what.to_string(),
         },
-        crate::toast::ToastLevel::Error,
-    );
+    }
 }
 
 #[cfg(test)]
@@ -210,6 +216,30 @@ mod tests {
             inbox_wasm_hash: Some("hash".into()),
         }
         .into_contact("Bob".into(), "from work".into())
+    }
+
+    /// A contact write refused at the contact cap says the limit was reached
+    /// (it used to be a bare "couldn't save"), and other failures stay bare.
+    /// Also pins that `CallError`'s text starts a failure with its code,
+    /// which `cap_reached_text` reads.
+    #[test]
+    fn a_full_address_book_is_reported_as_a_reached_limit() {
+        use freenet_mail_protocol::{Failure, FailureCode};
+        let cap = CallError::Failed(Failure {
+            code: FailureCode::CapReached,
+            detail: "too many items of this kind".into(),
+        });
+        assert!(cap.to_string().starts_with("CapReached:"), "{cap}");
+        let text = report_text("Couldn't save the contact", &cap);
+        assert!(text.contains("storage limit"), "{text}");
+        let other = CallError::Failed(Failure {
+            code: FailureCode::BadInput,
+            detail: "x".into(),
+        });
+        assert_eq!(
+            report_text("Couldn't save the contact", &other),
+            "Couldn't save the contact"
+        );
     }
 
     #[test]

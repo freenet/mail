@@ -1446,16 +1446,9 @@ pub(super) fn CreateAliasForm() -> Element {
         // Not stamped here: the node action stamps it once the create
         // request has gone to the node (see `record_backup_after_create`).
         let backed_up = *backup_confirmed.read();
-        crate::app::identity_store::spawn_detached(async move {
-            let alias = identity.alias.clone();
-            if let Err(e) = crate::app::identity_store::publish(identity, backed_up).await {
-                crate::log::error(format!("publishing identity `{alias}` failed: {e}"), None);
-                crate::toast::push_toast_detached(
-                    format!("Couldn't publish identity `{alias}`: {e}"),
-                    crate::toast::ToastLevel::Error,
-                );
-            }
-        });
+        crate::app::identity_store::spawn_detached(crate::app::identity_store::publish_or_recover(
+            identity, backed_up,
+        ));
         create_alias_form.write().0 = false;
     };
 
@@ -2154,17 +2147,11 @@ fn ImportForm() -> Element {
                                         // Restored from a recovery key or
                                         // backup file, so the user
                                         // demonstrably holds one.
-                                        crate::app::identity_store::spawn_detached(async move {
-                                            let alias = identity.alias.clone();
-                                            if let Err(e) =
-                                                crate::app::identity_store::publish(identity, true).await
-                                            {
-                                                crate::toast::push_toast_detached(
-                                                    format!("Couldn't publish identity `{alias}`: {e}"),
-                                                    crate::toast::ToastLevel::Error,
-                                                );
-                                            }
-                                        });
+                                        crate::app::identity_store::spawn_detached(
+                                            crate::app::identity_store::publish_or_recover(
+                                                identity, true,
+                                            ),
+                                        );
                                         import_backup_form.write().0 = false;
                                         import_id_form.write().0 = false;
                                     }

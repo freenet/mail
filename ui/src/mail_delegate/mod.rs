@@ -48,6 +48,18 @@ impl std::fmt::Display for CallError {
 
 impl std::error::Error for CallError {}
 
+/// What to tell the user when a write failed because a storage limit was
+/// reached (the delegate's `CapReached`: e.g. 2048 contacts, or 4096 sent,
+/// kept or archived messages per identity), given the error's text. `None`
+/// for any other failure. Takes the text because local-state errors reach
+/// their reporter boxed; [`CallError`]'s `Display` starts a failure with
+/// its code (pinned by a test).
+pub(crate) fn cap_reached_text(error: &str) -> Option<String> {
+    error.contains("CapReached:").then(|| {
+        "the storage limit for this kind of item is reached. Delete some (old messages or contacts) to make room.".to_string()
+    })
+}
+
 impl CallError {
     /// The failure code, when the delegate answered with one.
     pub(crate) fn code(&self) -> Option<freenet_mail_protocol::FailureCode> {

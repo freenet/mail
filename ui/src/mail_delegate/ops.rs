@@ -44,6 +44,9 @@ pub(crate) async fn create_identity(
     }
 }
 
+/// The pause before a lost create that is not listed is looked for again.
+const LOST_CREATE_RECHECK_MS: u32 = 3_000;
+
 /// What happened to a create whose answer never came.
 #[derive(Debug)]
 pub(crate) enum LostCreate {
@@ -62,8 +65,8 @@ pub(crate) enum LostCreate {
 /// exist. Look for it by `alias` and, if it is there, fetch its recovery
 /// key through the consented export, so the backup step can still run.
 pub(crate) async fn after_lost_create(alias: &str) -> LostCreate {
-    let found = match list_identities().await {
-        Ok(all) => all.into_iter().find(|i| i.alias == alias),
+    let found = match find_lost_create(alias, list_identities).await {
+        Ok(found) => found,
         Err(e) => return LostCreate::Unknown(e),
     };
     let Some(info) = found else {
@@ -73,6 +76,29 @@ pub(crate) async fn after_lost_create(alias: &str) -> LostCreate {
         Ok(key) => LostCreate::Created(info, key),
         Err(e) => LostCreate::CreatedKeyUnavailable(info, e),
     }
+}
+
+/// The identity named `alias`, per `list`. A create still queued behind
+/// other work may not be listed yet, so one miss is checked again after a
+/// pause before it counts as "not created" (which invites the user to
+/// create it again).
+async fn find_lost_create<F, Fut>(
+    alias: &str,
+    mut list: F,
+) -> Result<Option<IdentityInfo>, CallError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<IdentityInfo>, CallError>>,
+{
+    for attempt in 0..2 {
+        if attempt > 0 {
+            pause_ms(LOST_CREATE_RECHECK_MS).await;
+        }
+        if let Some(info) = list().await?.into_iter().find(|i| i.alias == alias) {
+            return Ok(Some(info));
+        }
+    }
+    Ok(None)
 }
 
 /// Import an identity. Never overwrites: an address already stored comes
@@ -539,6 +565,26 @@ mod tests {
             block_on(after_lost_create("lost-never-made")),
             LostCreate::NotCreated
         ));
+    }
+
+    /// A lost create that is not listed at first (still queued behind other
+    /// work) is found on the re-check, not reported as "not created".
+    #[test]
+    fn a_lost_create_listed_late_is_still_found() {
+        let (info, _) = block_on(create_identity("lost-late".into(), String::new())).unwrap();
+        let mut calls = 0;
+        let found = block_on(find_lost_create("lost-late", || {
+            calls += 1;
+            let listed = if calls == 1 {
+                Vec::new()
+            } else {
+                vec![info.clone()]
+            };
+            async move { Ok(listed) }
+        }))
+        .unwrap();
+        assert_eq!(found.map(|i| i.addr), Some(info.addr));
+        assert_eq!(calls, 2);
     }
 
     /// An identity imported from known seeds, with the UI-side keys for the

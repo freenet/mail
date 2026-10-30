@@ -64,11 +64,14 @@ pub(crate) fn local_state_failure_log_msg(op: &str, err: impl std::fmt::Display)
 /// "archive", "save sent", "update delivery state"). The toast reads
 /// "Couldn't <op> — changes may not persist after reload."
 pub(crate) fn local_state_failure(op: &str, err: impl std::fmt::Display) {
-    error(local_state_failure_log_msg(op, err), None);
-    crate::toast::push_toast_detached(
-        local_state_failure_toast_msg(op),
-        crate::toast::ToastLevel::Error,
-    );
+    let text = err.to_string();
+    error(local_state_failure_log_msg(op, &text), None);
+    // A reached storage limit is named, so the user knows deleting helps.
+    let toast = match crate::mail_delegate::cap_reached_text(&text) {
+        Some(cap) => format!("Couldn't {op}: {cap}"),
+        None => local_state_failure_toast_msg(op),
+    };
+    crate::toast::push_toast_detached(toast, crate::toast::ToastLevel::Error);
 }
 
 pub(crate) fn error(msg: impl AsRef<str>, action: Option<TryNodeAction>) {
