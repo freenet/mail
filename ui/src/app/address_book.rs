@@ -363,6 +363,9 @@ pub fn recipient_address(recipient: &Recipient) -> String {
 /// What a recorded recipient address resolves to now.
 enum Recorded {
     Found(Recipient),
+    /// More than one entry has this address's key (data from before each
+    /// key was kept unique): only the entry the user named can settle it.
+    Several(Vec<Recipient>),
     /// A well-formed address that nobody in the address book has now.
     Removed,
     /// Not an address this build can resolve.
@@ -382,14 +385,26 @@ fn resolve_recorded(address: &str) -> Recorded {
     else {
         return Recorded::Unresolvable;
     };
-    ADDRESS_BOOK
-        .with(|ab| {
-            ab.borrow()
-                .values()
-                .map(entry_to_recipient)
-                .find(|r| freenet_mail_protocol::address::address_of(&r.ml_dsa_vk_bytes).0 == addr)
-        })
-        .map_or(Recorded::Removed, Recorded::Found)
+    let mut found: Vec<Recipient> = ADDRESS_BOOK.with(|ab| {
+        ab.borrow()
+            .values()
+            .map(entry_to_recipient)
+            .filter(|r| freenet_mail_protocol::address::address_of(&r.ml_dsa_vk_bytes).0 == addr)
+            .collect()
+    });
+    found.dedup_by(|a, b| same_keys(a, b));
+    match found.len() {
+        0 => Recorded::Removed,
+        1 => Recorded::Found(found.remove(0)),
+        _ => Recorded::Several(found),
+    }
+}
+
+/// Whether two recipients have the same keys: the signing key AND the
+/// encryption key. A card can carry someone's signing key with another
+/// encryption key, so the signing key alone does not name a recipient.
+fn same_keys(a: &Recipient, b: &Recipient) -> bool {
+    a.ml_dsa_vk_bytes == b.ml_dsa_vk_bytes && a.ml_kem_ek_bytes == b.ml_kem_ek_bytes
 }
 
 /// The recipient to send to, given what the To field says (`typed`), the
@@ -410,6 +425,14 @@ pub fn resolve_for_send(
         Some(address) => {
             let recorded = match resolve_recorded(address) {
                 Recorded::Found(r) => r,
+                // Settled by the entry the To field names, and only if it
+                // has exactly the keys of one of them.
+                Recorded::Several(all) => match &named {
+                    Some(now) if all.iter().any(|r| same_keys(r, now)) => now.clone(),
+                    _ => {
+                        return Err("More than one contact has the key this message was addressed to. Retype or pick the recipient you mean.".to_string());
+                    }
+                },
                 Recorded::Removed => {
                     return Err("The recipient this message was addressed to is no longer in your address book. Choose the recipient again.".to_string());
                 }
@@ -418,7 +441,7 @@ pub fn resolve_for_send(
                 }
             };
             match named {
-                Some(now) if now.ml_dsa_vk_bytes != recorded.ml_dsa_vk_bytes => Err(format!(
+                Some(now) if !same_keys(&now, &recorded) => Err(format!(
                     "\"{typed}\" now names a different key than the recipient this message was addressed to. Retype the recipient to choose again."
                 )),
                 _ => Ok(recorded),
@@ -495,12 +518,31 @@ pub fn insert_contact(contact: Contact) -> Result<(), String> {
             let mut ab = ab.borrow_mut();
             // Self-import guard: enforced here so any caller path (UI form,
             // future API, test harness) gets the same protection.
-            for entry in ab.values() {
-                if let Entry::Own(id) = entry
-                    && id.ml_dsa_vk_bytes() == contact.ml_dsa_vk_bytes
-                    && id.ml_kem_ek_bytes() == contact.ml_kem_ek_bytes
-                {
-                    return Err("cannot import your own identity as a contact".into());
+            for (alias, entry) in ab.iter() {
+                match entry {
+                    Entry::Own(id) if id.ml_dsa_vk_bytes() == contact.ml_dsa_vk_bytes => {
+                        return Err(if id.ml_kem_ek_bytes() == contact.ml_kem_ek_bytes {
+                            "cannot import your own identity as a contact".into()
+                        } else {
+                            format!(
+                                "this card carries the signing key of your identity \"{alias}\" with a different encryption key; it was not imported"
+                            )
+                        });
+                    }
+                    // One entry per signing key: a second card with the same
+                    // key under another name would make which keys a
+                    // message goes to depend on the name typed, and a card
+                    // with a substituted encryption key could pass for the
+                    // real contact.
+                    Entry::Contact(c)
+                        if c.ml_dsa_vk_bytes == contact.ml_dsa_vk_bytes
+                            && *alias != *contact.local_alias =>
+                    {
+                        return Err(format!(
+                            "this contact is already in your address book as \"{alias}\"; update that entry instead"
+                        ));
+                    }
+                    _ => {}
                 }
             }
             if let Some(existing) = ab.get(contact.local_alias.as_ref()) {
@@ -571,6 +613,18 @@ pub fn remove_contact(alias: &str) {
             }
         });
     }
+    bump_address_book_gen();
+}
+
+/// Remove an own identity's entry (it was deleted), matched by its keys, not
+/// its name. Until this runs, typing its name would still send to an inbox
+/// nobody can read any more.
+pub fn remove_own_identity(identity: &Identity) {
+    ADDRESS_BOOK.with(|ab| {
+        ab.borrow_mut().retain(|_, e| {
+            !matches!(e, Entry::Own(id) if id.ml_dsa_vk_bytes() == identity.ml_dsa_vk_bytes())
+        })
+    });
     bump_address_book_gen();
 }
 
@@ -1122,6 +1176,46 @@ mod tests {
         let err =
             insert_contact(make_contact("bob", 3, 2)).expect_err("different VK should be rejected");
         assert!(err.contains("different contact"), "got: {err}");
+    }
+
+    /// A forged card with a known contact's signing key and another
+    /// encryption key, under a new name, is refused: one entry per signing
+    /// key, so which keys a message goes to can never depend on the name.
+    #[test]
+    fn a_second_contact_with_a_stored_signing_key_is_refused() {
+        reset_address_book();
+        insert_contact(make_contact("dupvk-bob", 41, 2)).unwrap();
+        let err = insert_contact(make_contact("dupvk-bob2", 41, 9)).unwrap_err();
+        assert!(err.contains("already in your address book"), "got: {err}");
+        let err = insert_contact(make_contact("dupvk-bob3", 41, 2)).unwrap_err();
+        assert!(err.contains("\"dupvk-bob\""), "got: {err}");
+        // Updating the existing entry still works.
+        insert_contact(make_contact("dupvk-bob", 41, 2)).unwrap();
+    }
+
+    /// Two entries with one signing key (data from before keys were kept
+    /// unique): a draft recorded for that key goes only to the entry the To
+    /// field names, compared on both key halves, never to a random one.
+    #[test]
+    fn a_recorded_key_shared_by_two_entries_resolves_to_the_named_one() {
+        reset_address_book();
+        let real = make_contact("shared-bob", 42, 2);
+        let forged = make_contact("shared-bob2", 42, 9);
+        ADDRESS_BOOK.with(|ab| {
+            let mut ab = ab.borrow_mut();
+            ab.insert("shared-bob".into(), Entry::Contact(real.clone()));
+            ab.insert("shared-bob2".into(), Entry::Contact(forged));
+        });
+        bump_address_book_gen();
+        // Both names record the same address (it derives from the signing
+        // key alone); each must still go to its own entry's keys.
+        let chosen = recipient_address(&lookup("shared-bob").unwrap());
+        let r = resolve_for_send("shared-bob", Some(&chosen), false).unwrap();
+        assert_eq!(r.ml_kem_ek_bytes, real.ml_kem_ek_bytes);
+        let r = resolve_for_send("shared-bob2", Some(&chosen), false).unwrap();
+        assert_eq!(r.ml_kem_ek_bytes, vec![9; 1184]);
+        // Naming neither settles nothing.
+        assert!(resolve_for_send("someone-else", Some(&chosen), false).is_err());
     }
 
     fn make_contact_suggested(local: &str, suggested: Option<&str>, vk: u8, ek: u8) -> Contact {

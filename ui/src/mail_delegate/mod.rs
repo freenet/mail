@@ -157,10 +157,39 @@ pub(crate) async fn call(op: Op) -> Result<Reply, CallError> {
     send(bytes).await.map_err(CallError::Unknown)?;
     let answer = wait(rx, timeout).await;
     match answer {
-        Some(Ok(reply)) => Ok(reply),
-        Some(Err(failure)) => Err(CallError::Failed(failure)),
-        None => Err(CallError::Unknown("timed out".into())),
+        Ok(Ok(reply)) => Ok(reply),
+        Ok(Err(failure)) => Err(CallError::Failed(failure)),
+        Err(why) => Err(CallError::Unknown(why.into())),
     }
+}
+
+/// Whether a node delegate error can belong to a mail-delegate call
+/// (`mail` is the mail delegate's key): one naming another delegate (the v1
+/// token generator, say) cannot, and must not end mail calls.
+pub(crate) fn may_be_mail_delegate_error(
+    error: &freenet_stdlib::client_api::DelegateError,
+    mail: &freenet_stdlib::prelude::DelegateKey,
+) -> bool {
+    use freenet_stdlib::client_api::DelegateError as E;
+    match error {
+        E::RegisterError(key) | E::Missing(key) | E::MissingSecret { key, .. } => key == mail,
+        // Execution errors and secret-access errors carry no key.
+        _ => true,
+    }
+}
+
+/// Why a waiting call was ended by [`fail_all_pending`].
+const NODE_DELEGATE_ERROR: &str = "the node reported an error running the mail delegate";
+
+/// End every waiting call now, as [`CallError::Unknown`]: the node reported
+/// a delegate error that names no request (it carries no request id), so
+/// which call it belongs to cannot be told, and the delegate may have done
+/// part of the work before it failed. Without this each call would wait out
+/// its whole timeout (up to the 10-minute consent window) for an answer that
+/// never comes. Returns how many calls were ended.
+pub(crate) fn fail_all_pending() -> usize {
+    // Dropping a waiter's sender ends its call with NODE_DELEGATE_ERROR.
+    PENDING.with(|p| p.borrow_mut().drain().count())
 }
 
 /// `call`, expecting `Reply::Ack`: the new generation.
@@ -201,21 +230,21 @@ fn reply_name(reply: &Reply) -> &'static str {
 async fn wait(
     rx: oneshot::Receiver<Result<Reply, Failure>>,
     timeout_ms: u32,
-) -> Option<Result<Reply, Failure>> {
+) -> Result<Result<Reply, Failure>, &'static str> {
     #[cfg(target_family = "wasm")]
     {
         use futures::FutureExt;
         let mut rx = rx.fuse();
         let mut timer = gloo_timers::future::TimeoutFuture::new(timeout_ms).fuse();
         futures::select! {
-            answer = rx => answer.ok(),
-            _ = timer => None,
+            answer = rx => answer.map_err(|_| NODE_DELEGATE_ERROR),
+            _ = timer => Err("timed out"),
         }
     }
     #[cfg(not(target_family = "wasm"))]
     {
         let _ = timeout_ms;
-        rx.await.ok()
+        rx.await.map_err(|_| NODE_DELEGATE_ERROR)
     }
 }
 
@@ -272,6 +301,37 @@ mod tests {
                 "a late approval must not act after the page gave up"
             );
         }
+    }
+
+    /// A node delegate error with no request id ends the waiting calls at
+    /// once, as unknown, instead of leaving them to their whole timeout.
+    #[test]
+    fn a_node_delegate_error_ends_waiting_calls_as_unknown() {
+        let (tx, rx) = oneshot::channel();
+        PENDING.with(|p| p.borrow_mut().insert(RequestId([9; 16]), tx));
+        assert_eq!(fail_all_pending(), 1);
+        let ended = futures::executor::block_on(wait(rx, 1_000));
+        assert_eq!(ended, Err(NODE_DELEGATE_ERROR));
+    }
+
+    /// An error naming another delegate (the v1 token generator) never ends
+    /// mail calls; one naming the mail delegate, or naming none, may.
+    #[test]
+    fn only_errors_that_may_be_the_mail_delegates_end_its_calls() {
+        use freenet_stdlib::client_api::DelegateError as E;
+        use freenet_stdlib::prelude::{CodeHash, DelegateKey};
+        let mail = DelegateKey::new([1; 32], CodeHash::new([2; 32]));
+        let other = DelegateKey::new([3; 32], CodeHash::new([4; 32]));
+        assert!(!may_be_mail_delegate_error(
+            &E::Missing(other.clone()),
+            &mail
+        ));
+        assert!(!may_be_mail_delegate_error(&E::RegisterError(other), &mail));
+        assert!(may_be_mail_delegate_error(&E::Missing(mail.clone()), &mail));
+        assert!(may_be_mail_delegate_error(
+            &E::ExecutionError("trap".into()),
+            &mail
+        ));
     }
 
     #[test]

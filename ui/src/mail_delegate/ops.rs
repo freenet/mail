@@ -44,6 +44,37 @@ pub(crate) async fn create_identity(
     }
 }
 
+/// What happened to a create whose answer never came.
+#[derive(Debug)]
+pub(crate) enum LostCreate {
+    /// It was created: here it is, with its recovery key from a consented
+    /// export (the one returned at creation was lost with the answer).
+    Created(IdentityInfo, SecretString),
+    /// It is not there: creating it again is safe.
+    NotCreated,
+    /// It is there, but its recovery key could not be shown now.
+    CreatedKeyUnavailable(IdentityInfo, CallError),
+    /// Nothing could be checked either.
+    Unknown(CallError),
+}
+
+/// After a create with no answer ([`CallError::Unknown`]): the identity may
+/// exist. Look for it by `alias` and, if it is there, fetch its recovery
+/// key through the consented export, so the backup step can still run.
+pub(crate) async fn after_lost_create(alias: &str) -> LostCreate {
+    let found = match list_identities().await {
+        Ok(all) => all.into_iter().find(|i| i.alias == alias),
+        Err(e) => return LostCreate::Unknown(e),
+    };
+    let Some(info) = found else {
+        return LostCreate::NotCreated;
+    };
+    match export_recovery_key(info.addr).await {
+        Ok(key) => LostCreate::Created(info, key),
+        Err(e) => LostCreate::CreatedKeyUnavailable(info, e),
+    }
+}
+
 /// Import an identity. Never overwrites: an address already stored comes
 /// back unchanged with `already_present`.
 pub(crate) async fn import_identity(
@@ -489,6 +520,25 @@ mod tests {
 
     fn block_on<F: std::future::Future>(f: F) -> F::Output {
         futures::executor::block_on(f)
+    }
+
+    /// After a create whose answer was lost, an identity that was created is
+    /// found with its recovery key (through the consented export), and one
+    /// that was not is reported as safe to create again.
+    #[test]
+    fn a_lost_create_finds_the_identity_and_its_key() {
+        let (info, key) = block_on(create_identity("lost-made".into(), String::new())).unwrap();
+        match block_on(after_lost_create("lost-made")) {
+            LostCreate::Created(found, k) => {
+                assert_eq!(found.addr, info.addr);
+                assert_eq!(k.as_str(), key.as_str());
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(
+            block_on(after_lost_create("lost-never-made")),
+            LostCreate::NotCreated
+        ));
     }
 
     /// An identity imported from known seeds, with the UI-side keys for the

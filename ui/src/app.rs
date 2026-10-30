@@ -318,7 +318,6 @@ pub(crate) fn app() -> Element {
                             }
                             identity_store::drop_from_page(&identity, &mut user_sig.write());
                             login_ctl.write().updated = true;
-                            address_book::remove_contact(&identity.alias);
                             let prev = *ab_gen.0.read();
                             ab_gen.0.set(prev.wrapping_add(1));
                         }

@@ -297,26 +297,38 @@ fn status(s: &Space<'_>) -> OpResult {
     }))
 }
 
-/// Identities whose approved deletion has not finished.
-/// Drop identity index entries whose record is gone: a deletion that
+/// Drop identity index entries whose deletion finished: a deletion that
 /// removed the record and then failed to update the index. The deletion
 /// removes everything the identity owns before its record, so nothing is
 /// left to finish, but the stale entry would hold one of the
 /// `MAX_IDENTITIES` slots for good and could not be listed to clean up.
+///
+/// An entry is pruned only when the deletion's own marker proves the record
+/// was removed on purpose. A record that merely fails to read (the host
+/// cannot tell a failed read from an absent key) keeps its entry, so a
+/// transient miss never leaves a private key unlisted.
 fn prune_recordless_identities(s: &mut Space<'_>) -> Result<(), Failure> {
     let (_, ids) = s.index(IDENTITY_INDEX)?;
     let mut gone = Vec::new();
+    let mut markers = Vec::new();
     for id in ids {
-        let Ok(addr) = <[u8; 24]>::try_from(id.as_slice()) else {
+        let Ok(addr) = <[u8; 24]>::try_from(id.as_slice()).map(Addr) else {
             gone.push(id);
             continue;
         };
-        if load_identity(s, &Addr(addr))?.is_none() {
+        let marker = store::deleted_rel(&addr);
+        if s.get(&marker).is_some() && load_identity(s, &addr)?.is_none() {
             gone.push(id);
+            markers.push(marker);
         }
     }
     if !gone.is_empty() {
         s.index_remove_many(IDENTITY_INDEX, &gone)?;
+    }
+    for marker in markers {
+        // A marker left behind is harmless: it only ever allows pruning an
+        // entry whose record is gone.
+        let _ = s.del(&marker);
     }
     Ok(())
 }
@@ -386,6 +398,12 @@ fn store_new_identity(
     // claim if the write fails. A slot a half-finished deletion left behind
     // is freed first.
     prune_recordless_identities(s)?;
+    // A deletion marker for this address (the same keys deleted before)
+    // must not outlive the new record, or a later failed read would prune it.
+    let marker = store::deleted_rel(&addr);
+    if s.get(&marker).is_some() {
+        s.del(&marker)?;
+    }
     s.index_add(IDENTITY_INDEX, &addr.0, MAX_IDENTITIES)?;
     match s.write_if(&identity_rel(&addr), 0, &body) {
         Ok(generation) => Ok(info(addr, generation, &record)),
@@ -487,6 +505,10 @@ fn import_identity(
         if record.deleting {
             return Err(fail(FailureCode::Refused, "this identity is being deleted"));
         }
+        // Present but unindexed (an index write that failed): list it again.
+        if !s.index(IDENTITY_INDEX)?.1.contains(&addr.0[..]) {
+            s.index_add(IDENTITY_INDEX, &addr.0, MAX_IDENTITIES)?;
+        }
         return Ok(Reply::Imported {
             identity: info(addr, generation, &record),
             already_present: true,
@@ -563,8 +585,18 @@ pub const DELETE_STEP: usize = 256;
 /// resumes where it stopped.
 pub fn delete_identity_now(s: &mut Space<'_>, addr: &Addr, expected_gen: u64) -> OpResult {
     let Some((generation, mut record)) = load_identity(s, addr)? else {
+        let marker = store::deleted_rel(addr);
+        if s.get(&marker).is_none() {
+            // No proof the record was deleted: a read that failed looks the
+            // same as an absent key, so never unindex on it.
+            return Err(fail(
+                FailureCode::Busy,
+                "the identity could not be read; retry",
+            ));
+        }
         // Record gone: only the index entry can be left.
         s.index_remove(IDENTITY_INDEX, &addr.0)?;
+        let _ = s.del(&marker);
         return Ok(Reply::Deleted);
     };
     if !record.deleting {
@@ -588,7 +620,10 @@ pub fn delete_identity_now(s: &mut Space<'_>, addr: &Addr, expected_gen: u64) ->
 pub fn deletion_in_progress(s: &Space<'_>, addr: &Addr) -> Result<bool, Failure> {
     Ok(match load_identity(s, addr)? {
         Some((_, r)) => r.deleting,
-        None => s.index(IDENTITY_INDEX)?.1.contains(&addr.0[..]),
+        None => {
+            s.get(&store::deleted_rel(addr)).is_some()
+                && s.index(IDENTITY_INDEX)?.1.contains(&addr.0[..])
+        }
     })
 }
 
@@ -616,8 +651,13 @@ fn delete_step(s: &mut Space<'_>, addr: &Addr) -> OpResult {
             remaining: u32::try_from(remaining).unwrap_or(u32::MAX),
         });
     }
+    // The marker goes first: it is what lets a later listing prune the
+    // index entry if removing it below fails.
+    let marker = store::deleted_rel(addr);
+    s.put(&marker, b"")?;
     s.del(&identity_rel(addr))?;
     s.index_remove(IDENTITY_INDEX, &addr.0)?;
+    let _ = s.del(&marker);
     Ok(Reply::Deleted)
 }
 

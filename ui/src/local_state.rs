@@ -647,7 +647,8 @@ pub(crate) fn global_settings() -> GlobalSettings {
 mod items;
 pub(crate) use items::{
     DraftCheck, DraftSave, archive_message, check_draft_before_send, delete_draft, delete_message,
-    delete_sent, load, message_id_for, save_draft, save_sent, set_sent_delivery_state,
+    delete_sent, full_message_id, load, message_id_for, reclaim_flags, save_draft, save_sent,
+    set_sent_delivery_state,
 };
 // `unarchive_message` is wired but unused until #60 (true unarchive).
 #[allow(unused_imports)]

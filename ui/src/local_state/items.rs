@@ -45,9 +45,14 @@ fn remember(full: [u8; 16]) -> MessageId {
 
 /// The id of a received message, from its ciphertext.
 pub(crate) fn message_id_for(ciphertext: &[u8]) -> MessageId {
+    remember(full_message_id(ciphertext))
+}
+
+/// The 16-byte item id of a received message, from its ciphertext.
+pub(crate) fn full_message_id(ciphertext: &[u8]) -> [u8; 16] {
     let mut full = [0u8; 16];
     full.copy_from_slice(&blake3::hash(ciphertext).as_bytes()[..16]);
-    remember(full)
+    full
 }
 
 fn full_id(id: MessageId) -> Result<[u8; 16], DynError> {
@@ -359,14 +364,8 @@ pub(crate) async fn mark_read(
     if message_gone(&alias, msg_id).await? {
         return Ok(());
     }
-    let body = json(&kept);
-    let kept_item = message_item(ItemKind::Kept, &alias, msg_id)?;
-    ops::put_item_merged(kept_item.clone(), |_| {
-        let gone = super::is_deleted(&alias, msg_id) || super::is_archived(&alias, msg_id);
-        (!gone).then(|| body.clone())
-    })
-    .await
-    .map_err(boxed)?;
+    // The read mark first: it is small and always fits, so a kept copy the
+    // delegate refuses (too large) never costs the mark itself.
     let mut deleted = false;
     set_flags(message_item(ItemKind::Flags, &alias, msg_id)?, |f| {
         deleted = f.deleted;
@@ -376,6 +375,16 @@ pub(crate) async fn mark_read(
     })
     .await
     .map_err(boxed)?;
+    let body = json(&kept);
+    let kept_item = message_item(ItemKind::Kept, &alias, msg_id)?;
+    if !deleted {
+        ops::put_item_merged(kept_item.clone(), |_| {
+            let gone = super::is_deleted(&alias, msg_id) || super::is_archived(&alias, msg_id);
+            (!gone).then(|| body.clone())
+        })
+        .await
+        .map_err(boxed)?;
+    }
     // A delete landed between the check and the write: take the copy back.
     if deleted || message_gone(&alias, msg_id).await? {
         delete(kept_item).await.map_err(boxed)?;
@@ -517,6 +526,47 @@ fn message_id(id: &[u8]) -> Option<MessageId> {
 }
 
 /// Everything stored for `identities` (alias, address), as one snapshot.
+/// Drop the read and deleted marks of messages that are gone for good: no
+/// longer in `owner`'s inbox state (`live`: every message of a WHOLE state)
+/// and with no kept or archived copy. Without this every message ever
+/// received keeps a flags item, and the per-identity cap eventually refuses
+/// every new mark. Returns how many were dropped.
+///
+/// A deleted mark is safe to drop then: it only hides a message the inbox
+/// still holds, and this one is no longer there.
+pub(crate) async fn reclaim_flags(
+    owner: Addr,
+    live: &HashSet<[u8; 16]>,
+) -> Result<usize, CallError> {
+    let mut keep: HashSet<Vec<u8>> = live.iter().map(|id| id.to_vec()).collect();
+    for kind in [ItemKind::Kept, ItemKind::Archived] {
+        keep.extend(
+            ops::list_all_items(kind, Some(owner))
+                .await?
+                .into_iter()
+                .map(|i| i.item.id),
+        );
+    }
+    let mut dropped = 0;
+    for i in ops::list_all_items(ItemKind::Flags, Some(owner)).await? {
+        if keep.contains(&i.item.id) {
+            continue;
+        }
+        match ops::delete_item(i.item, i.generation).await {
+            Ok(_) => dropped += 1,
+            // Changed since it was listed: a mark is being written for a
+            // message something still knows about; leave it.
+            Err(e)
+                if matches!(
+                    e.code(),
+                    Some(freenet_mail_protocol::FailureCode::Conflict { .. })
+                ) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(dropped)
+}
+
 pub(crate) async fn load(identities: &[(String, Addr)]) -> Result<LocalState, CallError> {
     let mut state = LocalState::default();
     for (alias, addr) in identities {
@@ -714,6 +764,68 @@ mod delegate_tests {
             in_reply_to: None,
             quoted_excerpt: None,
         }
+    }
+
+    fn kept(content: String) -> KeptMessage {
+        KeptMessage {
+            from: "bob".into(),
+            title: "t".into(),
+            content,
+            kept_at: 0,
+            sent_at: None,
+            sender_vk: Vec::new(),
+            signature_valid: true,
+        }
+    }
+
+    fn flag_ids(addr: Addr) -> HashSet<Vec<u8>> {
+        block_on(ops::list_all_items(ItemKind::Flags, Some(addr)))
+            .unwrap()
+            .into_iter()
+            .map(|i| i.item.id)
+            .collect()
+    }
+
+    /// Marks of messages that left the inbox with no kept or archived copy
+    /// are dropped; marks of messages still in the inbox, kept or archived
+    /// stay, so flags items cannot pile up to the per-identity cap.
+    #[test]
+    fn marks_of_messages_gone_for_good_are_reclaimed() {
+        let alias = "items-reclaim";
+        let addr = identity(alias);
+        let live = message_id_for(b"still in the inbox");
+        let gone = message_id_for(b"deleted and removed");
+        let read_gone = message_id_for(b"read, then removed");
+        let saved = message_id_for(b"archived");
+        block_on(delete_message(alias.into(), live)).unwrap();
+        block_on(delete_message(alias.into(), gone)).unwrap();
+        block_on(mark_read(alias.into(), read_gone, kept("k".into()))).unwrap();
+        block_on(delete(
+            message_item(ItemKind::Kept, alias, read_gone).unwrap(),
+        ))
+        .unwrap();
+        block_on(archive_message(alias.into(), saved, archived())).unwrap();
+        assert_eq!(flag_ids(addr).len(), 4);
+        let still: HashSet<[u8; 16]> = [full_message_id(b"still in the inbox")].into();
+        assert_eq!(block_on(reclaim_flags(addr, &still)).unwrap(), 2);
+        let left = flag_ids(addr);
+        assert!(left.contains(&full_message_id(b"still in the inbox").to_vec()));
+        assert!(left.contains(&full_message_id(b"archived").to_vec()));
+        assert_eq!(left.len(), 2);
+    }
+
+    /// A kept copy too large for the delegate must not cost the read mark.
+    #[test]
+    fn a_read_mark_is_kept_when_the_kept_copy_is_refused() {
+        let alias = "items-big-kept";
+        let addr = identity(alias);
+        let id = message_id_for(b"a very long message");
+        let huge = "x".repeat(freenet_mail_protocol::MAX_ITEM_BYTES + 1);
+        assert!(block_on(mark_read(alias.into(), id, kept(huge))).is_err());
+        assert!(
+            loaded(alias, addr).is_read(alias, id),
+            "the mark was stored"
+        );
     }
 
     /// After a rename, every write under the new alias still reaches the

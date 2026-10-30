@@ -75,6 +75,14 @@ pub fn identity_rel(addr: &Addr) -> String {
     format!("id/{}", hex(&addr.0))
 }
 
+/// Written by the last deletion step just before the identity record is
+/// removed, and cleared once its index entry is gone. It is the only proof
+/// that a recordless index entry was really deleted: the host cannot tell a
+/// failed read from an absent key, so a missing record alone proves nothing.
+pub fn deleted_rel(addr: &Addr) -> String {
+    format!("dl/{}", hex(&addr.0))
+}
+
 pub const IDENTITY_INDEX: &str = "ix/id";
 pub const PROMPT_INDEX: &str = "ix/pg";
 pub const EXPORT_GRANT: &str = "gr/export";

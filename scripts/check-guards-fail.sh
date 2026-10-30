@@ -218,6 +218,16 @@ dt "a request for an unknown operation gets a typed answer" "$D/handlers.rs" \
 dt "a recordless identity index entry is pruned" "$D/handlers.rs" \
     '    let _ = prune_recordless_identities(s);' '    let _ = s;' \
     a_recordless_identity_index_entry_is_pruned_when_deletions_are_listed
+dt "a record that fails to read is never pruned" "$D/handlers.rs" \
+    'if s.get(&marker).is_some() && load_identity(s, &addr)?.is_none() {' \
+    'if load_identity(s, &addr)?.is_none() {' \
+    a_record_that_fails_to_read_is_never_pruned_from_the_index
+dt "an import re-indexes a present, unindexed identity" "$D/handlers.rs" \
+    'if !s.index(IDENTITY_INDEX)?.1.contains(&addr.0[..]) {' 'if false {' \
+    importing_a_present_but_unindexed_identity_indexes_it_again
+dt "re-creating an identity clears its deletion marker" "$D/handlers.rs" \
+    '        s.del(&marker)?;' '        let _ = &marker;' \
+    a_reimported_identity_clears_its_old_deletion_marker
 dt "a failed prune does not fail the deletion listing" "$D/handlers.rs" \
     '    let _ = prune_recordless_identities(s);' '    prune_recordless_identities(s)?;' \
     a_failed_prune_does_not_fail_the_deletion_listing

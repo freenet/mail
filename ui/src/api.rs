@@ -1284,6 +1284,14 @@ fn set_inbox_state(
     state: freenet_mail_wire_v1::inbox::Inbox,
 ) {
     use crate::inbox::InboxModel;
+    reclaim_flags_once(
+        identity.addr,
+        state
+            .messages
+            .iter()
+            .map(|m| crate::local_state::full_message_id(&m.content))
+            .collect(),
+    );
     let mut models = inboxes.0.write();
     let pending = match models.iter().position(|e| e.borrow().key == key) {
         Some(pos) => models[pos].borrow_mut().replace_state(state),
@@ -1299,6 +1307,36 @@ fn set_inbox_state(
         Ok(pending) => spawn_decrypt(inboxes, key, pending),
         Err(e) => crate::log::error(format!("inbox {key}: bad state: {e}"), None),
     }
+}
+
+#[cfg(feature = "use-node")]
+thread_local! {
+    /// Identities whose stale message marks were reclaimed this page.
+    static FLAGS_RECLAIMED: RefCell<std::collections::HashSet<freenet_mail_protocol::Addr>> =
+        RefCell::new(std::collections::HashSet::new());
+}
+
+/// Once per page and identity, on its first whole inbox state, drop the
+/// marks of messages that are gone ([`crate::local_state::reclaim_flags`]).
+/// A failure is retried on the next whole state.
+#[cfg(feature = "use-node")]
+fn reclaim_flags_once(
+    owner: freenet_mail_protocol::Addr,
+    live: std::collections::HashSet<[u8; 16]>,
+) {
+    if !FLAGS_RECLAIMED.with(|r| r.borrow_mut().insert(owner)) {
+        return;
+    }
+    crate::app::identity_store::spawn_detached(async move {
+        match crate::local_state::reclaim_flags(owner, &live).await {
+            Ok(n) if n > 0 => crate::log::debug!("reclaimed {n} stale message marks"),
+            Ok(_) => {}
+            Err(e) => {
+                FLAGS_RECLAIMED.with(|r| r.borrow_mut().remove(&owner));
+                crate::log::error(format!("reclaiming message marks failed: {e}"), None);
+            }
+        }
+    });
 }
 
 /// Retries of a decryption call that failed as a whole.
@@ -2257,6 +2295,16 @@ pub(crate) async fn node_comms(
                                     format!("received delegate request error: {error}"),
                                     None,
                                 );
+                                // It carries no request id: end the mail
+                                // calls it may belong to now, as unknown,
+                                // rather than let them wait out their whole
+                                // timeout.
+                                if crate::mail_delegate::may_be_mail_delegate_error(
+                                    &error,
+                                    crate::mail_delegate::node::key(),
+                                ) {
+                                    crate::mail_delegate::fail_all_pending();
+                                }
                             }
                             RequestError::Disconnect => {
                                 todo!("lost connection to node, should retry connecting")

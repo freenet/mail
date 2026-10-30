@@ -488,15 +488,18 @@ pub fn answer(
             Err(f) => Err(f),
         },
         Some(Kind::Destructive) if choice == DELETE => perform(s, &pending.request_id, &pending.op),
-        // The node answers a prompt nobody answered (its 60 s timeout, or a
-        // dismissed dialog) with an empty response. Refusing here is what
-        // ends the waiting call then, not at the UI's own long backstop.
-        _ if choice.is_empty() => Err(fail(
+        // Deny, Cancel, anything unrecognised, and the empty response the
+        // node sends for a prompt nobody answered (its 60 s timeout, or a
+        // dismissed dialog). Refusing that one here is what ends the waiting
+        // call, not the UI's own long backstop.
+        _ => Err(fail(
             FailureCode::Refused,
-            "the prompt was not answered (it timed out or was dismissed)",
+            if choice.is_empty() {
+                "the prompt was not answered (it timed out or was dismissed)"
+            } else {
+                "the user declined"
+            },
         )),
-        // Deny, Cancel, and anything unrecognised.
-        _ => Err(fail(FailureCode::Refused, "the user declined")),
     };
     Ok(respond(pending.request_id, result))
 }

@@ -1395,7 +1395,20 @@ pub(super) fn CreateAliasForm() -> Element {
         login_error.set(String::new());
         let desc_val = description.read().clone();
         spawn(async move {
-            match crate::mail_delegate::ops::create_identity(alias_str, desc_val).await {
+            use crate::mail_delegate::{CallError, ops};
+            let created = match ops::create_identity(alias_str.clone(), desc_val).await {
+                Ok(created) => Ok(created),
+                // No answer: the identity may exist. Find out rather than
+                // report a failure that may be false.
+                Err(CallError::Unknown(_)) => match ops::after_lost_create(&alias_str).await {
+                    ops::LostCreate::Created(info, key) => Ok((info, key)),
+                    lost => Err(crate::app::identity_store::lost_create_text(
+                        &alias_str, &lost,
+                    )),
+                },
+                Err(e) => Err(format!("Couldn't create the identity: {e}")),
+            };
+            match created {
                 Ok((info, recovery_key)) => {
                     let identity = Identity::from_info(&info, UserId(0));
                     let words = crate::app::address_book::fingerprint_words(
@@ -1408,7 +1421,7 @@ pub(super) fn CreateAliasForm() -> Element {
                     copy_tracker.write().reset();
                     backup_panel_open.set(false);
                 }
-                Err(e) => login_error.set(format!("Couldn't create the identity: {e}")),
+                Err(text) => login_error.set(text),
             }
             creating.set(false);
         });
@@ -1457,6 +1470,10 @@ pub(super) fn CreateAliasForm() -> Element {
                     crate::log::error(
                         format!("discarding identity `{}` failed: {e}", identity.alias),
                         None,
+                    );
+                    crate::toast::push_toast_detached(
+                        crate::app::identity_store::discard_failure_text(&identity.alias, &e),
+                        crate::toast::ToastLevel::Error,
                     );
                 }
             });
@@ -2090,6 +2107,7 @@ fn ImportForm() -> Element {
                             // The mail delegate stores the keys; then the
                             // identity's contracts are published.
                             spawn(async move {
+                                let requested = alias_str.clone();
                                 let imported = crate::mail_delegate::ops::import_identity(
                                     source,
                                     freenet_mail_protocol::ImportKind::UserRestore,
@@ -2098,12 +2116,28 @@ fn ImportForm() -> Element {
                                 )
                                 .await;
                                 match imported {
-                                    Ok((info, _already_present)) => {
+                                    Ok((info, already_present)) => {
                                         // The delegate holds the keys now:
                                         // wipe the page's copies of them.
                                         paste_text.with_mut(zeroize::Zeroize::zeroize);
                                         parsed_backup.set(None);
                                         preview.set(None);
+                                        if already_present {
+                                            // Nothing changed: say so, under
+                                            // the name it is stored as.
+                                            crate::toast::push_toast_detached(
+                                                crate::app::identity_store::already_present_text(
+                                                    &info.alias,
+                                                    &requested,
+                                                ),
+                                                crate::toast::ToastLevel::Warning,
+                                            );
+                                            if Identity::get_alias(&info.alias).is_some() {
+                                                import_backup_form.write().0 = false;
+                                                import_id_form.write().0 = false;
+                                                return;
+                                            }
+                                        }
                                         let identity = Identity::from_info(&info, UserId(0));
                                         // Restored from a recovery key or
                                         // backup file, so the user

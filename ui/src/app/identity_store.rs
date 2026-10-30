@@ -124,6 +124,7 @@ pub(crate) async fn refresh_unfinished_deletions() -> Vec<IdentityInfo> {
 pub(crate) fn drop_from_page(identity: &crate::app::login::Identity, user: &mut crate::app::User) {
     crate::app::login::Identity::remove_in_place_by_addr(&identity.addr);
     crate::local_state::forget_identity(&identity.addr);
+    crate::app::address_book::remove_own_identity(identity);
     let was_logged_in = user.logged_id().is_some_and(|i| i.addr == identity.addr);
     user.identities.retain(|i| i.addr != identity.addr);
     if was_logged_in {
@@ -231,6 +232,58 @@ pub(crate) fn restore_failure_text(error: &crate::mail_delegate::CallError) -> S
                 .into()
         }
         other => format!("Couldn't restore the identity: {other}"),
+    }
+}
+
+/// What creating says when its answer was lost and the identity turned out
+/// not to be usable yet. Never a plain "couldn't create": it may exist.
+pub(crate) fn lost_create_text(
+    alias: &str,
+    lost: &crate::mail_delegate::ops::LostCreate,
+) -> String {
+    use crate::mail_delegate::ops::LostCreate;
+    match lost {
+        LostCreate::NotCreated | LostCreate::Created(..) => format!(
+            "Mail didn't hear back while creating `{alias}`, and it was not created. Try again."
+        ),
+        LostCreate::CreatedKeyUnavailable(info, e) => format!(
+            "`{}` was created, but its recovery key couldn't be shown ({e}). \
+             Reload, then back it up from Your identities before using it.",
+            info.alias
+        ),
+        LostCreate::Unknown(e) => format!(
+            "Mail didn't hear back while creating `{alias}`, so it may have been created ({e}). \
+             Reload and check Your identities before trying again."
+        ),
+    }
+}
+
+/// What a restore says when the keys are already here (`stored_alias`):
+/// nothing was changed, and a different name is not silently dropped.
+pub(crate) fn already_present_text(stored_alias: &str, requested_alias: &str) -> String {
+    if stored_alias == requested_alias {
+        format!("`{stored_alias}` is already here; nothing was changed.")
+    } else {
+        format!(
+            "These keys are already here as `{stored_alias}`, so nothing was changed. \
+             To call it `{requested_alias}`, rename it under Your identities."
+        )
+    }
+}
+
+/// What discarding a just-created identity says when its deletion was not
+/// confirmed. The identity may still be stored, and the user can finish it.
+pub(crate) fn discard_failure_text(alias: &str, error: &crate::mail_delegate::CallError) -> String {
+    match error {
+        crate::mail_delegate::CallError::Unknown(_) => format!(
+            "Mail didn't confirm that `{alias}` was discarded. If it is listed under Your \
+             identities after a reload, delete it there."
+        ),
+        crate::mail_delegate::CallError::Failed(f) => format!(
+            "`{alias}` was not discarded ({}). It is still stored: reload and delete it under \
+             Your identities.",
+            f.detail
+        ),
     }
 }
 
@@ -614,6 +667,69 @@ mod tests {
             confirmed: true,
             generation: 1,
         }
+    }
+
+    /// A create whose answer was lost never reads as a plain failure while
+    /// the identity may exist, and says when retrying is safe.
+    #[test]
+    fn a_lost_create_is_never_reported_as_a_plain_failure() {
+        use crate::mail_delegate::{CallError, ops::LostCreate};
+        let unknown = lost_create_text("lc", &LostCreate::Unknown(CallError::Unknown("x".into())));
+        assert!(unknown.contains("may have been created"), "{unknown}");
+        assert!(!unknown.starts_with("Couldn't create"), "{unknown}");
+        let none = lost_create_text("lc", &LostCreate::NotCreated);
+        assert!(none.contains("Try again"), "{none}");
+        let no_key = lost_create_text(
+            "lc",
+            &LostCreate::CreatedKeyUnavailable(info("lc", 1), CallError::Unknown("x".into())),
+        );
+        assert!(no_key.contains("was created"), "{no_key}");
+    }
+
+    /// Restoring keys already stored says so, under the stored name, and a
+    /// different requested name is not dropped silently.
+    #[test]
+    fn restoring_keys_already_here_says_under_which_name() {
+        assert!(already_present_text("bob", "bob").contains("already here"));
+        let renamed = already_present_text("bob", "robert");
+        assert!(
+            renamed.contains("`bob`") && renamed.contains("`robert`"),
+            "{renamed}"
+        );
+    }
+
+    /// A discard that was not confirmed tells the user where to finish it.
+    #[test]
+    fn an_unconfirmed_discard_tells_the_user() {
+        use crate::mail_delegate::CallError;
+        let t = discard_failure_text("dc", &CallError::Unknown("x".into()));
+        assert!(t.contains("delete it there"), "{t}");
+        let f = freenet_mail_protocol::Failure {
+            code: freenet_mail_protocol::FailureCode::Busy,
+            detail: "busy".into(),
+        };
+        let t = discard_failure_text("dc", &CallError::Failed(f));
+        assert!(t.contains("still stored"), "{t}");
+    }
+
+    /// A deleted identity leaves the address book too, in both builds:
+    /// otherwise typing its name sends to an inbox nobody can read.
+    #[test]
+    fn a_dropped_identity_leaves_the_address_book() {
+        use crate::app::{User, UserId, address_book, login::Identity};
+        let mut info = info("ab-gone", 0x73);
+        info.vk = crate::test_util::real_vk_bytes(0x73).into();
+        let gone = Identity::from_info(&info, UserId(0));
+        address_book::register_identity(&gone);
+        assert!(address_book::lookup("ab-gone").is_some());
+        let mut user = User {
+            logged: false,
+            identified: false,
+            active_id: None,
+            identities: vec![gone.clone()],
+        };
+        drop_from_page(&gone, &mut user);
+        assert!(address_book::lookup("ab-gone").is_none());
     }
 
     /// A deletion that stopped after it began leaves the identity hidden

@@ -148,3 +148,78 @@ fn a_request_from_a_newer_ui_gets_a_typed_answer_with_its_id() {
     assert_eq!(r.result.unwrap_err().code, FailureCode::UnsupportedVersion);
     assert!(env.secrets.is_empty());
 }
+
+fn identity_index_len(env: &mut MemEnv) -> usize {
+    let s = Space::new(env, Origin([PROD; 32]));
+    s.index(store::IDENTITY_INDEX).unwrap().1.len()
+}
+
+/// The host cannot tell a failed read from an absent key. A listing that
+/// prunes while an identity's record fails to read must not unindex it:
+/// only a finished deletion's own marker proves the record is gone.
+#[test]
+fn a_record_that_fails_to_read_is_never_pruned_from_the_index() {
+    let mut env = MemEnv::default();
+    let me = import_fixture(&mut env, PROD);
+    let key = Space::new(&mut env, Origin([PROD; 32])).full_key(&store::identity_rel(&me));
+    // The record "disappears" for a while (a transient read failure).
+    let record = env.secrets.remove(&key).unwrap();
+    assert_eq!(
+        call(&mut env, PROD, Op::ListDeletingIdentities),
+        Ok(Reply::Identities(vec![]))
+    );
+    // Nor may a deletion nobody approved finish on it.
+    let del = Op::DeleteIdentity {
+        addr: me,
+        expected_gen: 0,
+    };
+    assert_ne!(call(&mut env, PROD, del), Ok(Reply::Deleted));
+    env.secrets.insert(key, record);
+    assert_eq!(identity_index_len(&mut env), 1, "still indexed");
+    match call(&mut env, PROD, Op::ListIdentities) {
+        Ok(Reply::Identities(v)) => {
+            assert_eq!(v.iter().map(|i| i.addr).collect::<Vec<_>>(), vec![me]);
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+/// An identity whose record exists but whose index entry was lost is listed
+/// again by importing its keys.
+#[test]
+fn importing_a_present_but_unindexed_identity_indexes_it_again() {
+    let mut env = MemEnv::default();
+    let me = import_fixture(&mut env, PROD);
+    Space::new(&mut env, Origin([PROD; 32]))
+        .index_remove(store::IDENTITY_INDEX, &me.0)
+        .unwrap();
+    assert_eq!(identity_index_len(&mut env), 0);
+    let (dsa, kem) = fixture_seeds();
+    let (_, already) = import(
+        &mut env,
+        PROD,
+        ImportSource::Seeds { dsa, kem },
+        ImportKind::UserRestore,
+        "a",
+    )
+    .unwrap();
+    assert!(already);
+    assert_eq!(identity_index_len(&mut env), 1, "indexed again");
+}
+
+/// Re-creating an identity whose earlier deletion left its marker clears
+/// the marker, so a later failed read cannot prune the new record's entry.
+#[test]
+fn a_reimported_identity_clears_its_old_deletion_marker() {
+    let mut env = MemEnv::default();
+    let me = import_fixture(&mut env, PROD);
+    {
+        let mut s = Space::new(&mut env, Origin([PROD; 32]));
+        s.put(&store::deleted_rel(&me), b"").unwrap();
+        s.del(&store::identity_rel(&me)).unwrap();
+        s.index_remove(store::IDENTITY_INDEX, &me.0).unwrap();
+    }
+    import_fixture(&mut env, PROD);
+    let s = Space::new(&mut env, Origin([PROD; 32]));
+    assert!(s.get(&store::deleted_rel(&me)).is_none());
+}
