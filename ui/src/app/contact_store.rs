@@ -99,6 +99,60 @@ pub(crate) async fn remove(vk: &[u8]) -> Result<(), CallError> {
     }
 }
 
+/// Add `contact` to the address book and, only if it is accepted there,
+/// persist it. The address book is what refuses a clash (an alias taken by
+/// another contact or by one of your identities); persisting first stored a
+/// contact the user was told was rejected, which a later load could let
+/// claim the alias.
+pub(crate) fn accept(contact: Contact) -> Result<(), String> {
+    accept_with(contact, save_in_background)
+}
+
+fn accept_with(contact: Contact, persist: impl FnOnce(Contact)) -> Result<(), String> {
+    super::address_book::insert_contact(contact.clone())?;
+    persist(contact);
+    Ok(())
+}
+
+/// The label a stored contact is shown under when its alias clashes:
+/// the alias plus the start of its address, which is what tells the
+/// contacts apart.
+fn clash_label(contact: &Contact) -> std::rc::Rc<str> {
+    let addr = address_of(&contact.ml_dsa_vk_bytes);
+    let prefix: String = addr.0[..3].iter().map(|b| format!("{b:02x}")).collect();
+    format!("{}~{prefix}", contact.local_alias).into()
+}
+
+/// Stored contacts, made safe to load into the address book. A contact is
+/// its address; its alias is a label, and stored contacts can share one
+/// (stored before the address book's check ran, or carried over from older
+/// data), or share one with your own identity (`taken`). Whichever loaded
+/// first would take the alias, and mail addressed to it would go there, so
+/// none of them keeps the bare alias: each is shown as `alias~<address>`
+/// until the user renames it. Returns the contacts, in address order, and
+/// the aliases that clashed.
+pub(crate) fn disambiguate(
+    mut contacts: Vec<Contact>,
+    taken: impl Fn(&str) -> bool,
+) -> (Vec<Contact>, Vec<String>) {
+    contacts.sort_by_key(|c| address_of(&c.ml_dsa_vk_bytes).0);
+    let mut uses: std::collections::HashMap<std::rc::Rc<str>, usize> =
+        std::collections::HashMap::new();
+    for c in &contacts {
+        *uses.entry(c.local_alias.clone()).or_default() += 1;
+    }
+    let mut clashed: Vec<String> = Vec::new();
+    for c in &mut contacts {
+        if uses[&c.local_alias] > 1 || taken(&c.local_alias) {
+            if !clashed.iter().any(|a| **a == *c.local_alias) {
+                clashed.push(c.local_alias.to_string());
+            }
+            c.local_alias = clash_label(c);
+        }
+    }
+    (contacts, clashed)
+}
+
 /// Persist `contact` in the background, reporting a failure.
 pub(crate) fn save_in_background(contact: Contact) {
     let _task = dioxus::core::spawn_forever(async move {
@@ -161,6 +215,54 @@ mod tests {
         assert!(back.verified);
         assert_eq!(back.max_age_secs, 7);
         assert_eq!(back.inbox_wasm_hash.as_deref(), Some("hash"));
+    }
+
+    /// A contact the address book refuses is never persisted.
+    #[test]
+    fn a_rejected_contact_is_not_persisted() {
+        let mut persisted = Vec::new();
+        let mut first = contact(vec![11; 1952]);
+        first.local_alias = "acc-bob".into();
+        accept_with(first, |c| persisted.push(c)).unwrap();
+        let mut clash = contact(vec![12; 1952]);
+        clash.local_alias = "acc-bob".into();
+        assert!(accept_with(clash, |c| persisted.push(c)).is_err());
+        assert_eq!(persisted.len(), 1, "only the accepted contact is saved");
+        assert_eq!(persisted[0].ml_dsa_vk_bytes, vec![11; 1952]);
+    }
+
+    #[test]
+    fn clashing_stored_contacts_are_all_relabelled_never_routed_by_load_order() {
+        let mut a = contact(vec![21; 1952]);
+        a.local_alias = "bob".into();
+        let mut b = contact(vec![22; 1952]);
+        b.local_alias = "bob".into();
+        let mut own = contact(vec![23; 1952]);
+        own.local_alias = "me".into();
+        let mut fine = contact(vec![24; 1952]);
+        fine.local_alias = "carol".into();
+        for order in [
+            vec![a.clone(), b.clone(), own.clone(), fine.clone()],
+            vec![fine.clone(), own.clone(), b.clone(), a.clone()],
+        ] {
+            let (out, clashed) = disambiguate(order, |alias| alias == "me");
+            let labels: Vec<String> = out.iter().map(|c| c.local_alias.to_string()).collect();
+            assert!(
+                !labels.iter().any(|l| l == "bob" || l == "me"),
+                "{labels:?}"
+            );
+            assert!(labels.contains(&"carol".to_string()));
+            assert_eq!(clashed, vec!["bob".to_string(), "me".to_string()]);
+            // The same contact gets the same label whatever the load order.
+            let label_of = |vk: &[u8]| {
+                out.iter()
+                    .find(|c| c.ml_dsa_vk_bytes == vk)
+                    .map(|c| c.local_alias.to_string())
+                    .unwrap()
+            };
+            assert_eq!(label_of(&a.ml_dsa_vk_bytes), clash_label(&a).to_string());
+            assert_ne!(label_of(&a.ml_dsa_vk_bytes), label_of(&b.ml_dsa_vk_bytes));
+        }
     }
 
     #[test]

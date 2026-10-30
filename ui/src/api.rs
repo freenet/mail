@@ -1395,6 +1395,19 @@ pub(crate) async fn node_comms(
         let _task = dioxus::core::spawn_forever(async move {
             match crate::app::contact_store::load_all().await {
                 Ok(contacts) => {
+                    let (contacts, clashed) =
+                        crate::app::contact_store::disambiguate(contacts, |alias| {
+                            crate::app::login::Identity::get_alias(alias).is_some()
+                        });
+                    if !clashed.is_empty() {
+                        crate::toast::push_toast_detached(
+                            format!(
+                                "Some contacts share a name ({}). Each is shown with the start of its address; rename them in Contacts.",
+                                clashed.join(", ")
+                            ),
+                            crate::toast::ToastLevel::Warning,
+                        );
+                    }
                     let mut client = WEB_API_SENDER.get().cloned();
                     for contact in contacts {
                         // #191: contacts arrive here after a reload, so prime
@@ -1769,10 +1782,10 @@ pub(crate) async fn node_comms(
                 });
             }
             NodeAction::CreateContact { contact } => {
-                // Stored in the mail delegate in the background; the address
-                // book updates now. A refused or unanswered save is reported.
-                crate::app::contact_store::save_in_background(contact.clone());
-                if let Err(e) = crate::app::address_book::insert_contact(contact.clone()) {
+                // The address book updates now and, only if it accepts the
+                // contact, it is stored in the mail delegate in the
+                // background. A refused or unanswered save is reported.
+                if let Err(e) = crate::app::contact_store::accept(contact.clone()) {
                     crate::log::error(format!("address book rejected contact: {e}"), None);
                 } else {
                     // ContactsSection reads ADDRESS_BOOK directly (not via a
