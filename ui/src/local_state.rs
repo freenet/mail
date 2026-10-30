@@ -66,9 +66,145 @@ thread_local! {
     /// itself records the deletion. Key: (alias, msg_id).
     static DELETED_MESSAGES: RefCell<HashSet<(String, MessageId)>> = RefCell::new(HashSet::new());
 
-    /// Global-settings changes made in this page, counted so a startup load
-    /// that began before one of them does not overwrite it ([`merge_loaded`]).
-    static SETTINGS_WRITES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Every change made in this page while a load from the delegate runs,
+    /// numbered, so the load can be applied underneath them ([`merge_loaded`]).
+    static JOURNAL: RefCell<Vec<(u64, Change)>> = const { RefCell::new(Vec::new()) };
+    /// Number of the next journal entry.
+    static NEXT_CHANGE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Loads in flight; the journal is kept only while there is one.
+    static LOADS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// One change to the local state, as the page made it.
+#[derive(Clone)]
+enum Change {
+    SaveDraft(String, String, Draft),
+    DeleteDraft(String, String),
+    SaveSent(String, String, SentMessage),
+    DeleteSent(String, String),
+    SentDelivery(String, String, DeliveryState),
+    Archive(String, MessageId, ArchivedMessage),
+    Unarchive(String, MessageId),
+    DeleteMessage(String, MessageId),
+    MarkRead(String, MessageId, KeptMessage),
+    /// The fields that differ between the two values changed.
+    IdentitySettings(String, IdentitySettings, IdentitySettings),
+    GlobalSettings(GlobalSettings, GlobalSettings),
+    Forget(String),
+    Rename(String, String),
+}
+
+/// Apply `change` to `state` exactly as the page applied it to its
+/// snapshot. Settings changes set only the fields the change touched.
+fn apply(state: &mut LocalState, change: &Change) {
+    match change {
+        Change::SaveDraft(alias, id, draft) => {
+            let entry = state.aliases_mut().entry(alias.clone()).or_default();
+            entry.drafts.insert(id.clone(), draft.clone());
+        }
+        Change::DeleteDraft(alias, id) => {
+            if let Some(entry) = state.aliases_mut().get_mut(alias) {
+                entry.drafts.remove(id);
+            }
+        }
+        Change::SaveSent(alias, id, sent) => {
+            let entry = state.aliases_mut().entry(alias.clone()).or_default();
+            entry.sent.insert(id.clone(), sent.clone());
+        }
+        Change::DeleteSent(alias, id) => {
+            if let Some(entry) = state.aliases_mut().get_mut(alias) {
+                entry.sent.remove(id);
+            }
+        }
+        Change::SentDelivery(alias, id, delivery) => {
+            if let Some(sent) = state
+                .aliases_mut()
+                .get_mut(alias)
+                .and_then(|entry| entry.sent.get_mut(id))
+                && !delivery_state_is_terminal(sent.delivery_state)
+            {
+                sent.delivery_state = *delivery;
+            }
+        }
+        Change::Archive(alias, msg_id, archived) => {
+            // Archiving implies read, drops any kept fallback for the same id,
+            // and stashes the snapshot (the delegate's semantics).
+            let entry = state.aliases_mut().entry(alias.clone()).or_default();
+            entry.kept.remove(&msg_id.to_string());
+            if !entry.read.contains(msg_id) {
+                entry.read.push(*msg_id);
+            }
+            entry.archived.insert(msg_id.to_string(), archived.clone());
+        }
+        Change::Unarchive(alias, msg_id) => {
+            if let Some(entry) = state.aliases_mut().get_mut(alias) {
+                entry.archived.remove(&msg_id.to_string());
+            }
+        }
+        Change::DeleteMessage(alias, msg_id) => {
+            let entry = state.aliases_mut().entry(alias.clone()).or_default();
+            entry.kept.remove(&msg_id.to_string());
+            entry.archived.remove(&msg_id.to_string());
+            entry.read.retain(|id| id != msg_id);
+            if !entry.deleted.contains(msg_id) {
+                entry.deleted.push(*msg_id);
+            }
+        }
+        Change::MarkRead(alias, msg_id, kept) => {
+            let entry = state.aliases_mut().entry(alias.clone()).or_default();
+            if !entry.read.contains(msg_id) {
+                entry.read.push(*msg_id);
+            }
+            entry.kept.insert(msg_id.to_string(), kept.clone());
+        }
+        Change::IdentitySettings(alias, before, after) => {
+            let entry = state.aliases_mut().entry(alias.clone()).or_default();
+            overlay_changed_fields(&mut entry.settings, before, after);
+        }
+        Change::GlobalSettings(before, after) => {
+            overlay_changed_fields(state.global_settings_mut(), before, after);
+        }
+        Change::Forget(alias) => {
+            state.aliases_mut().remove(alias);
+        }
+        Change::Rename(old, new) => {
+            if let Some(entry) = state.aliases_mut().remove(old) {
+                state.aliases_mut().insert(new.clone(), entry);
+            }
+        }
+    }
+}
+
+/// Set in `value` the fields that differ between `before` and `after`.
+fn overlay_changed_fields<T>(value: &mut T, before: &T, after: &T)
+where
+    T: serde::Serialize + serde::de::DeserializeOwned,
+{
+    let (Ok(mut merged), Ok(before), Ok(after)) = (
+        serde_json::to_value(&*value),
+        serde_json::to_value(before),
+        serde_json::to_value(after),
+    ) else {
+        return;
+    };
+    if items::apply_changes(&mut merged, &before, &after)
+        && let Ok(next) = serde_json::from_value(merged)
+    {
+        *value = next;
+    }
+}
+
+/// Make `change` to the snapshot, and journal it while a load runs.
+fn change(change: Change) {
+    if LOADS.with(std::cell::Cell::get) > 0 {
+        let n = NEXT_CHANGE.with(|n| {
+            let next = n.get();
+            n.set(next + 1);
+            next
+        });
+        JOURNAL.with(|j| j.borrow_mut().push((n, change.clone())));
+    }
+    SNAPSHOT.with(|s| apply(&mut s.borrow_mut(), &change));
 }
 
 /// Every received message's UI id is below this, so ids at or above it are
@@ -77,30 +213,80 @@ thread_local! {
 /// partition nearly all of them would land in the folded range (#289).
 pub(crate) const RECEIVED_ID_LIMIT: u64 = 1 << 63;
 
+/// A load from the delegate in progress: from [`begin_load`] until it is
+/// passed to [`merge_loaded`] or dropped (the load failed), the page's
+/// changes are journaled.
+pub(crate) struct LoadMark(u64);
+
+impl Drop for LoadMark {
+    fn drop(&mut self) {
+        let left = LOADS.with(|l| {
+            let left = l.get().saturating_sub(1);
+            l.set(left);
+            left
+        });
+        if left == 0 {
+            JOURNAL.with(|j| j.borrow_mut().clear());
+        }
+    }
+}
+
 /// Mark the start of a load from the delegate; pass the result to
 /// [`merge_loaded`].
-pub(crate) fn begin_load() -> u64 {
-    SETTINGS_WRITES.with(std::cell::Cell::get)
+pub(crate) fn begin_load() -> LoadMark {
+    LOADS.with(|l| l.set(l.get() + 1));
+    LoadMark(NEXT_CHANGE.with(std::cell::Cell::get))
 }
 
 /// Apply a load that began at `mark` ([`begin_load`]) for `owners` only.
 ///
-/// The load is a snapshot taken while the page kept running, so it replaces
-/// just the identities it read: an identity created meanwhile keeps its
-/// state, and the global settings are taken from the load only if nothing in
-/// this page changed them since `mark` (#286: a wholesale replace dropped
-/// both). The optimistic stashes still apply, as for any echo.
-pub(crate) fn merge_loaded(mut loaded: LocalState, owners: &[String], mark: u64) {
+/// The load is a snapshot taken while the page kept running. It replaces
+/// just the identities it read (an identity created meanwhile keeps its
+/// state, #286), and every change the page made since `mark` is applied
+/// again on top of it: a draft saved meanwhile stays, a Sent row deleted
+/// meanwhile stays deleted, and a settings change keeps the fields it
+/// changed while every other field comes from the load. The optimistic
+/// stashes still apply, as for any echo.
+pub(crate) fn merge_loaded(mut loaded: LocalState, owners: &[String], mark: LoadMark) {
+    let since: Vec<Change> = JOURNAL.with(|j| {
+        j.borrow()
+            .iter()
+            .filter(|(n, _)| *n >= mark.0)
+            .map(|(_, c)| c.clone())
+            .collect()
+    });
+    drop(mark);
+    let mut fresh = LocalState::default();
+    *fresh.global_settings_mut() = loaded.global_settings().clone();
+    let mut touched: HashSet<String> = HashSet::new();
+    for alias in owners {
+        let state = loaded.aliases_mut().remove(alias).unwrap_or_default();
+        fresh.aliases_mut().insert(alias.clone(), state);
+        touched.insert(alias.clone());
+    }
+    for change in &since {
+        match change {
+            Change::Rename(old, new) if touched.remove(old) => {
+                touched.insert(new.clone());
+            }
+            _ => {}
+        }
+        apply(&mut fresh, change);
+    }
     // Taken out and put back by `replace_snapshot` below, with nothing in
     // between that could read it.
     let mut merged = SNAPSHOT.with(|s| std::mem::take(&mut *s.borrow_mut()));
-    for alias in owners {
-        let state = loaded.aliases_mut().remove(alias).unwrap_or_default();
-        merged.aliases_mut().insert(alias.clone(), state);
+    for alias in touched {
+        match fresh.aliases_mut().remove(&alias) {
+            Some(state) => {
+                merged.aliases_mut().insert(alias, state);
+            }
+            None => {
+                merged.aliases_mut().remove(&alias);
+            }
+        }
     }
-    if SETTINGS_WRITES.with(std::cell::Cell::get) == mark {
-        *merged.global_settings_mut() = loaded.global_settings().clone();
-    }
+    *merged.global_settings_mut() = fresh.global_settings().clone();
     replace_snapshot(merged);
 }
 
@@ -249,9 +435,7 @@ pub(crate) fn is_deleted(alias: &str, id: MessageId) -> bool {
 /// identity later created under the same alias starts empty instead of
 /// inheriting the old one's drafts, sent mail and settings.
 pub(crate) fn forget_alias(alias: &str) {
-    SNAPSHOT.with(|s| {
-        s.borrow_mut().aliases_mut().remove(alias);
-    });
+    change(Change::Forget(alias.to_string()));
     DELETED_DRAFTS.with(|t| t.borrow_mut().retain(|(a, _)| a != alias));
     PENDING_KEPT.with(|t| t.borrow_mut().retain(|(a, _), _| a != alias));
     OPTIMISTIC_SENT.with(|t| t.borrow_mut().retain(|(a, _), _| a != alias));
@@ -263,12 +447,7 @@ pub(crate) fn forget_alias(alias: &str) {
 
 /// Move what is cached for `old` to `new` (the identity was renamed).
 pub(crate) fn rename_alias(old: &str, new: &str) {
-    SNAPSHOT.with(|s| {
-        let mut s = s.borrow_mut();
-        if let Some(state) = s.aliases_mut().remove(old) {
-            s.aliases_mut().insert(new.to_string(), state);
-        }
-    });
+    change(Change::Rename(old.to_string(), new.to_string()));
     bump();
 }
 
@@ -379,26 +558,12 @@ mod legacy {
 // re-renders without waiting for the delegate roundtrip.
 
 pub(crate) fn local_save_draft(alias: &str, id: &str, draft: Draft) {
-    SNAPSHOT.with(|s| {
-        let mut state = s.borrow_mut();
-        let key = alias.to_string();
-        state
-            .aliases_mut()
-            .entry(key)
-            .or_default()
-            .drafts
-            .insert(id.to_string(), draft);
-    });
+    change(Change::SaveDraft(alias.to_string(), id.to_string(), draft));
     bump();
 }
 
 pub(crate) fn local_delete_draft(alias: &str, id: &str) {
-    SNAPSHOT.with(|s| {
-        let mut state = s.borrow_mut();
-        if let Some(entry) = state.aliases_mut().get_mut(alias) {
-            entry.drafts.remove(id);
-        }
-    });
+    change(Change::DeleteDraft(alias.to_string(), id.to_string()));
     // Tombstone protects against a stale `save_draft` echo that would
     // otherwise re-add this draft via `replace_snapshot` (#107).
     DELETED_DRAFTS.with(|t| {
@@ -408,15 +573,11 @@ pub(crate) fn local_delete_draft(alias: &str, id: &str) {
 }
 
 pub(crate) fn local_save_sent(alias: &str, id: &str, sent: SentMessage) {
-    SNAPSHOT.with(|s| {
-        let mut state = s.borrow_mut();
-        state
-            .aliases_mut()
-            .entry(alias.to_string())
-            .or_default()
-            .sent
-            .insert(id.to_string(), sent.clone());
-    });
+    change(Change::SaveSent(
+        alias.to_string(),
+        id.to_string(),
+        sent.clone(),
+    ));
     // Protect the optimistic Sent entry until `SaveSent` round-trips, so a
     // stale `GetAll` echo doesn't wipe it (#265).
     OPTIMISTIC_SENT.with(|p| {
@@ -427,12 +588,7 @@ pub(crate) fn local_save_sent(alias: &str, id: &str, sent: SentMessage) {
 }
 
 pub(crate) fn local_delete_sent(alias: &str, id: &str) {
-    SNAPSHOT.with(|s| {
-        let mut state = s.borrow_mut();
-        if let Some(entry) = state.aliases_mut().get_mut(alias) {
-            entry.sent.remove(id);
-        }
-    });
+    change(Change::DeleteSent(alias.to_string(), id.to_string()));
     // Drop any optimistic-sent protection for this id so a later stale echo
     // doesn't resurrect a sent row the user just deleted (#265).
     OPTIMISTIC_SENT.with(|p| {
@@ -447,27 +603,23 @@ pub(crate) fn local_delete_sent(alias: &str, id: &str) {
 /// reload even though the in-memory render was correctly suppressed (#288).
 #[must_use]
 pub(crate) fn local_set_sent_delivery_state(alias: &str, id: &str, state: DeliveryState) -> bool {
+    // Pending is the only non-terminal state. Once a row reaches Delivered
+    // or Failed it must NOT flip again (#288): the stale-send timeout sweep
+    // can drain a Pending entry and flip it Failed, after which a late
+    // `UpdateResponse` would otherwise mis-pair (FIFO pop) and resurrect the
+    // wrong row to Delivered — or flap a delivered row back to Failed.
+    // Terminal states stick (`apply` holds the same guard).
     let changed = SNAPSHOT.with(|s| {
-        let mut snap = s.borrow_mut();
-        if let Some(entry) = snap.aliases_mut().get_mut(alias)
-            && let Some(sent) = entry.sent.get_mut(id)
-        {
-            // Pending is the only non-terminal state. Once a row reaches
-            // Delivered or Failed it must NOT flip again (#288): the
-            // stale-send timeout sweep can drain a Pending entry and flip it
-            // Failed, after which a late `UpdateResponse` would otherwise
-            // mis-pair (FIFO pop) and resurrect the wrong row to Delivered —
-            // or flap a delivered row back to Failed. Terminal states stick.
-            if delivery_state_is_terminal(sent.delivery_state) {
-                return false;
-            }
-            sent.delivery_state = state;
-            true
-        } else {
-            false
-        }
+        s.borrow().sent_of(alias).any(|(sent_id, sent)| {
+            sent_id == id && !delivery_state_is_terminal(sent.delivery_state)
+        })
     });
     if changed {
+        change(Change::SentDelivery(
+            alias.to_string(),
+            id.to_string(),
+            state,
+        ));
         bump();
     }
     changed
@@ -481,17 +633,7 @@ pub(crate) fn delivery_state_is_terminal(state: DeliveryState) -> bool {
 }
 
 pub(crate) fn local_archive_message(alias: &str, msg_id: MessageId, archived: ArchivedMessage) {
-    SNAPSHOT.with(|s| {
-        let mut state = s.borrow_mut();
-        let entry = state.aliases_mut().entry(alias.to_string()).or_default();
-        // Mirrors the delegate semantics: archiving implies read, drops any
-        // kept fallback for the same id, and stashes the snapshot.
-        entry.kept.remove(&msg_id.to_string());
-        if !entry.read.contains(&msg_id) {
-            entry.read.push(msg_id);
-        }
-        entry.archived.insert(msg_id.to_string(), archived.clone());
-    });
+    change(Change::Archive(alias.to_string(), msg_id, archived.clone()));
     // Archive supersedes a pending kept tombstone — drop it so a stale
     // echo doesn't re-insert the kept entry under the archived row.
     PENDING_KEPT.with(|pending| {
@@ -509,12 +651,7 @@ pub(crate) fn local_archive_message(alias: &str, msg_id: MessageId, archived: Ar
 
 #[allow(dead_code)] // Wired for #60 (true unarchive).
 pub(crate) fn local_unarchive_message(alias: &str, msg_id: MessageId) {
-    SNAPSHOT.with(|s| {
-        let mut state = s.borrow_mut();
-        if let Some(entry) = state.aliases_mut().get_mut(alias) {
-            entry.archived.remove(&msg_id.to_string());
-        }
-    });
+    change(Change::Unarchive(alias.to_string(), msg_id));
     // Drop optimistic-archive protection so a stale echo doesn't re-archive
     // a message the user just unarchived (#265).
     OPTIMISTIC_ARCHIVED.with(|p| {
@@ -525,16 +662,7 @@ pub(crate) fn local_unarchive_message(alias: &str, msg_id: MessageId) {
 }
 
 pub(crate) fn local_delete_message(alias: &str, msg_id: MessageId) {
-    SNAPSHOT.with(|s| {
-        let mut state = s.borrow_mut();
-        let entry = state.aliases_mut().entry(alias.to_string()).or_default();
-        entry.kept.remove(&msg_id.to_string());
-        entry.archived.remove(&msg_id.to_string());
-        entry.read.retain(|id| *id != msg_id);
-        if !entry.deleted.contains(&msg_id) {
-            entry.deleted.push(msg_id);
-        }
-    });
+    change(Change::DeleteMessage(alias.to_string(), msg_id));
     // Same as archive: delete supersedes a pending kept tombstone.
     PENDING_KEPT.with(|pending| {
         pending
@@ -559,14 +687,7 @@ pub(crate) fn local_delete_message(alias: &str, msg_id: MessageId) {
 }
 
 pub(crate) fn local_mark_read(alias: &str, msg_id: MessageId, kept: KeptMessage) {
-    SNAPSHOT.with(|s| {
-        let mut state = s.borrow_mut();
-        let entry = state.aliases_mut().entry(alias.to_string()).or_default();
-        if !entry.read.contains(&msg_id) {
-            entry.read.push(msg_id);
-        }
-        entry.kept.insert(msg_id.to_string(), kept.clone());
-    });
+    change(Change::MarkRead(alias.to_string(), msg_id, kept.clone()));
     // Tombstone the optimistic write until the delegate echoes back a
     // snapshot that includes it — guards against the #113 race where a
     // stale `GetAll` reply lands before `MarkRead` persists.
@@ -579,22 +700,18 @@ pub(crate) fn local_mark_read(alias: &str, msg_id: MessageId, kept: KeptMessage)
 }
 
 pub(crate) fn local_set_identity_settings(alias: &str, settings: IdentitySettings) {
-    SNAPSHOT.with(|s| {
-        let mut state = s.borrow_mut();
-        state
-            .aliases_mut()
-            .entry(alias.to_string())
-            .or_default()
-            .settings = settings;
-    });
+    let before = identity_settings_for(alias);
+    change(Change::IdentitySettings(
+        alias.to_string(),
+        before,
+        settings,
+    ));
     bump();
 }
 
 pub(crate) fn local_set_global_settings(settings: GlobalSettings) {
-    SETTINGS_WRITES.with(|n| n.set(n.get() + 1));
-    SNAPSHOT.with(|s| {
-        *s.borrow_mut().global_settings_mut() = settings;
-    });
+    let before = global_settings();
+    change(Change::GlobalSettings(before, settings));
     bump();
 }
 
@@ -844,6 +961,136 @@ mod tests {
             global_settings().inbox.thread_view,
             freenet_mail_wire_v1::local_state::ThreadView::Compact,
         );
+    }
+
+    fn loaded_alice(
+        edit: impl FnOnce(&mut freenet_mail_wire_v1::local_state::AliasState),
+    ) -> LocalState {
+        let mut loaded = LocalState::default();
+        edit(loaded.aliases_mut().entry("alice".to_string()).or_default());
+        loaded
+    }
+
+    #[test]
+    fn a_draft_saved_during_the_load_stays() {
+        fresh_snapshot();
+        fresh_pending();
+        let mark = begin_load();
+        local_save_draft("alice", "d-new", draft("bob", "written meanwhile"));
+        let loaded = loaded_alice(|a| {
+            a.drafts.insert("d-old".into(), draft("carol", "stored"));
+        });
+        merge_loaded(loaded, &["alice".to_string()], mark);
+        let ids: HashSet<String> = drafts_for("alice").into_iter().map(|(id, _)| id).collect();
+        assert!(
+            ids.contains("d-new"),
+            "the draft saved during the load stays"
+        );
+        assert!(ids.contains("d-old"), "the stored draft is loaded");
+    }
+
+    #[test]
+    fn a_sent_row_deleted_during_the_load_stays_deleted() {
+        fresh_snapshot();
+        fresh_pending();
+        local_save_sent("alice", "s1", sent_row("bob"));
+        OPTIMISTIC_SENT.with(|p| p.borrow_mut().clear());
+        let mark = begin_load();
+        local_delete_sent("alice", "s1");
+        // The load read the row before the delete reached the delegate.
+        let loaded = loaded_alice(|a| {
+            a.sent.insert("s1".into(), sent_row("bob"));
+        });
+        merge_loaded(loaded, &["alice".to_string()], mark);
+        assert!(
+            sent_for("alice").is_empty(),
+            "a deleted Sent row must not come back"
+        );
+    }
+
+    #[test]
+    fn an_identity_settings_change_during_the_load_keeps_its_field_only() {
+        fresh_snapshot();
+        fresh_pending();
+        let mark = begin_load();
+        let mut settings = identity_settings_for("alice");
+        settings.display_name = "Alice Changed".into();
+        local_set_identity_settings("alice", settings);
+        let loaded = loaded_alice(|a| {
+            a.settings.display_name = "Alice Stored".into();
+            a.settings.signature = "-- stored sig".into();
+        });
+        merge_loaded(loaded, &["alice".to_string()], mark);
+        let got = identity_settings_for("alice");
+        assert_eq!(got.display_name, "Alice Changed", "the page's change wins");
+        assert_eq!(
+            got.signature, "-- stored sig",
+            "other loaded fields are kept"
+        );
+    }
+
+    #[test]
+    fn a_global_settings_change_keeps_the_other_loaded_fields() {
+        fresh_snapshot();
+        fresh_pending();
+        let mark = begin_load();
+        let mut settings = global_settings();
+        settings.inbox.thread_view = freenet_mail_wire_v1::local_state::ThreadView::Compact;
+        local_set_global_settings(settings);
+        let mut loaded = LocalState::default();
+        loaded.global_settings_mut().inbox.drafts_in_inbox = true;
+        loaded.global_settings_mut().advanced.custom_relay_url = "ws://stored".into();
+        merge_loaded(loaded, &[], mark);
+        let got = global_settings();
+        assert_eq!(
+            got.inbox.thread_view,
+            freenet_mail_wire_v1::local_state::ThreadView::Compact
+        );
+        assert!(
+            got.inbox.drafts_in_inbox,
+            "loaded settings are not dropped wholesale"
+        );
+        assert_eq!(got.advanced.custom_relay_url, "ws://stored");
+    }
+
+    #[test]
+    fn an_identity_deleted_or_renamed_during_the_load_is_not_brought_back() {
+        fresh_snapshot();
+        fresh_pending();
+        let mark = begin_load();
+        forget_alias("alice");
+        rename_alias("bob", "robert");
+        let mut loaded = loaded_alice(|a| a.read.push(1));
+        loaded
+            .aliases_mut()
+            .entry("bob".into())
+            .or_default()
+            .read
+            .push(2);
+        merge_loaded(loaded, &["alice".to_string(), "bob".to_string()], mark);
+        assert!(
+            !is_read("alice", 1),
+            "a deleted identity's loaded state is dropped"
+        );
+        assert!(!is_read("bob", 2));
+        assert!(
+            is_read("robert", 2),
+            "a renamed identity's loaded state follows the rename"
+        );
+    }
+
+    #[test]
+    fn the_journal_is_kept_only_while_a_load_runs() {
+        fresh_snapshot();
+        fresh_pending();
+        local_save_draft("alice", "d0", draft("bob", "before"));
+        assert!(JOURNAL.with(|j| j.borrow().is_empty()));
+        let mark = begin_load();
+        local_save_draft("alice", "d1", draft("bob", "during"));
+        assert_eq!(JOURNAL.with(|j| j.borrow().len()), 1);
+        drop(mark); // the load failed
+        assert!(JOURNAL.with(|j| j.borrow().is_empty()));
+        assert_eq!(LOADS.with(std::cell::Cell::get), 0);
     }
 
     fn fresh_pending() {

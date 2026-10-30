@@ -277,7 +277,7 @@ pub(crate) async fn delete_message(alias: String, msg_id: MessageId) -> Result<(
 /// Set in `stored` every leaf field that differs between `before` and
 /// `after` to `after`'s value, descending into nested records. Returns
 /// whether anything changed.
-fn apply_changes(
+pub(super) fn apply_changes(
     stored: &mut serde_json::Value,
     before: &serde_json::Value,
     after: &serde_json::Value,
