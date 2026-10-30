@@ -5431,6 +5431,10 @@ fn OpenMessage(msg: Message) -> Element {
 
 use crate::toast::ToastView;
 
+/// Shown when the draft being edited was sent or discarded in another tab.
+/// It is not sent from here: that could send it twice.
+const DRAFT_GONE_ELSEWHERE: &str = "This draft was sent or discarded in another tab, so it isn't saved or sent from here. Start a new message if you still want to send it.";
+
 #[allow(non_snake_case)]
 fn ComposeSheet() -> Element {
     let mut menu_selection = use_context::<Signal<menu::MenuSelection>>();
@@ -5476,6 +5480,18 @@ fn ComposeSheet() -> Element {
     let initial_quoted_excerpt = prefill.as_ref().and_then(|p| p.quoted_excerpt.clone());
 
     let mut to = use_signal(|| initial_to.clone());
+    // The address of the recipient chosen in the To field. A reopened draft
+    // brings the one it recorded; otherwise the prefilled name is resolved
+    // now, which is when it is chosen. Every later edit of the field
+    // re-resolves it, and sending goes to this address only
+    // (`address_book::resolve_for_send`).
+    let reopened_draft = prefill.as_ref().and_then(|p| p.draft_id.clone());
+    let alias_for_choice = user_alias.clone();
+    let mut chosen_address = use_signal(move || {
+        reopened_draft
+            .and_then(|id| crate::local_state::draft_recipient(&alias_for_choice, &id))
+            .or_else(|| address_book::address_choice(&initial_to))
+    });
     let mut title = use_signal(|| initial_subj.clone());
     let mut content = use_signal(|| initial_body.clone());
     let draft_id = use_signal(|| initial_draft_id.clone());
@@ -5500,6 +5516,10 @@ fn ComposeSheet() -> Element {
     // (discarded or sent there): autosave stops, so the draft is not brought
     // back, and the sheet says so.
     let draft_gone = use_signal(|| false);
+    // The last autosave token whose write the delegate acknowledged. Equal
+    // to `autosave_token` when what is on screen is stored; exposed on the
+    // sheet as `data-autosave` so a test can wait for it instead of sleeping.
+    let saved_token = use_signal(|| 0u64);
     /// Idle window before a draft is flushed to the delegate. Picked to feel
     /// instant for normal typing while still coalescing fast bursts.
     const AUTOSAVE_DEBOUNCE_MS: u32 = 500;
@@ -5531,6 +5551,8 @@ fn ComposeSheet() -> Element {
             quoted_excerpt: quoted_excerpt.read().clone(),
         };
         crate::local_state::local_save_draft(&alias_for_save, &id, draft.clone());
+        let to_address = chosen_address.read().clone();
+        crate::local_state::set_draft_recipient(&alias_for_save, &id, to_address.clone());
 
         // Bump the token, then schedule a delayed delegate save that
         // double-checks the token before firing. If another keystroke landed
@@ -5546,7 +5568,9 @@ fn ComposeSheet() -> Element {
                 if *token_signal.read() != my_token {
                     return;
                 }
-                match crate::local_state::save_draft(alias.clone(), id.clone(), draft).await {
+                match crate::local_state::save_draft(alias.clone(), id.clone(), draft, to_address)
+                    .await
+                {
                     Ok(crate::local_state::DraftSave::GoneElsewhere) => {
                         // Discarded or sent in another tab: stop autosaving
                         // and drop the local copy, so it neither comes back
@@ -5555,7 +5579,11 @@ fn ComposeSheet() -> Element {
                         gone.set(true);
                         crate::local_state::local_delete_draft(&alias, &id);
                     }
-                    Ok(_) => {}
+                    Ok(crate::local_state::DraftSave::Stored) => {
+                        let mut saved = saved_token;
+                        saved.set(my_token);
+                    }
+                    Ok(crate::local_state::DraftSave::Discarded) => {}
                     Err(e) => crate::log::local_state_failure("save draft", e),
                 }
             });
@@ -5610,29 +5638,23 @@ fn ComposeSheet() -> Element {
             });
         }
     });
-    let send_msg = move |_| {
+    let send_now = use_callback(move |()| {
         let to_val = to.read().clone();
-        // Try local alias first; fall back to raw bs58 inbox address so
-        // a user can paste an address into the To field and reach a
-        // contact without re-typing the alias.
-        let recipient = match address_book::lookup(&to_val)
-            .or_else(|| address_book::lookup_by_bs58(&to_val))
-        {
-            Some(r) => r,
-            None => {
-                crate::log::error(
-                    format!("couldn't find key for `{to_val}`"),
-                    Some(TryNodeAction::GetAlias),
-                );
-                crate::toast::push_toast(
-                    format!(
-                        "Recipient `{to_val}` is not in your address book. Import their contact before sending."
-                    ),
-                    crate::toast::ToastLevel::Error,
-                );
-                return;
-            }
-        };
+        // Mail goes to the address recorded when the recipient was chosen
+        // (an alias, a clash label or a pasted bs58 inbox address), and is
+        // refused if the field now names a different key.
+        let recipient =
+            match address_book::resolve_for_send(&to_val, chosen_address.read().as_deref()) {
+                Ok(r) => r,
+                Err(message) => {
+                    crate::log::error(
+                        format!("couldn't resolve the recipient `{to_val}`: {message}"),
+                        Some(TryNodeAction::GetAlias),
+                    );
+                    crate::toast::push_toast(message, crate::toast::ToastLevel::Error);
+                    return;
+                }
+            };
         // IdentityPrivacyPrefs.verify_on_send: refuse to send if the
         // address-book contact has not been confirmed by the user. Own-
         // identity sends bypass (no verification required to message self).
@@ -5886,6 +5908,48 @@ fn ComposeSheet() -> Element {
         if post.push_success_toast {
             crate::toast::push_toast("Sent", crate::toast::ToastLevel::Success);
         }
+    });
+
+    // Before sending, make sure the draft was not sent or discarded in
+    // another tab meanwhile: this page may hold it untouched, with no
+    // autosave to notice, and sending it would send it twice.
+    let alias_for_check = user_alias.clone();
+    let send_msg = move |_| {
+        if *draft_gone.read() {
+            crate::toast::push_toast(DRAFT_GONE_ELSEWHERE, crate::toast::ToastLevel::Warning);
+            return;
+        }
+        #[cfg(feature = "use-node")]
+        {
+            let alias = alias_for_check.clone();
+            let id = draft_id.read().clone();
+            spawn(async move {
+                match crate::local_state::check_draft_before_send(alias.clone(), id.clone()).await {
+                    Ok(crate::local_state::DraftCheck::Current) => send_now(()),
+                    Ok(crate::local_state::DraftCheck::GoneElsewhere) => {
+                        let mut gone = draft_gone;
+                        gone.set(true);
+                        crate::local_state::local_delete_draft(&alias, &id);
+                        crate::toast::push_toast(
+                            DRAFT_GONE_ELSEWHERE,
+                            crate::toast::ToastLevel::Warning,
+                        );
+                    }
+                    Err(e) => {
+                        crate::log::local_state_failure("check the draft before sending", e);
+                        crate::toast::push_toast(
+                            "Couldn't confirm this draft wasn't already sent from another tab. Try again.",
+                            crate::toast::ToastLevel::Error,
+                        );
+                    }
+                }
+            });
+        }
+        #[cfg(not(feature = "use-node"))]
+        {
+            let _ = &alias_for_check;
+            send_now(());
+        }
     };
 
     rsx! {
@@ -5893,6 +5957,7 @@ fn ComposeSheet() -> Element {
             onclick: move |_| { menu_selection.write().at_new_msg(); },
             div { class: "sheet",
                 "data-testid": testid::FM_COMPOSE_SHEET,
+                "data-autosave": if *autosave_token.read() > 0 && *saved_token.read() == *autosave_token.read() { "saved" } else { "pending" },
                 onclick: move |ev| { ev.stop_propagation(); },
                 div { class: "sheet-head",
                     span { class: "sheet-title", "New message" }
@@ -5932,6 +5997,7 @@ fn ComposeSheet() -> Element {
                                 aria_expanded: "{has_suggestions}",
                                 oninput: move |ev| {
                                     to.set(ev.value());
+                                    chosen_address.set(address_book::address_choice(&to.read()));
                                     ac_highlighted.set(-1);
                                     ac_open.set(true);
                                     autosave(());
@@ -5962,6 +6028,7 @@ fn ComposeSheet() -> Element {
                                             let idx = *ac_highlighted.read();
                                             if idx >= 0 && idx < len {
                                                 let alias = suggestions[idx as usize].local_alias.to_string();
+                                                chosen_address.set(address_book::address_choice(&alias));
                                                 to.set(alias);
                                                 ac_highlighted.set(-1);
                                                 ac_open.set(false);
@@ -6031,6 +6098,7 @@ fn ComposeSheet() -> Element {
                                                     onpointerdown: move |ev| {
                                                         ev.prevent_default();
                                                         ac_ignore_blur.set(true);
+                                                        chosen_address.set(address_book::address_choice(&alias_fill));
                                                         to.set(alias_fill.clone());
                                                         ac_highlighted.set(-1);
                                                         ac_open.set(false);
@@ -6100,7 +6168,7 @@ fn ComposeSheet() -> Element {
                         "data-testid": "compose-draft-gone",
                         role: "status",
                         "aria-live": "polite",
-                        "This draft was discarded or sent in another tab, so it is no longer saved. You can still send it from here."
+                        "{DRAFT_GONE_ELSEWHERE}"
                     }
                 }
                 div { class: "sheet-field",

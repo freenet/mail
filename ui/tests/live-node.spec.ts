@@ -2305,8 +2305,11 @@ test.describe("Live node E2E", () => {
       await sheet.locator('input[placeholder="alias or address"]').fill(after);
       await sheet.locator('input[placeholder="subject"]').fill(subject);
       await sheet.locator("textarea.sheet-textarea").fill("written after the rename");
-      // Let the debounced autosave reach the delegate before closing.
-      await page.waitForTimeout(2_000);
+      // Wait until the delegate has acknowledged the debounced autosave of
+      // what is on screen before closing.
+      await expect(sheet, "the draft is stored").toHaveAttribute("data-autosave", "saved", {
+        timeout: 30_000,
+      });
       await sheet.locator(".sheet-x").click();
       await expect(sheet).toHaveCount(0);
       await app.locator('[data-testid="fm-settings-btn"]').click();

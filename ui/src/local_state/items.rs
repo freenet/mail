@@ -159,6 +159,58 @@ fn seen_draft(key: String, id: String) {
     SEEN_DRAFTS.with(|s| s.borrow_mut().insert((key, id)));
 }
 
+/// Forget the drafts seen for state key `key` (its identity is gone).
+pub(super) fn forget_seen_drafts(key: &str) {
+    SEEN_DRAFTS.with(|s| s.borrow_mut().retain(|(k, _)| k != key));
+}
+
+/// A draft as stored: the v0.2.x draft fields plus the address of the
+/// recipient chosen for it. The alias in `to` is only what the user typed;
+/// `to_address` names the key, and a draft without one (carried over from
+/// older data, or never addressed) is resolved when it is next opened.
+#[derive(Serialize, Deserialize)]
+struct StoredDraft {
+    #[serde(flatten)]
+    draft: Draft,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    to_address: Option<String>,
+}
+
+/// Whether a draft may be sent from this page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DraftCheck {
+    /// Stored, or never stored by anyone this page knows of: send it.
+    Current,
+    /// This page saw it stored and it is gone now: sent or discarded in
+    /// another tab. Sending it here would send it twice.
+    GoneElsewhere,
+}
+
+/// Check, just before sending, that draft `id` is still current. A draft
+/// this page never saw stored (a fresh compose not yet autosaved) is
+/// current; one it saw stored is current only while the delegate still
+/// holds it. Unanswered is an error: sending could duplicate a send made in
+/// another tab, so the caller asks the user to try again.
+pub(crate) async fn check_draft_before_send(
+    alias: String,
+    id: String,
+) -> Result<DraftCheck, DynError> {
+    let owner = owner(&alias)?;
+    let key = super::addr_key(&owner);
+    let seen = SEEN_DRAFTS.with(|s| s.borrow().contains(&(key, id.clone())));
+    if !seen {
+        return Ok(DraftCheck::Current);
+    }
+    let stored = ops::get_item(item(ItemKind::Draft, Some(owner), uuid_id(&id)?))
+        .await
+        .map_err(boxed)?;
+    Ok(if stored.is_some() {
+        DraftCheck::Current
+    } else {
+        DraftCheck::GoneElsewhere
+    })
+}
+
 /// Save a draft unless it is gone. An autosave still in flight when the
 /// draft is discarded here must not bring it back: the discard is checked
 /// at the last moment before each write. A draft discarded or sent in
@@ -169,12 +221,13 @@ pub(crate) async fn save_draft(
     alias: String,
     id: String,
     draft: Draft,
+    to_address: Option<String>,
 ) -> Result<DraftSave, DynError> {
     let owner = owner(&alias)?;
     let key = super::addr_key(&owner);
     let item = item(ItemKind::Draft, Some(owner), uuid_id(&id)?);
     let seen = SEEN_DRAFTS.with(|s| s.borrow().contains(&(key.clone(), id.clone())));
-    let body = json(&draft);
+    let body = json(&StoredDraft { draft, to_address });
     let mut outcome = DraftSave::Stored;
     let written = ops::put_item_merged(item, |stored| {
         if super::draft_discarded(&alias, &id) {
@@ -470,9 +523,13 @@ pub(crate) async fn load(identities: &[(String, Addr)]) -> Result<LocalState, Ca
         let owner = Some(*addr);
         let entry = state.aliases_mut().entry(alias.clone()).or_default();
         for i in ops::list_all_items(ItemKind::Draft, owner).await? {
-            if let (Some(id), Some(d)) = (uuid_string(&i.item.id), decode("draft", &i.body)) {
+            if let (Some(id), Some(d)) = (
+                uuid_string(&i.item.id),
+                decode::<StoredDraft>("draft", &i.body),
+            ) {
                 seen_draft(super::addr_key(addr), id.clone());
-                entry.drafts.insert(id, d);
+                super::set_draft_recipient_for_key(super::addr_key(addr), id.clone(), d.to_address);
+                entry.drafts.insert(id, d.draft);
             }
         }
         for i in ops::list_all_items(ItemKind::Sent, owner).await? {
@@ -689,7 +746,7 @@ mod delegate_tests {
         // The routing map is deliberately left holding the old alias:
         // persistence must not depend on it.
         let id = uuid::Uuid::new_v4().to_string();
-        block_on(save_draft("items-rn-new".into(), id, draft("after"))).unwrap();
+        block_on(save_draft("items-rn-new".into(), id, draft("after"), None)).unwrap();
         let before = IdentitySettings::default();
         let mut after = before.clone();
         after.display_name = "Renamed".into();
@@ -704,9 +761,21 @@ mod delegate_tests {
     fn drafts_are_stored_and_a_discard_removes_them() {
         let addr = identity("items-drafts");
         let id = uuid::Uuid::new_v4().to_string();
-        block_on(save_draft("items-drafts".into(), id.clone(), draft("one"))).unwrap();
+        block_on(save_draft(
+            "items-drafts".into(),
+            id.clone(),
+            draft("one"),
+            None,
+        ))
+        .unwrap();
         // An autosave of the same draft replaces it.
-        block_on(save_draft("items-drafts".into(), id.clone(), draft("two"))).unwrap();
+        block_on(save_draft(
+            "items-drafts".into(),
+            id.clone(),
+            draft("two"),
+            None,
+        ))
+        .unwrap();
         let state = loaded("items-drafts", addr);
         let drafts: Vec<_> = state.drafts_of("items-drafts").collect();
         assert_eq!(drafts.len(), 1);
@@ -781,11 +850,18 @@ mod delegate_tests {
             "items-late-save".into(),
             id.clone(),
             draft("one"),
+            None,
         ))
         .unwrap();
         super::super::local_delete_draft("items-late-save", &id);
         block_on(delete_draft("items-late-save".into(), id.clone())).unwrap();
-        block_on(save_draft("items-late-save".into(), id, draft("late"))).unwrap();
+        block_on(save_draft(
+            "items-late-save".into(),
+            id,
+            draft("late"),
+            None,
+        ))
+        .unwrap();
         assert_eq!(
             loaded("items-late-save", addr)
                 .drafts_of("items-late-save")
@@ -818,6 +894,7 @@ mod delegate_tests {
             "items-other-tab".into(),
             id.clone(),
             draft("one"),
+            None,
         ));
         assert_eq!(saved.unwrap(), DraftSave::Stored);
         other_tab_deletes(draft_item(&id));
@@ -825,6 +902,7 @@ mod delegate_tests {
             "items-other-tab".into(),
             id.clone(),
             draft("late"),
+            None,
         ));
         assert_eq!(late.unwrap(), DraftSave::GoneElsewhere);
         assert!(block_on(ops::get_item(draft_item(&id))).unwrap().is_none());
@@ -843,14 +921,86 @@ mod delegate_tests {
             "items-other-tab".into(),
             id2.clone(),
             draft("late"),
+            None,
         ));
         assert_eq!(late2.unwrap(), DraftSave::GoneElsewhere);
         assert!(block_on(ops::get_item(draft_item(&id2))).unwrap().is_none());
 
         // A brand-new draft is still stored on its first save.
         let fresh = uuid::Uuid::new_v4().to_string();
-        let first = block_on(save_draft("items-other-tab".into(), fresh, draft("new")));
+        let first = block_on(save_draft(
+            "items-other-tab".into(),
+            fresh,
+            draft("new"),
+            None,
+        ));
         assert_eq!(first.unwrap(), DraftSave::Stored);
+    }
+
+    /// A draft sent (or discarded) in another tab must not be sent again
+    /// from this one, even if this page never autosaves it again. This page
+    /// is tab B; tab A is a second client on the same in-page store.
+    #[test]
+    fn a_draft_sent_in_another_tab_is_refused_before_sending() {
+        let addr = identity("items-send-check");
+        let alias = "items-send-check";
+        let id = uuid::Uuid::new_v4().to_string();
+        let item = ItemRef {
+            kind: ItemKind::Draft,
+            owner: Some(addr),
+            id: uuid_id(&id).unwrap(),
+        };
+        // Tab B saved the draft and still shows it.
+        block_on(save_draft(alias.into(), id.clone(), draft("hi"), None)).unwrap();
+        let check = || block_on(check_draft_before_send(alias.into(), id.clone())).unwrap();
+        assert_eq!(check(), DraftCheck::Current);
+
+        // Tab A sends it, which deletes the stored draft.
+        let stored = block_on(ops::get_item(item.clone())).unwrap().unwrap();
+        block_on(ops::delete_item(item, stored.generation)).unwrap();
+        assert_eq!(check(), DraftCheck::GoneElsewhere);
+
+        // A fresh compose this page never saved is sendable.
+        let fresh = uuid::Uuid::new_v4().to_string();
+        assert_eq!(
+            block_on(check_draft_before_send(alias.into(), fresh)).unwrap(),
+            DraftCheck::Current
+        );
+    }
+
+    /// The recipient address a draft was addressed to survives a reload,
+    /// and a draft stored without one (older data) loads with none.
+    #[test]
+    fn a_drafts_recipient_address_survives_a_reload() {
+        let addr = identity("items-to-address");
+        let alias = "items-to-address";
+        let addressed = uuid::Uuid::new_v4().to_string();
+        let bare = uuid::Uuid::new_v4().to_string();
+        block_on(save_draft(
+            alias.into(),
+            addressed.clone(),
+            draft("to bob"),
+            Some("BobsInboxAddress".into()),
+        ))
+        .unwrap();
+        block_on(ops::put_item(
+            ItemRef {
+                kind: ItemKind::Draft,
+                owner: Some(addr),
+                id: uuid_id(&bare).unwrap(),
+            },
+            json(&draft("old")),
+            None,
+        ))
+        .unwrap();
+        super::super::set_draft_recipient(alias, &addressed, None);
+        let state = loaded(alias, addr);
+        assert_eq!(state.drafts_of(alias).count(), 2);
+        assert_eq!(
+            super::super::draft_recipient(alias, &addressed).as_deref(),
+            Some("BobsInboxAddress")
+        );
+        assert_eq!(super::super::draft_recipient(alias, &bare), None);
     }
 
     /// A read mark racing a delete, including one made in another tab

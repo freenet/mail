@@ -493,7 +493,39 @@ fn forget_key(key: &str) {
     OPTIMISTIC_ARCHIVED.with(|t| t.borrow_mut().retain(|(a, _), _| a != key));
     DELETED_MESSAGES.with(|t| t.borrow_mut().retain(|(a, _)| a != key));
     READ_SENT.with(|t| t.borrow_mut().retain(|(a, _)| a != key));
+    DRAFT_RECIPIENTS.with(|t| t.borrow_mut().retain(|(a, _), _| a != key));
+    items::forget_seen_drafts(key);
     bump();
+}
+
+thread_local! {
+    /// The address each draft is addressed to, by (state key, draft id): the
+    /// recipient chosen when the To field was filled in. An alias can come
+    /// to name someone else (an identity created later under a contact's
+    /// name), an address cannot, so a draft is sent to the address it
+    /// recorded.
+    static DRAFT_RECIPIENTS: RefCell<HashMap<(String, String), String>> =
+        RefCell::new(HashMap::new());
+}
+
+fn set_draft_recipient_for_key(key: String, id: String, address: Option<String>) {
+    DRAFT_RECIPIENTS.with(|t| {
+        let mut t = t.borrow_mut();
+        match address {
+            Some(a) => t.insert((key, id), a),
+            None => t.remove(&(key, id)),
+        };
+    });
+}
+
+/// Record the recipient address of `alias`'s draft `id` (`None`: none chosen).
+pub(crate) fn set_draft_recipient(alias: &str, id: &str, address: Option<String>) {
+    set_draft_recipient_for_key(state_key(alias), id.to_string(), address);
+}
+
+/// The recipient address `alias`'s draft `id` recorded, if any.
+pub(crate) fn draft_recipient(alias: &str, id: &str) -> Option<String> {
+    DRAFT_RECIPIENTS.with(|t| t.borrow().get(&(state_key(alias), id.to_string())).cloned())
 }
 
 thread_local! {
@@ -614,8 +646,8 @@ pub(crate) fn global_settings() -> GlobalSettings {
 
 mod items;
 pub(crate) use items::{
-    DraftSave, archive_message, delete_draft, delete_message, delete_sent, load, message_id_for,
-    save_draft, save_sent, set_sent_delivery_state,
+    DraftCheck, DraftSave, archive_message, check_draft_before_send, delete_draft, delete_message,
+    delete_sent, load, message_id_for, save_draft, save_sent, set_sent_delivery_state,
 };
 // `unarchive_message` is wired but unused until #60 (true unarchive).
 #[allow(unused_imports)]
@@ -683,6 +715,7 @@ pub(crate) fn local_save_draft(alias: &str, id: &str, draft: Draft) {
 pub(crate) fn local_delete_draft(alias: &str, id: &str) {
     let alias = &state_key(alias);
     change(Change::DeleteDraft(alias.to_string(), id.to_string()));
+    set_draft_recipient_for_key(alias.to_string(), id.to_string(), None);
     // Tombstone protects against a stale `save_draft` echo that would
     // otherwise re-add this draft via `replace_snapshot` (#107).
     DELETED_DRAFTS.with(|t| {
