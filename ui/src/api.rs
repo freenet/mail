@@ -2437,12 +2437,16 @@ pub(crate) async fn node_comms(
                                 // calls it may belong to now, as unknown,
                                 // rather than let them wait out their whole
                                 // timeout.
+                                let token_call = crate::aft::token_request_in_flight();
                                 if crate::mail_delegate::may_be_mail_delegate_error(
                                     error,
                                     crate::mail_delegate::node::key(),
-                                    crate::aft::token_request_in_flight(),
+                                    token_call,
                                 ) {
                                     crate::mail_delegate::fail_pending_calls();
+                                } else if token_call {
+                                    // Taken as the token call's answer.
+                                    crate::aft::note_token_call_answered();
                                 }
                             }
                             RequestError::Disconnect => {
@@ -3194,7 +3198,10 @@ pub(crate) async fn node_comms(
                             // fail with a deser error.
                             let token = match TokenDelegateMessage::try_from(msg.payload.as_slice())
                             {
-                                Ok(r) => r,
+                                Ok(r) => {
+                                    crate::aft::note_token_call_answered();
+                                    r
+                                }
                                 Err(e) => {
                                     crate::log::error(
                                         format!("error deserializing delegate msg: {e}"),

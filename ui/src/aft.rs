@@ -76,11 +76,49 @@ thread_local! {
     static PENDING_INBOXES_UPDATES: RefCell<Vec<(InboxContract, AssignmentHash)>> = const { RefCell::new(Vec::new()) };
 }
 
-/// Whether a token-generator request is waiting for its answer: a node
-/// delegate error naming no delegate is then that request's, not the mail
-/// delegate's.
+thread_local! {
+    /// When each token-generator call still waiting for its answer was
+    /// sent (ms since the epoch), oldest first.
+    static TOKEN_CALLS: RefCell<std::collections::VecDeque<i64>> =
+        const { RefCell::new(std::collections::VecDeque::new()) };
+}
+
+/// A token call unanswered for longer than this no longer counts as in
+/// flight: an answer the node never sent must not misattribute errors for
+/// the rest of the page.
+const TOKEN_CALL_WINDOW_MS: i64 = 60_000;
+
+/// A token-generator call was sent.
+pub(crate) fn note_token_call_sent() {
+    let now = chrono::Utc::now().timestamp_millis();
+    TOKEN_CALLS.with(|c| c.borrow_mut().push_back(now));
+}
+
+/// A token-generator call was answered (or an error was taken as its
+/// answer).
+pub(crate) fn note_token_call_answered() {
+    TOKEN_CALLS.with(|c| c.borrow_mut().pop_front());
+}
+
+/// Whether a token-generator call is waiting for its answer: a node
+/// delegate error naming no delegate is then that call's, not the mail
+/// delegate's. Counts actual calls, not "a token record is unconfirmed",
+/// which lasts long after the call was answered.
 pub(crate) fn token_request_in_flight() -> bool {
-    PENDING_INBOXES_UPDATES.with(|q| !q.borrow().is_empty())
+    token_calls_in_flight_at(chrono::Utc::now().timestamp_millis())
+}
+
+fn token_calls_in_flight_at(now_ms: i64) -> bool {
+    TOKEN_CALLS.with(|c| {
+        let mut c = c.borrow_mut();
+        while c
+            .front()
+            .is_some_and(|sent| now_ms - sent > TOKEN_CALL_WINDOW_MS)
+        {
+            c.pop_front();
+        }
+        !c.is_empty()
+    })
 }
 
 /// Default timeout for pending AFT confirmations. If the host's
@@ -514,7 +552,11 @@ impl AftRecords {
         PENDING_INBOXES_UPDATES.with(|queue| {
             queue.borrow_mut().push((inbox_key, assignment_hash));
         });
-        client.send(request.into()).await?;
+        note_token_call_sent();
+        if let Err(e) = client.send(request.into()).await {
+            note_token_call_answered();
+            return Err(e.into());
+        }
         Ok(delegate_key)
     }
 
@@ -727,6 +769,43 @@ pub(crate) fn format_insufficient_tier_toast(required: Tier) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// Only an actual token call waiting for its answer counts as in
+    /// flight, and only for a while (round-8 X9). An unconfirmed token
+    /// record (an entry in PENDING_INBOXES_UPDATES) is not a call: it used
+    /// to keep keyless node errors away from the mail calls for as long as
+    /// the record went unconfirmed.
+    #[test]
+    fn only_a_waiting_token_call_is_in_flight_and_not_for_ever() {
+        let now = 1_000_000;
+        TOKEN_CALLS.with(|c| c.borrow_mut().clear());
+        PENDING_INBOXES_UPDATES.with(|q| q.borrow_mut().clear());
+        assert!(!token_calls_in_flight_at(now));
+        PENDING_INBOXES_UPDATES.with(|q| {
+            q.borrow_mut().push((
+                freenet_stdlib::prelude::ContractKey::from_params(
+                    crate::inbox::INBOX_CODE_HASH,
+                    freenet_stdlib::prelude::Parameters::from(vec![1u8; 8]),
+                )
+                .unwrap(),
+                [0; 32],
+            ))
+        });
+        assert!(
+            !token_calls_in_flight_at(now),
+            "an unconfirmed record is no call"
+        );
+        TOKEN_CALLS.with(|c| c.borrow_mut().push_back(now));
+        assert!(token_calls_in_flight_at(now + 30_000));
+        note_token_call_answered();
+        assert!(!token_calls_in_flight_at(now + 30_000));
+        TOKEN_CALLS.with(|c| c.borrow_mut().push_back(now));
+        assert!(
+            !token_calls_in_flight_at(now + TOKEN_CALL_WINDOW_MS + 1),
+            "a lost answer expires"
+        );
+        PENDING_INBOXES_UPDATES.with(|q| q.borrow_mut().clear());
+    }
+
     use super::*;
     use freenet_stdlib::prelude::ContractInstanceId;
 
