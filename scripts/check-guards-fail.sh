@@ -250,9 +250,29 @@ dt "re-creating an identity clears its deletion marker" "$D/handlers.rs" \
     '            if s.del(&marker).is_err() && s.put(&marker, store::MARKER_SPENT).is_err() {' \
     '            if false {' \
     a_reimported_identity_clears_its_old_deletion_marker
+dt "one corrupt identity record does not fail every listing" "$D/handlers.rs" \
+    '    freenet_mail_protocol::from_cbor(body).ok()' \
+    '    Some(freenet_mail_protocol::from_cbor(body).expect("an identity record decodes"))' \
+    a_corrupt_identity_record_is_left_out_and_counted_as_unreadable
+dt "importing keys writes over a corrupt identity record" "$D/handlers.rs" \
+    '|b| decodes_identity(b).is_some()' \
+    '|_| true' \
+    importing_keys_restores_an_identity_whose_record_is_corrupt
+dt "removing an unreadable key counts one key fewer" "$D/store.rs" \
+    '                // It was there, unreadable: one key fewer.
+                self.forget_unsized_key();' \
+    '                // It was there, unreadable: one key fewer.' \
+    removing_an_unreadable_key_counts_one_key_fewer
+dt "replacing an unreadable value counts its key once" "$D/store.rs" \
+    '                if self.env.remove(&key) || self.env.remove(&key) {
+                    self.forget_unsized_key();
+                }
+                0' \
+    '                0' \
+    replacing_an_unreadable_value_counts_its_key_once
 dt "a delete removes a key that reads as absent" "$D/store.rs" \
-    '            if !(self.env.remove(&key) || self.env.remove(&key) || self.env.remove(&key))' \
-    '            if false' \
+    '            if self.env.remove(&key) || self.env.remove(&key) || self.env.remove(&key) {' \
+    '            if false {' \
     a_delete_removes_a_key_whose_reads_fail
 dt "an unreadable index is not taken for empty" "$D/store.rs" \
     'if self.get(&index_marker_rel(rel)).as_deref() == Some(MARKER_LIVE) {' 'if false {' \

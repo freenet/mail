@@ -674,6 +674,25 @@ fn check(run: &mut Run) -> Result<(), String> {
     // were never handed back): unusable anyway, and restorable by import.
     let blinded = run.blinded.clone();
     let blinded_rel = |rel: &str| blinded.as_deref() == Some(s.full_key(rel).as_slice());
+    // An item whose whole list was the unreadable key: a deletion approved
+    // while that list could not be read forgets it and leaves the items it
+    // named as unreachable bytes (`delete_step`: the host offers no way to
+    // find them without their list). That is the documented limit, not a
+    // leak this check can demand be closed; nothing else is excused.
+    let under_blind_list = |k: &str| {
+        let parts: Vec<&str> = k.split('/').collect();
+        if parts.len() != 4 || parts[0] != "it" {
+            return false;
+        }
+        let Some(kind) = KINDS
+            .into_iter()
+            .find(|kd| store::kind_tag(*kd) == parts[1])
+        else {
+            return false;
+        };
+        let owner = (parts[2] != "-").then(|| Addr(unhex(parts[2]).try_into().unwrap()));
+        blinded_rel(&store::index_rel(kind, owner.as_ref()))
+    };
     if let Some(id) = records.difference(&indexed).find(|id| {
         let addr = Addr(id.as_slice().try_into().unwrap());
         !blinded_rel(&store::identity_rel(&addr))
@@ -715,7 +734,10 @@ fn check(run: &mut Run) -> Result<(), String> {
             return Err(format!("the approved deletion of {} was undone", &hex[..8]));
         }
         if i.deleted {
-            if let Some(k) = keys.keys().find(|k| k.contains(&hex)) {
+            if let Some(k) = keys
+                .keys()
+                .find(|k| k.contains(&hex) && !under_blind_list(k))
+            {
                 return Err(format!("a deleted identity left {k}"));
             }
         } else if !i.deleting && !listed.contains(addr) {
@@ -734,13 +756,14 @@ fn check(run: &mut Run) -> Result<(), String> {
             let owner = (parts[2] != "-").then(|| Addr(unhex(parts[2]).try_into().unwrap()));
             if let Some(o) = &owner
                 && !records.contains(o.0.as_slice())
+                && !under_blind_list(k)
             {
                 return Err(format!("{k} outlived its identity"));
             }
             let (_, ids) = s
                 .index(&store::index_rel(kind, owner.as_ref()))
                 .map_err(|f| format!("{f:?}"))?;
-            if !ids.contains(&unhex(parts[3])) && !blinded_rel(k) {
+            if !ids.contains(&unhex(parts[3])) && !blinded_rel(k) && !under_blind_list(k) {
                 return Err(format!("{k} is not in its index"));
             }
         }
@@ -770,7 +793,9 @@ fn check(run: &mut Run) -> Result<(), String> {
             .read(&rel)
             .map_err(|f| format!("{f:?}"))?
             .map(|(_, body)| body);
-        if !possible.contains(&stored) {
+        // The documented limit again: an approved deletion that found this
+        // item's list unreadable could not find the item to remove it.
+        if !possible.contains(&stored) && !under_blind_list(&rel) {
             return Err(format!(
                 "{rel} holds {:?}, which no reply allowed",
                 stored.map(|b| String::from_utf8_lossy(&b).into_owned())

@@ -638,6 +638,36 @@ pub(crate) fn plan_migration(
 
 /// Read the identities from the mail delegate and hand them to the node
 /// loop ([`NodeAction::IdentitiesLoaded`]).
+/// What to tell the user when `n` of their identities could not be read
+/// (`None` when there are none).
+pub(crate) fn unreadable_identities_text(n: u32) -> Option<String> {
+    match n {
+        0 => None,
+        1 => Some(
+            "One of your identities on this node could not be read, so it is not \
+             shown. Restore it from its recovery key to get it back."
+                .into(),
+        ),
+        n => Some(format!(
+            "{n} of your identities on this node could not be read, so they are \
+             not shown. Restore each from its recovery key to get it back."
+        )),
+    }
+}
+
+/// Tell the user about listed identities whose record cannot be used: the
+/// identity list leaves them out, so nothing else would show they exist.
+async fn report_unreadable_identities() {
+    match ops::get_status().await {
+        Ok(status) => {
+            if let Some(text) = unreadable_identities_text(status.unreadable_identities) {
+                crate::toast::push_toast_detached(text, crate::toast::ToastLevel::Warning);
+            }
+        }
+        Err(e) => crate::log::error(format!("reading the delegate status failed: {e}"), None),
+    }
+}
+
 pub(crate) async fn load_and_report() {
     let infos = match with_retries(
         "loading identities",
@@ -664,6 +694,7 @@ pub(crate) async fn load_and_report() {
             return;
         }
     };
+    report_unreadable_identities().await;
     // Local state is keyed by address (`local_state::addr_key`), never by
     // alias, so a rename or a reused alias can't misfile it.
     #[cfg(feature = "use-node")]
@@ -1651,6 +1682,23 @@ mod tests {
             pending_aft_migration_from: None,
         };
         assert_eq!(plan_load(Some(read)), (None, None, None));
+    }
+
+    /// Identities the list leaves out because their record cannot be used
+    /// are announced, and only when there are any.
+    #[test]
+    fn unreadable_identities_are_announced_only_when_present() {
+        assert_eq!(unreadable_identities_text(0), None);
+        assert!(
+            unreadable_identities_text(1)
+                .unwrap()
+                .contains("recovery key")
+        );
+        assert!(
+            unreadable_identities_text(3)
+                .unwrap()
+                .starts_with("3 of your identities")
+        );
     }
 
     #[test]

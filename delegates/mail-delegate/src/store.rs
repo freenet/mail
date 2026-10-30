@@ -348,9 +348,10 @@ impl<'a> Space<'a> {
             // key known present (`del_written`). What remains is a limit of
             // the host API: a key that cannot be read AND whose removal is
             // refused every time is indistinguishable from an absent one.
-            if !(self.env.remove(&key) || self.env.remove(&key) || self.env.remove(&key))
-                && self.fetch(&key).is_some()
-            {
+            if self.env.remove(&key) || self.env.remove(&key) || self.env.remove(&key) {
+                // It was there, unreadable: one key fewer.
+                self.forget_unsized_key();
+            } else if self.fetch(&key).is_some() {
                 return Err(fail(FailureCode::Internal, "the host refused the delete"));
             }
             return Ok(());
@@ -377,21 +378,94 @@ impl<'a> Space<'a> {
         if !(self.env.remove(&key) || self.env.remove(&key) || self.env.remove(&key)) {
             return Err(fail(FailureCode::Internal, "the host refused the delete"));
         }
-        if let Some(old) = old {
-            let u = self.usage();
-            self.set_usage(Usage {
-                keys: u.keys.saturating_sub(1),
-                bytes: u.bytes.saturating_sub((key.len() + old.len()) as u64),
-            });
+        match old {
+            Some(old) => {
+                let u = self.usage();
+                self.set_usage(Usage {
+                    keys: u.keys.saturating_sub(1),
+                    bytes: u.bytes.saturating_sub((key.len() + old.len()) as u64),
+                });
+            }
+            None => self.forget_unsized_key(),
         }
         Ok(())
     }
 
-    /// Remove `rel` without reading it first; `true` only if the host
-    /// removed something (the key was there, readable or not).
+    /// Remove `rel` whether or not it reads; `true` only if the host removed
+    /// something (the key was there, readable or not). The read is for the
+    /// usage record only; the removal does not depend on it.
     pub fn remove_if_present(&mut self, rel: &str) -> bool {
         let key = self.full_key(rel);
-        self.env.remove(&key) || self.env.remove(&key)
+        let old = self.fetch(&key);
+        let removed = self.env.remove(&key) || self.env.remove(&key);
+        if removed {
+            match old {
+                Some(old) => {
+                    let u = self.usage();
+                    self.set_usage(Usage {
+                        keys: u.keys.saturating_sub(1),
+                        bytes: u.bytes.saturating_sub((key.len() + old.len()) as u64),
+                    });
+                }
+                None => self.forget_unsized_key(),
+            }
+        }
+        removed
+    }
+
+    /// Account for a key removed (or about to be replaced) whose value
+    /// could not be read. The key count is exact; its bytes cannot be known
+    /// (the host reports an unreadable value as absent, and nothing records
+    /// sizes elsewhere), so they stay counted. The usage record is an upper
+    /// bound throughout ([`Space::put`] over-counts on a failed write too):
+    /// the error only ever costs this origin budget, never lets it exceed
+    /// one, and arises only from values the host itself failed to read.
+    fn forget_unsized_key(&mut self) {
+        let u = self.usage();
+        self.set_usage(Usage {
+            keys: u.keys.saturating_sub(1),
+            bytes: u.bytes,
+        });
+    }
+
+    /// Write `body` at `rel` as a new record over a stored value that cannot
+    /// be used: one the host cannot read, or one that does not decode
+    /// (`usable` says which bodies decode). A usable stored value is a
+    /// conflict, as [`Space::write_if`] with `expected = 0` reports it.
+    ///
+    /// Callers use this only where the record is the user's own and
+    /// rebuildable from what they supply (an item, or an identity whose
+    /// keys they are importing: same address, same seeds), so replacing an
+    /// unusable value loses nothing. An unreadable value is removed first,
+    /// so the key is counted once rather than as a second key.
+    pub fn write_over_unusable(
+        &mut self,
+        rel: &str,
+        body: &[u8],
+        usable: impl Fn(&[u8]) -> bool,
+    ) -> Result<u64, Failure> {
+        let key = self.full_key(rel);
+        let floor = match self.fetch(&key) {
+            Some(stored) => match decode_versioned(&stored) {
+                Some((g, b)) if usable(b) => {
+                    return Err(fail(
+                        FailureCode::Conflict { current_gen: g },
+                        "stale generation",
+                    ));
+                }
+                Some((g, _)) => g,
+                None => 0,
+            },
+            None => {
+                if self.env.remove(&key) || self.env.remove(&key) {
+                    self.forget_unsized_key();
+                }
+                0
+            }
+        };
+        let generation = self.next_generation(floor)?;
+        self.put(rel, &encode_versioned(generation, body))?;
+        Ok(generation)
     }
 
     /// The stored `(generation, body)` at `rel`.
@@ -723,6 +797,80 @@ mod tests {
                 keys: 1,
                 bytes: ns + 2
             }
+        );
+    }
+
+    fn blind(env: &mut MemEnv, rel: &str) {
+        let key = String::from_utf8(Space::new(env, Origin([1; 32])).full_key(rel)).unwrap();
+        env.faults = Some(crate::env::mem::Faults::blind(&key));
+    }
+
+    /// A removed key that could not be read leaves the key count; its bytes
+    /// cannot be known and stay counted (an upper bound, never under).
+    #[test]
+    fn removing_an_unreadable_key_counts_one_key_fewer() {
+        let mut env = MemEnv::default();
+        {
+            let mut s = Space::new(&mut env, Origin([1; 32]));
+            s.put("a", b"12345").unwrap();
+            s.put("b", b"1").unwrap();
+            s.put("c", b"1").unwrap();
+        }
+        let before = Space::new(&mut env, Origin([1; 32])).usage();
+        blind(&mut env, "a");
+        Space::new(&mut env, Origin([1; 32])).del("a").unwrap();
+        blind(&mut env, "c");
+        assert!(Space::new(&mut env, Origin([1; 32])).remove_if_present("c"));
+        env.faults = None;
+        let s = Space::new(&mut env, Origin([1; 32]));
+        assert!(s.get("a").is_none() && s.get("c").is_none());
+        let after = s.usage();
+        assert_eq!(after.keys, before.keys - 2);
+        assert_eq!(after.bytes, before.bytes, "unknown sizes stay counted");
+    }
+
+    /// Writing over a value that cannot be read counts its key once, not as
+    /// a second key.
+    #[test]
+    fn replacing_an_unreadable_value_counts_its_key_once() {
+        let mut env = MemEnv::default();
+        {
+            let mut s = Space::new(&mut env, Origin([1; 32]));
+            s.write_if("a", 0, b"12345").unwrap();
+        }
+        let before = Space::new(&mut env, Origin([1; 32])).usage();
+        blind(&mut env, "a");
+        let g = Space::new(&mut env, Origin([1; 32]))
+            .write_over_unusable("a", b"x", |_| true)
+            .unwrap();
+        env.faults = None;
+        let s = Space::new(&mut env, Origin([1; 32]));
+        assert_eq!(s.read("a").unwrap(), Some((g, b"x".to_vec())));
+        assert_eq!(s.usage().keys, before.keys);
+    }
+
+    /// A stored value that does not decode is replaced exactly (its size is
+    /// known), and a usable one is a conflict.
+    #[test]
+    fn a_corrupt_value_is_replaced_and_a_usable_one_is_not() {
+        let mut env = MemEnv::default();
+        let mut s = Space::new(&mut env, Origin([1; 32]));
+        let old = s.write_if("a", 0, b"bad").unwrap();
+        let before = s.usage();
+        let usable = |b: &[u8]| b == b"good";
+        let g = s.write_over_unusable("a", b"good", usable).unwrap();
+        assert!(g > old, "never reuses a generation");
+        let after = s.usage();
+        assert_eq!(after.keys, before.keys);
+        assert_eq!(
+            after.bytes + encode_versioned(old, b"bad").len() as u64,
+            before.bytes + encode_versioned(g, b"good").len() as u64
+        );
+        assert_eq!(
+            s.write_over_unusable("a", b"good", usable)
+                .unwrap_err()
+                .code,
+            FailureCode::Conflict { current_gen: g }
         );
     }
 

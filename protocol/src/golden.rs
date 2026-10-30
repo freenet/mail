@@ -228,6 +228,7 @@ fn replies() -> Vec<Reply> {
             key_budget: 5,
             byte_budget: 6,
             v1_transition: true,
+            unreadable_identities: 0,
         }),
         Reply::Identities(vec![identity()]),
         Reply::Identity(identity()),
@@ -340,6 +341,17 @@ fn samples() -> Vec<(String, Vec<u8>)> {
         session: Some(b(&[0x66; 32])),
     };
     out.push(("reply_exported_secrets_session".into(), enc(&reply_session)));
+    let status_unreadable = Reply::Status(Status {
+        protocol_version: 1,
+        identities: 2,
+        stored_keys: 3,
+        stored_bytes: 4,
+        key_budget: 5,
+        byte_budget: 6,
+        v1_transition: true,
+        unreadable_identities: 1,
+    });
+    out.push(("reply_status_unreadable".into(), enc(&status_unreadable)));
     let response = Response {
         request_id: RequestId([0x44; 16]),
         result: Err(Failure {

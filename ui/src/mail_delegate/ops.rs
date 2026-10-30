@@ -24,6 +24,15 @@ pub(crate) async fn list_identities() -> Result<Vec<IdentityInfo>, CallError> {
     }
 }
 
+/// The caller's status: how much it stores, and how many listed identities
+/// have a record that cannot be used.
+pub(crate) async fn get_status() -> Result<freenet_mail_protocol::Status, CallError> {
+    match call(Op::GetStatus).await? {
+        Reply::Status(status) => Ok(status),
+        other => Err(unexpected(&other)),
+    }
+}
+
 /// Create an identity. Its recovery key comes back this once, so it can be
 /// backed up as it is made; later reveals are consented exports.
 pub(crate) async fn create_identity(

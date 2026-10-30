@@ -615,3 +615,69 @@ fn a_spent_create_marker_does_not_stop_deleting_an_unreadable_identity() {
         "record left behind"
     );
 }
+
+fn corrupt(env: &mut MemEnv, rel: &str, stored: Vec<u8>) {
+    let key = full(env, rel);
+    env.secrets.insert(key.into_bytes(), stored);
+}
+
+fn unreadable_identities(env: &mut MemEnv) -> u32 {
+    match call(env, PROD, Op::GetStatus) {
+        Ok(Reply::Status(status)) => status.unreadable_identities,
+        other => panic!("{other:?}"),
+    }
+}
+
+/// An identity record that reads but does not decode is left out of the
+/// listing (the others still list) and counted as unreadable, so the UI can
+/// say it exists.
+#[test]
+fn a_corrupt_identity_record_is_left_out_and_counted_as_unreadable() {
+    let mut env = MemEnv::default();
+    let me = import_fixture(&mut env, PROD);
+    let other = create(&mut env, PROD, "other");
+    assert_eq!(unreadable_identities(&mut env), 0);
+    corrupt(
+        &mut env,
+        &store::identity_rel(&me),
+        store::encode_versioned(9, b"\xff not an identity"),
+    );
+    assert_eq!(listed(&mut env), vec![other.addr]);
+    assert_eq!(unreadable_identities(&mut env), 1);
+    assert_eq!(identity_index_len(&mut env), 2, "its entry stays");
+}
+
+/// Importing the keys of an identity whose record is corrupt writes over it
+/// (same address, same seeds), whether the body or the whole stored value
+/// is damaged.
+#[test]
+fn importing_keys_restores_an_identity_whose_record_is_corrupt() {
+    for damaged in [
+        store::encode_versioned(9, b"\xff not an identity"),
+        b"\x01".to_vec(),
+    ] {
+        let mut env = MemEnv::default();
+        let me = import_fixture(&mut env, PROD);
+        corrupt(&mut env, &store::identity_rel(&me), damaged);
+        let keys_before = Space::new(&mut env, Origin([PROD; 32])).usage().keys;
+        let (dsa, kem) = fixture_seeds();
+        let (identity, already) = import(
+            &mut env,
+            PROD,
+            ImportSource::Seeds { dsa, kem },
+            ImportKind::UserRestore,
+            "restored",
+        )
+        .expect("restoring over a corrupt record");
+        assert_eq!(identity.addr, me);
+        assert!(!already);
+        assert_eq!(listed(&mut env), vec![me]);
+        assert_eq!(identity_index_len(&mut env), 1, "no second entry");
+        assert_eq!(unreadable_identities(&mut env), 0);
+        assert_eq!(
+            Space::new(&mut env, Origin([PROD; 32])).usage().keys,
+            keys_before,
+            "the record is replaced, not counted twice"
+        );
+    }
+}

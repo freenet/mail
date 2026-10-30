@@ -246,13 +246,28 @@ fn info(addr: Addr, generation: u64, r: &IdentityRecord) -> IdentityInfo {
     }
 }
 
+/// A stored identity record. `None` for one that is absent or cannot be
+/// used: unreadable (the host reports that as absent) or corrupt (it reads
+/// but does not decode). A corrupt record is handled exactly like an
+/// unreadable one: left out of listings, counted as unreadable in the
+/// status, deletable after asking, and restored by importing its keys,
+/// which writes over it (the same address means the same seeds). One bad
+/// record therefore never fails every listing.
 pub fn load_identity(s: &Space<'_>, addr: &Addr) -> Result<Option<(u64, IdentityRecord)>, Failure> {
-    match s.read(&identity_rel(addr))? {
-        None => Ok(None),
-        Some((generation, body)) => freenet_mail_protocol::from_cbor(&body)
-            .map(|r| Some((generation, r)))
-            .map_err(|_| fail(FailureCode::Internal, "a stored identity is unreadable")),
-    }
+    let Some(stored) = s.get(&identity_rel(addr)) else {
+        return Ok(None);
+    };
+    Ok(store::decode_versioned(&stored)
+        .and_then(|(g, body)| decodes_identity(body).map(|r| (g, r))))
+}
+
+fn decodes_identity(body: &[u8]) -> Option<IdentityRecord> {
+    freenet_mail_protocol::from_cbor(body).ok()
+}
+
+/// Write a new identity record, over a stored one that cannot be used.
+fn write_new_identity(s: &mut Space<'_>, addr: &Addr, body: &[u8]) -> Result<u64, Failure> {
+    s.write_over_unusable(&identity_rel(addr), body, |b| decodes_identity(b).is_some())
 }
 
 /// A usable identity: present and not being deleted.
@@ -287,14 +302,35 @@ fn all_identities(s: &Space<'_>) -> Result<Vec<(Addr, u64, IdentityRecord)>, Fai
 
 fn status(s: &Space<'_>) -> OpResult {
     let usage = s.usage();
+    let (_, ids) = s.index(IDENTITY_INDEX)?;
+    let mut unreadable_identities = 0;
+    for id in &ids {
+        // A listed identity with no usable record, unless its marker says
+        // the record may legitimately be absent (a create or a deletion that
+        // did not finish).
+        let Ok(addr) = <[u8; 24]>::try_from(id.as_slice()).map(Addr) else {
+            continue;
+        };
+        if load_identity(s, &addr)?.is_none()
+            && !matches!(
+                s.get(&store::deleted_rel(&addr)).as_deref(),
+                Some(store::MARKER_CREATING)
+                    | Some(store::MARKER_FAILED)
+                    | Some(store::MARKER_DELETING)
+            )
+        {
+            unreadable_identities += 1;
+        }
+    }
     Ok(Reply::Status(Status {
         protocol_version: PROTOCOL_VERSION,
-        identities: s.index(IDENTITY_INDEX)?.1.len() as u32,
+        identities: ids.len() as u32,
         stored_keys: usage.keys,
         stored_bytes: usage.bytes,
         key_budget: store::MAX_ORIGIN_KEYS,
         byte_budget: store::MAX_ORIGIN_BYTES,
         v1_transition: cfg!(feature = "v1-transition"),
+        unreadable_identities,
     }))
 }
 
@@ -465,7 +501,7 @@ fn store_new_identity(
         }
         return Err(e);
     }
-    match s.write_if(&identity_rel(&addr), 0, &body) {
+    match write_new_identity(s, &addr, &body) {
         Ok(generation) => {
             // A create marker left beside the record would let a later
             // failed read of the record unlist it, so it must not stay `c`:
@@ -647,9 +683,9 @@ fn restore_unreadable_identity(
         deleting: false,
     };
     let body = to_cbor(&record).map_err(|e| fail(FailureCode::Internal, e))?;
-    // Reads as absent, so this writes over it; the generation counter keeps
-    // the new generation above whatever the unreadable record held.
-    let generation = s.write_if(&identity_rel(&addr), 0, &body)?;
+    // Unreadable or corrupt, so this writes over it; the generation counter
+    // keeps the new generation above whatever the old record held.
+    let generation = write_new_identity(s, &addr, &body)?;
     let marker = store::deleted_rel(&addr);
     if s.get(&marker).is_some() {
         let _ = s.del(&marker);
@@ -996,7 +1032,7 @@ fn put_item(
             ));
         }
         return s
-            .write_if(&rel, 0, &body)
+            .write_over_unusable(&rel, &body, |_| true)
             .map(|generation| Reply::Ack { generation });
     }
     let current_gen = current.as_ref().map_or(0, |(g, _)| *g);

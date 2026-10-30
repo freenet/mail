@@ -358,6 +358,16 @@ pub struct Status {
     pub key_budget: u64,
     pub byte_budget: u64,
     pub v1_transition: bool,
+    /// Identities listed but whose record cannot be used (unreadable, or
+    /// stored but not decodable). They are left out of `ListIdentities`;
+    /// importing their keys restores them. Added later: absent when zero,
+    /// so the earlier encoding is unchanged.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub unreadable_identities: u32,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
