@@ -64,6 +64,15 @@ pub(crate) enum LostCreate {
 /// After a create with no answer ([`CallError::Unknown`]): the identity may
 /// exist. Look for it by `alias` and, if it is there, fetch its recovery
 /// key through the consented export, so the backup step can still run.
+///
+/// Matching by alias is enough: the delegate refuses a second live identity
+/// with the same alias, atomically. The only way the identity found is not
+/// the one this create made is another tab of the same app creating that
+/// same alias first (this create then got a lost `Conflict`); what is shown
+/// is then the user's own identity of exactly that name, through the
+/// consented export, so no other identity's key is exposed. A per-create
+/// nonce in the protocol would close even that, at the cost of a delegate
+/// change.
 pub(crate) async fn after_lost_create(alias: &str) -> LostCreate {
     let found = match find_lost_create(alias, list_identities).await {
         Ok(found) => found,
