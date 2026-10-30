@@ -619,6 +619,14 @@ struct DeferredRemoval {
 }
 
 impl DeferredRemoval {
+    /// The inbox this removal was made for, out of `inboxes` (indexed by
+    /// identity): the one shown when it was deferred, whichever is shown
+    /// now. `None` if that inbox is not loaded.
+    #[cfg(any(test, not(all(feature = "example-data", not(feature = "use-node")))))]
+    fn pick<T: Clone>(&self, inboxes: &[T]) -> Option<T> {
+        inboxes.get(*self.target).cloned()
+    }
+
     fn run(
         self,
         client: WebApiRequestClient,
@@ -637,9 +645,12 @@ impl DeferredRemoval {
         }
         #[cfg(not(all(feature = "example-data", not(feature = "use-node"))))]
         {
-            // FIXME: indexing by id fails cause all not aliases inboxes has been loaded initially
-            let inbox_data = inbox_data.snapshot();
-            let mut inbox = inbox_data[*self.target].borrow_mut();
+            // Not every identity's inbox may be loaded yet; that is an
+            // error to report, not a panic.
+            let inbox = self
+                .pick(&inbox_data.snapshot())
+                .ok_or_else(|| format!("the inbox for identity {} is not loaded", *self.target))?;
+            let mut inbox = inbox.borrow_mut();
             inbox.remove_messages(client, ids)
         }
     }
@@ -6137,6 +6148,42 @@ mod deferred_removal_tests {
         assert_eq!(removal.target, alice);
         assert_eq!(removal.ids, vec![7]);
         assert_eq!(view.active_user(), bob);
+    }
+
+    /// The archive flow end to end, minus the network: the removal is bound
+    /// when the archive starts, the user switches identity while the archive
+    /// write is awaited (`store_then`, as archive uses), and the removal then
+    /// picks its inbox the way `DeferredRemoval::run` does: alice's, not the
+    /// one shown by then.
+    #[test]
+    fn a_removal_after_an_identity_switch_mid_wait_goes_to_the_original_inbox() {
+        use futures::executor::block_on;
+        use std::cell::Cell;
+        let view = InboxView::new();
+        let (alice, bob) = (UserId(0), UserId(1));
+        let inboxes = vec!["alice's inbox", "bob's inbox"];
+        *view.active_id.borrow_mut() = alice;
+
+        let removal = view.defer_removal(&[7]);
+        let picked = Cell::new(None);
+        let outcome = block_on(super::store_then(
+            async {
+                // The user switches identity while the write is confirmed.
+                *view.active_id.borrow_mut() = bob;
+                Ok(())
+            },
+            || async {
+                picked.set(removal.pick(&inboxes));
+            },
+        ));
+        assert_eq!(outcome, crate::local_state::Stored::Yes);
+        assert_eq!(view.active_user(), bob, "the switch happened mid-wait");
+        assert_eq!(picked.get(), Some("alice's inbox"));
+
+        // An inbox that is not loaded is reported, never a panic.
+        let unloaded = InboxView::new();
+        *unloaded.active_id.borrow_mut() = UserId(5);
+        assert_eq!(unloaded.defer_removal(&[1]).pick(&inboxes), None);
     }
 }
 

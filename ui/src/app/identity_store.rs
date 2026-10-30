@@ -340,30 +340,58 @@ pub(crate) async fn load_and_report() {
     // marks and settings takes a delegate round trip per item, and while it
     // ran the user could create an identity that the late announcement then
     // hid (#286). Views opened before the load lands re-render when it does.
-    //
-    // Journaling starts BEFORE the announcement: every change the page makes
-    // from the moment the identities are usable is replayed over the load,
-    // including those made while unfinished deletions are listed below.
-    #[cfg(feature = "use-node")]
-    let mark = crate::local_state::begin_load();
-    send_action(NodeAction::IdentitiesLoaded { identities: loaded });
-    refresh_unfinished_deletions().await;
     #[cfg(feature = "use-node")]
     {
-        match crate::local_state::load(&owners).await {
-            Ok(state) => {
-                let keys: Vec<String> = owners.into_iter().map(|(key, _)| key).collect();
-                crate::local_state::merge_loaded(state, &keys, mark);
-            }
-            Err(e) => {
-                crate::log::error(format!("loading local mail state failed: {e}"), None);
-                crate::toast::push_toast_detached(
-                    format!("Couldn't load your drafts, sent mail and settings: {e}"),
-                    crate::toast::ToastLevel::Error,
-                );
-            }
+        let keys: Vec<String> = owners.iter().map(|(key, _)| key.clone()).collect();
+        let merged = announce_then_merge(
+            &keys,
+            || send_action(NodeAction::IdentitiesLoaded { identities: loaded }),
+            refresh_unfinished_deletions(),
+            || crate::local_state::load(&owners),
+        )
+        .await;
+        if let Err(e) = merged {
+            crate::log::error(format!("loading local mail state failed: {e}"), None);
+            crate::toast::push_toast_detached(
+                format!("Couldn't load your drafts, sent mail and settings: {e}"),
+                crate::toast::ToastLevel::Error,
+            );
         }
     }
+    #[cfg(not(feature = "use-node"))]
+    {
+        send_action(NodeAction::IdentitiesLoaded { identities: loaded });
+        refresh_unfinished_deletions().await;
+    }
+}
+
+/// Announce the identities, let `meanwhile` run, then load their local state
+/// and merge it over the page's changes. Journaling starts BEFORE the
+/// announcement: from the moment the identities are usable the user can
+/// change their state, and every such change, including those made while
+/// `meanwhile` runs, is replayed over the load rather than replaced by it.
+#[cfg(any(test, feature = "use-node"))]
+async fn announce_then_merge<Load, LoadFut>(
+    owners: &[String],
+    announce: impl FnOnce(),
+    meanwhile: impl std::future::Future<Output = ()>,
+    load: Load,
+) -> Result<(), crate::mail_delegate::CallError>
+where
+    Load: FnOnce() -> LoadFut,
+    LoadFut: std::future::Future<
+            Output = Result<
+                freenet_mail_wire_v1::local_state::LocalState,
+                crate::mail_delegate::CallError,
+            >,
+        >,
+{
+    let mark = crate::local_state::begin_load();
+    announce();
+    meanwhile.await;
+    let state = load().await?;
+    crate::local_state::merge_loaded(state, owners, mark);
+    Ok(())
 }
 
 /// The migrations to run for an identity whose markers read as `read`, and
@@ -551,6 +579,49 @@ mod tests {
         assert!(!is_finishing(&addr));
         assert!(begin_finishing(addr), "a later retry may run");
         drop(FinishingGuard(addr));
+    }
+
+    /// R5: a change the user makes as soon as the identities are announced,
+    /// or while unfinished deletions are listed, lands before the local
+    /// state load; the merge must replay it, not replace it with the load.
+    #[test]
+    fn a_change_made_between_the_announcement_and_the_load_is_replayed() {
+        use freenet_mail_wire_v1::local_state::{Draft, LocalState};
+        use futures::executor::block_on;
+        let draft = |subject: &str| Draft {
+            subject: subject.into(),
+            ..Draft::default()
+        };
+        let owner = "r5-alice".to_string();
+        let loaded_without_them = || {
+            let mut state = LocalState::default();
+            state.aliases_mut().entry(owner.clone()).or_default();
+            async { Ok(state) }
+        };
+        block_on(announce_then_merge(
+            std::slice::from_ref(&owner),
+            || {
+                crate::local_state::local_save_draft(
+                    &owner,
+                    "d-announce",
+                    draft("at the announcement"),
+                )
+            },
+            async {
+                crate::local_state::local_save_draft(&owner, "d-meanwhile", draft("meanwhile"))
+            },
+            loaded_without_them,
+        ))
+        .unwrap();
+        let mut ids: Vec<String> = crate::local_state::drafts_for(&owner)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        ids.sort();
+        assert_eq!(
+            ids,
+            vec!["d-announce".to_string(), "d-meanwhile".to_string()]
+        );
     }
 
     /// The button's `disabled` reads `FINISHING_VIEW`, a signal, so a render
