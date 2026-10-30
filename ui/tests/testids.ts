@@ -89,6 +89,8 @@ interface TestIds {
   fmIdRename: string;
   fmIdShare: string;
   fmIdDelete: string;
+  fmIdUnfinishedDelete: string;
+  fmIdFinishDelete: string;
   fmRenameInput: string;
   fmRenameSubmit: string;
   fmDeleteConfirmInput: string;

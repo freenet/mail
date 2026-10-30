@@ -113,6 +113,15 @@ pub(crate) async fn delete_identity(
     ))
 }
 
+/// Identities whose approved deletion was interrupted; finish one with
+/// [`delete_identity`], which does not ask again.
+pub(crate) async fn list_deleting_identities() -> Result<Vec<IdentityInfo>, CallError> {
+    match call(Op::ListDeletingIdentities).await? {
+        Reply::Identities(list) => Ok(list),
+        other => Err(unexpected(&other)),
+    }
+}
+
 // ── Stored items ───────────────────────────────────────────────────────────
 
 pub(crate) async fn get_item(item: ItemRef) -> Result<Option<Item>, CallError> {

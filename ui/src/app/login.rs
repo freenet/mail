@@ -1191,11 +1191,40 @@ pub(super) fn Identities() -> Element {
         })
     });
 
+    // Deletions the user approved that stopped midway (the page closed):
+    // the delegate hides those identities, so offer to finish each here.
+    let unfinished = crate::app::identity_store::UNFINISHED_DELETIONS
+        .read()
+        .clone();
+    let unfinished_iter = unfinished.into_iter().map(|info| {
+        let alias = info.alias.clone();
+        rsx! {
+            div {
+                class: "field-help",
+                "data-testid": testid::FM_ID_UNFINISHED_DELETE,
+                style: "display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:10px;",
+                span { "Deleting `{alias}` did not finish." }
+                button {
+                    class: "btn btn-secondary",
+                    "data-testid": testid::FM_ID_FINISH_DELETE,
+                    onclick: move |_| {
+                        let info = info.clone();
+                        crate::app::identity_store::spawn_detached(
+                            crate::app::identity_store::finish_deletion(info),
+                        );
+                    },
+                    "Finish deleting"
+                }
+            }
+        }
+    });
+
     rsx! {
         div { style: "display:flex; align-items:baseline; justify-content:space-between; margin-bottom:18px;",
             h1 { class: "display lg italic", "Your identities" }
             span { class: "mono-tag", "{aliases_list.len()} on this device" }
         }
+        {unfinished_iter}
         div { class: "id-list",
             {identities_iter}
         }
@@ -2071,7 +2100,9 @@ fn ImportForm() -> Element {
                                         import_id_form.write().0 = false;
                                     }
                                     Err(e) => {
-                                        restore_error.set(format!("Couldn't restore the identity: {e}"));
+                                        restore_error.set(
+                                            crate::app::identity_store::restore_failure_text(&e),
+                                        );
                                     }
                                 }
                             });

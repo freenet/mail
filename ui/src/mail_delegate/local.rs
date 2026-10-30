@@ -190,4 +190,60 @@ mod tests {
             "the identity is gone"
         );
     }
+
+    /// A deletion interrupted after its first page (the page closed) is
+    /// listed for finishing, and finishing it removes it from that list,
+    /// with the restore refused meanwhile.
+    #[test]
+    fn an_interrupted_deletion_is_listed_until_it_is_finished() {
+        use super::super::ops;
+        let (info, recovery_key) = block_on(ops::create_identity(
+            "interrupted-delete".into(),
+            String::new(),
+        ))
+        .unwrap();
+        for i in 0u32..300 {
+            let mut item_id = [0u8; 16];
+            item_id[..4].copy_from_slice(&i.to_le_bytes());
+            let item = freenet_mail_protocol::ItemRef {
+                kind: freenet_mail_protocol::ItemKind::Flags,
+                owner: Some(info.addr),
+                id: item_id.to_vec(),
+            };
+            block_on(ops::put_item(item, b"{}".to_vec(), None)).unwrap();
+        }
+        // One page, approved, then the page goes away.
+        let first = block_on(call(Op::DeleteIdentity {
+            addr: info.addr,
+            expected_gen: info.generation,
+        }))
+        .unwrap();
+        assert!(matches!(first, Reply::Continue { .. }), "{first:?}");
+        let unfinished = block_on(ops::list_deleting_identities()).unwrap();
+        assert_eq!(
+            unfinished.iter().map(|i| i.addr).collect::<Vec<_>>(),
+            vec![info.addr]
+        );
+        let restore = block_on(ops::import_identity(
+            freenet_mail_protocol::ImportSource::RecoveryKey(recovery_key.as_str().to_string()),
+            freenet_mail_protocol::ImportKind::UserRestore,
+            "again".into(),
+            String::new(),
+        ));
+        let text = crate::app::identity_store::restore_failure_text(&restore.unwrap_err());
+        assert!(text.contains("Finish deleting"), "{text}");
+        // Finish it, as the "Finish deleting" button does.
+        let unfinished = unfinished.into_iter().next().unwrap();
+        block_on(ops::delete_identity(
+            unfinished.addr,
+            unfinished.generation,
+            |_| {},
+        ))
+        .unwrap();
+        assert!(
+            block_on(ops::list_deleting_identities())
+                .unwrap()
+                .is_empty()
+        );
+    }
 }

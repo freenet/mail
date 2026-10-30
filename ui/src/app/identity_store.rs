@@ -9,7 +9,7 @@
 
 use std::cell::Cell;
 
-use dioxus::prelude::Coroutine;
+use dioxus::prelude::{Coroutine, GlobalSignal, Signal};
 use freenet_mail_protocol::{Addr, IdentityInfo, ItemKind, ItemRef};
 use serde::{Deserialize, Serialize};
 
@@ -45,13 +45,19 @@ pub(crate) fn spawn_detached(fut: impl std::future::Future<Output = ()> + 'stati
 /// asks the user first), showing how much is left while a large one is
 /// deleted page by page. A small identity finishes in one step and never
 /// shows it. Used by the node and the offline builds alike.
+///
+/// The error is the text to show the user: once the deletion has started, or
+/// when it is not known whether it did, it says the deletion may be
+/// incomplete and will finish on a retry ([`deletion_failure_text`]).
 pub(crate) async fn delete_with_progress(
     addr: Addr,
     generation: u64,
     alias: &str,
-) -> Result<(), crate::mail_delegate::CallError> {
+) -> Result<(), String> {
     let mut progress: Option<crate::toast::ToastId> = None;
+    let mut started = false;
     let deleted = ops::delete_identity(addr, generation, |remaining| {
+        started = true;
         let text = deletion_progress_text(alias, remaining);
         crate::log::info(text.clone());
         match progress {
@@ -66,7 +72,80 @@ pub(crate) async fn delete_with_progress(
     if let Some(id) = progress {
         crate::toast::dismiss_toast_detached(id);
     }
-    deleted
+    deleted.map_err(|e| {
+        crate::log::error(format!("deleting identity `{alias}` failed: {e}"), None);
+        deletion_failure_text(alias, &e, started)
+    })
+}
+
+/// What the user is told when a deletion did not finish. A deletion that
+/// started (a page was removed), or whose outcome is unknown, may be partly
+/// done: the identity is hidden but some of its data is left, and a retry
+/// finishes it without asking again.
+pub(crate) fn deletion_failure_text(
+    alias: &str,
+    error: &crate::mail_delegate::CallError,
+    started: bool,
+) -> String {
+    if started || matches!(error, crate::mail_delegate::CallError::Unknown(_)) {
+        format!(
+            "Deleting identity `{alias}` may be incomplete; it will finish when you retry \
+             (Your identities → Finish deleting)."
+        )
+    } else {
+        format!("Identity `{alias}` was not deleted: {error}")
+    }
+}
+
+/// Identities whose approved deletion was interrupted (the page closed or
+/// lost the node midway). The delegate hides them; the identities screen
+/// offers to finish each.
+pub(crate) static UNFINISHED_DELETIONS: GlobalSignal<Vec<IdentityInfo>> = Signal::global(Vec::new);
+
+/// Ask the delegate which deletions are unfinished and show them.
+pub(crate) async fn refresh_unfinished_deletions() {
+    match ops::list_deleting_identities().await {
+        Ok(list) => {
+            if dioxus::core::Runtime::try_current().is_some() {
+                *UNFINISHED_DELETIONS.write() = list;
+            }
+        }
+        Err(e) => crate::log::error(format!("listing unfinished deletions failed: {e}"), None),
+    }
+}
+
+/// Finish an interrupted deletion. The user approved it before, so the
+/// delegate does not ask again.
+pub(crate) async fn finish_deletion(info: IdentityInfo) {
+    match delete_with_progress(info.addr, info.generation, &info.alias).await {
+        Ok(()) => {
+            crate::local_state::forget_alias(&info.alias);
+            crate::toast::push_toast_detached(
+                format!("Identity `{}` deleted", info.alias),
+                crate::toast::ToastLevel::Success,
+            );
+        }
+        Err(text) => {
+            crate::toast::push_toast_detached(text, crate::toast::ToastLevel::Error);
+        }
+    }
+    refresh_unfinished_deletions().await;
+}
+
+/// What a restore says when the delegate refuses an identity because its
+/// deletion is unfinished: finish the deletion first, then restore.
+pub(crate) fn restore_failure_text(error: &crate::mail_delegate::CallError) -> String {
+    match error {
+        crate::mail_delegate::CallError::Failed(f)
+            if f.code == freenet_mail_protocol::FailureCode::Refused
+                && f.detail.contains("being deleted") =>
+        {
+            "This identity's deletion has not finished. Finish deleting it under \
+             Your identities, then restore it."
+                .into()
+        }
+        other => format!("Couldn't restore the identity: {other}"),
+    }
 }
 
 /// What the user sees while a large identity is deleted page by page.
@@ -207,6 +286,7 @@ pub(crate) async fn load_and_report() {
     // ran the user could create an identity that the late announcement then
     // hid (#286). Views opened before the load lands re-render when it does.
     send_action(NodeAction::IdentitiesLoaded { identities: loaded });
+    refresh_unfinished_deletions().await;
     #[cfg(feature = "use-node")]
     {
         let mark = crate::local_state::begin_load();
@@ -397,6 +477,36 @@ pub(crate) async fn publish(identity: Identity, backed_up: bool) -> Result<(), D
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_deletion_that_may_be_partly_done_is_never_called_not_deleted() {
+        use crate::mail_delegate::CallError;
+        let refused = CallError::Failed(freenet_mail_protocol::Failure {
+            code: freenet_mail_protocol::FailureCode::Refused,
+            detail: "the user declined".into(),
+        });
+        let unknown = CallError::Unknown("timed out".into());
+        // Nothing was removed and the delegate said so.
+        assert!(deletion_failure_text("alice", &refused, false).contains("was not deleted"));
+        // A page was removed, or nobody knows: it may be partly done.
+        for (e, started) in [(&refused, true), (&unknown, false), (&unknown, true)] {
+            let text = deletion_failure_text("alice", e, started);
+            assert!(text.contains("may be incomplete"), "{text}");
+            assert!(!text.contains("was not deleted"), "{text}");
+        }
+    }
+
+    #[test]
+    fn restoring_an_identity_being_deleted_says_to_finish_the_deletion() {
+        use crate::mail_delegate::CallError;
+        let being_deleted = CallError::Failed(freenet_mail_protocol::Failure {
+            code: freenet_mail_protocol::FailureCode::Refused,
+            detail: "this identity is being deleted".into(),
+        });
+        assert!(restore_failure_text(&being_deleted).contains("Finish deleting"));
+        let other = CallError::Unknown("timed out".into());
+        assert!(restore_failure_text(&other).starts_with("Couldn't restore the identity"));
+    }
 
     #[test]
     fn deletion_progress_names_the_identity_and_what_is_left() {

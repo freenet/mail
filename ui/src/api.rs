@@ -2092,17 +2092,15 @@ pub(crate) async fn node_comms(
                             ab_gen.0.set(prev.wrapping_add(1));
                             login_controller.write().updated = true;
                         }
-                        Err(e) => {
-                            crate::log::error(
-                                format!("failed to delete identity {alias}: {e}"),
-                                None,
-                            );
+                        Err(text) => {
                             // Detached task: no component scope for
-                            // `push_toast`'s `use_context`.
+                            // `push_toast`'s `use_context`. A deletion that
+                            // stopped midway is offered for finishing.
                             crate::toast::push_toast_detached(
-                                format!("Identity `{alias}` was not deleted: {e}"),
+                                text,
                                 crate::toast::ToastLevel::Error,
                             );
+                            crate::app::identity_store::refresh_unfinished_deletions().await;
                         }
                     }
                 });

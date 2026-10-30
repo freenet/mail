@@ -300,9 +300,10 @@ pub(crate) fn app() -> Element {
                             .await
                             {
                                 crate::toast::push_toast_detached(
-                                    format!("Identity `{}` was not deleted: {e}", identity.alias),
+                                    e,
                                     crate::toast::ToastLevel::Error,
                                 );
+                                identity_store::refresh_unfinished_deletions().await;
                                 continue;
                             }
                             Identity::remove_in_place(&identity.alias);

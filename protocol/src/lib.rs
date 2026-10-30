@@ -315,6 +315,10 @@ pub enum Op {
     /// Withdraw a remembered "Always allow for this app" for exports, and end
     /// any export session.
     RevokeExportGrant,
+    /// The identities whose deletion the user approved but which are not
+    /// gone yet (the deletion was interrupted). `ListIdentities` hides them;
+    /// `DeleteIdentity` finishes one without asking again.
+    ListDeletingIdentities,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

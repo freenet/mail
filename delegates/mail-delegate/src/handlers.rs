@@ -137,6 +137,7 @@ fn handle_request(
         | Op::DeleteIdentity { .. }) => return Ok(consent::request(s, id, op)),
         Op::GetStatus => status(s),
         Op::ListIdentities => list_identities(s),
+        Op::ListDeletingIdentities => list_deleting_identities(s),
         Op::CreateIdentity {
             alias,
             description,
@@ -294,6 +295,25 @@ fn status(s: &Space<'_>) -> OpResult {
         byte_budget: store::MAX_ORIGIN_BYTES,
         v1_transition: cfg!(feature = "v1-transition"),
     }))
+}
+
+/// Identities whose approved deletion has not finished.
+fn list_deleting_identities(s: &Space<'_>) -> OpResult {
+    let (_, ids) = s.index(IDENTITY_INDEX)?;
+    let mut out = Vec::new();
+    for id in ids {
+        let addr = Addr(
+            id.as_slice()
+                .try_into()
+                .map_err(|_| fail(FailureCode::Internal, "the identity index is unreadable"))?,
+        );
+        if let Some((g, r)) = load_identity(s, &addr)?
+            && r.deleting
+        {
+            out.push(info(addr, g, &r));
+        }
+    }
+    Ok(Reply::Identities(out))
 }
 
 fn list_identities(s: &Space<'_>) -> OpResult {

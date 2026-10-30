@@ -369,3 +369,48 @@ fn a_stash_dated_in_the_future_is_treated_as_expired() {
         FailureCode::Refused
     );
 }
+
+/// An approved deletion interrupted midway (the tab closed) is listed by
+/// `ListDeletingIdentities`, only for the app that owns it, and finishing it
+/// asks nothing.
+#[test]
+fn an_interrupted_deletion_is_listed_and_finishes_without_asking() {
+    let mut env = MemEnv::default();
+    let me = create(&mut env, PROD, "alice");
+    let keep = create(&mut env, PROD, "bob");
+    fill_archive(&mut env, me.addr, 600);
+    let del = Op::DeleteIdentity {
+        addr: me.addr,
+        expected_gen: me.generation,
+    };
+    let (id, _, _) = prompt(&send(&mut env, app(PROD), del.clone()));
+    assert!(matches!(
+        response(&answer(&mut env, PROD, id, DELETE)).result,
+        Ok(Reply::Continue { .. })
+    ));
+    // The page went away here.
+    let listed = |env: &mut MemEnv, origin| match call(env, origin, Op::ListDeletingIdentities) {
+        Ok(Reply::Identities(v)) => v.iter().map(|i| i.addr).collect::<Vec<_>>(),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(listed(&mut env, PROD), vec![me.addr]);
+    assert!(
+        listed(&mut env, OTHER).is_empty(),
+        "another app sees nothing"
+    );
+    assert!(!listed(&mut env, PROD).contains(&keep.addr));
+    loop {
+        let out = send(&mut env, app(PROD), del.clone());
+        assert!(
+            out.iter()
+                .all(|m| !matches!(m, OutboundDelegateMsg::RequestUserInput(_))),
+            "finishing an approved deletion must not ask again"
+        );
+        match response(&out).result {
+            Ok(Reply::Continue { .. }) => continue,
+            Ok(Reply::Deleted) => break,
+            other => panic!("{other:?}"),
+        }
+    }
+    assert!(listed(&mut env, PROD).is_empty(), "nothing left to finish");
+}

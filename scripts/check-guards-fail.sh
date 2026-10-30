@@ -135,6 +135,14 @@ dt "origins get separate namespaces" "$D/store.rs" \
     origins_and_kinds_never_share_a_key,a_foreign_origin_can_neither_read_nor_change_another_namespace
 dt "index records enforce per-kind caps" "$D/store.rs" \
     'if ids.len() >= cap {' 'if ids.len() >= cap + 1_000_000 {' per_kind_caps_are_enforced_from_the_index
+dt "an interrupted deletion is listed for finishing" "$D/handlers.rs" \
+    '            && r.deleting
+        {
+            out.push(info(addr, g, &r));' \
+    '            && !r.deleting
+        {
+            out.push(info(addr, g, &r));' \
+    an_interrupted_deletion_is_listed_and_finishes_without_asking
 dt "the export grant is the only way to skip the prompt" "$D/consent.rs" \
     'if kind == Kind::Export && s.get(EXPORT_GRANT).is_some() {' 'if kind == Kind::Export {' \
     an_export_asks_and_only_an_allow_releases_the_key

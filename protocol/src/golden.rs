@@ -38,6 +38,7 @@ fn op_name(op: &Op) -> &'static str {
         Op::ExportProfile { .. } => "op_export_profile",
         Op::ExportForSuccessor { .. } => "op_export_for_successor",
         Op::RevokeExportGrant => "op_revoke_export_grant",
+        Op::ListDeletingIdentities => "op_list_deleting_identities",
     }
 }
 
@@ -207,6 +208,7 @@ fn ops() -> Vec<Op> {
             session: None,
         },
         Op::RevokeExportGrant,
+        Op::ListDeletingIdentities,
     ]
 }
 
