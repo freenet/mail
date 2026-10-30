@@ -1179,6 +1179,25 @@ pub(crate) struct ComposePostSend {
     pub push_success_toast: bool,
 }
 
+/// One send at a time per compose sheet. Send first checks the draft with
+/// the delegate (a round trip), so a second click arriving before that
+/// answer would start a second send of the same message. The first click
+/// claims the send; later clicks are ignored until it settles
+/// ([`release_send`]).
+pub(crate) fn claim_send(sending: &mut bool) -> bool {
+    if *sending {
+        return false;
+    }
+    *sending = true;
+    true
+}
+
+/// The send claimed by [`claim_send`] has settled (sent, refused or
+/// failed), so Send works again.
+pub(crate) fn release_send(sending: &mut bool) {
+    *sending = false;
+}
+
 /// All-or-nothing decision driven by `send_succeeded`. Encodes the
 /// invariant that compose-form-finalization is gated on send success.
 pub(crate) fn compose_post_send(send_succeeded: bool) -> ComposePostSend {
@@ -5913,10 +5932,21 @@ fn ComposeSheet() -> Element {
     // Before sending, make sure the draft was not sent or discarded in
     // another tab meanwhile: this page may hold it untouched, with no
     // autosave to notice, and sending it would send it twice.
+    //
+    // Two tabs pressing Send on the same draft within the same couple of
+    // delegate round trips can both pass this check; that window is left
+    // open. Closing it would mean claiming the draft before sending (a
+    // compare-and-swap delete), and then un-claiming it if the send fails.
     let alias_for_check = user_alias.clone();
+    // Set while a send is being checked or sent, so a second click in the
+    // meantime does not send the message again (`claim_send`).
+    let mut sending = use_signal(|| false);
     let send_msg = move |_| {
         if *draft_gone.read() {
             crate::toast::push_toast(DRAFT_GONE_ELSEWHERE, crate::toast::ToastLevel::Warning);
+            return;
+        }
+        if !claim_send(&mut sending.write()) {
             return;
         }
         #[cfg(feature = "use-node")]
@@ -5924,6 +5954,8 @@ fn ComposeSheet() -> Element {
             let alias = alias_for_check.clone();
             let id = draft_id.read().clone();
             spawn(async move {
+                // `send_now` is synchronous, so the sheet is still mounted
+                // when the send is released below, whatever it did.
                 match crate::local_state::check_draft_before_send(alias.clone(), id.clone()).await {
                     Ok(crate::local_state::DraftCheck::Current) => send_now(()),
                     Ok(crate::local_state::DraftCheck::GoneElsewhere) => {
@@ -5943,12 +5975,14 @@ fn ComposeSheet() -> Element {
                         );
                     }
                 }
+                release_send(&mut sending.write());
             });
         }
         #[cfg(not(feature = "use-node"))]
         {
             let _ = &alias_for_check;
             send_now(());
+            release_send(&mut sending.write());
         }
     };
 
@@ -6206,8 +6240,9 @@ fn ComposeSheet() -> Element {
                         button {
                             class: "btn btn-primary",
                             "data-testid": testid::FM_SEND,
+                            disabled: *sending.read(),
                             onclick: send_msg,
-                            "Send"
+                            if *sending.read() { "Sending…" } else { "Send" }
                         }
                     }
                 }
@@ -6299,7 +6334,20 @@ mod deferred_removal_tests {
 
 #[cfg(test)]
 mod compose_post_send_tests {
-    use super::compose_post_send;
+    use super::{claim_send, compose_post_send, release_send};
+
+    /// A second Send while the first is still being checked or sent is
+    /// ignored, so one message is not sent twice from one tab; once the
+    /// first settles, Send works again.
+    #[test]
+    fn a_second_send_click_while_one_is_in_flight_is_ignored() {
+        let mut sending = false;
+        assert!(claim_send(&mut sending), "the first click sends");
+        assert!(!claim_send(&mut sending), "a double click does not");
+        assert!(!claim_send(&mut sending), "nor a third");
+        release_send(&mut sending);
+        assert!(claim_send(&mut sending), "after it settles, Send works");
+    }
 
     /// Regression for #230. Before the fix, `delete_draft_now`, navigation,
     /// and the green "Sent" toast all ran unconditionally after the
