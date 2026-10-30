@@ -314,11 +314,35 @@ pub(crate) fn in_flight_sent() -> std::collections::HashSet<(String, String)> {
 /// Mark Failed every Sent row of `owners` left `Pending` by an earlier page
 /// session (see `local_state::stranded_pending_sent`), locally and in the
 /// mail delegate. Returns how many were marked, for one notice to the user.
+///
+/// Only rows older than the stale-send timeout count, and they are stored
+/// as presumed failed (`local_state::presume_sent_failed`): nothing here
+/// knows they failed, so a Delivered that still arrives for one (from the
+/// tab that sent it) is kept rather than refused.
 #[cfg(feature = "use-node")]
 pub(crate) fn fail_stranded_pending_sent(owners: &[String]) -> usize {
-    let stranded = crate::local_state::stranded_pending_sent(owners, &in_flight_sent());
+    let stranded = crate::local_state::stranded_pending_sent(
+        owners,
+        &in_flight_sent(),
+        chrono::Utc::now().timestamp_millis(),
+        PENDING_SENT_TIMEOUT_SECS * 1000,
+    );
     for (key, sent_id) in &stranded {
-        fail_one_sent(key, sent_id);
+        if !crate::local_state::local_set_sent_delivery_state(
+            key,
+            sent_id,
+            freenet_mail_wire_v1::local_state::DeliveryState::Failed,
+        ) {
+            continue;
+        }
+        let (key, sent_id) = (key.clone(), sent_id.clone());
+        wasm_bindgen_futures::spawn_local(async move {
+            if let Err(e) =
+                crate::local_state::presume_sent_failed(key.clone(), sent_id.clone()).await
+            {
+                crate::log::error(format!("presume_sent_failed for {sent_id}: {e}"), None);
+            }
+        });
     }
     stranded.len()
 }

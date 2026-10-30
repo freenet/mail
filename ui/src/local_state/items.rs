@@ -391,7 +391,9 @@ pub(crate) async fn save_sent(
     let alias = super::state_key(&alias);
     let item = item(ItemKind::Sent, Some(owner(&alias)?), uuid_id(&id)?);
     let sent = sent_with_early_delivery(&alias, &id, sent);
-    put(item, json(&sent)).await.map_err(boxed)?;
+    put(item, json(&StoredSent::new(sent)))
+        .await
+        .map_err(boxed)?;
     super::drain_acked_sent(&alias, &id);
     // A state that arrived while that write was in flight found no item
     // yet; apply it now that the item is stored.
@@ -407,12 +409,70 @@ pub(crate) async fn delete_sent(alias: String, id: String) -> Result<(), DynErro
     delete(item).await.map_err(boxed)
 }
 
+/// A sent message as stored: the v0.2.x fields plus whether its `Failed` is
+/// only presumed. A page that finds a row still Pending long after it was
+/// sent, with no send of its own waiting on it, marks it Failed without
+/// knowing (`super::stranded_pending_sent`): the tab that sent it may still
+/// be open and get the inbox's answer. That answer is the truth, so a
+/// presumed Failed gives way to Delivered; a Failed a send actually saw
+/// stays terminal (#288). Unset, the field is omitted, so rows read and
+/// write the same bytes as before it existed.
+#[derive(Serialize, Deserialize)]
+struct StoredSent {
+    #[serde(flatten)]
+    sent: SentMessage,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    presumed_failed: bool,
+}
+
+impl StoredSent {
+    fn new(sent: SentMessage) -> Self {
+        StoredSent {
+            sent,
+            presumed_failed: false,
+        }
+    }
+}
+
+/// The stored row with `state` applied, or `None` to leave it as it is:
+/// a terminal state stays, except a presumed Failed, which a Delivered
+/// replaces. `presumed` marks the Failed being written as presumed.
+fn advance_sent(mut row: StoredSent, state: DeliveryState, presumed: bool) -> Option<StoredSent> {
+    let overrides_presumed = row.presumed_failed
+        && row.sent.delivery_state == DeliveryState::Failed
+        && state == DeliveryState::Delivered;
+    if super::delivery_state_is_terminal(row.sent.delivery_state) && !overrides_presumed {
+        return None;
+    }
+    row.sent.delivery_state = state;
+    row.presumed_failed = presumed && state == DeliveryState::Failed;
+    Some(row)
+}
+
 /// Move a sent message's delivery state on, unless it is already terminal
-/// (`super::delivery_state_is_terminal`, #288).
+/// (`super::delivery_state_is_terminal`, #288; a presumed Failed is the one
+/// exception, see [`StoredSent`]).
 pub(crate) async fn set_sent_delivery_state(
     alias: String,
     id: String,
     state: DeliveryState,
+) -> Result<(), DynError> {
+    write_sent_state(alias, id, state, false).await
+}
+
+/// Store a sent message as presumed failed: Failed, but replaced by a
+/// Delivered that still arrives (see [`StoredSent`]). Only for a row this
+/// page found stranded, never for a send this page saw fail.
+#[cfg_attr(not(feature = "use-node"), allow(dead_code))]
+pub(crate) async fn presume_sent_failed(alias: String, id: String) -> Result<(), DynError> {
+    write_sent_state(alias, id, DeliveryState::Failed, true).await
+}
+
+async fn write_sent_state(
+    alias: String,
+    id: String,
+    state: DeliveryState,
+    presumed: bool,
 ) -> Result<(), DynError> {
     let alias = super::state_key(&alias);
     let item = item(ItemKind::Sent, Some(owner(&alias)?), uuid_id(&id)?);
@@ -424,12 +484,8 @@ pub(crate) async fn set_sent_delivery_state(
             EARLY_DELIVERY.with(|e| e.borrow_mut().insert(key.clone(), state));
             return None;
         };
-        let mut sent: SentMessage = serde_json::from_slice(stored).ok()?;
-        if super::delivery_state_is_terminal(sent.delivery_state) {
-            return None;
-        }
-        sent.delivery_state = state;
-        Some(json(&sent))
+        let row: StoredSent = serde_json::from_slice(stored).ok()?;
+        advance_sent(row, state, presumed).map(|row| json(&row))
     })
     .await
     .map(|_| ())
@@ -781,9 +837,11 @@ pub(crate) async fn load(identities: &[(String, Addr)]) -> Result<LocalState, Ca
             }
         }
         for i in list_owned(*addr, ItemKind::Sent).await? {
-            if let (Some(id), Some(s)) = (uuid_string(&i.item.id), decode("sent message", &i.body))
-            {
-                entry.sent.insert(id, s);
+            if let (Some(id), Some(s)) = (
+                uuid_string(&i.item.id),
+                decode::<StoredSent>("sent message", &i.body),
+            ) {
+                entry.sent.insert(id, s.sent);
             }
         }
         for i in list_owned(*addr, ItemKind::Kept).await? {
@@ -1002,6 +1060,53 @@ mod tests {
         assert!(!apply_changes(&mut already, &before, &after));
     }
 
+    fn stored(state: DeliveryState, presumed_failed: bool) -> StoredSent {
+        StoredSent {
+            sent: SentMessage {
+                delivery_state: state,
+                ..SentMessage::default()
+            },
+            presumed_failed,
+        }
+    }
+
+    /// A Failed this page only presumed (a stranded row) gives way to the
+    /// Delivered the sending tab still gets; a Failed a send saw stays
+    /// terminal (#288), as does Delivered.
+    #[test]
+    fn a_presumed_failure_gives_way_to_a_delivery_and_a_real_one_does_not() {
+        use DeliveryState::*;
+        let delivered = advance_sent(stored(Failed, true), Delivered, false).unwrap();
+        assert_eq!(delivered.sent.delivery_state, Delivered);
+        assert!(!delivered.presumed_failed);
+        assert!(advance_sent(stored(Failed, false), Delivered, false).is_none());
+        assert!(advance_sent(stored(Delivered, false), Failed, true).is_none());
+        // A presumed Failed is not replaced by another Failed.
+        assert!(advance_sent(stored(Failed, true), Failed, false).is_none());
+        let presumed = advance_sent(stored(Pending, false), Failed, true).unwrap();
+        assert_eq!(presumed.sent.delivery_state, Failed);
+        assert!(presumed.presumed_failed);
+        let real = advance_sent(stored(Pending, false), Failed, false).unwrap();
+        assert!(!real.presumed_failed);
+    }
+
+    /// Rows without the flag keep their bytes: stored rows written before it
+    /// existed still decode, and a row that is not presumed failed encodes
+    /// exactly as a bare `SentMessage`.
+    #[test]
+    fn a_sent_row_without_the_flag_keeps_its_bytes() {
+        let sent = SentMessage {
+            to: "bob".into(),
+            sent_at: 42,
+            ..SentMessage::default()
+        };
+        let bare = json(&sent);
+        assert_eq!(json(&StoredSent::new(sent.clone())), bare);
+        let back: StoredSent = serde_json::from_slice(&bare).unwrap();
+        assert!(!back.presumed_failed);
+        assert_eq!(back.sent.sent_at, 42);
+    }
+
     #[test]
     fn draft_and_sent_ids_are_their_uuid_bytes() {
         let id = uuid::Uuid::new_v4().to_string();
@@ -1030,6 +1135,58 @@ mod delegate_tests {
 
     fn loaded(alias: &str, addr: Addr) -> LocalState {
         block_on(load(&[(alias.to_string(), addr)])).unwrap()
+    }
+
+    /// A page that finds another tab's send stranded stores it as presumed
+    /// failed; the sending tab's Delivered then wins in the store. A send
+    /// that really failed still refuses a late Delivered (#288).
+    #[test]
+    fn the_sending_tabs_delivery_wins_over_a_presumed_failure() {
+        let alias = "items-presumed";
+        let addr = identity(alias);
+        let state_of = |id: &str| {
+            loaded(alias, addr)
+                .sent_of(alias)
+                .find(|(sent_id, _)| sent_id.as_str() == id)
+                .map(|(_, s)| s.delivery_state)
+        };
+        let presumed = uuid::Uuid::new_v4().to_string();
+        block_on(save_sent(
+            alias.into(),
+            presumed.clone(),
+            SentMessage::default(),
+        ))
+        .unwrap();
+        block_on(presume_sent_failed(alias.into(), presumed.clone())).unwrap();
+        assert_eq!(state_of(&presumed), Some(DeliveryState::Failed));
+        block_on(set_sent_delivery_state(
+            alias.into(),
+            presumed.clone(),
+            DeliveryState::Delivered,
+        ))
+        .unwrap();
+        assert_eq!(state_of(&presumed), Some(DeliveryState::Delivered));
+
+        let failed = uuid::Uuid::new_v4().to_string();
+        block_on(save_sent(
+            alias.into(),
+            failed.clone(),
+            SentMessage::default(),
+        ))
+        .unwrap();
+        block_on(set_sent_delivery_state(
+            alias.into(),
+            failed.clone(),
+            DeliveryState::Failed,
+        ))
+        .unwrap();
+        block_on(set_sent_delivery_state(
+            alias.into(),
+            failed.clone(),
+            DeliveryState::Delivered,
+        ))
+        .unwrap();
+        assert_eq!(state_of(&failed), Some(DeliveryState::Failed));
     }
 
     fn draft(subject: &str) -> Draft {

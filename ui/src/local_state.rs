@@ -672,6 +672,9 @@ pub(crate) use items::{
     delete_sent, full_message_id, load, message_id_for, reclaim_flags, save_draft, save_sent,
     set_sent_delivery_state,
 };
+// Only the node build finds stranded sends to presume failed.
+#[cfg_attr(not(feature = "use-node"), allow(unused_imports))]
+pub(crate) use items::presume_sent_failed;
 pub(crate) use items::{forget_unreadable_list, list_name, unreadable_lists};
 // `unarchive_message` is wired but unused until #60 (true unarchive).
 #[allow(unused_imports)]
@@ -808,15 +811,22 @@ pub(crate) fn local_set_sent_delivery_state(alias: &str, id: &str, state: Delive
 }
 
 /// Sent rows of `owners` still `Pending` that no send in this page is
-/// waiting on: `in_flight` holds the `(state key, sent id)` of every send
-/// whose inbox update this page has queued. Such a row was left by an
-/// earlier page session that ended (reload, closed tab, crash) before the
-/// update was answered; nothing in this page will ever resolve it, and
-/// re-sending would seal a new ciphertext, so a message that did go out
-/// would arrive twice.
+/// waiting on and that were sent at least `min_age_ms` before `now_ms`:
+/// `in_flight` holds the `(state key, sent id)` of every send whose inbox
+/// update this page has queued. Such a row was left by an earlier page
+/// session that ended (reload, closed tab, crash) before the update was
+/// answered; nothing in this page will ever resolve it, and re-sending would
+/// seal a new ciphertext, so a message that did go out would arrive twice.
+///
+/// The age matters because `in_flight` only knows this page's sends:
+/// another open tab's send is Pending in the shared store and in no set
+/// here. Callers pass the stale-send timeout, after which the sending page
+/// gives up on the row itself.
 pub(crate) fn stranded_pending_sent(
     owners: &[String],
     in_flight: &HashSet<(String, String)>,
+    now_ms: i64,
+    min_age_ms: i64,
 ) -> Vec<(String, String)> {
     SNAPSHOT.with(|s| {
         let snapshot = s.borrow();
@@ -824,6 +834,7 @@ pub(crate) fn stranded_pending_sent(
         for owner in owners {
             for (sent_id, sent) in snapshot.sent_of(owner) {
                 if !delivery_state_is_terminal(sent.delivery_state)
+                    && now_ms.saturating_sub(sent.sent_at) >= min_age_ms
                     && !in_flight.contains(&(owner.clone(), sent_id.to_string()))
                 {
                     out.push((owner.clone(), sent_id.to_string()));
@@ -1922,9 +1933,30 @@ mod tests {
         local_save_sent("carol", "elsewhere", sent_row("bob"));
         let in_flight: HashSet<(String, String)> =
             [("alice".to_string(), "sending".to_string())].into();
+        // `sent_row` rows were sent at 0: long enough ago.
         assert_eq!(
-            stranded_pending_sent(&["alice".to_string()], &in_flight),
+            stranded_pending_sent(&["alice".to_string()], &in_flight, 1_000_000, 90_000),
             vec![("alice".to_string(), "left".to_string())]
+        );
+    }
+
+    /// A Pending row sent less than the stale-send timeout ago may be
+    /// another open tab's send in flight (this page's in-flight set knows
+    /// only its own sends): it is not stranded, so this page never writes a
+    /// Failed that the sending tab's Delivered would then be refused over.
+    #[test]
+    fn a_recent_pending_row_from_another_tab_is_not_stranded() {
+        fresh_snapshot();
+        let (now, timeout) = (1_000_000, 90_000);
+        let at = |sent_at| SentMessage {
+            sent_at,
+            ..sent_row("bob")
+        };
+        local_save_sent("alice", "other-tab", at(now - 10_000));
+        local_save_sent("alice", "old", at(now - timeout));
+        assert_eq!(
+            stranded_pending_sent(&["alice".to_string()], &HashSet::new(), now, timeout),
+            vec![("alice".to_string(), "old".to_string())]
         );
     }
 
