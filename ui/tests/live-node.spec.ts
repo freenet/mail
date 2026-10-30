@@ -121,14 +121,10 @@ async function recordEvidence(browser: Browser, context: BrowserContext) {
     lines: [],
   };
   EVIDENCE.set(browser, ev);
-  const start = async (ctx: BrowserContext) => {
-    watchContext(ctx, ev);
-    await ctx.tracing.start({ screenshots: true, snapshots: true });
-  };
-  await start(context);
+  watchContext(context, ev);
   browser.newContext = async (options) => {
     const ctx = await ev.newContext(options);
-    await start(ctx);
+    watchContext(ctx, ev);
     return ctx;
   };
 }
@@ -138,26 +134,31 @@ async function attachEvidence(browser: Browser, testInfo: TestInfo) {
   if (!ev) return;
   browser.newContext = ev.newContext;
   EVIDENCE.delete(browser);
-  const failed = testInfo.status !== testInfo.expectedStatus;
+  if (testInfo.status === testInfo.expectedStatus) return;
   for (const [i, ctx] of ev.contexts.entries()) {
-    const file = testInfo.outputPath(`trace-ctx${i}.zip`);
-    // A context the test already closed has no tracing to stop.
-    const stopped = await ctx.tracing
-      .stop(failed ? { path: file } : undefined)
-      .then(() => true)
-      .catch(() => false);
-    if (failed && stopped) {
-      await testInfo.attach(`trace-ctx${i}`, { path: file });
+    for (const [j, page] of ctx.pages().entries()) {
+      if (page.isClosed()) continue;
+      const name = `ctx${i}-page${j}`;
+      const shot = await page.screenshot({ fullPage: true }).catch(() => null);
+      if (shot) {
+        await testInfo.attach(`${name}.png`, { body: shot, contentType: "image/png" });
+      }
+      const app = await page
+        .$("iframe#app")
+        .then((el) => el?.contentFrame() ?? null)
+        .catch(() => null);
+      const html = await (app ?? page.mainFrame()).content().catch(() => null);
+      if (html) {
+        await testInfo.attach(`${name}.html`, { body: html, contentType: "text/html" });
+      }
     }
   }
-  if (failed) {
-    await testInfo.attach("console", {
-      body: ev.lines.join("\n"),
-      contentType: "text/plain",
-    });
-    console.log(`── console of failed test "${testInfo.title}" ──`);
-    for (const line of ev.lines) console.log(line);
-  }
+  await testInfo.attach("console", {
+    body: ev.lines.join("\n"),
+    contentType: "text/plain",
+  });
+  console.log(`── console of failed test "${testInfo.title}" ──`);
+  for (const line of ev.lines) console.log(line);
 }
 
 test.describe("Live node E2E", () => {
@@ -185,8 +186,8 @@ test.describe("Live node E2E", () => {
   });
 
   // A failure that only happens in CI leaves nothing to diagnose unless every
-  // page's console and a trace are kept. This suite runs with retries: 0, so
-  // the config's `trace: "on-first-retry"` never fires here.
+  // page's console, a screenshot and the app's DOM are kept. This suite runs
+  // with retries: 0, so the config's `trace: "on-first-retry"` never fires.
   test.afterEach(async ({ browser }, testInfo) => {
     await attachEvidence(browser, testInfo);
   });
