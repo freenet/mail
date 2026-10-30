@@ -131,6 +131,10 @@ pub enum FailureCode {
     UnsupportedVersion,
     /// The request's operation is not one this delegate knows (a newer UI).
     UnknownOperation,
+    /// The item is listed but its stored bytes cannot be read (the host
+    /// reports a file it cannot read or decrypt as absent, every time).
+    /// Writing it with `expected_gen: None` replaces it.
+    Unreadable,
 }
 
 /// What kind of stored item. Each kind has its own key space, so an identity,
@@ -319,6 +323,15 @@ pub enum Op {
     /// gone yet (the deletion was interrupted). `ListIdentities` hides them;
     /// `DeleteIdentity` finishes one without asking again.
     ListDeletingIdentities,
+    /// Reset an index whose stored bytes can no longer be read, so the app
+    /// can be used again: the identity index (`kind: None`) or one kind's
+    /// index (with its owner). Asks the user every time. Refused while the
+    /// index reads fine. Records stay stored: an identity comes back by
+    /// importing it again (from its recovery key).
+    RepairIndex {
+        kind: Option<ItemKind>,
+        owner: Option<Addr>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

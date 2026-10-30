@@ -32,6 +32,11 @@ const PINNED_BLIND_RUNS: &[(u64, usize, u32, u32)] = &[
     (1855, 80, 60, 20),
     (1871, 80, 60, 20),
     (1389, 80, 200, 100),
+    // A deletion marker that could not be read or removed, reported gone.
+    (1072, 80, 60, 20),
+    // An index created but left marked "may be absent", rebuilt from
+    // nothing once it failed to read.
+    (339, 80, 200, 100),
 ];
 
 const KINDS: [ItemKind; 5] = [
@@ -74,10 +79,8 @@ struct Model {
     items: BTreeMap<(ItemKind, Option<Addr>, Vec<u8>), Possible>,
     /// Every generation the delegate handed out, to catch reuse.
     generations: Vec<u64>,
-    /// Index entries left with no record under a create's marker: the
-    /// store cannot tell a create that failed from a record that keeps
-    /// failing to read, so it keeps the entry (a slot, no data) rather
-    /// than risk unlisting a live record.
+    /// Index entries left naming no record after healing: a leaked slot.
+    /// Always an invariant failure; counted so the test reports it.
     leaks: u64,
     log: Vec<String>,
 }
@@ -103,6 +106,9 @@ struct Run {
     rng: Rng,
     m: Model,
     lose_reply: u64,
+    /// The key that went persistently unreadable during the run, kept
+    /// past `heal` (which turns the faults off).
+    blinded: Option<Vec<u8>>,
 }
 
 impl Run {
@@ -474,6 +480,7 @@ impl Run {
     /// What a page does on its next load, with a working host: finish
     /// deletions it can, list everything.
     fn heal(&mut self) {
+        self.blinded = self.env.faults.as_ref().and_then(|f| f.blinded());
         self.env.faults = None;
         self.lose_reply = 0;
         if let Seen::Reply(Ok(Reply::Identities(deleting))) = self.send(Op::ListDeletingIdentities)
@@ -501,9 +508,40 @@ impl Run {
                 }
             }
         }
-        let Seen::Reply(Ok(Reply::Identities(listed))) = self.send(Op::ListIdentities) else {
+        let Seen::Reply(Ok(Reply::Identities(mut listed))) = self.send(Op::ListIdentities) else {
             panic!("listing identities on a working host failed");
         };
+        // An identity unlisted because its record was the unreadable key (a
+        // create marker beside it made it look like a create that never
+        // finished): the user restores it from its recovery key.
+        let unlisted: Vec<Addr> = self
+            .m
+            .ids
+            .iter()
+            .filter(|(a, i)| !i.deleting && !listed.iter().any(|l| l.addr == **a))
+            .map(|(a, _)| *a)
+            .collect();
+        for addr in unlisted {
+            let Some((dsa, kem)) = self.m.seeds.iter().find(|(d, k)| {
+                freenet_mail_protocol::address::address_of(
+                    &crate::crypto::Keys::from_seeds(d, k).vk_bytes(),
+                ) == addr
+            }) else {
+                continue;
+            };
+            let (dsa, kem) = (dsa.clone(), kem.clone());
+            let alias = format!("restored{}", self.rng.below(100_000));
+            if let Seen::Reply(Ok(Reply::Imported { identity, .. })) =
+                self.send(Op::ImportIdentity {
+                    source: ImportSource::Seeds { dsa, kem },
+                    kind: ImportKind::UserRestore,
+                    alias,
+                    description: String::new(),
+                })
+            {
+                listed.push(identity);
+            }
+        }
         for i in &listed {
             for kind in KINDS.iter().filter(|k| store::shape(**k).0) {
                 self.send(Op::ListItems {
@@ -560,29 +598,34 @@ fn check(run: &mut Run) -> Result<(), String> {
     // No private key without an index entry, no index entry without a
     // record (a slot is never leaked).
     let marker_of = |id: &[u8]| keys.get(&format!("dl/{}", store::hex(id))).cloned();
-    if let Some(id) = records.difference(&indexed).next() {
+    // The one record allowed to be stored but unlisted is the one that was
+    // unreadable during the run, when nothing could restore it (its keys
+    // were never handed back): unusable anyway, and restorable by import.
+    let blinded = run.blinded.clone();
+    let blinded_rel = |rel: &str| blinded.as_deref() == Some(s.full_key(rel).as_slice());
+    if let Some(id) = records.difference(&indexed).find(|id| {
+        let addr = Addr(id.as_slice().try_into().unwrap());
+        !blinded_rel(&store::identity_rel(&addr))
+    }) {
         return Err(format!(
             "identity {} is stored but not listed",
             &store::hex(id)[..8]
         ));
     }
     let leaked: BTreeSet<Vec<u8>> = indexed.difference(&records).cloned().collect();
-    for id in &leaked {
-        if marker_of(id).as_deref() != Some(store::MARKER_CREATING) {
-            return Err(format!(
-                "index entry {} has no record and no create marker ({:?})",
-                &store::hex(id)[..8],
-                marker_of(id).map(|m| String::from_utf8_lossy(&m).into_owned())
-            ));
-        }
+    if let Some(id) = leaked.iter().next() {
+        return Err(format!(
+            "index entry {} has no record (marker {:?}): a leaked slot",
+            &store::hex(id)[..8],
+            marker_of(id).map(|m| String::from_utf8_lossy(&m).into_owned())
+        ));
     }
-    run.m.leaks += leaked.len() as u64;
     // A marker may be left only where it licenses nothing (no entry), or
     // beside a tolerated leak.
     if let Some(h) = keys
         .keys()
         .filter_map(|k| k.strip_prefix("dl/"))
-        .find(|h| indexed.contains(&unhex(h)) && !leaked.contains(&unhex(h)))
+        .find(|h| indexed.contains(&unhex(h)))
     {
         return Err(format!("a marker outlived its create or deletion: {h}"));
     }
@@ -618,7 +661,7 @@ fn check(run: &mut Run) -> Result<(), String> {
             let (_, ids) = s
                 .index(&store::index_rel(kind, owner.as_ref()))
                 .map_err(|f| format!("{f:?}"))?;
-            if !ids.contains(&unhex(parts[3])) {
+            if !ids.contains(&unhex(parts[3])) && !blinded_rel(k) {
                 return Err(format!("{k} is not in its index"));
             }
         }
@@ -631,14 +674,7 @@ fn check(run: &mut Run) -> Result<(), String> {
             for id in ids {
                 let item = format!("it/{tag}/{owner_hex}/{}", store::hex(&id));
                 if !keys.contains_key(&item) {
-                    let pending = format!(
-                        "pi/{}",
-                        store::hex(&blake3::hash(item.as_bytes()).as_bytes()[..16])
-                    );
-                    if keys.get(&pending).map(Vec::as_slice) == Some(store::MARKER_CREATING) {
-                        run.m.leaks += 1;
-                        continue;
-                    }
+                    run.m.leaks += 1;
                     return Err(format!("{k} names {item}, which is not stored"));
                 }
             }
@@ -700,6 +736,7 @@ fn run_seed_with(
         rng: Rng(seed.wrapping_mul(0xD1B5_4A32_D192_ED03) | 1),
         m: Model::default(),
         lose_reply: u64::from(per_mille),
+        blinded: None,
     };
     for _ in 0..ops {
         run.step();
@@ -760,12 +797,9 @@ fn invariants_hold_over_a_host_that_misses_reads_and_refuses_writes() {
     );
     // The faults really fired.
     assert!(injected > seeds, "only {injected} faults injected");
-    // A slot left under a create's marker takes a record write, its
-    // rollback and three tries at marking it failed all being refused: at
-    // the default rate, none. (Higher FAULT_RATE runs may leak a few.)
-    if rate <= 60 {
-        assert_eq!(leaks, 0, "{leaks} index slots leaked");
-    }
+    // A create that never finished frees its slot on the next listing, at
+    // every fault rate.
+    assert_eq!(leaks, 0, "{leaks} index slots leaked");
 }
 
 /// One present key at a time goes persistently unreadable (freenet-core
@@ -826,14 +860,17 @@ fn a_create_marker_beside_an_unreadable_record_licenses_nothing() {
             rng: Rng(7),
             m: Model::default(),
             lose_reply: 0,
+            blinded: None,
         };
         let ui_entropy = run.entropy();
-        let Seen::Reply(Ok(Reply::CreatedIdentity { identity, .. })) =
-            run.send(Op::CreateIdentity {
-                alias: "x3".into(),
-                description: String::new(),
-                ui_entropy,
-            })
+        let Seen::Reply(Ok(Reply::CreatedIdentity {
+            identity,
+            recovery_key,
+        })) = run.send(Op::CreateIdentity {
+            alias: "x3".into(),
+            description: String::new(),
+            ui_entropy,
+        })
         else {
             panic!("create failed on a perfect host");
         };
@@ -859,6 +896,24 @@ fn a_create_marker_beside_an_unreadable_record_licenses_nothing() {
             "{leftover:?}: deleted without asking: {}",
             describe(&seen)
         );
+        if leftover == store::MARKER_CREATING {
+            // A create marker beside an absent record is a create that never
+            // finished, and a listing frees its slot. The one case that
+            // misreads (this one: the record is only unreadable) must stay
+            // recoverable: importing the keys again restores it, even while
+            // the record still cannot be read.
+            let seen = run.send(Op::ImportIdentity {
+                source: ImportSource::RecoveryKey(recovery_key.clone()),
+                kind: ImportKind::UserRestore,
+                alias: "x3".into(),
+                description: String::new(),
+            });
+            assert!(
+                matches!(seen, Seen::Reply(Ok(Reply::Imported { .. }))),
+                "re-import while unreadable: {}",
+                describe(&seen)
+            );
+        }
         run.env.faults = None;
         let Seen::Reply(Ok(Reply::Identities(listed))) = run.send(Op::ListIdentities) else {
             panic!("listing failed on a working host");
@@ -910,6 +965,7 @@ fn the_invariant_check_fails_on_a_leaked_identity_slot() {
         rng: Rng(7),
         m: Model::default(),
         lose_reply: 0,
+        blinded: None,
     };
     run.create();
     let addr = *run.m.ids.keys().next().unwrap();

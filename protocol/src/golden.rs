@@ -39,6 +39,7 @@ fn op_name(op: &Op) -> &'static str {
         Op::ExportForSuccessor { .. } => "op_export_for_successor",
         Op::RevokeExportGrant => "op_revoke_export_grant",
         Op::ListDeletingIdentities => "op_list_deleting_identities",
+        Op::RepairIndex { .. } => "op_repair_index",
     }
 }
 
@@ -75,6 +76,7 @@ fn failure_name(code: &FailureCode) -> &'static str {
         FailureCode::Internal => "failure_internal",
         FailureCode::UnsupportedVersion => "failure_unsupported_version",
         FailureCode::UnknownOperation => "failure_unknown_operation",
+        FailureCode::Unreadable => "failure_unreadable",
     }
 }
 
@@ -209,6 +211,10 @@ fn ops() -> Vec<Op> {
         },
         Op::RevokeExportGrant,
         Op::ListDeletingIdentities,
+        Op::RepairIndex {
+            kind: Some(ItemKind::Draft),
+            owner: Some(a),
+        },
     ]
 }
 
@@ -282,6 +288,7 @@ fn samples() -> Vec<(String, Vec<u8>)> {
         FailureCode::Internal,
         FailureCode::UnsupportedVersion,
         FailureCode::UnknownOperation,
+        FailureCode::Unreadable,
     ] {
         let f = Failure {
             code,

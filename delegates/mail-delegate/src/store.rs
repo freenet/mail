@@ -43,6 +43,11 @@ pub const MAX_MESSAGES: usize = 4096;
 pub const MAX_ORIGIN_KEYS: u64 = 300_000;
 /// Bytes (keys plus values) one origin may hold.
 pub const MAX_ORIGIN_BYTES: u64 = 512 * 1024 * 1024;
+/// Headroom past the budget that only deletion bookkeeping may use: a
+/// delete writes a marker before it removes anything, and a user whose
+/// storage is full must still be able to delete to free space.
+pub const RESERVED_KEYS: u64 = 64;
+pub const RESERVED_BYTES: u64 = 64 * 1024;
 /// Pending consent prompts per origin; the oldest is refused past this.
 pub const MAX_PENDING_PROMPTS: usize = 4;
 /// A prompt not answered within this many seconds is refused.
@@ -273,10 +278,31 @@ impl<'a> Space<'a> {
         self.env.set(&key, &b)
     }
 
+    #[cfg(test)]
+    pub fn set_usage_for_test(&mut self, u: Usage) {
+        assert!(self.set_usage(u));
+    }
+
     /// Store `value` under `rel`, within the origin's budget. The usage
     /// record is written first: if the value write then fails, the record
     /// over-counts, which only ever costs capacity.
     pub fn put(&mut self, rel: &str, value: &[u8]) -> Result<(), Failure> {
+        self.put_within(rel, value, 0, 0)
+    }
+
+    /// [`Space::put`] for the bookkeeping of a deletion, which may use the
+    /// [`RESERVED_KEYS`]/[`RESERVED_BYTES`] headroom past the budget.
+    pub fn put_for_delete(&mut self, rel: &str, value: &[u8]) -> Result<(), Failure> {
+        self.put_within(rel, value, RESERVED_KEYS, RESERVED_BYTES)
+    }
+
+    fn put_within(
+        &mut self,
+        rel: &str,
+        value: &[u8],
+        extra_keys: u64,
+        extra_bytes: u64,
+    ) -> Result<(), Failure> {
         let key = self.full_key(rel);
         let old = self.fetch(&key);
         let before = self.usage();
@@ -285,7 +311,13 @@ impl<'a> Space<'a> {
             keys: before.keys + u64::from(old.is_none()),
             bytes: (before.bytes + (key.len() + value.len()) as u64).saturating_sub(old_size),
         };
-        if after.keys > MAX_ORIGIN_KEYS || after.bytes > MAX_ORIGIN_BYTES {
+        // A write that does not grow the store is never refused, so a user
+        // over the budget can still shrink what is stored.
+        let grows = after.keys > before.keys || after.bytes > before.bytes;
+        if grows
+            && (after.keys > MAX_ORIGIN_KEYS + extra_keys
+                || after.bytes > MAX_ORIGIN_BYTES + extra_bytes)
+        {
             return Err(fail(
                 FailureCode::CapReached,
                 "this app's storage budget is full",
@@ -327,6 +359,34 @@ impl<'a> Space<'a> {
             bytes: u.bytes.saturating_sub((key.len() + old.len()) as u64),
         });
         Ok(())
+    }
+
+    /// Remove a key this operation itself wrote, so it is known present
+    /// whatever a read says: `Ok` only once the host confirms a removal
+    /// (a read that fails would otherwise make a refused removal look like
+    /// an absent key, and the key would stay while the caller reports it
+    /// gone).
+    pub fn del_written(&mut self, rel: &str) -> Result<(), Failure> {
+        let key = self.full_key(rel);
+        let old = self.fetch(&key);
+        if !(self.env.remove(&key) || self.env.remove(&key) || self.env.remove(&key)) {
+            return Err(fail(FailureCode::Internal, "the host refused the delete"));
+        }
+        if let Some(old) = old {
+            let u = self.usage();
+            self.set_usage(Usage {
+                keys: u.keys.saturating_sub(1),
+                bytes: u.bytes.saturating_sub((key.len() + old.len()) as u64),
+            });
+        }
+        Ok(())
+    }
+
+    /// Remove `rel` without reading it first; `true` only if the host
+    /// removed something (the key was there, readable or not).
+    pub fn remove_if_present(&mut self, rel: &str) -> bool {
+        let key = self.full_key(rel);
+        self.env.remove(&key) || self.env.remove(&key)
     }
 
     /// The stored `(generation, body)` at `rel`.
@@ -410,6 +470,27 @@ impl<'a> Space<'a> {
         }
     }
 
+    /// Whether the index at `rel` is unreadable: written once (its marker
+    /// says so) but reading as absent.
+    pub fn index_unreadable(&self, rel: &str) -> bool {
+        matches!(self.index(rel), Err(f) if f.code == FailureCode::Busy)
+    }
+
+    /// Forget an unreadable index, so the set it held can be built again.
+    /// Refused while the index reads: this never drops a readable list.
+    /// Its records stay stored; nothing here can find them again (nothing
+    /// lists the host's keys), so they come back by being written again.
+    pub fn reset_index(&mut self, rel: &str) -> Result<(), Failure> {
+        if !self.index_unreadable(rel) {
+            return Err(fail(
+                FailureCode::Refused,
+                "this index can be read; there is nothing to repair",
+            ));
+        }
+        self.del(rel)?;
+        self.del(&index_marker_rel(rel))
+    }
+
     /// Write an index (generation 0 = create it), or remove it when empty,
     /// keeping its existence marker in step. The marker says `p` whenever
     /// the index may legitimately be absent (before its first write lands,
@@ -425,11 +506,11 @@ impl<'a> Space<'a> {
             if generation == 0 {
                 return Ok(());
             }
-            self.put(&marker, MARKER_PENDING)?;
+            self.put_for_delete(&marker, MARKER_PENDING)?;
             if let Err(e) = self.del(rel) {
                 // Still there: say so again, or a read that fails later
                 // would be taken for an empty index.
-                let _ = self.put(&marker, MARKER_LIVE);
+                let _ = self.put_for_delete(&marker, MARKER_LIVE);
                 return Err(e);
             }
             // Left as `p` if this fails: "may be absent", which is true.
@@ -446,7 +527,7 @@ impl<'a> Space<'a> {
             // It exists (it was just read), so `l` is true before and after
             // the write. Set first, so nothing can fail after the write.
             if self.get(&marker).as_deref() != Some(MARKER_LIVE) {
-                self.put(&marker, MARKER_LIVE)?;
+                self.put_for_delete(&marker, MARKER_LIVE)?;
             }
             return self.write_if(rel, generation, &body).map(|_| ());
         }
@@ -458,8 +539,14 @@ impl<'a> Space<'a> {
         // "not written".
         self.put(&marker, MARKER_PENDING)?;
         self.write_if(rel, 0, &body)?;
-        if let Err(e) = self.put(&marker, MARKER_LIVE) {
-            let _ = self.del(rel);
+        let live = |sp: &mut Self| sp.put_for_delete(&marker, MARKER_LIVE);
+        if let Err(e) = live(self).or_else(|_| live(self)) {
+            // Never leave a written index under `p`: once it failed to read
+            // it would be taken for empty and rebuilt from nothing. Remove
+            // it (confirmed: it was just written), or else keep trying `l`.
+            if self.del_written(rel).is_err() {
+                let _ = live(self).or_else(|_| live(self));
+            }
             return Err(e);
         }
         Ok(())

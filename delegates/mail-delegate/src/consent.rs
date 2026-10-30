@@ -30,7 +30,8 @@ use serde_bytes::ByteBuf;
 
 use crate::handlers::{
     OpResult, delete_identity_now, deletion_in_progress, export_for_successor, export_profile,
-    export_recovery_key, require_identity, respond, response_msg,
+    export_recovery_key, load_identity, repair_index, repair_target, require_identity, respond,
+    response_msg,
 };
 use crate::store::{
     EXPORT_GRANT, EXPORT_SESSION, MAX_PENDING_PROMPTS, PROMPT_INDEX, PROMPT_SEQ, PROMPT_TTL_SECS,
@@ -42,6 +43,7 @@ pub const ALWAYS: &[u8] = b"Always allow for this app";
 pub const DENY: &[u8] = b"Deny";
 pub const DELETE: &[u8] = b"Delete";
 pub const CANCEL: &[u8] = b"Cancel";
+pub const REPAIR: &[u8] = b"Repair";
 
 /// How long an export session lasts after its last page.
 pub const EXPORT_SESSION_SECS: u64 = 300;
@@ -75,6 +77,8 @@ enum Kind {
     Export,
     /// Cannot be undone; asks every time.
     Destructive,
+    /// Resets storage that cannot be read; asks every time.
+    Repair,
 }
 
 fn kind_of(op: &Op) -> Option<Kind> {
@@ -83,6 +87,7 @@ fn kind_of(op: &Op) -> Option<Kind> {
             Some(Kind::Export)
         }
         Op::DeleteIdentity { .. } => Some(Kind::Destructive),
+        Op::RepairIndex { .. } => Some(Kind::Repair),
         _ => None,
     }
 }
@@ -103,6 +108,7 @@ fn perform(s: &mut Space<'_>, request_id: &RequestId, op: &Op) -> OpResult {
             start_session(s, request_id, *source_generation, page)
         }
         Op::DeleteIdentity { addr, expected_gen } => delete_identity_now(s, addr, *expected_gen),
+        Op::RepairIndex { kind, owner } => repair_index(s, *kind, *owner),
         _ => Err(fail(FailureCode::Internal, "not a consented operation")),
     }
 }
@@ -221,7 +227,28 @@ fn precheck(s: &Space<'_>, op: &Op) -> Result<(), Failure> {
         Op::ExportRecoveryKey { addr } | Op::ExportProfile { addr } => {
             require_identity(s, addr).map(|_| ())
         }
+        Op::RepairIndex { kind, owner } => {
+            let rel = repair_target(*kind, *owner)?;
+            if s.index_unreadable(&rel) {
+                Ok(())
+            } else {
+                Err(fail(
+                    FailureCode::Refused,
+                    "this index can be read; there is nothing to repair",
+                ))
+            }
+        }
         Op::DeleteIdentity { addr, expected_gen } => {
+            // Listed but unreadable: the user may still delete it (the
+            // record cannot be compared, but deleting needs no read).
+            if load_identity(s, addr)?.is_none()
+                && s.index(crate::store::IDENTITY_INDEX)?
+                    .1
+                    .contains(&addr.0[..])
+                && s.get(&crate::store::deleted_rel(addr)).is_none()
+            {
+                return Ok(());
+            }
             let (generation, _) = require_identity(s, addr)?;
             if generation == *expected_gen {
                 Ok(())
@@ -312,6 +339,17 @@ fn prompt_text(s: &Space<'_>, op: &Op) -> String {
             "{app} wants a copy of all your mail identities, including their private \
              keys, contacts and stored mail.\n\n\
              Expect this only while Mail is moving your data to an updated version."
+        ),
+        Op::RepairIndex { kind: None, .. } => format!(
+            "{app} wants to repair Mail's list of your identities, which can no longer be \
+             read.\n\n\
+             Your identities stay stored, but Mail will not show them until you restore \
+             each one from its recovery key."
+        ),
+        Op::RepairIndex { kind: Some(_), .. } => format!(
+            "{app} wants to repair a list of Mail's saved items, which can no longer be \
+             read.\n\n\
+             The items it listed will no longer be shown. New ones can be saved again."
         ),
         Op::DeleteIdentity { addr, .. } => format!(
             "{app} wants to delete {} and everything stored for it: its keys, drafts \
@@ -440,6 +478,7 @@ fn raise_prompt(
     let responses = match kind {
         Kind::Export => vec![ALLOW, ALWAYS, DENY],
         Kind::Destructive => vec![DELETE, CANCEL],
+        Kind::Repair => vec![REPAIR, CANCEL],
     };
     Ok(OutboundDelegateMsg::RequestUserInput(UserInputRequest {
         request_id: prompt_id,
@@ -488,6 +527,7 @@ pub fn answer(
             Err(f) => Err(f),
         },
         Some(Kind::Destructive) if choice == DELETE => perform(s, &pending.request_id, &pending.op),
+        Some(Kind::Repair) if choice == REPAIR => perform(s, &pending.request_id, &pending.op),
         // Deny, Cancel, anything unrecognised, and the empty response the
         // node sends for a prompt nobody answered (its 60 s timeout, or a
         // dismissed dialog). Refusing that one here is what ends the waiting

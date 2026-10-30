@@ -259,8 +259,14 @@ dt "the counter is read from both copies" "$D/store.rs" \
             .iter()' '        [GENERATION]
             .iter()' \
     an_unreadable_counter_copy_does_not_restart_generations
-dt "a create's marker licenses no prune" "$D/handlers.rs" \
-    'if kind != store::MARKER_FAILED && kind != store::MARKER_DELETING {' 'if false {' \
+dt "a spent create marker licenses no prune" "$D/handlers.rs" \
+    '        if kind == store::MARKER_SPENT {' \
+    '        if kind == store::MARKER_SPENT && load_identity(s, &addr)?.is_none() {
+            gone.push(id);
+            markers.push(marker);
+            continue;
+        }
+        if kind == store::MARKER_SPENT {' \
     a_create_marker_beside_an_unreadable_record_licenses_nothing
 dt "only a deletion's marker skips the prompt" "$D/handlers.rs" \
     's.get(&store::deleted_rel(addr)).as_deref() == Some(store::MARKER_DELETING)' \
@@ -269,21 +275,45 @@ dt "only a deletion's marker skips the prompt" "$D/handlers.rs" \
 dft() { guard "$1" "$2" "$3" "$4" "tests:$FAULT_RUN" fault_tests; }
 dft "absence is believed only when a re-read agrees" "$D/store.rs" \
     'self.env.get(key).or_else(|| self.env.get(key))' 'self.env.get(key)'
-dft "a failed create marks its slot free to reclaim" "$D/handlers.rs" \
-    '                // say so, so a listing can free it.
-                let _ = retried(|| s.put(&marker, store::MARKER_FAILED));' \
-    '                // say so, so a listing can free it.
-                let _ = &marker;'
-dft "a deletion answers Deleted only once its marker is gone" "$D/handlers.rs" \
-    '    s.del(&marker)?;
-    Ok(Reply::Deleted)' '    let _ = s.del(&marker);
-    Ok(Reply::Deleted)'
 dt "listing frees index entries whose item is gone" "$D/handlers.rs" \
     '        if s.index_remove_many(&ix, &ids).is_ok() {' '        if false && s.index_remove_many(&ix, &ids).is_ok() {' \
     listing_frees_an_index_entry_whose_item_is_gone
 dbt() { guard "$1" "$2" "$3" "$4" "tests:$BLIND_RUN" blind_tests; }
-dbt "an item that cannot be read is not created over" "$D/handlers.rs" \
-    'if current.is_none() && s.index(&ix)?.1.contains(&item.id) {' 'if false {'
+dbt "a deletion answers Deleted only once its marker is confirmed removed" "$D/handlers.rs" \
+    '    s.del_written(&marker)?;' '    s.del(&marker)?;'
+dbt "an index that cannot be read may hold a failed create's entry" "$D/handlers.rs" \
+    '            if s.index(&ix).is_ok_and(|(_, ids)| !ids.contains(&item.id)) {' \
+    '            if !s.index(&ix).is_ok_and(|(_, ids)| ids.contains(&item.id)) {'
+# Recovery from a key that stays unreadable.
+dt "importing keys restores an identity whose record cannot be read" "$D/handlers.rs" \
+    '        return restore_unreadable_identity(s, addr, dsa, kem, alias, description, confirmed).map(' \
+    '        return Err(fail(FailureCode::Busy, "unreadable")).map(' \
+    importing_keys_restores_a_listed_identity_whose_record_cannot_be_read
+dt "an identity whose record cannot be read can be deleted" "$D/handlers.rs" \
+    '            s.put_for_delete(&marker, store::MARKER_DELETING)?;' \
+    '            return Err(fail(FailureCode::Busy, "unreadable"));' \
+    an_identity_whose_record_cannot_be_read_can_be_deleted_after_asking
+dt "an unreadable item is reported and a create replaces it" "$D/handlers.rs" \
+    "fn listed_but_unreadable(s: &Space<'_>, item: &ItemRef) -> Result<bool, Failure> {" \
+    "fn listed_but_unreadable(s: &Space<'_>, item: &ItemRef) -> Result<bool, Failure> {
+    if true {
+        return Ok(false);
+    }" \
+    an_unreadable_item_is_reported_and_a_create_replaces_it
+dt "a readable index is never reset" "$D/consent.rs" \
+    '            if s.index_unreadable(&rel) {' '            if true {' \
+    a_readable_index_is_never_reset
+dt "an unreadable index can be reset" "$D/handlers.rs" \
+    '    s.reset_index(&rel)?;' '    let _ = &rel;' \
+    an_unreadable_identity_index_can_be_reset_and_identities_restored,an_unreadable_item_index_can_be_reset
+dt "deleting works when the budget is full" "$D/store.rs" \
+    '        self.put_within(rel, value, RESERVED_KEYS, RESERVED_BYTES)' \
+    '        self.put_within(rel, value, 0, 0)' \
+    deleting_works_when_the_budget_is_full
+dt "a create that never finished frees its slot" "$D/handlers.rs" \
+    '        if kind == store::MARKER_CREATING && load_identity(s, &addr)?.is_none() {' \
+    '        if false {' \
+    a_create_that_never_finished_frees_its_slot_on_the_next_listing
 dbt "a failure after a write is reported as partial" "$D/handlers.rs" \
     '    s.index_remove(&ix, &item.id).map_err(partial)?;
     // A `d` marker left behind' '    s.index_remove(&ix, &item.id)?;

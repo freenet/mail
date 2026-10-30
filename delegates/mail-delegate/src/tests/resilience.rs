@@ -201,12 +201,19 @@ fn a_record_that_fails_to_read_is_never_pruned_from_the_index() {
         call(&mut env, PROD, Op::ListDeletingIdentities),
         Ok(Reply::Identities(vec![]))
     );
-    // Nor may a deletion nobody approved finish on it.
+    // Nor may a deletion nobody approved finish on it: it asks (deleting an
+    // unreadable record is allowed, but only with the user's approval).
     let del = Op::DeleteIdentity {
         addr: me,
         expected_gen: 0,
     };
-    assert_ne!(call(&mut env, PROD, del), Ok(Reply::Deleted));
+    let out = send(&mut env, app(PROD), del);
+    assert!(
+        responses(&out)
+            .iter()
+            .all(|r| r.result != Ok(Reply::Deleted)),
+        "deleted without asking: {out:?}"
+    );
     env.secrets.insert(key, record);
     assert_eq!(identity_index_len(&mut env), 1, "still indexed");
     match call(&mut env, PROD, Op::ListIdentities) {
