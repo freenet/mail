@@ -1049,3 +1049,38 @@ cd "$ROOT/ui/tests" && \
     FREENET_ISO_PEER_LOG_DIR="$ISO_ROOT/peer/logs" \
     npx playwright test live-node.spec.ts --project=chromium ${extra_args[@]+"${extra_args[@]}"}
 '''
+
+[tasks.test-e2e-legacy-migration]
+description = "Real-node migration: wipe iso nodes, publish, fill the frozen v0.2.7 delegates, check the data arrives in the current UI"
+dependencies = ["build", "derive-test-contract-id"]
+script_runner = "bash"
+script = '''
+set -euo pipefail
+ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
+ISO_ROOT="${FREENET_E2E_ROOT:-$HOME/freenet-mail-iso}"
+GW_PORT="${FREENET_ISO_GW_PORT:-7510}"
+KEEP="${FREENET_E2E_KEEP:-0}"
+
+cleanup() {
+    if [ "$KEEP" = "1" ]; then
+        echo "FREENET_E2E_KEEP=1 - leaving iso nodes up at $ISO_ROOT"
+    else
+        bash "$ROOT/scripts/run-isolated-nodes.sh" down
+    fi
+}
+trap cleanup EXIT
+
+# Fresh nodes: a load that finds these delegates missing counts towards the
+# walk's back-off, and the seed must be the only legacy data on the node.
+bash "$ROOT/scripts/run-isolated-nodes.sh" wipe
+bash "$ROOT/scripts/run-isolated-nodes.sh" up
+FREENET_ISO_GW_PORT="$GW_PORT" cargo make publish-email-iso
+cargo run --manifest-path "$ROOT/Cargo.toml" -p v1-node-seed -- "$GW_PORT"
+
+CONTRACT_ID="$(cat "$ROOT/target/webapp/contract-id.txt")"
+cd "$ROOT/ui/tests" && \
+    FREENET_LEGACY_SEEDED=1 \
+    FREENET_EMAIL_BASE_URL="http://127.0.0.1:$GW_PORT/v1/contract/web/$CONTRACT_ID/" \
+    FREENET_ISO_GW_PORT="$GW_PORT" \
+    npx playwright test legacy-migration.spec.ts --project=chromium
+'''

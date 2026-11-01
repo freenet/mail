@@ -142,14 +142,22 @@ thread_local! {
     static ONE_WALK: Rc<futures::lock::Mutex<()>> = Rc::new(futures::lock::Mutex::new(()));
 }
 
-/// The walks each pending predecessor has been through, by delegate key.
-fn pending_walks(status: &JournalStatus) -> HashMap<Vec<u8>, u32> {
+/// The walks each pending predecessor has been through, by delegate key. A row
+/// missing here counts as resolved, so a status that does not list them (the
+/// enum is `#[non_exhaustive]`) reads as every row pending.
+fn pending_walks(
+    status: &JournalStatus,
+    lineage: &[DelegateLineageEntry],
+) -> HashMap<Vec<u8>, u32> {
     match status {
         JournalStatus::Incomplete { pending, .. } => pending
             .iter()
             .map(|p| (p.key.bytes().to_vec(), p.attempts))
             .collect(),
-        _ => HashMap::new(),
+        _ => lineage
+            .iter()
+            .map(|e| (e.delegate_key.to_vec(), 0))
+            .collect(),
     }
 }
 
@@ -186,7 +194,7 @@ where
             counts: successor.into_counts(),
         };
     }
-    let walks = pending_walks(&status);
+    let walks = pending_walks(&status, &lineage);
     let mut predecessors = LegacyAdapter::new(transport, lineage.clone(), walks, arrived);
     let report = migrate_delegate_secrets_journaled(
         &mut successor,

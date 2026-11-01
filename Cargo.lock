@@ -4394,6 +4394,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "v1-node-seed"
+version = "0.2.7"
+dependencies = [
+ "freenet-mail-wire-v1",
+ "freenet-stdlib 0.12.1",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite",
+]
+
+[[package]]
 name = "valuable"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

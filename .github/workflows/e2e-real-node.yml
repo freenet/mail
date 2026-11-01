@@ -159,6 +159,11 @@ jobs:
           # Don't tear down on failure — uploads below capture state.
           FREENET_E2E_KEEP: '1'
 
+      - name: Run real-node legacy migration
+        run: cargo make test-e2e-legacy-migration
+        env:
+          FREENET_E2E_KEEP: '1'
+
       - name: Upload Playwright artifacts
         if: always()
         uses: actions/upload-artifact@v7

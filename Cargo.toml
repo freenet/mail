@@ -14,6 +14,7 @@ members = [
     "ui",
     "wire-v1",
     "tools/web-container-sign",
+    "tools/v1-node-seed",
 ]
 # Issues #198 + #199: every on-chain contract and delegate (and the shared
 # types crates they depend on) lives outside the workspace with its own

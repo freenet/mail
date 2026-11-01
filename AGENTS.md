@@ -113,12 +113,28 @@ normal operations, which never overwrite; `node.rs` is the real transport.
   installed" all leave a predecessor pending, so the journal is normally
   never `Complete` and that is expected. `settled` is the only place that
   decides the migration is finished. Do not seal anything as empty.
+- **Newest first is held, not assumed:** the first copy of a shared key to
+  land stands, so a newer row that gives nothing usable holds the older rows
+  of its family back for at most `HOLD_BACK_LOADS` loads. The limit matters: a
+  row can stay empty for good while the data sits in an older one. A typed "not
+  installed" never holds back.
+- **An alias is orphaned only on its own generation's word:** local state waits
+  until the identity row of the same generation has answered with something.
+- **A refusal retrying cannot change ends the walk:** a cap, or an identity
+  being deleted, is a counted permanent rejection and the item stays in the
+  predecessor. `NotFound` is one only for an identity known to have arrived
+  (`ArrivedIdentities`), because the delegate answers the same for one that is
+  still on its way. A user's deletion can still return on a transient retry.
 - **The journal and markers are delegate items** (`ItemKind::MigrationJournal`,
   `MigrationMarker`), per origin and never exported.
 - **Tests** drive the crate's real walk against the real delegate's handlers,
   with old-format inputs taken only from `wire-v1/src/golden_v1.txt`. Add a
   golden sample through `wire-v1/capture` rather than building an old reply
-  with today's types.
+  with today's types. `cargo make test-e2e-legacy-migration` proves the path on
+  a real node: `tools/v1-node-seed` fills the frozen delegates, and
+  `ui/tests/legacy-migration.spec.ts` checks the data arrives. It wipes its
+  nodes because a load that finds those delegates missing counts towards the
+  walk's back-off.
 
 ## Quick Reference
 
