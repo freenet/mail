@@ -1896,3 +1896,36 @@ fn the_page_lists_identities_before_it_walks() {
     let walked = body.find("after_listing(").unwrap();
     assert!(listed < walked);
 }
+
+/// The "we couldn't open your previous data" alarm comes from this count. A
+/// typed "not installed" is what every new user's node says, and an empty
+/// answer is what a node that never ran that version says: neither is silence.
+#[test]
+fn only_a_silent_or_undecodable_row_counts_as_silent() {
+    for (row, silent) in [
+        (LegacyReply::NotInstalled, false),
+        (answer(br#"{"identities":{}}"#.to_vec()), false),
+        (LegacyReply::NoAnswer("timed out".into()), true),
+        (answer(b"{not json".to_vec()), true),
+    ] {
+        let node = Node::default();
+        node.set(im(206), row);
+        let outcome = walk(&Delegate::new(), &node, no_inbox());
+        assert_eq!(outcome.silent_rows > 0, silent);
+    }
+}
+
+/// A migrated identity is confirmed by its owner before it first sends.
+#[test]
+fn sending_asks_an_unconfirmed_identity_to_confirm_first() {
+    let source = include_str!("../app.rs");
+    let send = &source[source.find("let send_now = use_callback").unwrap()..];
+    let asks = send.find("confirm_sender.set(true)").unwrap();
+    let reads_recipient = send.find("let to_val = to.read()").unwrap();
+    assert!(
+        asks < reads_recipient,
+        "the check precedes everything the send does"
+    );
+    let check = "if login::Identity::get_alias(&sender_for_send).is_some_and(|i| !i.confirmed) {";
+    assert!(send[..asks].trim_end().ends_with(check) || send[..asks].contains(check));
+}

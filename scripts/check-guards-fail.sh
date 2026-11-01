@@ -575,6 +575,23 @@ ut "the settings merge keeps what is stored" "$M/successor.rs" \
     '        (_, other) => other.clone(),' \
     the_settings_merge_commutes_over_disjoint_fields
 
+ut "a typed not-installed never raises the Restore alarm" "$M/legacy_delegates.rs" \
+    '                LegacyReply::NotInstalled => false,' \
+    '                LegacyReply::NotInstalled => true,' \
+    only_a_silent_or_undecodable_row_counts_as_silent
+ut "an orphan move never overwrites an item" "$M/orphans.rs" \
+    '        Some(_) => Err("that identity already holds a different item with this id".to_string()),' \
+    '        Some(_) => Ok(()),' \
+    moving_an_orphan_never_overwrites_an_item_already_there
+ut "a silent identity row never orphans its aliases" "$M/legacy_delegates.rs" \
+    'AliasOwner::Unresolved if orphan_unresolved && aliases.own_row_absent(generation) => None,' \
+    'AliasOwner::Unresolved if orphan_unresolved => None,' \
+    scenario_a_silent_identity_row_never_orphans_its_aliases
+guard "send asks an unconfirmed identity to confirm" "$STAGE/ui/src/app.rs" \
+    '        if login::Identity::get_alias(&sender_for_send).is_some_and(|i| !i.confirmed) {' \
+    '        if false && login::Identity::get_alias(&sender_for_send).is_some_and(|i| !i.confirmed) {' \
+    "tests:sending_asks_an_unconfirmed_identity_to_confirm_first" ui_migration_tests
+
 # A rename that still compiles: only the pinned bytes can catch it. (A new
 # variant is caught earlier, by the wildcard-free match in golden.rs, at
 # compile time.)

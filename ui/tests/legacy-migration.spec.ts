@@ -27,7 +27,7 @@ test("a v0.2.7 identity and its archive arrive from the frozen delegates", async
     "needs a seeded node: run `cargo make test-e2e-legacy-migration`",
   );
   // The walk's reads and the first delegate compile take a while, and the
-  // identity list waits for the walk.
+  // identity arrives after the walk.
   test.setTimeout(180_000);
 
   // The gateway asks before the delegates run for this page.
