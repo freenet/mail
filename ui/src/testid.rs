@@ -14,6 +14,21 @@
 
 #![allow(dead_code)]
 
+// Migration from v0.2.x
+pub(crate) const FM_MIGRATION_STATUS: &str = "fm-migration-status";
+pub(crate) const FM_MIGRATION_UNREACHABLE: &str = "fm-migration-unreachable";
+pub(crate) const FM_MIGRATION_RESTORE: &str = "fm-migration-restore";
+pub(crate) const FM_MIGRATION_NOTICE: &str = "fm-migration-notice";
+pub(crate) const FM_MIGRATION_BACKUP: &str = "fm-migration-backup";
+pub(crate) const FM_MIGRATION_DISMISS: &str = "fm-migration-dismiss";
+pub(crate) const FM_MIGRATION_REPORT: &str = "fm-migration-report";
+pub(crate) const FM_ORPHAN_GROUP: &str = "fm-orphan-group";
+pub(crate) const FM_ORPHAN_TARGET: &str = "fm-orphan-target";
+pub(crate) const FM_ORPHAN_MOVE: &str = "fm-orphan-move";
+pub(crate) const FM_CONFIRM_IDENTITY: &str = "fm-confirm-identity";
+pub(crate) const FM_CONFIRM_IDENTITY_SUBMIT: &str = "fm-confirm-identity-submit";
+pub(crate) const FM_CONFIRM_IDENTITY_CANCEL: &str = "fm-confirm-identity-cancel";
+
 // App shell
 pub(crate) const FM_APP: &str = "fm-app";
 pub(crate) const FM_AVATAR: &str = "fm-avatar";
@@ -191,6 +206,19 @@ mod tests {
             serde_json::from_str(include_str!("../branding/testids.json"))
                 .expect("ui/branding/testids.json failed to parse");
         let pairs: &[(&str, &str)] = &[
+            ("fmMigrationStatus", super::FM_MIGRATION_STATUS),
+            ("fmMigrationUnreachable", super::FM_MIGRATION_UNREACHABLE),
+            ("fmMigrationRestore", super::FM_MIGRATION_RESTORE),
+            ("fmMigrationNotice", super::FM_MIGRATION_NOTICE),
+            ("fmMigrationBackup", super::FM_MIGRATION_BACKUP),
+            ("fmMigrationDismiss", super::FM_MIGRATION_DISMISS),
+            ("fmMigrationReport", super::FM_MIGRATION_REPORT),
+            ("fmOrphanGroup", super::FM_ORPHAN_GROUP),
+            ("fmOrphanTarget", super::FM_ORPHAN_TARGET),
+            ("fmOrphanMove", super::FM_ORPHAN_MOVE),
+            ("fmConfirmIdentity", super::FM_CONFIRM_IDENTITY),
+            ("fmConfirmIdentitySubmit", super::FM_CONFIRM_IDENTITY_SUBMIT),
+            ("fmConfirmIdentityCancel", super::FM_CONFIRM_IDENTITY_CANCEL),
             ("fmApp", super::FM_APP),
             ("fmAvatar", super::FM_AVATAR),
             ("fmLogout", super::FM_LOGOUT),

@@ -31,8 +31,15 @@
 //! - **There is no "done" marker of our own.** Completeness is the journal's
 //!   status, read through [`settled`], and a predecessor that is simply not
 //!   installed keeps the journal incomplete for good. That is expected. It
-//!   costs a round trip on the loads that walk, and the load waits for the
-//!   walk: identities are listed after it.
+//!   costs a round trip on the loads that walk. The walk runs after the first
+//!   identity listing and blocks nothing: while it runs, an empty list shows
+//!   "Checking for your previous Mail data", and the list is read again when
+//!   it ends if it imported anything.
+//! - **A row that stays unresolved does not hold the rest back for good.** An
+//!   alias that cannot be resolved keeps its local-state row pending for
+//!   [`legacy_delegates::HOLD_BACK_LOADS`] walks, then its items go to the
+//!   orphans, which the user can move to an identity ([`orphans`]).
+//! - **The predecessors are never modified.** Nothing here deletes from them.
 //!
 //! The journal and the markers live in the mail delegate under the caller's
 //! origin, not in the crate's reserved `\0` keys, so a staging app walks its
@@ -41,20 +48,34 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
+use freenet_mail_protocol::{Addr, IdentityInfo, Op, Reply};
 use freenet_migrate::{
-    DelegateLineageEntry, JournalStatus, JournaledMigrationReport, MigrationAuthorization,
-    SecretSelectionPolicy, UnionAck, begin_migration_journal, migrate_delegate_secrets_journaled,
+    DelegateLineageEntry, ImportFlag, JournalStatus, JournaledMigrationReport,
+    MigrationAuthorization, SecretSelectionPolicy, UnionAck, begin_migration_journal,
+    migrate_delegate_secrets_journaled,
 };
 
+pub(crate) mod ledger;
 pub(crate) mod legacy_delegates;
 #[cfg(feature = "use-node")]
 pub(crate) mod node;
+pub(crate) mod orphans;
 pub(crate) mod successor;
 #[cfg(test)]
 mod tests;
 
 use legacy_delegates::{LegacyAdapter, LegacyTransport};
 use successor::{ArrivedIdentities, MailStore, MailSuccessor, MigrationCounts, V1InboxReader};
+
+/// The mail delegate, through the page's usual calls.
+#[derive(Clone)]
+pub(crate) struct PageStore;
+
+impl MailStore for PageStore {
+    async fn call(&mut self, op: Op) -> Result<Reply, crate::mail_delegate::CallError> {
+        crate::mail_delegate::call(op).await
+    }
+}
 
 /// Added to an identity-management row's generation in the lineage. The walk
 /// goes newest generation first, and every identity generation must come
@@ -92,15 +113,31 @@ const ABSENT_WALKS_BEFORE_BACKING_OFF: u32 = 3;
 /// proof a predecessor holds nothing, and the node can change.
 const BACKED_OFF_ONE_LOAD_IN: u8 = 10;
 
+/// How many walks a row must have been left unresolved before silence slows
+/// the walk down, and how often it then runs. Shorter than the "not installed"
+/// cadence: a silent row may hold data and answer on any load.
+const SILENT_WALKS_BEFORE_SLOWING: u32 = 6;
+const SLOWED_ONE_LOAD_IN: u8 = 4;
+
 /// Whether this load walks, given `begin`'s status and a random byte. Only
-/// a complete journal or a run of typed "not installed" answers reduce it;
-/// a predecessor that went silent is asked on every load.
+/// a complete journal, a run of typed "not installed" answers, or rows left
+/// unresolved walk after walk reduce it. An import under way walks every load.
 pub(crate) fn walk_this_load(status: &JournalStatus, roll: u8) -> bool {
     if status.is_complete() {
         return false;
     }
-    !status.pending_all_absent(ABSENT_WALKS_BEFORE_BACKING_OFF)
-        || roll.is_multiple_of(BACKED_OFF_ONE_LOAD_IN)
+    if status.pending_all_absent(ABSENT_WALKS_BEFORE_BACKING_OFF) {
+        return roll.is_multiple_of(BACKED_OFF_ONE_LOAD_IN);
+    }
+    let JournalStatus::Incomplete { pending, .. } = status else {
+        return true;
+    };
+    let slowed = pending.iter().all(|p| {
+        p.import != ImportFlag::Started
+            && (p.absent_streak >= ABSENT_WALKS_BEFORE_BACKING_OFF
+                || p.attempts >= SILENT_WALKS_BEFORE_SLOWING)
+    });
+    !slowed || roll.is_multiple_of(SLOWED_ONE_LOAD_IN)
 }
 
 /// Whether the walk has nothing left to do for good.
@@ -133,6 +170,9 @@ pub(crate) struct WalkOutcome {
     /// The walk's report, `None` if this load did not walk.
     pub report: Option<JournaledMigrationReport>,
     pub counts: MigrationCounts,
+    /// Rows that went silent or answered with bytes that do not decode. A
+    /// typed "not installed" is not among them.
+    pub silent_rows: usize,
 }
 
 thread_local! {
@@ -184,6 +224,7 @@ where
                 status: None,
                 report: None,
                 counts: successor.into_counts(),
+                silent_rows: 0,
             };
         }
     };
@@ -192,6 +233,7 @@ where
             status: Some(status),
             report: None,
             counts: successor.into_counts(),
+            silent_rows: 0,
         };
     }
     let walks = pending_walks(&status, &lineage);
@@ -210,11 +252,95 @@ where
         status: report.status.clone(),
         report: Some(report),
         counts,
+        silent_rows: predecessors.silent_rows(),
     }
 }
 
-/// The line a person can read about a migration, `None` when there is
-/// nothing to say. The upgrade notice replaces this.
+/// Every code hash an identity's v1 inbox can be under: the registry's rows
+/// and the current hash, which is not a row.
+pub(crate) fn v1_inbox_hashes() -> Vec<String> {
+    let rows = crate::legacy_registry::LEGACY_INBOX_CODE_HASHES.iter();
+    rows.map(|hash| bs58::encode(hash).into_string())
+        .chain(std::iter::once(
+            crate::inbox::INBOX_CODE_HASH.trim().to_string(),
+        ))
+        .filter(|hash| !hash.is_empty())
+        .collect()
+}
+
+/// Confirm the unconfirmed identities that have a v1 inbox under any hash: a
+/// key that really was in use has one. The rest stay for their owner to
+/// confirm. Returns the addresses confirmed.
+pub(crate) async fn confirm_by_inbox<S, I>(
+    store: &mut S,
+    inbox: &mut I,
+    identities: &[IdentityInfo],
+) -> Vec<Addr>
+where
+    S: MailStore,
+    I: V1InboxReader,
+{
+    let mut confirmed = Vec::new();
+    for identity in identities.iter().filter(|i| !i.confirmed) {
+        let mut found = false;
+        for hash in v1_inbox_hashes() {
+            if inbox.has_inbox(&identity.vk, &hash).await {
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            continue;
+        }
+        let op = Op::ConfirmIdentity {
+            addr: identity.addr,
+            expected_gen: identity.generation,
+        };
+        match store.call(op).await {
+            Ok(_) => confirmed.push(identity.addr),
+            Err(e) => crate::log::error(format!("confirming an identity failed: {e}"), None),
+        }
+    }
+    confirmed
+}
+
+/// The migration's state for diagnosis: the journal, each row, the counts and
+/// the notice's counts. Shown under Your identities as JSON.
+pub(crate) fn status_report(status: Option<&JournalStatus>, ledger: &ledger::Ledger) -> String {
+    let rows: Vec<serde_json::Value> = lineage()
+        .iter()
+        .map(|e| {
+            let pending = match status {
+                Some(JournalStatus::Incomplete { pending, .. }) => pending
+                    .iter()
+                    .find(|p| p.key.bytes() == e.delegate_key.as_slice()),
+                _ => None,
+            };
+            serde_json::json!({
+                "generation": e.generation,
+                "outcome": match (status, pending) {
+                    (_, Some(_)) => "pending",
+                    (Some(JournalStatus::Complete { .. } | JournalStatus::Incomplete { .. }), _) => {
+                        "resolved"
+                    }
+                    _ => "unknown",
+                },
+                "attempts": pending.map(|p| p.attempts),
+                "absent_streak": pending.map(|p| p.absent_streak),
+                "import_started": pending.map(|p| p.import == ImportFlag::Started),
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "journal": status.map(|s| format!("{s:?}")),
+        "rejected_items": status.map(JournalStatus::rejected_items),
+        "rows": rows,
+        "counts": ledger.totals,
+    })
+    .to_string()
+}
+
+/// The log's line about a migration, `None` when there is nothing to say.
 pub(crate) fn status_line(outcome: &WalkOutcome) -> Option<String> {
     let c = &outcome.counts;
     let unreachable = outcome

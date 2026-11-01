@@ -72,10 +72,7 @@ pub(crate) struct Identity {
     pub addr: freenet_mail_protocol::Addr,
     /// False for an identity carried over from older data until the user
     /// confirms it is theirs (a UI hint, not a security boundary). Only the
-    /// migration from v0.2.x delegates imports unconfirmed identities; the
-    /// confirm prompt lands with it (step B3 of the v0.3.0 chain; remove the
-    /// allow there).
-    #[allow(dead_code)]
+    /// migration from v0.2.x delegates imports unconfirmed identities.
     pub confirmed: bool,
     /// The delegate record's generation, for compare-and-swap on rename,
     /// confirm and delete.
@@ -290,6 +287,28 @@ impl Identity {
     #[cfg(test)]
     pub(crate) fn register_live_for_test(identity: Identity) {
         ALIASES.with(|aliases| aliases.borrow_mut().push(identity));
+    }
+
+    /// The identity was confirmed, at `generation`.
+    pub(crate) fn set_confirmed(
+        addr: &freenet_mail_protocol::Addr,
+        generation: u64,
+        mut user: Signal<crate::app::User>,
+    ) {
+        Self::set_generation(addr, generation, user);
+        ALIASES.with(|aliases| {
+            for a in aliases.borrow_mut().iter_mut().filter(|a| &a.addr == addr) {
+                a.confirmed = true;
+            }
+        });
+        for i in user
+            .write()
+            .identities
+            .iter_mut()
+            .filter(|i| &i.addr == addr)
+        {
+            i.confirmed = true;
+        }
     }
 
     /// Record a new delegate generation for the identity at `addr`.
@@ -989,6 +1008,28 @@ pub(super) fn Identities() -> Element {
         // the user's "I've saved it" for this modal session.
         let mut backup_open = use_signal(|| false);
         let mut backup_saved = use_signal(|| false);
+        let mut confirm_open = use_signal(|| false);
+        let confirm_id = identity.clone();
+        // The upgrade notice can ask for this identity's recovery key.
+        let asked_to_back_up =
+            super::migration_view::BACKUP_REQUEST.read().as_ref() == Some(&identity.addr);
+        let open_share = use_callback(move |()| {
+            let card = crate::app::address_book::ContactCard::from_identity(&share_id);
+            let fp = crate::app::address_book::fingerprint_words(
+                &share_id.ml_dsa_vk_bytes(),
+                &share_id.ml_kem_ek_bytes(),
+            )
+            .join("-");
+            let share_text = format!("{}\nverify: {}", card.encode(), fp);
+            share_pending.set(SharePending {
+                data: Some(SharePendingData {
+                    alias: share_id.alias.to_string(),
+                    share_text,
+                }),
+            });
+            share_contact_form.write().0 = true;
+        });
+        let unconfirmed_alias = identity.alias.clone();
 
         let submit_rename = move |_| {
             let next = rename_draft
@@ -1120,20 +1161,11 @@ pub(super) fn Identities() -> Element {
                             title: "Share your address with someone",
                             "data-testid": testid::FM_ID_SHARE,
                             onclick: move |_| {
-                                let card = crate::app::address_book::ContactCard::from_identity(&share_id);
-                                let fp = crate::app::address_book::fingerprint_words(
-                                    &share_id.ml_dsa_vk_bytes(),
-                                    &share_id.ml_kem_ek_bytes(),
-                                )
-                                .join("-");
-                                let share_text = format!("{}\nverify: {}", card.encode(), fp);
-                                share_pending.set(SharePending {
-                                    data: Some(SharePendingData {
-                                        alias: share_id.alias.to_string(),
-                                        share_text,
-                                    }),
-                                });
-                                share_contact_form.write().0 = true;
+                                if Identity::get_alias(&unconfirmed_alias).is_some_and(|i| !i.confirmed) {
+                                    confirm_open.set(true);
+                                } else {
+                                    open_share.call(());
+                                }
                             },
                             "↗"
                         }
@@ -1216,18 +1248,39 @@ pub(super) fn Identities() -> Element {
                     }
                 }
             }
-            if *backup_open.read() {
+            if *confirm_open.read() {
+                super::migration_view::ConfirmIdentityPrompt {
+                    identity: confirm_id.clone(),
+                    on_confirmed: move |_| {
+                        confirm_open.set(false);
+                        open_share.call(());
+                    },
+                    on_cancel: move |_| confirm_open.set(false),
+                }
+            }
+            if *backup_open.read() || asked_to_back_up {
                 BackupKeyModal {
                     identity: backup_alias.clone(),
                     alias_str: backup_alias.alias.to_string(),
                     saved: *backup_saved.read(),
                     on_saved: move |_| backup_saved.set(true),
-                    on_close: move |_| backup_open.set(false),
+                    on_close: move |_| {
+                        backup_open.set(false);
+                        if asked_to_back_up {
+                            *super::migration_view::BACKUP_REQUEST.write() = None;
+                        }
+                    },
                 }
             }
         }
     }
 
+    let migration_targets: Vec<(String, freenet_mail_protocol::Addr)> = aliases_list
+        .iter()
+        .map(|i| (i.alias.to_string(), i.addr))
+        .collect();
+    // An empty list means nothing yet while the migration is looking.
+    let checking = aliases_list.is_empty() && super::migration_view::MIGRATION.read().walking;
     let identities_iter = aliases_list.iter().map(|alias| {
         rsx!(IdentityEntry {
             identity: alias.clone(),
@@ -1336,21 +1389,24 @@ pub(super) fn Identities() -> Element {
             }
         }
         {unfinished_iter}
+        super::migration_view::MigrationPanel { identities: migration_targets }
         div { class: "id-list",
             {identities_iter}
         }
-        div { style: "display:flex; gap:10px; margin-top:18px;",
-            button {
-                class: "btn btn-secondary",
-                "data-testid": testid::FM_ID_CREATE,
-                onclick: move |_| { create_alias_form.write().0 = true; },
-                "+ Create new identity"
-            }
-            button {
-                class: "btn btn-ghost",
-                "data-testid": testid::FM_ID_RESTORE,
-                onclick: move |_| { import_backup_form.write().0 = true; },
-                "Restore from backup"
+        if !checking {
+            div { style: "display:flex; gap:10px; margin-top:18px;",
+                button {
+                    class: "btn btn-secondary",
+                    "data-testid": testid::FM_ID_CREATE,
+                    onclick: move |_| { create_alias_form.write().0 = true; },
+                    "+ Create new identity"
+                }
+                button {
+                    class: "btn btn-ghost",
+                    "data-testid": testid::FM_ID_RESTORE,
+                    onclick: move |_| { import_backup_form.write().0 = true; },
+                    "Restore from backup"
+                }
             }
         }
         p { class: "field-help", style: "margin-top:14px;",

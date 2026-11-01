@@ -9,7 +9,6 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use freenet_mail_protocol::{Op, Reply};
 use freenet_mail_wire_v1::inbox::{Inbox, InboxParams};
 use freenet_stdlib::client_api::{ContractRequest, DelegateError, DelegateRequest};
 use freenet_stdlib::prelude::{
@@ -18,9 +17,8 @@ use freenet_stdlib::prelude::{
 };
 use futures::channel::oneshot;
 
-use super::legacy_delegates::{LegacyReply, LegacyTransport};
-use super::successor::{MailStore, V1InboxReader};
-use crate::mail_delegate::CallError;
+use super::legacy_delegates::{EMPTY_REPLY, LegacyReply, LegacyTransport};
+use super::successor::V1InboxReader;
 
 /// How long a legacy delegate or an inbox GET gets to answer.
 const REPLY_TIMEOUT_MS: u32 = 15_000;
@@ -43,7 +41,7 @@ pub(crate) fn classify_response(values: &[OutboundDelegateMsg]) -> LegacyReply {
             }
             _ => None,
         })
-        .unwrap_or_else(|| LegacyReply::NoAnswer("an empty reply".to_string()))
+        .unwrap_or_else(|| LegacyReply::NoAnswer(EMPTY_REPLY.to_string()))
 }
 
 /// What a node delegate error means for a legacy request to `waiting`, `None`
@@ -143,6 +141,7 @@ async fn legacy_answer(rx: oneshot::Receiver<LegacyReply>, timeout_ms: u32) -> L
 }
 
 /// The node, as the walk's reader.
+#[derive(Clone)]
 pub(crate) struct NodeLegacy;
 
 impl LegacyTransport for NodeLegacy {
@@ -179,26 +178,19 @@ impl LegacyTransport for NodeLegacy {
     }
 }
 
-/// The mail delegate, through the page's usual calls.
-pub(crate) struct NodeStore;
-
-impl MailStore for NodeStore {
-    async fn call(&mut self, op: Op) -> Result<Reply, CallError> {
-        crate::mail_delegate::call(op).await
-    }
-}
-
 /// An identity's v1 inbox, read with a GET.
+#[derive(Clone)]
 pub(crate) struct NodeInbox;
 
-impl V1InboxReader for NodeInbox {
-    async fn ciphertexts(&mut self, vk: &[u8]) -> Option<Vec<Vec<u8>>> {
+impl NodeInbox {
+    /// The state of `vk`'s inbox under `code_hash`, if the node returns one.
+    async fn state(vk: &[u8], code_hash: &str) -> Option<Vec<u8>> {
         let params: Parameters<'_> = InboxParams {
             pub_key: vk.to_vec(),
         }
         .try_into()
         .ok()?;
-        let key = ContractKey::from_params(crate::inbox::INBOX_CODE_HASH.trim(), params).ok()?;
+        let key = ContractKey::from_params(code_hash, params).ok()?;
         let mut client = crate::api::WEB_API_SENDER.get()?.clone();
         let (tx, rx) = oneshot::channel();
         INBOX_WAITER.with(|w| w.borrow_mut().insert(key, tx));
@@ -213,19 +205,19 @@ impl V1InboxReader for NodeInbox {
             Err(_) => None,
         };
         INBOX_WAITER.with(|w| w.borrow_mut().remove(&key));
-        let inbox: Inbox = serde_json::from_slice(&state?).ok()?;
-        Some(inbox.messages.into_iter().map(|m| m.content).collect())
+        state
     }
 }
 
-/// This load's migration. Runs before the identities are listed, so what it
-/// imports is what the load shows, and nothing the load writes (the contract
-/// markers `identity_store::prepare` stamps) can precede it.
-pub(crate) async fn run_on_load() {
-    let roll = crate::rng::random_bytes::<1>()[0];
-    let outcome = super::run(NodeStore, NodeLegacy, NodeInbox, roll).await;
-    if let Some(line) = super::status_line(&outcome) {
-        crate::log::info(line);
+impl V1InboxReader for NodeInbox {
+    async fn ciphertexts(&mut self, vk: &[u8]) -> Option<Vec<Vec<u8>>> {
+        let state = Self::state(vk, crate::inbox::INBOX_CODE_HASH.trim()).await?;
+        let inbox: Inbox = serde_json::from_slice(&state).ok()?;
+        Some(inbox.messages.into_iter().map(|m| m.content).collect())
+    }
+
+    async fn has_inbox(&mut self, vk: &[u8], code_hash: &str) -> bool {
+        Self::state(vk, code_hash).await.is_some()
     }
 }
 

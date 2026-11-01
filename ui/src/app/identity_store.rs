@@ -672,9 +672,41 @@ async fn report_unreadable_identities() {
     }
 }
 
+/// Confirm a migrated identity, from a fresh read of its generation.
+pub(crate) async fn confirm_identity(
+    addr: Addr,
+    user: Signal<crate::app::User>,
+) -> Result<(), String> {
+    let listed = ops::list_identities().await.map_err(|e| e.to_string())?;
+    let info = listed
+        .iter()
+        .find(|i| i.addr == addr)
+        .ok_or("this identity is no longer here")?;
+    let generation = ops::confirm_identity(addr, info.generation)
+        .await
+        .map_err(|e| e.to_string())?;
+    Identity::set_confirmed(&addr, generation, user);
+    Ok(())
+}
+
+/// A page load: the identities, then the migration, which runs after them so
+/// it delays nothing. While it runs an empty list shows that it is checking
+/// rather than offering to create an identity.
 pub(crate) async fn load_and_report() {
     #[cfg(feature = "use-node")]
-    crate::migration::node::run_on_load().await;
+    crate::app::migration_view::walk_starting();
+    load_identities().await;
+    #[cfg(feature = "use-node")]
+    crate::app::migration_view::after_listing(
+        crate::migration::node::NodeLegacy,
+        crate::migration::node::NodeInbox,
+    )
+    .await;
+}
+
+/// Read the identities and their local state, and hand them to the node loop.
+/// Called again when the migration has brought more.
+pub(crate) async fn load_identities() {
     let infos = match with_retries(
         "loading identities",
         STARTUP_LOAD_RETRIES,

@@ -43,10 +43,16 @@ pub(crate) trait MailStore {
 /// list order, or `None` if the state could not be fetched.
 pub(crate) trait V1InboxReader {
     async fn ciphertexts(&mut self, vk: &[u8]) -> Option<Vec<Vec<u8>>>;
+
+    /// Whether the node returned an inbox for `vk` under `code_hash`. No
+    /// answer is `false`, which only leaves an identity to be confirmed by
+    /// its owner.
+    async fn has_inbox(&mut self, vk: &[u8], code_hash: &str) -> bool;
 }
 
 /// What this walk imported, and what it could not, for the upgrade notice.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub(crate) struct MigrationCounts {
     pub identities: u32,
     pub contacts: u32,
@@ -76,6 +82,23 @@ impl MigrationCounts {
     pub(crate) fn merge_mapping(&mut self, mapping: MappingCounts) {
         self.flags_skipped += mapping.orphan_flags;
         self.deleted_marks += mapping.deleted_marks;
+    }
+
+    /// Add a later run. Items are counted when written, so they add up. The
+    /// rest are found again on every retry, so the highest count stands.
+    pub(crate) fn absorb(&mut self, run: &Self) {
+        self.identities += run.identities;
+        self.contacts += run.contacts;
+        self.drafts += run.drafts;
+        self.sent += run.sent;
+        self.kept += run.kept;
+        self.archived += run.archived;
+        self.orphaned += run.orphaned;
+        self.refused = self.refused.max(run.refused);
+        self.at_cap = self.at_cap.max(run.at_cap);
+        self.identity_gone = self.identity_gone.max(run.identity_gone);
+        self.flags_skipped = self.flags_skipped.max(run.flags_skipped);
+        self.deleted_marks = self.deleted_marks.max(run.deleted_marks);
     }
 }
 
@@ -250,6 +273,14 @@ fn unowned(kind: ItemKind, id: Vec<u8>) -> ItemRef {
     }
 }
 
+pub(crate) fn settings_item(owner: Addr) -> ItemRef {
+    ItemRef {
+        kind: ItemKind::IdentitySettings,
+        owner: Some(owner),
+        id: Vec::new(),
+    }
+}
+
 fn journal_item() -> ItemRef {
     unowned(ItemKind::MigrationJournal, Vec::new())
 }
@@ -265,6 +296,56 @@ fn is_conflict(e: &CallError) -> bool {
 /// A listed record that keeps failing to read. Only a create replaces it.
 fn is_unreadable(e: &CallError) -> bool {
     e.code() == Some(FailureCode::Unreadable)
+}
+
+pub(crate) async fn get_item<S: MailStore>(
+    store: &mut S,
+    item: ItemRef,
+) -> Result<Option<Item>, CallError> {
+    match store.call(Op::GetItem { item }).await? {
+        Reply::Item(item) => Ok(item),
+        other => Err(crate::mail_delegate::unexpected(&other)),
+    }
+}
+
+pub(crate) async fn put_item<S: MailStore>(
+    store: &mut S,
+    item: ItemRef,
+    body: Vec<u8>,
+    expected_gen: Option<u64>,
+) -> Result<u64, CallError> {
+    let op = Op::PutItem {
+        item,
+        body: ByteBuf::from(body),
+        expected_gen,
+    };
+    match store.call(op).await? {
+        Reply::Ack { generation } => Ok(generation),
+        other => Err(crate::mail_delegate::unexpected(&other)),
+    }
+}
+
+/// Read-merge-write `item`, retrying a lost compare-and-swap. `merge` gets
+/// the stored body and returns the new one, `None` to leave it. Returns
+/// whether anything was written.
+pub(crate) async fn merged_put<S: MailStore>(
+    store: &mut S,
+    item: ItemRef,
+    merge: impl Fn(Option<&[u8]>) -> Option<Vec<u8>>,
+) -> Result<bool, CallError> {
+    let mut attempt = 0;
+    loop {
+        let current = get_item(store, item.clone()).await?;
+        let generation = current.as_ref().map_or(0, |i| i.generation);
+        let Some(body) = merge(current.as_ref().map(|i| i.body.as_slice())) else {
+            return Ok(false);
+        };
+        match put_item(store, item.clone(), body, Some(generation)).await {
+            Ok(_) => return Ok(true),
+            Err(e) if is_conflict(&e) && attempt + 1 < CAS_ATTEMPTS => attempt += 1,
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 pub(crate) struct MailSuccessor<S, I> {
@@ -318,10 +399,7 @@ impl<S: MailStore, I: V1InboxReader> MailSuccessor<S, I> {
     }
 
     async fn get(&mut self, item: ItemRef) -> Result<Option<Item>, CallError> {
-        match self.store.call(Op::GetItem { item }).await? {
-            Reply::Item(item) => Ok(item),
-            other => Err(crate::mail_delegate::unexpected(&other)),
-        }
+        get_item(&mut self.store, item).await
     }
 
     async fn put(
@@ -330,38 +408,15 @@ impl<S: MailStore, I: V1InboxReader> MailSuccessor<S, I> {
         body: Vec<u8>,
         expected_gen: Option<u64>,
     ) -> Result<u64, CallError> {
-        let op = Op::PutItem {
-            item,
-            body: ByteBuf::from(body),
-            expected_gen,
-        };
-        match self.store.call(op).await? {
-            Reply::Ack { generation } => Ok(generation),
-            other => Err(crate::mail_delegate::unexpected(&other)),
-        }
+        put_item(&mut self.store, item, body, expected_gen).await
     }
 
-    /// Read-merge-write `item`, retrying a lost compare-and-swap. `merge`
-    /// gets the stored body and returns the new one, `None` to leave it.
-    /// Returns whether anything was written.
     async fn merged_put(
         &mut self,
         item: ItemRef,
         merge: impl Fn(Option<&[u8]>) -> Option<Vec<u8>>,
     ) -> Result<bool, CallError> {
-        let mut attempt = 0;
-        loop {
-            let current = self.get(item.clone()).await?;
-            let generation = current.as_ref().map_or(0, |i| i.generation);
-            let Some(body) = merge(current.as_ref().map(|i| i.body.as_slice())) else {
-                return Ok(false);
-            };
-            match self.put(item.clone(), body, Some(generation)).await {
-                Ok(_) => return Ok(true),
-                Err(e) if is_conflict(&e) && attempt + 1 < CAS_ATTEMPTS => attempt += 1,
-                Err(e) => return Err(e),
-            }
-        }
+        merged_put(&mut self.store, item, merge).await
     }
 
     /// Import an item that may not exist yet: a stored one stands. A
@@ -448,11 +503,7 @@ impl<S: MailStore, I: V1InboxReader> MailSuccessor<S, I> {
         legacy: &MigrationMarkers,
         generation: u32,
     ) -> Result<(), CallError> {
-        let item = ItemRef {
-            kind: ItemKind::IdentitySettings,
-            owner: Some(info.addr),
-            id: Vec::new(),
-        };
+        let item = settings_item(info.addr);
         self.merged_put(item, |stored| {
             let markers = markers_from_body(stored);
             let adopted = adopt_legacy_markers(
@@ -596,12 +647,7 @@ impl<S: MailStore, I: V1InboxReader> MailSuccessor<S, I> {
             }
             PairKey::Flags(owner) => self.import_flags(owner, value).await,
             PairKey::IdentitySettings(owner) => {
-                let item = ItemRef {
-                    kind: ItemKind::IdentitySettings,
-                    owner: Some(owner),
-                    id: Vec::new(),
-                };
-                self.merge_settings(item, value).await
+                self.merge_settings(settings_item(owner), value).await
             }
             PairKey::GlobalSettings => {
                 let item = unowned(ItemKind::GlobalSettings, Vec::new());

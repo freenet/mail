@@ -1,0 +1,90 @@
+//! The migration's own record: what the upgrade notice counts and whether it
+//! was dismissed. A `MigrationMarker` item under an id no predecessor key can
+//! equal. That kind is per origin and never exported, and the walk never reads
+//! it.
+
+use freenet_mail_protocol::{Addr, Item, ItemKind, ItemRef, Op, Reply};
+use freenet_stdlib::prelude::blake3;
+use serde::{Deserialize, Serialize};
+use serde_bytes::ByteBuf;
+
+use super::successor::{MailStore, MigrationCounts, get_item, merged_put};
+use crate::mail_delegate::CallError;
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct Ledger {
+    pub totals: MigrationCounts,
+    pub notice_dismissed: bool,
+}
+
+fn reserved_item(name: &[u8], index: u32) -> ItemRef {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"freenet-mail migration record\0");
+    hasher.update(name);
+    hasher.update(&index.to_le_bytes());
+    ItemRef {
+        kind: ItemKind::MigrationMarker,
+        owner: None,
+        id: hasher.finalize().as_bytes().to_vec(),
+    }
+}
+
+fn ledger_item() -> ItemRef {
+    reserved_item(b"ledger", 0)
+}
+
+/// The stored ledger. One that cannot be decoded is an error, never an empty
+/// ledger: scrub's journal is in it.
+pub(crate) async fn read_ledger<S: MailStore>(store: &mut S) -> Result<Ledger, CallError> {
+    match get_item(store, ledger_item()).await? {
+        Some(item) => serde_json::from_slice(&item.body)
+            .map_err(|e| CallError::Unknown(format!("the migration record cannot be read: {e}"))),
+        None => Ok(Ledger::default()),
+    }
+}
+
+/// Change the ledger, merged with what is stored so another tab's change
+/// survives. A body that does not decode is left alone.
+pub(crate) async fn update_ledger<S: MailStore>(
+    store: &mut S,
+    change: impl Fn(&mut Ledger),
+) -> Result<(), CallError> {
+    merged_put(store, ledger_item(), |stored| {
+        let mut ledger = match stored {
+            Some(body) => serde_json::from_slice(body).ok()?,
+            None => Ledger::default(),
+        };
+        change(&mut ledger);
+        Some(serde_json::to_vec(&ledger).expect("a ledger always encodes"))
+    })
+    .await
+    .map(|_| ())
+}
+
+pub(crate) async fn list_items<S: MailStore>(
+    store: &mut S,
+    kind: ItemKind,
+    owner: Option<Addr>,
+) -> Result<Vec<Item>, CallError> {
+    let mut out: Vec<Item> = Vec::new();
+    let mut after = None;
+    loop {
+        let op = Op::ListItems {
+            kind,
+            owner,
+            after: after.take(),
+            limit: 256,
+        };
+        let (items, more) = match store.call(op).await? {
+            Reply::Items { items, more } => (items, more),
+            other => return Err(crate::mail_delegate::unexpected(&other)),
+        };
+        let last = items.last().map(|i| ByteBuf::from(i.item.id.clone()));
+        out.extend(items);
+        match (more, last) {
+            (true, Some(last)) => after = Some(last),
+            _ => return Ok(out),
+        }
+    }
+}

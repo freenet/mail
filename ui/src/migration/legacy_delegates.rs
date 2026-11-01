@@ -39,6 +39,10 @@ use crate::app::identity_store::MigrationMarkers;
 /// and counts as no answer. The per-item caps still apply to what is in it.
 pub(crate) const MAX_LEGACY_REPLY_BYTES: usize = 64 * 1024 * 1024;
 
+/// What a reply with no application message is called: how a v0.2.x delegate
+/// acknowledges a change, and no answer to a read.
+pub(crate) const EMPTY_REPLY: &str = "an empty reply";
+
 /// How many loads in a row a newer row that gave nothing usable holds the
 /// older rows of its family back. Bounded because a user who ran v0.2.6 and
 /// never re-added an identity has the newer row answering empty for good and
@@ -79,7 +83,7 @@ const IDENTITY_PARAMS: &[u8] =
 const LOCAL_STATE_PARAMS: &[u8] =
     include_bytes!("../../../published-contract/wasm/v1/mail-local-state-params");
 
-fn hex(bytes: &[u8]) -> String {
+pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
@@ -223,9 +227,22 @@ pub(crate) struct AliasTables {
     tables: Vec<(u32, HashMap<String, Addr>)>,
     /// A generation that gave no readable answer may hold the alias.
     pub incomplete: bool,
+    /// Generations whose identity row is typed "not installed" or answered
+    /// with nothing in it. Their aliases are known to have no identity there,
+    /// unlike a row that went silent, which may hold any of them.
+    absent: HashSet<u32>,
 }
 
 impl AliasTables {
+    pub(crate) fn mark_absent(&mut self, generation: u32) {
+        self.absent.insert(generation);
+    }
+
+    /// Whether the identity row of `generation` is known to hold nothing.
+    pub(crate) fn own_row_absent(&self, generation: u32) -> bool {
+        self.absent.contains(&generation)
+    }
+
     pub(crate) fn add(&mut self, generation: u32, table: HashMap<String, Addr>) {
         self.tables.push((generation, table));
         self.tables.sort_by_key(|(g, _)| std::cmp::Reverse(*g));
@@ -282,7 +299,7 @@ fn refused(what: &[u8]) -> SecretPair {
     (PairKey::Refused(id).encode(), Vec::new())
 }
 
-fn id16(parts: &[&[u8]]) -> [u8; 16] {
+pub(crate) fn id16(parts: &[&[u8]]) -> [u8; 16] {
     let mut hasher = blake3::Hasher::new();
     for part in parts {
         hasher.update(&(part.len() as u64).to_le_bytes());
@@ -296,7 +313,7 @@ fn id16(parts: &[&[u8]]) -> [u8; 16] {
 /// The item id of a draft or sent message: its UUID, which every generation
 /// keeps for it, so an older copy of a later-edited draft is not a second
 /// draft. An id that is not a UUID is hashed.
-fn text_id(id: &str) -> [u8; 16] {
+pub(crate) fn text_id(id: &str) -> [u8; 16] {
     uuid::Uuid::parse_str(id).map_or_else(|_| id16(&[id.as_bytes()]), |u| *u.as_bytes())
 }
 
@@ -532,12 +549,17 @@ fn map_alias(
 }
 
 /// The items in a mail-local-state reply. `generation` is the row's release.
-/// `Err` is "this reply established nothing".
+/// `Err` is "this reply established nothing". An alias that cannot be resolved
+/// holds the whole row back, unless `orphan_unresolved` says it has waited
+/// long enough and the row's own identity row is known to hold nothing (typed
+/// "not installed", or empty): its items then go to the orphans, and the rest
+/// of the row imports. A silent identity row keeps waiting.
 pub(crate) fn map_local_state(
     reply: &[u8],
     generation: u32,
     aliases: &AliasTables,
     newer: &NewerAliases,
+    orphan_unresolved: bool,
     counts: &mut MappingCounts,
 ) -> Result<Vec<SecretPair>, String> {
     let mut state = LocalState::try_from(reply).map_err(|e| format!("undecodable: {e}"))?;
@@ -548,6 +570,9 @@ pub(crate) fn map_local_state(
         let owner = match aliases.resolve(generation, &alias) {
             AliasOwner::Identity(addr) => Some(addr),
             AliasOwner::NoIdentity => None,
+            AliasOwner::Unresolved if orphan_unresolved && aliases.own_row_absent(generation) => {
+                None
+            }
             AliasOwner::Unresolved => {
                 return Err(format!("the identities that own `{alias}` did not answer"));
             }
@@ -658,11 +683,15 @@ impl<T: LegacyTransport> LegacyAdapter<T> {
                             }
                             tables.add(entry.generation - IDENTITY_GENERATION_OFFSET, table);
                         }
-                        Err(_) if IdentityManagement::try_from(bytes.as_slice()).is_ok() => {}
+                        Err(_) if IdentityManagement::try_from(bytes.as_slice()).is_ok() => {
+                            tables.mark_absent(entry.generation - IDENTITY_GENERATION_OFFSET);
+                        }
                         Err(_) => tables.incomplete = true,
                     }
                 }
-                Ok(LegacyReply::NotInstalled) => {}
+                Ok(LegacyReply::NotInstalled) => {
+                    tables.mark_absent(entry.generation - IDENTITY_GENERATION_OFFSET);
+                }
                 Ok(LegacyReply::NoAnswer(_)) | Err(_) => tables.incomplete = true,
             }
         }
@@ -730,7 +759,44 @@ impl<T: LegacyTransport> LegacyAdapter<T> {
         }
         let tables = self.alias_tables().await;
         let newer = self.newer_aliases(entry.generation).await;
-        map_local_state(&bytes, entry.generation, &tables, &newer, &mut self.counts)
+        let walks = self.pending_walks.get(predecessor.bytes());
+        let orphan_unresolved = walks.is_some_and(|w| *w >= HOLD_BACK_LOADS);
+        map_local_state(
+            &bytes,
+            entry.generation,
+            &tables,
+            &newer,
+            orphan_unresolved,
+            &mut self.counts,
+        )
+    }
+
+    /// How many pending rows went silent or answered with bytes that do not
+    /// decode this run. "Not installed" and an empty answer are not among
+    /// them: both are what a node that never ran that version gives.
+    pub(crate) fn silent_rows(&self) -> usize {
+        self.replies
+            .iter()
+            .filter(|(key, _)| self.pending_walks.contains_key(*key))
+            .filter(|(key, reply)| match reply {
+                LegacyReply::NoAnswer(_) => true,
+                LegacyReply::NotInstalled => false,
+                LegacyReply::Answer(bytes) => !self.decodes(key, bytes),
+            })
+            .count()
+    }
+
+    fn decodes(&self, key: &[u8], bytes: &[u8]) -> bool {
+        let identity = self
+            .lineage
+            .iter()
+            .find(|e| e.delegate_key.as_slice() == key)
+            .is_some_and(|e| e.generation >= IDENTITY_GENERATION_OFFSET);
+        if identity {
+            IdentityManagement::try_from(bytes).is_ok()
+        } else {
+            LocalState::try_from(bytes).is_ok()
+        }
     }
 }
 

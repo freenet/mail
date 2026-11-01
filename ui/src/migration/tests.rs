@@ -304,6 +304,10 @@ impl V1InboxReader for Inbox {
     async fn ciphertexts(&mut self, _: &[u8]) -> Option<Vec<Vec<u8>>> {
         self.0.clone()
     }
+
+    async fn has_inbox(&mut self, _: &[u8], _: &str) -> bool {
+        false
+    }
 }
 
 fn no_inbox() -> Inbox {
@@ -1337,7 +1341,17 @@ fn a_silent_identity_generation_makes_an_unknown_alias_an_error() {
     tables.incomplete = true;
     let mut counts = MappingCounts::default();
     let newer = NewerAliases::default();
-    assert!(map_local_state(&golden("ls_state"), 206, &tables, &newer, &mut counts).is_err());
+    assert!(
+        map_local_state(
+            &golden("ls_state"),
+            206,
+            &tables,
+            &newer,
+            false,
+            &mut counts
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -1393,7 +1407,7 @@ fn an_item_over_its_size_cap_is_refused_and_counted() {
     tables.add(206, HashMap::from([("alice".to_string(), alice())]));
     let mut counts = MappingCounts::default();
     let newer = NewerAliases::default();
-    let pairs = map_local_state(&reply, 206, &tables, &newer, &mut counts).unwrap();
+    let pairs = map_local_state(&reply, 206, &tables, &newer, false, &mut counts).unwrap();
     // The golden draft and sent message both hold that body.
     assert_eq!(counts.oversized, 2);
     let refused = pairs
@@ -1687,4 +1701,198 @@ fn the_flag_merge_is_commutative_idempotent_and_associative() {
             }
         }
     }
+}
+
+// ── Orphans, the confirm check, the silent cadence ─────────────────────────
+
+fn orphan_count(delegate: &Delegate) -> usize {
+    delegate.list(ItemKind::LegacyOrphan, None).len()
+}
+
+/// An alias whose own generation's identity row holds nothing (typed "not
+/// installed", or empty) is orphaned after enough loads, and the rest of its
+/// row imports. Nothing is orphaned earlier.
+#[test]
+fn scenario_aliases_of_an_absent_identity_row_become_orphans_after_enough_loads() {
+    for identity_row in [
+        LegacyReply::NotInstalled,
+        answer(br#"{"identities":{}}"#.to_vec()),
+    ] {
+        let delegate = Delegate::new();
+        let node = Node::default();
+        node.set(im(206), identity_row);
+        node.set(ls(206), answer(golden("ls_state")));
+        for load in 0..HOLD_BACK_LOADS {
+            walk(&delegate, &node, no_inbox());
+            assert_eq!(orphan_count(&delegate), 0, "load {load}");
+        }
+        let outcome = walk(&delegate, &node, no_inbox());
+        assert_eq!(
+            orphan_count(&delegate),
+            5,
+            "draft, sent, kept, archived, settings"
+        );
+        assert_eq!(outcome.counts.orphaned, 5);
+    }
+}
+
+/// A row that gave no answer holds no decision. However long it stays silent
+/// or undecodable, nothing is orphaned and the local-state row stays pending.
+#[test]
+fn scenario_a_silent_identity_row_never_orphans_its_aliases() {
+    for identity_row in [
+        LegacyReply::NoAnswer("timed out".into()),
+        answer(b"{not json".to_vec()),
+    ] {
+        let delegate = Delegate::new();
+        let node = Node::default();
+        node.set(im(206), identity_row);
+        node.set(ls(206), answer(golden("ls_state")));
+        for _ in 0..HOLD_BACK_LOADS * 3 {
+            let outcome = walk(&delegate, &node, no_inbox());
+            assert_eq!(orphan_count(&delegate), 0);
+            assert_eq!(pending_count(&outcome.status), 4);
+        }
+    }
+}
+
+#[test]
+fn rows_left_unresolved_slow_the_walk_to_one_load_in_four() {
+    fn status_after(loads: u32) -> JournalStatus {
+        let delegate = Delegate::new();
+        let node = Node::default();
+        node.set(im(206), LegacyReply::NoAnswer("timed out".into()));
+        let mut last = None;
+        for _ in 0..loads {
+            last = walk(&delegate, &node, no_inbox()).status;
+        }
+        last.unwrap()
+    }
+    let young = status_after(SILENT_WALKS_BEFORE_SLOWING - 1);
+    assert!(walk_this_load(&young, 1), "still every load");
+    let old = status_after(SILENT_WALKS_BEFORE_SLOWING);
+    assert!(!walk_this_load(&old, 1));
+    assert!(walk_this_load(&old, 0), "still walks sometimes");
+    assert!(walk_this_load(&old, SLOWED_ONE_LOAD_IN), "one in four");
+}
+
+/// Reports whether an inbox exists under one given code hash.
+#[derive(Clone)]
+struct InboxUnder(Option<String>);
+
+impl V1InboxReader for InboxUnder {
+    async fn ciphertexts(&mut self, _: &[u8]) -> Option<Vec<Vec<u8>>> {
+        None
+    }
+
+    async fn has_inbox(&mut self, _: &[u8], code_hash: &str) -> bool {
+        self.0.as_deref() == Some(code_hash)
+    }
+}
+
+#[test]
+fn the_inbox_check_covers_the_current_hash_and_every_registry_row() {
+    let hashes = v1_inbox_hashes();
+    assert!(hashes.contains(&crate::inbox::INBOX_CODE_HASH.trim().to_string()));
+    for row in crate::legacy_registry::LEGACY_INBOX_CODE_HASHES.iter() {
+        assert!(hashes.contains(&bs58::encode(row).into_string()));
+    }
+}
+
+#[test]
+fn an_identity_with_a_v1_inbox_under_any_hash_is_confirmed_and_the_rest_are_not() {
+    let hashes = v1_inbox_hashes();
+    for (reader, confirmed) in [
+        (InboxUnder(Some(hashes[0].clone())), true),
+        (InboxUnder(hashes.last().cloned()), true),
+        (InboxUnder(Some("another".into())), false),
+        (InboxUnder(None), false),
+    ] {
+        let delegate = Delegate::new();
+        walk(&delegate, &populated_node(), no_inbox());
+        let listed = delegate.identities();
+        assert!(listed.iter().all(|i| !i.confirmed), "imported unconfirmed");
+        let done = block_on(confirm_by_inbox(
+            &mut delegate.clone(),
+            &mut reader.clone(),
+            &listed,
+        ));
+        assert_eq!(!done.is_empty(), confirmed);
+        assert_eq!(delegate.identities().iter().all(|i| i.confirmed), confirmed);
+    }
+}
+
+fn orphan_node() -> Delegate {
+    let delegate = Delegate::new();
+    let node = Node::default();
+    node.set(
+        im(206),
+        answer(golden_edited(
+            "identity_state_seeded",
+            r#"{"identities":{"alice":"#,
+            r#"{"identities":{"renamed":"#,
+        )),
+    );
+    node.set(ls(206), answer(golden("ls_state")));
+    walk(&delegate, &node, no_inbox());
+    delegate
+}
+
+#[test]
+fn moving_orphans_files_them_under_the_identity_and_removes_the_orphans() {
+    let delegate = orphan_node();
+    assert_eq!(orphan_count(&delegate), 5);
+    let owner = delegate.identities()[0].addr;
+    let (moved, failure) = block_on(orphans::move_alias(&mut delegate.clone(), "alice", owner));
+    assert_eq!((moved, failure), (5, None));
+    assert_eq!(orphan_count(&delegate), 0);
+    assert_eq!(delegate.list(ItemKind::Draft, Some(owner)).len(), 1);
+    assert_eq!(delegate.list(ItemKind::Archived, Some(owner)).len(), 1);
+}
+
+/// An item already under the id wins: the orphan stays, with the reason.
+#[test]
+fn moving_an_orphan_never_overwrites_an_item_already_there() {
+    let delegate = orphan_node();
+    let owner = delegate.identities()[0].addr;
+    let is_draft = |o: &Item| {
+        let decoded: legacy_delegates::OrphanItem = serde_json::from_slice(&o.body).unwrap();
+        decoded.what == "draft"
+    };
+    let orphan = delegate
+        .list(ItemKind::LegacyOrphan, None)
+        .into_iter()
+        .find(is_draft)
+        .unwrap();
+    let decoded: legacy_delegates::OrphanItem = serde_json::from_slice(&orphan.body).unwrap();
+    let existing = ItemRef {
+        kind: ItemKind::Draft,
+        owner: Some(owner),
+        id: legacy_delegates::text_id(&decoded.legacy_id).to_vec(),
+    };
+    block_on(successor::put_item(
+        &mut delegate.clone(),
+        existing.clone(),
+        b"mine".to_vec(),
+        None,
+    ))
+    .unwrap();
+    let result = block_on(orphans::move_one(&mut delegate.clone(), &orphan, owner));
+    assert!(result.is_err());
+    let kept = block_on(successor::get_item(&mut delegate.clone(), existing))
+        .unwrap()
+        .unwrap();
+    assert_eq!(kept.body, b"mine");
+    assert_eq!(orphan_count(&delegate), 5, "the orphan stays");
+}
+
+/// The page lists the identities before it walks, so a slow or silent
+/// predecessor never delays the list.
+#[test]
+fn the_page_lists_identities_before_it_walks() {
+    let source = include_str!("../app/identity_store.rs");
+    let body = &source[source.find("pub(crate) async fn load_and_report").unwrap()..];
+    let listed = body.find("load_identities().await").unwrap();
+    let walked = body.find("after_listing(").unwrap();
+    assert!(listed < walked);
 }

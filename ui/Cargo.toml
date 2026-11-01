@@ -73,6 +73,7 @@ features = [
     "HtmlInputElement",
     "HtmlTextAreaElement",
     "InputEvent",
+    "Location",
     "Navigator",
     "Performance",
     "Request",

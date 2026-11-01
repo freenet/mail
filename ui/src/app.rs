@@ -32,6 +32,9 @@ pub(crate) mod backup_token;
 pub(crate) mod contact_store;
 pub(crate) mod identity_store;
 pub(crate) mod login;
+#[cfg(all(feature = "example-data", target_family = "wasm"))]
+mod migration_fixture;
+pub(crate) mod migration_view;
 pub(crate) mod settings;
 
 // In-memory mailbox for offline (`example-data`, `!use-node`) mode.
@@ -262,6 +265,15 @@ pub(crate) fn app() -> Element {
                                 login_ctl.write().updated = true;
                             }
                         }
+                        // The offline fixtures' migrated identities.
+                        #[cfg(feature = "example-data")]
+                        NodeAction::IdentitiesLoaded { identities } => {
+                            for loaded in identities {
+                                let identity = Identity::from_info(&loaded.info, UserId::new());
+                                Identity::upsert(identity, user_sig);
+                            }
+                            login_ctl.write().updated = true;
+                        }
                         NodeAction::RenameIdentity { old, new, identity } => {
                             // The in-page delegate holds the identity, as a
                             // node's would: rename it there, then relabel.
@@ -319,6 +331,8 @@ pub(crate) fn app() -> Element {
     }
     #[allow(unused_variables)]
     let actions = use_coroutine_handle::<NodeAction>();
+    #[cfg(all(feature = "example-data", target_family = "wasm"))]
+    use_hook(migration_fixture::start);
 
     // Storybook short-circuit (#270): when the URL carries `?story=<name>`
     // AND this is an `example-data` build, render the isolated thread-component
@@ -5782,7 +5796,15 @@ fn ComposeSheet() -> Element {
             });
         }
     });
+    let mut confirm_sender = use_signal(|| false);
+    let sender = user.read().logged_id().cloned();
+    let sender_for_send = user_alias.clone();
     let send_now = use_callback(move |()| {
+        // A migrated identity is confirmed by its owner before it first sends.
+        if login::Identity::get_alias(&sender_for_send).is_some_and(|i| !i.confirmed) {
+            confirm_sender.set(true);
+            return;
+        }
         let to_val = to.read().clone();
         // Mail goes to the address recorded when the recipient was chosen
         // (an alias, a clash label or a pasted bs58 inbox address), and is
@@ -6427,6 +6449,16 @@ fn ComposeSheet() -> Element {
                             if *sending.read() { "Sending…" } else { "Send" }
                         }
                     }
+                }
+            }
+            if *confirm_sender.read() && let Some(identity) = sender.clone() {
+                migration_view::ConfirmIdentityPrompt {
+                    identity,
+                    on_confirmed: move |_| {
+                        confirm_sender.set(false);
+                        send_now.call(());
+                    },
+                    on_cancel: move |_| confirm_sender.set(false),
                 }
             }
         }
