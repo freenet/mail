@@ -1544,6 +1544,7 @@ dependencies = [
  "dioxus",
  "freenet-mail-protocol",
  "freenet-mail-wire-v1",
+ "freenet-migrate",
  "freenet-migrate-build",
  "freenet-stdlib 0.12.1",
  "futures",
