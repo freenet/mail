@@ -97,6 +97,11 @@ no-sync = ["local-delegate"]
 local-delegate = ["dep:mail-delegate"]
 use-node = []
 
+[dev-dependencies]
+# The walk's tests run against the real delegate's handlers in every feature
+# set, so what they exercise is its compare-and-swap and never-overwrite rules.
+mail-delegate = { path = "../delegates/mail-delegate", features = ["v1-transition"] }
+
 [build-dependencies]
 # Validates the repo-root legacy_*.toml registries and generates their consts.
 freenet-migrate-build = "0.2.0"

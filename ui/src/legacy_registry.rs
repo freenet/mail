@@ -8,12 +8,15 @@
 //! replaced those two delegates and must never appear here. The inbox list
 //! is not read at runtime yet (the shipped inbox is still the v1 one).
 
+#[allow(dead_code)]
 mod inbox {
     include!(concat!(env!("OUT_DIR"), "/legacy_inbox.rs"));
 }
+#[allow(dead_code)]
 mod identity {
     include!(concat!(env!("OUT_DIR"), "/legacy_identity_delegate.rs"));
 }
+#[allow(dead_code)]
 mod local_state {
     include!(concat!(env!("OUT_DIR"), "/legacy_local_state_delegate.rs"));
 }
@@ -23,12 +26,20 @@ mod local_state {
 pub(crate) const LEGACY_INBOX_CODE_HASHES: &[[u8; 32]] = inbox::LEGACY_INBOX_CODE_HASHES;
 /// Previous identity-management delegates, oldest first, as
 /// `(delegate_key, code_hash)`.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) const LEGACY_IDENTITY_DELEGATES: &[([u8; 32], [u8; 32])] =
     identity::LEGACY_IDENTITY_DELEGATES;
 /// Previous mail-local-state delegates, oldest first, as
 /// `(delegate_key, code_hash)`.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) const LEGACY_LOCAL_STATE_DELEGATES: &[([u8; 32], [u8; 32])] =
     local_state::LEGACY_LOCAL_STATE_DELEGATES;
+/// The same identity-management rows, as the walk takes them.
+pub(crate) const IDENTITY_LINEAGE: &[freenet_migrate::DelegateLineageEntry] =
+    identity::DELEGATE_LINEAGE;
+/// The same mail-local-state rows, as the walk takes them.
+pub(crate) const LOCAL_STATE_LINEAGE: &[freenet_migrate::DelegateLineageEntry] =
+    local_state::DELEGATE_LINEAGE;
 
 #[cfg(test)]
 mod tests {

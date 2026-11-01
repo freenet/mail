@@ -2496,6 +2496,9 @@ pub(crate) async fn node_comms(
                                     format!("received delegate request error: {error}"),
                                     None,
                                 );
+                                if crate::migration::node::offer_error(error) {
+                                    return;
+                                }
                                 // It carries no request id: end the mail
                                 // calls it may belong to now, as unknown,
                                 // rather than let them wait out their whole
@@ -2538,6 +2541,7 @@ pub(crate) async fn node_comms(
                     "GetResponse: key={key} state_size={}",
                     state.as_ref().len()
                 ));
+                crate::migration::node::offer_contract_state(&key, state.as_ref());
                 match InboxModel::contract_identity(&key) {
                     Some(identity) => {
                         crate::log::info(format!(
@@ -3231,6 +3235,11 @@ pub(crate) async fn node_comms(
                 }
             }
             HostResponse::DelegateResponse { key, values }
+                if crate::migration::node::takes_response(&key) =>
+            {
+                crate::migration::node::offer_response(&key, &values);
+            }
+            HostResponse::DelegateResponse { key, values }
                 if &key == crate::mail_delegate::node::key() =>
             {
                 // The mail delegate answers every request with exactly one
@@ -3404,6 +3413,7 @@ pub(crate) async fn node_comms(
                 // not handled" line every time we subscribe to inbox/AFT.
             }
             HostResponse::ContractResponse(ContractResponse::NotFound { instance_id }) => {
+                crate::migration::node::offer_contract_not_found(&instance_id);
                 // A GET resolved to NotFound: the contract isn't on the
                 // network. Three distinct sources land here, handled in
                 // priority order. They're mutually exclusive in practice

@@ -34,11 +34,10 @@ pub(crate) fn item_for(vk: &[u8]) -> ItemRef {
 }
 
 pub(crate) fn encode(contact: &Contact) -> Vec<u8> {
-    let record = ContactRecord {
-        v: 1,
-        local_alias: contact.local_alias.to_string(),
-        description: contact.description.clone(),
-        keys: StoredContactKeys {
+    encode_keys(
+        &contact.local_alias,
+        &contact.description,
+        StoredContactKeys {
             ml_dsa_vk_bytes: contact.ml_dsa_vk_bytes.clone(),
             ml_kem_ek_bytes: contact.ml_kem_ek_bytes.clone(),
             suggested_alias: contact.suggested_alias.as_deref().map(str::to_string),
@@ -47,6 +46,16 @@ pub(crate) fn encode(contact: &Contact) -> Vec<u8> {
             max_age_secs: contact.max_age_secs,
             inbox_wasm_hash: contact.inbox_wasm_hash.clone(),
         },
+    )
+}
+
+/// The stored record for a contact under `alias`.
+pub(crate) fn encode_keys(alias: &str, description: &str, keys: StoredContactKeys) -> Vec<u8> {
+    let record = ContactRecord {
+        v: 1,
+        local_alias: alias.to_string(),
+        description: description.to_string(),
+        keys,
     };
     serde_json::to_vec(&record).expect("a contact record always encodes")
 }

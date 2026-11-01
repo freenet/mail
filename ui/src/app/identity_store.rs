@@ -669,6 +669,8 @@ async fn report_unreadable_identities() {
 }
 
 pub(crate) async fn load_and_report() {
+    #[cfg(feature = "use-node")]
+    crate::migration::node::run_on_load().await;
     let infos = match with_retries(
         "loading identities",
         STARTUP_LOAD_RETRIES,
