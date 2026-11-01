@@ -540,6 +540,10 @@ pub(crate) struct MigrationMarkers {
     pub aft_record_wasm_hash: Option<String>,
     #[serde(default)]
     pub pending_aft_migration_from: Option<String>,
+    /// The v0.2.x release these markers were last imported from: only the
+    /// newest one holding the identity speaks for its contracts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub imported_generation: Option<u32>,
 }
 
 const MARKERS_FIELD: &str = "migration";
@@ -1611,6 +1615,7 @@ mod tests {
             pending_migration_from: None,
             aft_record_wasm_hash: Some("def".into()),
             pending_aft_migration_from: Some("old".into()),
+            imported_generation: Some(206),
         };
         let body = body_with_markers(Some(stored), &markers);
         assert_eq!(markers_from_body(Some(&body)), markers);
@@ -1671,6 +1676,7 @@ mod tests {
             pending_migration_from: None,
             aft_record_wasm_hash: Some(crate::aft::TOKEN_RECORD_CODE_HASH.to_string()),
             pending_aft_migration_from: None,
+            imported_generation: None,
         };
         let (inbox, aft, write) = plan_load(Some(read));
         assert_eq!(inbox.as_deref(), Some("old-inbox"));
@@ -1690,6 +1696,7 @@ mod tests {
             pending_migration_from: None,
             aft_record_wasm_hash: Some(crate::aft::TOKEN_RECORD_CODE_HASH.to_string()),
             pending_aft_migration_from: None,
+            imported_generation: None,
         };
         assert_eq!(plan_load(Some(read)), (None, None, None));
     }

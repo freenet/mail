@@ -17,19 +17,29 @@
 //!   answer and a typed "not installed" all leave a predecessor pending. The
 //!   adapter never reports a predecessor as holding nothing, so nothing is
 //!   ever sealed as empty and a later load can always ask again.
-//! - **Import never overwrites.** Under `UnionAllGenerations` the newest
-//!   generation wins a shared key only because the writer declines a key it
-//!   already holds, and a user's own edit on the new delegate wins the same
-//!   way. The documented cost: an identity deleted in a newer generation can
-//!   come back from an older one.
+//! - **Import never overwrites.** Under `UnionAllGenerations` the first copy
+//!   of a shared key to land stands, and a user's own edit on the new delegate
+//!   stands the same way. The newest generation is first when it answers. If
+//!   it gives nothing usable, it holds the older rows of its family back for
+//!   a few loads, after which they proceed and their values stand. The
+//!   documented cost: an identity deleted in a newer generation can come back
+//!   from an older one, and anything the user deleted can come back while a
+//!   predecessor is being retried.
+//! - **A refusal that retrying cannot change ends the walk.** An item a cap
+//!   refuses, or one whose identity was deleted, is a counted permanent
+//!   rejection and stays in the predecessor.
 //! - **There is no "done" marker of our own.** Completeness is the journal's
 //!   status, read through [`settled`], and a predecessor that is simply not
-//!   installed keeps the journal incomplete for good. That is expected: it
-//!   costs one round trip per load and blocks nothing.
+//!   installed keeps the journal incomplete for good. That is expected. It
+//!   costs a round trip on the loads that walk, and the load waits for the
+//!   walk: identities are listed after it.
 //!
 //! The journal and the markers live in the mail delegate under the caller's
 //! origin, not in the crate's reserved `\0` keys, so a staging app walks its
 //! own migration and never reads production's.
+
+use std::collections::HashMap;
+use std::rc::Rc;
 
 use freenet_migrate::{
     DelegateLineageEntry, JournalStatus, JournaledMigrationReport, MigrationAuthorization,
@@ -44,7 +54,7 @@ pub(crate) mod successor;
 mod tests;
 
 use legacy_delegates::{LegacyAdapter, LegacyTransport};
-use successor::{MailStore, MailSuccessor, MigrationCounts, V1InboxReader};
+use successor::{ArrivedIdentities, MailStore, MailSuccessor, MigrationCounts, V1InboxReader};
 
 /// Added to an identity-management row's generation in the lineage. The walk
 /// goes newest generation first, and every identity generation must come
@@ -125,6 +135,24 @@ pub(crate) struct WalkOutcome {
     pub counts: MigrationCounts,
 }
 
+thread_local! {
+    /// Held for a whole `run`. A load can start while another is walking (the
+    /// repair paths reload), and the journal's read-merge-write protects
+    /// against another tab but not against an interleaving inside this one.
+    static ONE_WALK: Rc<futures::lock::Mutex<()>> = Rc::new(futures::lock::Mutex::new(()));
+}
+
+/// The walks each pending predecessor has been through, by delegate key.
+fn pending_walks(status: &JournalStatus) -> HashMap<Vec<u8>, u32> {
+    match status {
+        JournalStatus::Incomplete { pending, .. } => pending
+            .iter()
+            .map(|p| (p.key.bytes().to_vec(), p.attempts))
+            .collect(),
+        _ => HashMap::new(),
+    }
+}
+
 /// Run this load's migration: start the journal, and walk unless the journal
 /// says there is no need. Writes nothing migrated unless the journal stored
 /// its start first.
@@ -134,8 +162,11 @@ where
     T: LegacyTransport,
     I: V1InboxReader,
 {
+    let one_walk = ONE_WALK.with(Rc::clone);
+    let _this_walk = one_walk.lock().await;
     let lineage = lineage();
-    let mut successor = MailSuccessor::new(store, inbox);
+    let arrived = ArrivedIdentities::default();
+    let mut successor = MailSuccessor::new(store, inbox, arrived.clone());
     let begun = begin_migration_journal(&mut successor, &lineage, &policy()).await;
     let status = match begun {
         Ok(status) => status,
@@ -155,7 +186,8 @@ where
             counts: successor.into_counts(),
         };
     }
-    let mut predecessors = LegacyAdapter::new(transport, lineage.clone());
+    let walks = pending_walks(&status);
+    let mut predecessors = LegacyAdapter::new(transport, lineage.clone(), walks, arrived);
     let report = migrate_delegate_secrets_journaled(
         &mut successor,
         &mut predecessors,
@@ -186,7 +218,8 @@ pub(crate) fn status_line(outcome: &WalkOutcome) -> Option<String> {
     }
     Some(format!(
         "migration: {} identities, {} contacts, {} drafts, {} sent, {} kept, {} archived, \
-         {} unmatched, {} refused, {} marks skipped; retry later: {}",
+         {} unmatched, {} refused, {} over a cap, {} of deleted identities, {} marks skipped, \
+         {} deleted marks left out; retry later: {}",
         c.identities,
         c.contacts,
         c.drafts,
@@ -195,7 +228,10 @@ pub(crate) fn status_line(outcome: &WalkOutcome) -> Option<String> {
         c.archived,
         c.orphaned,
         c.refused,
+        c.at_cap,
+        c.identity_gone,
         c.flags_skipped,
+        c.deleted_marks,
         settled(outcome.status.as_ref()) == Settled::Retry,
     ))
 }

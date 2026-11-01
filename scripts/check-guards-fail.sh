@@ -460,9 +460,7 @@ ut "silence never reads as absence" "$M/legacy_delegates.rs" \
         let entry = self
             .entry(predecessor)
             .ok_or("a predecessor outside the lineage")?;
-        let LegacyReply::Answer(bytes) = self.reply(predecessor).await? else {
-            return Err("no answer to read".into());
-        };' \
+        let read = self.read_row(&entry, predecessor).await;' \
     '            LegacyReply::NoAnswer(_) => ProbeVerdict::Executable,
         })
     }
@@ -474,10 +472,18 @@ ut "silence never reads as absence" "$M/legacy_delegates.rs" \
         let entry = self
             .entry(predecessor)
             .ok_or("a predecessor outside the lineage")?;
-        let LegacyReply::Answer(bytes) = self.reply(predecessor).await? else {
+        if matches!(
+            self.reply(predecessor).await?,
+            LegacyReply::NoAnswer(_)
+        ) {
             return Ok(Vec::new());
-        };' \
+        }
+        let read = self.read_row(&entry, predecessor).await;' \
     a_silent_get_is_unresponsive_never_absent_never_sealed
+ut "no reply in time is never an absence" "$M/node.rs" \
+    '        .unwrap_or_else(|| LegacyReply::NoAnswer("no reply in time".to_string()))' \
+    '        .unwrap_or(LegacyReply::NotInstalled)' \
+    no_reply_in_time_is_a_silence_never_an_absence
 ut "an empty answer is never sealed" "$M/legacy_delegates.rs" \
     '    if manager.is_empty() {
         return Err("answered with nothing, which does not prove it holds nothing".into());
@@ -487,11 +493,13 @@ ut "an empty answer is never sealed" "$M/legacy_delegates.rs" \
     }' \
     scenario_an_answered_empty_store_is_never_sealed
 ut "an import never overwrites" "$M/successor.rs" \
-    '        match self.put(item, body, None).await {
-            Ok(_) => ItemWrite::written(),' \
-    '        match self.merged_put(item, |_| Some(body.clone())).await {
-            Ok(_) => ItemWrite::written(),' \
+    '        let conflict = match self.put(item.clone(), body, None).await {' \
+    '        let conflict = match self.merged_put(item.clone(), |_| Some(body.clone())).await {' \
     scenario_an_import_never_overwrites_what_the_new_delegate_holds
+ut "a conflict does not prove an item is stored" "$M/successor.rs" \
+    '            Ok(None) => ItemWrite::retryable(format!("not stored after {conflict}")),' \
+    '            Ok(None) => ItemWrite::already_authoritative(),' \
+    scenario_a_false_conflict_does_not_pass_for_a_stored_item
 ut "a migrated identity starts unconfirmed" "$M/successor.rs" \
     '                kind: ImportKind::Migration,' \
     '                kind: ImportKind::UserRestore,' \
@@ -505,9 +513,55 @@ ut "identities are walked first" "$M/mod.rs" \
     '        generation: e.generation + IDENTITY_GENERATION_OFFSET - 2_000_000,' \
     scenario_identities_are_walked_before_any_local_state
 ut "a silent identity generation holds back its aliases" "$M/legacy_delegates.rs" \
-    '        if owner.is_none() && aliases.incomplete {' \
-    '        if false {' \
-    scenario_an_alias_with_no_identity_is_kept_not_lost
+    '        if self.incomplete {
+            return AliasOwner::Unresolved;
+        }' \
+    '' \
+    a_silent_identity_generation_makes_an_unknown_alias_an_error
+ut "only a generation's own identities can orphan its aliases" "$M/legacy_delegates.rs" \
+    '        let Some((_, own)) = self.tables.iter().find(|(g, _)| *g == generation) else {
+            return AliasOwner::Unresolved;
+        };' \
+    '        let Some((_, own)) = self.tables.iter().find(|(g, _)| *g == generation) else {
+            return AliasOwner::NoIdentity;
+        };' \
+    scenario_local_state_waits_for_the_identities_of_its_generation
+ut "a newer row holds older ones back" "$M/legacy_delegates.rs" \
+    '                        .is_some_and(|walks| *walks < HOLD_BACK_LOADS)' \
+    '                        .is_some_and(|_| false)' \
+    scenario_a_newer_row_that_answers_late_still_wins
+ut "the hold on older rows ends" "$M/legacy_delegates.rs" \
+    '                        .is_some_and(|walks| *walks < HOLD_BACK_LOADS)' \
+    '                        .is_some_and(|_| true)' \
+    scenario_a_newer_row_that_stays_empty_holds_older_rows_only_for_a_while
+ut "only the newest row sets an identity's markers" "$M/successor.rs" \
+    '    if imported.is_some_and(|from| from >= generation) {' \
+    '    if false {' \
+    scenario_only_the_newest_row_holding_an_identity_sets_its_markers
+ut "read marks come from the newest row holding the alias" "$M/legacy_delegates.rs" \
+    '                let held = newer.aliases.contains(alias);' \
+    '                let held = false;' \
+    scenario_read_marks_come_from_the_newest_row_holding_the_alias
+ut "a cap ends the walk" "$M/successor.rs" \
+    '                self.counts.at_cap += 1;
+                ItemWrite::permanent(text)' \
+    '                self.counts.at_cap += 1;
+                ItemWrite::retryable(text)' \
+    scenario_a_cap_is_a_counted_rejection_and_the_walk_ends
+ut "an identity on its way is not a deleted one" "$M/successor.rs" \
+    '            Some(FailureCode::NotFound) if owner.is_some_and(|o| self.arrived.holds(&o)) => {' \
+    '            Some(FailureCode::NotFound) if owner.is_some() => {' \
+    scenario_items_wait_for_an_identity_that_has_not_arrived
+ut "an unreadable journal is rebuilt" "$M/successor.rs" \
+    '            Err(e) if is_unreadable(&e) => {
+                self.journal_generation = None;' \
+    '            Err(e) if false && is_unreadable(&e) => {
+                self.journal_generation = None;' \
+    scenario_an_unreadable_journal_and_marker_are_rebuilt
+ut "one walk at a time" "$M/mod.rs" \
+    '    let _this_walk = one_walk.lock().await;' \
+    '    let _ = &one_walk;' \
+    scenario_walks_in_one_tab_run_one_at_a_time
 ut "a marker never lowers its data flag" "$M/successor.rs" \
     '                started: Some(saw_data || self.started == Some(true)),' \
     '                started: Some(saw_data),' \

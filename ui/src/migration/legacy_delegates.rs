@@ -1,10 +1,13 @@
 //! Reading the v0.2.x delegates, and turning what they hold into items.
 //!
 //! The walk deals in `(key, value)` pairs. A v0.2.x delegate holds one JSON
-//! blob, so this module maps a reply into one pair per item. Mapping is
-//! deterministic and goes by what a reply contains, never by which request it
-//! answered: an identity's key is the address its seeds derive, and the same
-//! item in two generations gets the same key, so the newest copy wins.
+//! blob, so this module maps a reply into one pair per item. Mapping goes by
+//! what a reply contains, never by which request it answered: an identity's
+//! key is the address its seeds derive, and the same item in two generations
+//! gets the same key, so the first copy written stands. Which copy of a name
+//! lands is not always the same: with two aliases on one address, or one
+//! contact under two labels, map order picks one. The set of keys is the same
+//! either way.
 //!
 //! Anything that does not establish what the predecessor holds is `Err`, the
 //! crate's "unresponsive": it earns no marker and the next load asks again.
@@ -13,7 +16,7 @@
 //! its secret, and `Ok(vec![])` would seal it for good. `fetch_secrets`
 //! therefore never returns an empty list.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use freenet_mail_protocol::address::address_of;
 use freenet_mail_protocol::{Addr, ItemKind, MAX_ITEM_BYTES};
@@ -24,12 +27,23 @@ use freenet_stdlib::prelude::{DelegateKey, blake3};
 use serde::{Deserialize, Serialize};
 
 use super::IDENTITY_GENERATION_OFFSET;
+use super::successor::ArrivedIdentities;
 use crate::app::address_book::StoredContactKeys;
 use crate::app::contact_store;
 use crate::app::identity_store::MigrationMarkers;
 
-/// Largest reply parsed. A larger one is refused unread, as unresponsive.
-pub(crate) const MAX_LEGACY_REPLY_BYTES: usize = 4 * 1024 * 1024;
+/// Largest reply read: stdlib's streaming limit (`MAX_TOTAL_CHUNKS *
+/// CHUNK_SIZE`), the most a node can deliver in one response. It is a bound on
+/// parsing and not on the data, because a v0.2.x delegate holds everything in
+/// one blob and contacts are double-encoded. A larger reply is refused unread
+/// and counts as no answer. The per-item caps still apply to what is in it.
+pub(crate) const MAX_LEGACY_REPLY_BYTES: usize = 64 * 1024 * 1024;
+
+/// How many loads in a row a newer row that gave nothing usable holds the
+/// older rows of its family back. Bounded because a user who ran v0.2.6 and
+/// never re-added an identity has the newer row answering empty for good and
+/// their data in the older one.
+pub(crate) const HOLD_BACK_LOADS: u32 = 3;
 
 const MAX_ALIAS_CHARS: usize = 64;
 const MAX_DESCRIPTION_CHARS: usize = 1024;
@@ -91,7 +105,7 @@ pub(crate) enum PairKey {
         owner: Addr,
         id: [u8; 16],
     },
-    /// One identity's read and deleted marks, as v1 list positions.
+    /// One identity's read marks, as v1 list positions.
     Flags(Addr),
     IdentitySettings(Addr),
     GlobalSettings,
@@ -179,7 +193,6 @@ pub(crate) struct MigratedIdentity {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct LegacyFlags {
     pub read: Vec<u64>,
-    pub deleted: Vec<u64>,
 }
 
 /// The value of a [`PairKey::Orphan`] pair.
@@ -191,12 +204,24 @@ pub(crate) struct OrphanItem {
     pub body: String,
 }
 
-/// The alias each identity had in each generation, newest first. Whether an
-/// alias is known at all depends on every generation having answered.
+/// Who an alias in a local-state row belongs to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AliasOwner {
+    Identity(Addr),
+    /// The identities of the row's own generation answered and no identity
+    /// anywhere has this alias: its items are kept as orphans.
+    NoIdentity,
+    /// Not established this load. An orphan now would be sealed out of reach
+    /// of the identity, and an older table could name the wrong one.
+    Unresolved,
+}
+
+/// The alias each identity had in each generation, newest first. A generation
+/// has a table only if its identity row answered with something in it.
 #[derive(Debug, Default)]
 pub(crate) struct AliasTables {
     tables: Vec<(u32, HashMap<String, Addr>)>,
-    /// An identity generation that did not answer may hold the alias.
+    /// A generation that gave no readable answer may hold the alias.
     pub incomplete: bool,
 }
 
@@ -207,14 +232,34 @@ impl AliasTables {
     }
 
     /// `alias` as the identities of `generation` knew it, else as the newest
-    /// generation that knew it. The same release's table first: an alias can
-    /// be reused for a different identity across releases.
-    pub(crate) fn resolve(&self, generation: u32, alias: &str) -> Option<Addr> {
-        let same = self.tables.iter().find(|(g, _)| *g == generation);
-        same.and_then(|(_, t)| t.get(alias))
-            .or_else(|| self.tables.iter().find_map(|(_, t)| t.get(alias)))
-            .copied()
+    /// generation that knew it. The same release's table comes first, and is
+    /// required: an alias can be reused for a different identity across
+    /// releases, so without it an older table proves nothing.
+    pub(crate) fn resolve(&self, generation: u32, alias: &str) -> AliasOwner {
+        let Some((_, own)) = self.tables.iter().find(|(g, _)| *g == generation) else {
+            return AliasOwner::Unresolved;
+        };
+        if let Some(addr) = own.get(alias) {
+            return AliasOwner::Identity(*addr);
+        }
+        if self.incomplete {
+            return AliasOwner::Unresolved;
+        }
+        self.tables
+            .iter()
+            .find_map(|(_, t)| t.get(alias))
+            .map_or(AliasOwner::NoIdentity, |addr| AliasOwner::Identity(*addr))
     }
+}
+
+/// The aliases newer local-state rows hold. A list position means something
+/// only in the inbox of the generation that recorded it, so only the newest
+/// generation holding an alias supplies its read marks.
+#[derive(Debug, Default)]
+pub(crate) struct NewerAliases {
+    pub aliases: HashSet<String>,
+    /// A newer row that could not be read may hold any alias.
+    pub unknown: bool,
 }
 
 /// Counts of what mapping left out, for the upgrade notice.
@@ -222,9 +267,13 @@ impl AliasTables {
 pub(crate) struct MappingCounts {
     pub oversized: u32,
     pub undecodable: u32,
-    /// Read/deleted marks of an alias with no identity: positions in an
-    /// inbox nobody can name.
+    /// Read marks with nowhere to go: an alias with no identity, or one a
+    /// newer row that could not be read may hold.
     pub orphan_flags: u32,
+    /// `deleted` marks, never imported: v0.2.7's delete already removes the
+    /// message from the inbox, so a surviving position usually names a
+    /// different, live message.
+    pub deleted_marks: u32,
 }
 
 /// A pair for an entry that can never be imported.
@@ -295,9 +344,6 @@ pub(crate) fn map_identities(
     reply: &[u8],
     counts: &mut MappingCounts,
 ) -> Result<(Vec<SecretPair>, HashMap<String, Addr>), String> {
-    if reply.len() > MAX_LEGACY_REPLY_BYTES {
-        return Err(format!("reply of {} bytes refused", reply.len()));
-    }
     let manager = IdentityManagement::try_from(reply).map_err(|e| format!("undecodable: {e}"))?;
     if manager.is_empty() {
         return Err("answered with nothing, which does not prove it holds nothing".into());
@@ -335,6 +381,7 @@ pub(crate) fn map_identities(
                         pending_migration_from: info.pending_migration_from,
                         aft_record_wasm_hash: info.aft_record_wasm_hash,
                         pending_aft_migration_from: info.pending_aft_migration_from,
+                        imported_generation: None,
                     },
                 };
                 aliases.insert(alias, addr);
@@ -419,6 +466,7 @@ fn map_alias(
     alias: &str,
     state: AliasState,
     owner: Option<Addr>,
+    newer: &NewerAliases,
     counts: &mut MappingCounts,
 ) -> Result<Vec<SecretPair>, String> {
     let mut m = AliasMapper {
@@ -445,18 +493,28 @@ fn map_alias(
         let body = json(archived)?;
         m.message(ItemKind::Archived, "archived", id, id16(&[&body]), body)?;
     }
-    let flags = LegacyFlags {
-        read: state.read,
-        deleted: state.deleted,
-    };
-    if flags != LegacyFlags::default() {
+    m.counts.deleted_marks += state.deleted.len() as u32;
+    let marks = state.read.len() as u32;
+    if marks > 0 {
         match owner {
-            Some(owner) => m
-                .pairs
-                .push((PairKey::Flags(owner).encode(), json(&flags)?)),
-            None => {
-                m.counts.orphan_flags += (flags.read.len() + flags.deleted.len()) as u32;
+            // The pair is there even with its marks left out: the journal
+            // holds a retry to the number of pairs it saw, and which newer
+            // rows answer can differ between loads.
+            Some(owner) => {
+                let held = newer.aliases.contains(alias);
+                if newer.unknown && !held {
+                    m.counts.orphan_flags += marks;
+                }
+                let read = if held || newer.unknown {
+                    Vec::new()
+                } else {
+                    state.read
+                };
+                let flags = LegacyFlags { read };
+                m.pairs
+                    .push((PairKey::Flags(owner).encode(), json(&flags)?));
             }
+            None => m.counts.orphan_flags += marks,
         }
     }
     // A default bucket is what v0.2.x reports for "never set": as a value it
@@ -479,23 +537,22 @@ pub(crate) fn map_local_state(
     reply: &[u8],
     generation: u32,
     aliases: &AliasTables,
+    newer: &NewerAliases,
     counts: &mut MappingCounts,
 ) -> Result<Vec<SecretPair>, String> {
-    if reply.len() > MAX_LEGACY_REPLY_BYTES {
-        return Err(format!("reply of {} bytes refused", reply.len()));
-    }
     let mut state = LocalState::try_from(reply).map_err(|e| format!("undecodable: {e}"))?;
     let global = state.global_settings().clone();
     let by_alias: BTreeMap<String, AliasState> = state.aliases_mut().drain().collect();
     let mut pairs = Vec::new();
     for (alias, alias_state) in by_alias {
-        let owner = aliases.resolve(generation, &alias);
-        if owner.is_none() && aliases.incomplete {
-            // An identity generation that did not answer may own this alias:
-            // an orphan now would file its mail out of reach of the identity.
-            return Err(format!("the identities that own `{alias}` did not answer"));
-        }
-        pairs.extend(map_alias(&alias, alias_state, owner, counts)?);
+        let owner = match aliases.resolve(generation, &alias) {
+            AliasOwner::Identity(addr) => Some(addr),
+            AliasOwner::NoIdentity => None,
+            AliasOwner::Unresolved => {
+                return Err(format!("the identities that own `{alias}` did not answer"));
+            }
+        };
+        pairs.extend(map_alias(&alias, alias_state, owner, newer, counts)?);
     }
     if global != GlobalSettings::default() {
         pairs.push((PairKey::GlobalSettings.encode(), json(&global)?));
@@ -513,15 +570,28 @@ pub(crate) struct LegacyAdapter<T> {
     lineage: Vec<DelegateLineageEntry>,
     replies: HashMap<Vec<u8>, LegacyReply>,
     counts: MappingCounts,
+    /// The rows the journal has pending, with the walks each has been through.
+    pending_walks: HashMap<Vec<u8>, u32>,
+    /// Rows whose read established nothing this run though they answered.
+    unusable: HashSet<Vec<u8>>,
+    arrived: ArrivedIdentities,
 }
 
 impl<T: LegacyTransport> LegacyAdapter<T> {
-    pub(crate) fn new(transport: T, lineage: Vec<DelegateLineageEntry>) -> Self {
+    pub(crate) fn new(
+        transport: T,
+        lineage: Vec<DelegateLineageEntry>,
+        pending_walks: HashMap<Vec<u8>, u32>,
+        arrived: ArrivedIdentities,
+    ) -> Self {
         LegacyAdapter {
             transport,
             lineage,
             replies: HashMap::new(),
             counts: MappingCounts::default(),
+            pending_walks,
+            unusable: HashSet::new(),
+            arrived,
         }
     }
 
@@ -550,16 +620,23 @@ impl<T: LegacyTransport> LegacyAdapter<T> {
             let msg = Vec::<u8>::try_from(&LocalStateMsg::GetAll);
             (LOCAL_STATE_PARAMS, msg.map_err(|e| e.to_string())?)
         };
-        let reply = self.transport.ask(predecessor, params, request).await;
+        let reply = match self.transport.ask(predecessor, params, request).await {
+            LegacyReply::Answer(bytes) if bytes.len() > MAX_LEGACY_REPLY_BYTES => {
+                LegacyReply::NoAnswer(format!("reply of {} bytes refused", bytes.len()))
+            }
+            reply => reply,
+        };
         self.replies
             .insert(predecessor.bytes().to_vec(), reply.clone());
         Ok(reply)
     }
 
     /// Every identity generation's aliases. A generation that is typed "not
-    /// installed" contributes none and leaves the tables complete: at worst
-    /// its aliases' items are kept as orphans. One that went silent leaves
-    /// them incomplete.
+    /// installed", or that answered with nothing in it, has no table, so its
+    /// own local state stays unresolved. For other generations neither leaves
+    /// the tables incomplete: a row that stays empty for good must not strand
+    /// the rows beside it. One that went silent or is undecodable may hold
+    /// any alias, and does.
     async fn alias_tables(&mut self) -> AliasTables {
         let mut tables = AliasTables::default();
         let identity_rows: Vec<DelegateLineageEntry> = self
@@ -570,15 +647,17 @@ impl<T: LegacyTransport> LegacyAdapter<T> {
             .collect();
         for entry in identity_rows {
             let key = lineage_key(&entry);
+            let resolved = !self.pending_walks.contains_key(key.bytes());
             match self.reply(&key).await {
                 Ok(LegacyReply::Answer(bytes)) => {
                     let mut ignored = MappingCounts::default();
                     match map_identities(&bytes, &mut ignored) {
                         Ok((_, table)) => {
+                            if resolved {
+                                table.values().for_each(|a| self.arrived.note(*a));
+                            }
                             tables.add(entry.generation - IDENTITY_GENERATION_OFFSET, table);
                         }
-                        // An empty manager names no alias; an undecodable
-                        // one might have.
                         Err(_) if IdentityManagement::try_from(bytes.as_slice()).is_ok() => {}
                         Err(_) => tables.incomplete = true,
                     }
@@ -588,6 +667,70 @@ impl<T: LegacyTransport> LegacyAdapter<T> {
             }
         }
         tables
+    }
+
+    /// The aliases held by the local-state rows newer than `generation`.
+    async fn newer_aliases(&mut self, generation: u32) -> NewerAliases {
+        let rows: Vec<DelegateLineageEntry> = self
+            .lineage
+            .iter()
+            .filter(|e| e.generation < IDENTITY_GENERATION_OFFSET && e.generation > generation)
+            .cloned()
+            .collect();
+        let mut newer = NewerAliases::default();
+        for entry in rows {
+            match self.reply(&lineage_key(&entry)).await {
+                Ok(LegacyReply::Answer(bytes)) => match LocalState::try_from(bytes.as_slice()) {
+                    Ok(mut state) => newer.aliases.extend(state.aliases_mut().keys().cloned()),
+                    Err(_) => newer.unknown = true,
+                },
+                Ok(LegacyReply::NotInstalled) => {}
+                Ok(LegacyReply::NoAnswer(_)) | Err(_) => newer.unknown = true,
+            }
+        }
+        newer
+    }
+
+    /// The newer row of `entry`'s family that holds it back, if any: one still
+    /// pending that gave nothing usable this run, for at most
+    /// [`HOLD_BACK_LOADS`] walks. Under the union policy nothing else stops
+    /// an older row landing first, and then the writer declines the newer
+    /// values for good. A typed "not installed" never holds back.
+    fn held_back_by(&self, entry: &DelegateLineageEntry) -> Option<u32> {
+        let identity = entry.generation >= IDENTITY_GENERATION_OFFSET;
+        self.lineage
+            .iter()
+            .filter(|e| e.generation > entry.generation)
+            .filter(|e| (e.generation >= IDENTITY_GENERATION_OFFSET) == identity)
+            .find(|e| {
+                let key = e.delegate_key.as_slice();
+                let silent = matches!(self.replies.get(key), Some(LegacyReply::NoAnswer(_)));
+                (silent || self.unusable.contains(key))
+                    && self
+                        .pending_walks
+                        .get(key)
+                        .is_some_and(|walks| *walks < HOLD_BACK_LOADS)
+            })
+            .map(|e| e.generation)
+    }
+
+    async fn read_row(
+        &mut self,
+        entry: &DelegateLineageEntry,
+        predecessor: &DelegateKey,
+    ) -> Result<Vec<SecretPair>, String> {
+        if let Some(newer) = self.held_back_by(entry) {
+            return Err(format!("waiting for generation {newer}, which is newer"));
+        }
+        let LegacyReply::Answer(bytes) = self.reply(predecessor).await? else {
+            return Err("no answer to read".into());
+        };
+        if entry.generation >= IDENTITY_GENERATION_OFFSET {
+            return map_identities(&bytes, &mut self.counts).map(|(pairs, _)| pairs);
+        }
+        let tables = self.alias_tables().await;
+        let newer = self.newer_aliases(entry.generation).await;
+        map_local_state(&bytes, entry.generation, &tables, &newer, &mut self.counts)
     }
 }
 
@@ -623,13 +766,10 @@ impl<T: LegacyTransport> PredecessorSecretsIo for LegacyAdapter<T> {
         let entry = self
             .entry(predecessor)
             .ok_or("a predecessor outside the lineage")?;
-        let LegacyReply::Answer(bytes) = self.reply(predecessor).await? else {
-            return Err("no answer to read".into());
-        };
-        if entry.generation >= IDENTITY_GENERATION_OFFSET {
-            return map_identities(&bytes, &mut self.counts).map(|(pairs, _)| pairs);
+        let read = self.read_row(&entry, predecessor).await;
+        if read.is_err() {
+            self.unusable.insert(predecessor.bytes().to_vec());
         }
-        let tables = self.alias_tables().await;
-        map_local_state(&bytes, entry.generation, &tables, &mut self.counts)
+        read
     }
 }

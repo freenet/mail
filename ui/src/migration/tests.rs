@@ -15,8 +15,8 @@ use std::rc::Rc;
 
 use freenet_mail_protocol::address::address_of;
 use freenet_mail_protocol::{
-    Addr, IdentityInfo, Item, ItemKind, ItemRef, Op, PROTOCOL_VERSION, Reply, Request, RequestId,
-    Response, from_cbor, to_cbor,
+    Addr, Failure, FailureCode, IdentityInfo, Item, ItemKind, ItemRef, Op, PROTOCOL_VERSION, Reply,
+    Request, RequestId, Response, from_cbor, to_cbor,
 };
 use freenet_mail_wire_v1::local_state::{ArchivedMessage, Draft, KeptMessage, SentMessage};
 use freenet_migrate::{JournalStatus, PredecessorMigration};
@@ -28,8 +28,8 @@ use futures::executor::block_on;
 use mail_delegate::env::Env;
 
 use super::legacy_delegates::{
-    AliasTables, LegacyReply, LegacyTransport, MAX_LEGACY_REPLY_BYTES, MappingCounts, PairKey,
-    lineage_key, map_identities, map_local_state,
+    AliasOwner, AliasTables, HOLD_BACK_LOADS, LegacyReply, LegacyTransport, MAX_LEGACY_REPLY_BYTES,
+    MappingCounts, NewerAliases, PairKey, lineage_key, map_local_state,
 };
 use super::successor::{
     MailStore, MergedFlags, StoredMarker, V1InboxReader, adopt_legacy_markers, merge_fields,
@@ -54,9 +54,22 @@ fn golden(name: &str) -> Vec<u8> {
 
 /// A golden reply with `from` replaced by `to` in its text.
 fn golden_edited(name: &str, from: &str, to: &str) -> Vec<u8> {
-    let text = String::from_utf8(golden(name)).unwrap();
-    assert!(text.contains(from), "{from} not in {name}");
+    edited(golden(name), from, to)
+}
+
+fn edited(reply: Vec<u8>, from: &str, to: &str) -> Vec<u8> {
+    let text = String::from_utf8(reply).unwrap();
+    assert!(text.contains(from), "{from} not in the reply");
     text.replace(from, to).into_bytes()
+}
+
+/// The golden identity, its recorded contract state replaced.
+fn identity_with_markers(inbox: &str, pending: &str, aft: &str, pending_aft: &str) -> Vec<u8> {
+    let reply = golden("identity_state_seeded");
+    let reply = edited(reply, r#""inbox_wasm_hash":"a""#, inbox);
+    let reply = edited(reply, r#""pending_migration_from":"b""#, pending);
+    let reply = edited(reply, r#""aft_record_wasm_hash":"c""#, aft);
+    edited(reply, r#""pending_aft_migration_from":"d""#, pending_aft)
 }
 
 #[derive(Default)]
@@ -92,6 +105,21 @@ impl Env for TestEnv {
 struct Delegate {
     env: Rc<RefCell<TestEnv>>,
     writes_left: Rc<RefCell<Option<usize>>>,
+    writes_seen: Rc<RefCell<usize>>,
+    faults: Rc<RefCell<Faults>>,
+}
+
+/// Answers the delegate is made to give.
+#[derive(Default)]
+struct Faults {
+    /// The next create of this kind answers `Conflict` and stores nothing.
+    false_conflict: Option<ItemKind>,
+    /// Every create of this kind answers `CapReached`.
+    capped: Option<ItemKind>,
+    /// Every identity import answers this.
+    import_fails: Option<FailureCode>,
+    /// Every write of an identity's items answers `Refused`.
+    owned_writes_refused: bool,
 }
 
 impl Delegate {
@@ -99,6 +127,42 @@ impl Delegate {
         Delegate {
             env: Rc::new(RefCell::new(TestEnv::default())),
             writes_left: Rc::new(RefCell::new(None)),
+            writes_seen: Rc::new(RefCell::new(0)),
+            faults: Rc::new(RefCell::new(Faults::default())),
+        }
+    }
+
+    /// Make the record of `item` read as absent while its index still lists
+    /// it: what the delegate answers `Unreadable` for.
+    fn blind(&self, item: &ItemRef) {
+        let rel = mail_delegate::store::item_rel(item).into_bytes();
+        let mut env = self.env.borrow_mut();
+        let before = env.secrets.len();
+        env.secrets.retain(|key, _| !key.ends_with(&rel));
+        assert_eq!(env.secrets.len(), before - 1, "one record");
+    }
+
+    fn fault(&self, op: &Op) -> Option<FailureCode> {
+        let mut faults = self.faults.borrow_mut();
+        match op {
+            Op::ImportIdentity { .. } => faults.import_fails,
+            Op::PutItem { item, .. } if faults.owned_writes_refused && item.owner.is_some() => {
+                Some(FailureCode::Refused)
+            }
+            Op::PutItem {
+                item,
+                expected_gen: None,
+                ..
+            } if faults.capped == Some(item.kind) => Some(FailureCode::CapReached),
+            Op::PutItem {
+                item,
+                expected_gen: None,
+                ..
+            } if faults.false_conflict == Some(item.kind) => {
+                faults.false_conflict = None;
+                Some(FailureCode::Conflict { current_gen: 0 })
+            }
+            _ => None,
         }
     }
 
@@ -183,6 +247,15 @@ impl MailStore for Delegate {
             }
         }
         drop(left);
+        if write {
+            *self.writes_seen.borrow_mut() += 1;
+        }
+        if let Some(code) = self.fault(&op) {
+            return Err(CallError::Failed(Failure {
+                code,
+                detail: "injected".into(),
+            }));
+        }
         self.send(op)
     }
 }
@@ -275,7 +348,8 @@ fn populated_node() -> Node {
     node
 }
 
-/// Six messages, so the golden read [1, 2] and deleted [5] all resolve.
+/// Six messages, so every position in the golden `read` and `deleted` lists
+/// resolves: a deleted mark that imported would show.
 fn six_messages() -> Inbox {
     Inbox(Some((0u8..6).map(|i| vec![i; 8]).collect()))
 }
@@ -326,27 +400,8 @@ fn scenario_a_populated_node_carries_everything_over() {
     assert_eq!(contact.description, "friend");
     assert!(contact.verified, "the v0.2.x flag, for exactly this vk");
 
-    // read [1, 2], deleted [5]: the marks land on those messages' hashes.
-    let mut flags: Vec<(Vec<u8>, MergedFlags)> = delegate
-        .list(ItemKind::Flags, owner)
-        .into_iter()
-        .map(|i| (i.item.id, serde_json::from_slice(&i.body).unwrap()))
-        .collect();
-    flags.sort_by(|a, b| a.0.cmp(&b.0));
-    let mut want: Vec<(Vec<u8>, MergedFlags)> = [(1u8, true), (2, true), (5, false)]
-        .iter()
-        .map(|(i, read)| {
-            (
-                crate::local_state::full_message_id(&[*i; 8]).to_vec(),
-                MergedFlags {
-                    read: *read,
-                    deleted: !*read,
-                },
-            )
-        })
-        .collect();
-    want.sort_by(|a, b| a.0.cmp(&b.0));
-    assert_eq!(flags, want);
+    // read [1, 2] land on those messages' hashes; deleted [5] is left out.
+    assert_eq!(read_marks(&delegate), positions(&[1, 2]));
 
     let settings = delegate.item(ItemKind::IdentitySettings, owner).unwrap();
     let value: serde_json::Value = serde_json::from_slice(&settings.body).unwrap();
@@ -365,9 +420,41 @@ fn scenario_a_populated_node_carries_everything_over() {
         (1, 1, 1, 1, 1, 1)
     );
     assert_eq!(c.flags_skipped, 0);
+    assert_eq!(c.deleted_marks, 1);
     // Generation 205's local-state delegate was never installed here.
     assert_eq!(pending_count(&outcome.status), 1);
     assert_eq!(settled(outcome.status.as_ref()), Settled::Retry);
+}
+
+/// The read marks stored for alice, as message ids.
+fn read_marks(delegate: &Delegate) -> Vec<Vec<u8>> {
+    let mut marks: Vec<Vec<u8>> = delegate
+        .list(ItemKind::Flags, Some(alice()))
+        .into_iter()
+        .map(|i| {
+            let flags: MergedFlags = serde_json::from_slice(&i.body).unwrap();
+            assert_eq!(
+                flags,
+                MergedFlags {
+                    read: true,
+                    deleted: false
+                }
+            );
+            i.item.id
+        })
+        .collect();
+    marks.sort();
+    marks
+}
+
+/// The ids of the messages at `positions` in [`six_messages`].
+fn positions(positions: &[u8]) -> Vec<Vec<u8>> {
+    let mut ids: Vec<Vec<u8>> = positions
+        .iter()
+        .map(|p| crate::local_state::full_message_id(&[*p; 8]).to_vec())
+        .collect();
+    ids.sort();
+    ids
 }
 
 #[test]
@@ -497,6 +584,16 @@ fn scenario_undecodable_and_oversized_replies_are_unresponsive() {
     }
 }
 
+/// How many writes an uninterrupted walk of `populated_node` makes, so the
+/// kill loops cover every one however many there come to be.
+fn writes_in_a_whole_walk() -> usize {
+    let whole = Delegate::new();
+    walk(&whole, &populated_node(), six_messages());
+    let writes = *whole.writes_seen.borrow();
+    assert!(writes > 10, "the walk barely wrote: {writes}");
+    writes
+}
+
 /// A tab that dies at any write leaves the next load able to finish, with
 /// the same result as a walk that was never interrupted.
 #[test]
@@ -504,7 +601,7 @@ fn scenario_an_interrupted_migration_finishes_on_the_next_load() {
     let whole = Delegate::new();
     walk(&whole, &populated_node(), six_messages());
     let want = visible(&whole);
-    for died_after in 0..24 {
+    for died_after in 0..writes_in_a_whole_walk() {
         let delegate = Delegate::new();
         delegate.die_after(died_after);
         walk(&delegate, &populated_node(), six_messages());
@@ -519,7 +616,7 @@ fn scenario_an_interrupted_migration_finishes_on_the_next_load() {
 #[test]
 fn scenario_a_partial_import_reads_as_interrupted() {
     let mut saw_interrupted = 0;
-    for died_after in 0..24 {
+    for died_after in 0..writes_in_a_whole_walk() {
         let delegate = Delegate::new();
         delegate.die_after(died_after);
         let dead = walk(&delegate, &populated_node(), six_messages());
@@ -604,11 +701,7 @@ fn scenario_an_import_never_overwrites_what_the_new_delegate_holds() {
         })
         .unwrap();
     assert!(matches!(restored, Reply::Imported { .. }));
-    let first = Delegate {
-        env: delegate.env.clone(),
-        writes_left: delegate.writes_left.clone(),
-    };
-    walk(&first, &populated_node(), six_messages());
+    walk(&delegate, &populated_node(), six_messages());
     let ids = delegate.identities();
     assert_eq!(ids.len(), 1);
     assert_eq!(ids[0].alias, "renamed");
@@ -668,12 +761,8 @@ fn scenario_the_newest_generation_wins_a_shared_item() {
     assert_eq!(draft.subject, "s");
 }
 
-#[test]
-fn scenario_two_identities_with_one_alias_both_arrive() {
-    let delegate = Delegate::new();
-    let node = Node::default();
-    node.set(im(206), answer(golden("identity_state_seeded")));
-    // The same alias for different seeds, in an older generation.
+/// The golden identity under alias alice, with the seed of a different one.
+fn other_alice() -> Vec<u8> {
     let seed_nine = (0..32).map(|_| "9").collect::<Vec<_>>().join(",");
     let seed_eight = (0..32).map(|_| "8").collect::<Vec<_>>().join(",");
     let text = String::from_utf8(golden("identity_state_seeded")).unwrap();
@@ -683,14 +772,20 @@ fn scenario_two_identities_with_one_alias_both_arrive() {
     let key_text = String::from_utf8(key_bytes).unwrap();
     assert!(key_text.contains(&seed_nine));
     let other: Vec<u8> = key_text.replace(&seed_nine, &seed_eight).into_bytes();
-    node.set(
-        im(205),
-        answer(golden_edited(
-            "identity_state_seeded",
-            &key.to_string(),
-            &serde_json::to_string(&other).unwrap(),
-        )),
-    );
+    golden_edited(
+        "identity_state_seeded",
+        &key.to_string(),
+        &serde_json::to_string(&other).unwrap(),
+    )
+}
+
+#[test]
+fn scenario_two_identities_with_one_alias_both_arrive() {
+    let delegate = Delegate::new();
+    let node = Node::default();
+    node.set(im(206), answer(golden("identity_state_seeded")));
+    // The same alias for different seeds, in an older generation.
+    node.set(im(205), answer(other_alice()));
     walk(&delegate, &node, no_inbox());
     let mut aliases: Vec<String> = delegate.identities().into_iter().map(|i| i.alias).collect();
     aliases.sort();
@@ -699,26 +794,376 @@ fn scenario_two_identities_with_one_alias_both_arrive() {
     assert!(aliases[1].starts_with("alice ("), "{}", aliases[1]);
 }
 
-/// Mail for an alias with no identity is kept, and said to be unmatched, but
-/// only once every identity generation has answered: if one went silent it
-/// may own the alias, and the local state stays pending instead.
+/// Mail for an alias with no identity is kept, and said to be unmatched. Its
+/// own generation's identities must have answered with something, or there
+/// is no telling: see the next test.
 #[test]
 fn scenario_an_alias_with_no_identity_is_kept_not_lost() {
     let delegate = Delegate::new();
     let node = Node::default();
+    node.set(
+        im(206),
+        answer(golden_edited(
+            "identity_state_seeded",
+            r#"{"identities":{"alice":"#,
+            r#"{"identities":{"renamed":"#,
+        )),
+    );
     node.set(ls(206), answer(golden("ls_state")));
     let outcome = walk(&delegate, &node, no_inbox());
     let orphans = delegate.list(ItemKind::LegacyOrphan, None);
     assert_eq!(orphans.len(), 5, "draft, sent, kept, archived, settings");
-    assert!(outcome.counts.orphaned >= 5);
+    assert_eq!(outcome.counts.orphaned, 5);
+    assert_eq!(outcome.counts.flags_skipped, 2);
+}
 
+/// An identity row that answered nothing usable decides nothing about the
+/// aliases of its generation. Sealing them as orphans would strand the mail,
+/// because local state is not walked again once it is imported.
+#[test]
+fn scenario_local_state_waits_for_the_identities_of_its_generation() {
+    let oversize = vec![b' '; MAX_LEGACY_REPLY_BYTES + 1];
+    for identity_row in [
+        LegacyReply::NoAnswer("timed out".into()),
+        LegacyReply::NotInstalled,
+        answer(br#"{"identities":{}}"#.to_vec()),
+        answer(oversize),
+        answer(b"{not json".to_vec()),
+    ] {
+        let delegate = Delegate::new();
+        let node = Node::default();
+        node.set(im(206), identity_row);
+        node.set(ls(206), answer(golden("ls_state")));
+        let outcome = walk(&delegate, &node, no_inbox());
+        assert!(delegate.list(ItemKind::LegacyOrphan, None).is_empty());
+        assert!(outcome.report.unwrap().report.any_unresponsive());
+        assert_eq!(pending_count(&outcome.status), 4);
+
+        // The identity row answers on the next load, and the mail lands
+        // under the identity.
+        let outcome = walk(&delegate, &populated_node(), six_messages());
+        assert!(delegate.list(ItemKind::LegacyOrphan, None).is_empty());
+        assert_eq!(delegate.list(ItemKind::Archived, Some(alice())).len(), 1);
+        assert_eq!(delegate.list(ItemKind::Draft, Some(alice())).len(), 1);
+        assert_eq!(pending_count(&outcome.status), 1, "only 205's local state");
+    }
+}
+
+/// The older table's alice is another identity. Filing 206's mail under her
+/// would be final, so it waits however long 206's identities stay silent.
+#[test]
+fn scenario_an_older_table_does_not_stand_in_for_a_silent_generation() {
     let delegate = Delegate::new();
     let node = Node::default();
     node.set(im(206), LegacyReply::NoAnswer("timed out".into()));
+    node.set(im(205), answer(other_alice()));
     node.set(ls(206), answer(golden("ls_state")));
+    for _ in 0..HOLD_BACK_LOADS + 2 {
+        walk(&delegate, &node, no_inbox());
+    }
+    let identities = delegate.identities();
+    assert_eq!(identities.len(), 1, "the hold has ended for the older row");
+    assert_ne!(identities[0].addr, alice());
+    assert!(
+        delegate
+            .list(ItemKind::Draft, Some(identities[0].addr))
+            .is_empty()
+    );
+
+    node.set(im(206), answer(golden("identity_state_seeded")));
+    walk(&delegate, &node, no_inbox());
+    assert_eq!(delegate.list(ItemKind::Draft, Some(alice())).len(), 1);
+}
+
+/// While 206 is silent an older row must not land first: under never-clobber
+/// its values would then stand for good.
+#[test]
+fn scenario_a_newer_row_that_answers_late_still_wins() {
+    let delegate = Delegate::new();
+    let node = populated_node();
+    let older = golden_edited("ls_state", r#""subject":"s""#, r#""subject":"older""#);
+    node.set(ls(205), answer(older));
+    node.set(ls(206), LegacyReply::NoAnswer("timed out".into()));
+    for _ in 0..HOLD_BACK_LOADS - 1 {
+        walk(&delegate, &node, six_messages());
+        assert!(delegate.list(ItemKind::Draft, Some(alice())).is_empty());
+    }
+    node.set(ls(206), answer(golden("ls_state")));
+    let outcome = walk(&delegate, &node, six_messages());
+    let drafts = delegate.list(ItemKind::Draft, Some(alice()));
+    let draft: Draft = serde_json::from_slice(&drafts[0].body).unwrap();
+    assert_eq!(draft.subject, "s", "the newest generation's copy");
+    assert_eq!(settled(outcome.status.as_ref()), Settled::Complete);
+}
+
+/// A user who ran v0.2.6 and never re-added an identity: 206 answers empty for
+/// good and everything is in 205. The hold ends, or they are stranded.
+#[test]
+fn scenario_a_newer_row_that_stays_empty_holds_older_rows_only_for_a_while() {
+    let delegate = Delegate::new();
+    let node = Node::default();
+    node.set(im(206), answer(br#"{"identities":{}}"#.to_vec()));
+    node.set(ls(206), answer(br#"{"aliases":{}}"#.to_vec()));
+    node.set(im(205), answer(golden("identity_state_seeded")));
+    node.set(ls(205), answer(golden("ls_state")));
+    for load in 0..HOLD_BACK_LOADS {
+        walk(&delegate, &node, no_inbox());
+        assert!(delegate.identities().is_empty(), "held on load {load}");
+    }
     let outcome = walk(&delegate, &node, no_inbox());
-    assert!(delegate.list(ItemKind::LegacyOrphan, None).is_empty());
-    assert!(outcome.report.unwrap().report.any_unresponsive());
+    assert_eq!(delegate.identities().len(), 1);
+    assert_eq!(delegate.list(ItemKind::Archived, Some(alice())).len(), 1);
+    assert_eq!(pending_count(&outcome.status), 2, "206 is never sealed");
+}
+
+#[test]
+fn scenario_a_typed_not_installed_holds_nothing_back() {
+    let delegate = Delegate::new();
+    let node = Node::default();
+    node.set(im(205), answer(golden("identity_state_seeded")));
+    node.set(ls(205), answer(golden("ls_state")));
+    walk(&delegate, &node, no_inbox());
+    assert_eq!(delegate.identities().len(), 1);
+    assert_eq!(delegate.list(ItemKind::Archived, Some(alice())).len(), 1);
+}
+
+/// One identity's record of where its inbox was, in two rows: v0.2.6 moved it,
+/// so 205's record is history. A pending migration from it would merge the
+/// old inbox back over newer state.
+#[test]
+fn scenario_only_the_newest_row_holding_an_identity_sets_its_markers() {
+    let inbox = crate::inbox::INBOX_CODE_HASH.trim();
+    let aft = crate::aft::TOKEN_RECORD_CODE_HASH.trim();
+    let delegate = Delegate::new();
+    let node = Node::default();
+    node.set(
+        im(206),
+        answer(identity_with_markers(
+            &format!(r#""inbox_wasm_hash":"{inbox}""#),
+            r#""pending_migration_from":null"#,
+            &format!(r#""aft_record_wasm_hash":"{aft}""#),
+            r#""pending_aft_migration_from":null"#,
+        )),
+    );
+    node.set(
+        im(205),
+        answer(identity_with_markers(
+            r#""inbox_wasm_hash":"older""#,
+            r#""pending_migration_from":null"#,
+            r#""aft_record_wasm_hash":"older-aft""#,
+            r#""pending_aft_migration_from":null"#,
+        )),
+    );
+    walk(&delegate, &node, no_inbox());
+    let settings = delegate.item(ItemKind::IdentitySettings, Some(alice()));
+    let markers = markers_from_body(settings.as_ref().map(|i| i.body.as_slice()));
+    assert_eq!(markers.pending_migration_from, None);
+    assert_eq!(markers.pending_aft_migration_from, None);
+    assert_eq!(markers.inbox_wasm_hash.as_deref(), Some(inbox));
+    assert_eq!(markers.imported_generation, Some(206));
+}
+
+/// A position means something only in the inbox of the generation that wrote
+/// it, so an older row's marks would land on the wrong messages.
+#[test]
+fn scenario_read_marks_come_from_the_newest_row_holding_the_alias() {
+    let older = || {
+        answer(golden_edited(
+            "ls_state",
+            r#""read":[1,2]"#,
+            r#""read":[3]"#,
+        ))
+    };
+    let delegate = Delegate::new();
+    let node = populated_node();
+    node.set(ls(205), older());
+    walk(&delegate, &node, six_messages());
+    assert_eq!(read_marks(&delegate), positions(&[1, 2]));
+
+    // No newer row holds it: these are the newest marks there are.
+    let delegate = Delegate::new();
+    let node = populated_node();
+    node.set(ls(206), LegacyReply::NotInstalled);
+    node.set(ls(205), older());
+    walk(&delegate, &node, six_messages());
+    assert_eq!(read_marks(&delegate), positions(&[3]));
+
+    // A newer row silent past its hold may hold it: skipped and counted.
+    let delegate = Delegate::new();
+    let node = populated_node();
+    node.set(ls(206), LegacyReply::NoAnswer("timed out".into()));
+    node.set(ls(205), older());
+    let mut skipped = 0;
+    for _ in 0..=HOLD_BACK_LOADS {
+        skipped += walk(&delegate, &node, six_messages()).counts.flags_skipped;
+    }
+    assert_eq!(delegate.list(ItemKind::Archived, Some(alice())).len(), 1);
+    assert!(read_marks(&delegate).is_empty());
+    assert_eq!(skipped, 1);
+}
+
+/// The delegate can answer `Conflict` about its index on a create of an item
+/// it does not hold. Taking that for "already stored" would seal the
+/// predecessor past an archived message with no other copy.
+#[test]
+fn scenario_a_false_conflict_does_not_pass_for_a_stored_item() {
+    let delegate = Delegate::new();
+    delegate.faults.borrow_mut().false_conflict = Some(ItemKind::Archived);
+    let outcome = walk(&delegate, &populated_node(), six_messages());
+    assert!(delegate.list(ItemKind::Archived, Some(alice())).is_empty());
+    assert_eq!(pending_count(&outcome.status), 2, "206's local state too");
+
+    let outcome = walk(&delegate, &populated_node(), six_messages());
+    assert_eq!(delegate.list(ItemKind::Archived, Some(alice())).len(), 1);
+    assert_eq!(pending_count(&outcome.status), 1);
+}
+
+/// A cap that stays reached must end the walk. If it kept the predecessor
+/// pending, every load would re-offer everything, and what the user deleted to
+/// make room would come straight back.
+#[test]
+fn scenario_a_cap_is_a_counted_rejection_and_the_walk_ends() {
+    let delegate = Delegate::new();
+    let node = populated_node();
+    delegate.faults.borrow_mut().capped = Some(ItemKind::Archived);
+    let outcome = walk(&delegate, &node, six_messages());
+    assert_eq!(outcome.counts.at_cap, 1);
+    let status = outcome.status.unwrap();
+    assert_eq!(status.rejected_items(), 1);
+    assert_eq!(pending_count(&Some(status)), 1, "206's local state ended");
+
+    let draft = delegate.list(ItemKind::Draft, Some(alice())).remove(0);
+    delegate
+        .send(Op::DeleteItem {
+            item: draft.item,
+            expected_gen: draft.generation,
+        })
+        .unwrap();
+    walk(&delegate, &node, six_messages());
+    assert!(
+        delegate.list(ItemKind::Draft, Some(alice())).is_empty(),
+        "the user's deletion stands"
+    );
+}
+
+/// An identity being deleted refuses its items for good.
+#[test]
+fn scenario_items_of_an_identity_being_deleted_are_a_counted_rejection() {
+    let delegate = Delegate::new();
+    delegate.faults.borrow_mut().owned_writes_refused = true;
+    let outcome = walk(&delegate, &populated_node(), six_messages());
+    assert!(outcome.counts.identity_gone > 0);
+    let status = outcome.status.unwrap();
+    assert!(status.rejected_items() > 0);
+    assert_eq!(pending_count(&Some(status)), 1, "206's local state ended");
+}
+
+/// `NotFound` for an identity that is held by a resolved row means it is gone,
+/// with the same result as the `Refused` it answered while being deleted.
+#[test]
+fn scenario_items_of_an_identity_that_is_gone_are_a_counted_rejection() {
+    let delegate = Delegate::new();
+    let node = populated_node();
+    node.set(ls(206), LegacyReply::NoAnswer("timed out".into()));
+    delegate.faults.borrow_mut().import_fails = Some(FailureCode::CapReached);
+    let outcome = walk(&delegate, &node, six_messages());
+    assert_eq!(pending_count(&outcome.status), 2, "only the local state");
+    assert!(delegate.identities().is_empty());
+
+    node.set(ls(206), answer(golden("ls_state")));
+    let outcome = walk(&delegate, &node, six_messages());
+    assert!(outcome.counts.identity_gone > 0);
+    assert_eq!(pending_count(&outcome.status), 1, "206's local state ended");
+}
+
+/// `NotFound` for an identity still on its way means nothing of the kind, and
+/// sealing the local state past it would strand the mail.
+#[test]
+fn scenario_items_wait_for_an_identity_that_has_not_arrived() {
+    let delegate = Delegate::new();
+    let node = populated_node();
+    delegate.faults.borrow_mut().import_fails = Some(FailureCode::Busy);
+    let outcome = walk(&delegate, &node, six_messages());
+    assert!(delegate.identities().is_empty());
+    assert_eq!(outcome.counts.identity_gone, 0);
+    let JournalStatus::Incomplete { pending, .. } = outcome.status.unwrap() else {
+        panic!("nothing is complete");
+    };
+    let key = lineage_key(ls(206));
+    assert!(
+        pending.iter().any(|p| p.key == key),
+        "206's mail is not sealed"
+    );
+
+    delegate.faults.borrow_mut().import_fails = None;
+    let outcome = walk(&delegate, &node, six_messages());
+    assert_eq!(delegate.list(ItemKind::Archived, Some(alice())).len(), 1);
+    assert_eq!(pending_count(&outcome.status), 1);
+}
+
+/// A journal or marker whose record keeps failing to read must not stop the
+/// migration on every load: the markers rebuild the journal, and the writes
+/// that follow replace what could not be read.
+#[test]
+fn scenario_an_unreadable_journal_and_marker_are_rebuilt() {
+    let delegate = Delegate::new();
+    let node = populated_node();
+    node.set(ls(206), LegacyReply::NoAnswer("timed out".into()));
+    walk(&delegate, &node, six_messages());
+    node.set(ls(206), answer(golden("ls_state")));
+
+    delegate.blind(
+        &delegate
+            .item(ItemKind::MigrationJournal, None)
+            .unwrap()
+            .item,
+    );
+    let marker = delegate.list(ItemKind::MigrationMarker, None).remove(0);
+    delegate.blind(&marker.item);
+
+    let outcome = walk(&delegate, &node, six_messages());
+    assert!(outcome.report.is_some(), "it walked");
+    assert_eq!(pending_count(&outcome.status), 1, "only 205's local state");
+    assert_eq!(delegate.list(ItemKind::Archived, Some(alice())).len(), 1);
+    assert!(delegate.item(ItemKind::MigrationJournal, None).is_some());
+}
+
+/// Two loads in one tab: the second waits for the first's walk to end.
+#[test]
+fn scenario_walks_in_one_tab_run_one_at_a_time() {
+    use futures::FutureExt;
+    use futures::channel::oneshot;
+
+    struct Gated(Option<oneshot::Receiver<()>>, Node);
+    impl LegacyTransport for Gated {
+        async fn ask(
+            &mut self,
+            predecessor: &DelegateKey,
+            params: &'static [u8],
+            request: Vec<u8>,
+        ) -> LegacyReply {
+            if let Some(gate) = self.0.take() {
+                let _ = gate.await;
+            }
+            self.1.ask(predecessor, params, request).await
+        }
+    }
+
+    let delegate = Delegate::new();
+    let (open, gate) = oneshot::channel();
+    let gated = Gated(Some(gate), populated_node());
+    let mut first = run(delegate.clone(), gated, six_messages(), 0).boxed_local();
+    assert!((&mut first).now_or_never().is_none(), "stopped at the gate");
+
+    let mut second = run(delegate.clone(), populated_node(), six_messages(), 0).boxed_local();
+    assert!(
+        (&mut second).now_or_never().is_none(),
+        "the first is walking"
+    );
+
+    open.send(()).unwrap();
+    block_on(futures::future::join(first, second));
+    assert_eq!(delegate.identities().len(), 1);
 }
 
 #[test]
@@ -726,7 +1171,7 @@ fn scenario_an_inbox_that_cannot_be_read_skips_the_marks_and_counts_them() {
     let delegate = Delegate::new();
     let outcome = walk(&delegate, &populated_node(), no_inbox());
     assert!(delegate.list(ItemKind::Flags, Some(alice())).is_empty());
-    assert_eq!(outcome.counts.flags_skipped, 3);
+    assert_eq!(outcome.counts.flags_skipped, 2);
     assert_eq!(delegate.list(ItemKind::Archived, Some(alice())).len(), 1);
 }
 
@@ -739,7 +1184,7 @@ fn scenario_a_mark_past_the_end_of_the_inbox_is_skipped_and_counted() {
         Inbox(Some(vec![vec![0; 8], vec![1; 8]])),
     );
     assert_eq!(delegate.list(ItemKind::Flags, Some(alice())).len(), 1);
-    assert_eq!(outcome.counts.flags_skipped, 2);
+    assert_eq!(outcome.counts.flags_skipped, 1);
 }
 
 #[test]
@@ -888,9 +1333,11 @@ fn the_lineage_has_every_row_and_identities_rank_above_local_state() {
 #[test]
 fn a_silent_identity_generation_makes_an_unknown_alias_an_error() {
     let mut tables = AliasTables::default();
+    tables.add(206, HashMap::new());
     tables.incomplete = true;
     let mut counts = MappingCounts::default();
-    assert!(map_local_state(&golden("ls_state"), 206, &tables, &mut counts).is_err());
+    let newer = NewerAliases::default();
+    assert!(map_local_state(&golden("ls_state"), 206, &tables, &newer, &mut counts).is_err());
 }
 
 #[test]
@@ -899,21 +1346,43 @@ fn an_alias_resolves_in_its_own_release_first() {
     let (old, new) = (Addr([1; 24]), Addr([2; 24]));
     tables.add(205, HashMap::from([("alice".to_string(), old)]));
     tables.add(206, HashMap::from([("alice".to_string(), new)]));
-    assert_eq!(tables.resolve(205, "alice"), Some(old));
-    assert_eq!(tables.resolve(206, "alice"), Some(new));
-    assert_eq!(tables.resolve(204, "alice"), Some(new), "newest knows it");
-    assert_eq!(tables.resolve(206, "bob"), None);
+    tables.add(204, HashMap::new());
+    assert_eq!(tables.resolve(205, "alice"), AliasOwner::Identity(old));
+    assert_eq!(tables.resolve(206, "alice"), AliasOwner::Identity(new));
+    assert_eq!(
+        tables.resolve(204, "alice"),
+        AliasOwner::Identity(new),
+        "its own row answered, and the newest knows it"
+    );
+    assert_eq!(tables.resolve(206, "bob"), AliasOwner::NoIdentity);
+    assert_eq!(tables.resolve(203, "alice"), AliasOwner::Unresolved);
 }
 
+/// The most the node can deliver is read, far more than the 122 contacts or
+/// 1000 messages a smaller limit would have stranded, and one byte more
+/// counts as no answer everywhere.
 #[test]
-fn a_reply_at_the_cap_is_parsed_and_one_past_it_is_not() {
-    let mut counts = MappingCounts::default();
+fn a_reply_at_the_limit_is_read_and_one_past_it_is_not() {
+    use freenet_stdlib::client_api::streaming::{CHUNK_SIZE, MAX_TOTAL_CHUNKS};
+    assert_eq!(
+        MAX_LEGACY_REPLY_BYTES,
+        MAX_TOTAL_CHUNKS as usize * CHUNK_SIZE
+    );
     let mut padded = golden("identity_state_seeded");
     padded.resize(MAX_LEGACY_REPLY_BYTES, b' ');
-    assert!(map_identities(&padded, &mut counts).is_ok());
+    let delegate = Delegate::new();
+    let node = Node::default();
+    node.set(im(206), answer(padded.clone()));
+    walk(&delegate, &node, no_inbox());
+    assert_eq!(delegate.identities().len(), 1);
+
     padded.push(b' ');
-    let err = map_identities(&padded, &mut counts).unwrap_err();
-    assert!(err.contains("refused"), "{err}");
+    let delegate = Delegate::new();
+    let node = Node::default();
+    node.set(im(206), answer(padded));
+    let outcome = walk(&delegate, &node, no_inbox());
+    assert!(delegate.identities().is_empty());
+    assert!(outcome.report.unwrap().report.any_unresponsive());
 }
 
 #[test]
@@ -923,7 +1392,8 @@ fn an_item_over_its_size_cap_is_refused_and_counted() {
     let mut tables = AliasTables::default();
     tables.add(206, HashMap::from([("alice".to_string(), alice())]));
     let mut counts = MappingCounts::default();
-    let pairs = map_local_state(&reply, 206, &tables, &mut counts).unwrap();
+    let newer = NewerAliases::default();
+    let pairs = map_local_state(&reply, 206, &tables, &newer, &mut counts).unwrap();
     // The golden draft and sent message both hold that body.
     assert_eq!(counts.oversized, 2);
     let refused = pairs
@@ -983,14 +1453,16 @@ fn a_record_of_an_older_hash_becomes_a_pending_migration() {
         inbox_wasm_hash: Some("old".into()),
         ..MigrationMarkers::default()
     };
-    let adopted = adopt_legacy_markers(&MigrationMarkers::default(), &legacy, "cur", "aft");
+    let adopted = adopt_legacy_markers(&MigrationMarkers::default(), &legacy, 206, "cur", "aft");
     assert_eq!(adopted.pending_migration_from.as_deref(), Some("old"));
-    // Stamped already by the new version: still pending, so it is retried.
+    assert_eq!(adopted.imported_generation, Some(206));
+    // Stamped by the new version before the walk, with no import behind the
+    // stamp: an identity restored by hand. Still pending, so it is retried.
     let stored = MigrationMarkers {
         inbox_wasm_hash: Some("cur".into()),
         ..MigrationMarkers::default()
     };
-    let adopted = adopt_legacy_markers(&stored, &legacy, "cur", "aft");
+    let adopted = adopt_legacy_markers(&stored, &legacy, 205, "cur", "aft");
     assert_eq!(adopted.inbox_wasm_hash.as_deref(), Some("cur"));
     assert_eq!(adopted.pending_migration_from.as_deref(), Some("old"));
     // At the current hash there is nothing to move.
@@ -998,19 +1470,51 @@ fn a_record_of_an_older_hash_becomes_a_pending_migration() {
         inbox_wasm_hash: Some("cur".into()),
         ..MigrationMarkers::default()
     };
-    let adopted = adopt_legacy_markers(&stored, &current, "cur", "aft");
+    let adopted = adopt_legacy_markers(&stored, &current, 206, "cur", "aft");
     assert_eq!(adopted.pending_migration_from, None);
+    // The same stamp, but written by importing a newer row: an older row's
+    // record is history, not a migration still to do.
+    let imported = adopted;
+    assert_eq!(
+        adopt_legacy_markers(&imported, &legacy, 205, "cur", "aft"),
+        imported
+    );
+    // A retry of the same row cannot put back what a landed migration cleared.
+    assert_eq!(
+        adopt_legacy_markers(&imported, &legacy, 206, "cur", "aft"),
+        imported
+    );
+}
+
+/// 205 got in first, its newer row having been silent past the hold. When 206
+/// answers it replaces 205's record, so 205's pending migration goes.
+#[test]
+fn a_newer_row_replaces_the_markers_of_an_older_one() {
+    let older = MigrationMarkers {
+        inbox_wasm_hash: Some("old".into()),
+        pending_migration_from: Some("old".into()),
+        imported_generation: Some(205),
+        ..MigrationMarkers::default()
+    };
+    let newer = MigrationMarkers {
+        inbox_wasm_hash: Some("cur".into()),
+        ..MigrationMarkers::default()
+    };
+    let adopted = adopt_legacy_markers(&older, &newer, 206, "cur", "aft");
+    assert_eq!(adopted.inbox_wasm_hash.as_deref(), Some("cur"));
+    assert_eq!(adopted.pending_migration_from, None);
+    assert_eq!(adopted.imported_generation, Some(206));
 }
 
 #[test]
 fn the_walk_backs_off_only_for_a_run_of_typed_not_installed() {
-    fn status(streak: u32, import_started: bool) -> JournalStatus {
+    fn status(streak: u32, then_silent: bool) -> JournalStatus {
         let delegate = Delegate::new();
         let mut last = None;
         for _ in 0..streak.max(1) {
             last = walk(&delegate, &Node::default(), no_inbox()).status;
         }
-        if import_started {
+        if then_silent {
             let node = Node::default();
             node.set(im(206), LegacyReply::NoAnswer("timed out".into()));
             last = walk(&delegate, &node, no_inbox()).status;
@@ -1029,6 +1533,33 @@ fn the_walk_backs_off_only_for_a_run_of_typed_not_installed() {
     );
     let complete = JournalStatus::Complete { rejected_items: 0 };
     assert!(!walk_this_load(&complete, 0));
+}
+
+/// An import under way may have left a partial copy. However long its
+/// predecessor then reads as not installed, the walk does not back off.
+#[test]
+fn the_walk_does_not_back_off_from_an_import_under_way() {
+    let delegate = Delegate::new();
+    delegate.faults.borrow_mut().import_fails = Some(FailureCode::Busy);
+    let node = Node::default();
+    node.set(im(206), answer(golden("identity_state_seeded")));
+    let outcome = walk(&delegate, &node, no_inbox());
+    assert!(outcome.status.unwrap().interrupted_import());
+    let mut last = None;
+    for _ in 0..ABSENT_WALKS_BEFORE_BACKING_OFF {
+        last = walk(&delegate, &Node::default(), no_inbox()).status;
+    }
+    let status = last.unwrap();
+    let JournalStatus::Incomplete { pending, .. } = &status else {
+        panic!("{status:?}");
+    };
+    assert!(
+        pending
+            .iter()
+            .all(|p| p.absent_streak >= ABSENT_WALKS_BEFORE_BACKING_OFF)
+    );
+    assert!(status.interrupted_import());
+    assert!(walk_this_load(&status, 1), "the Started row keeps it going");
 }
 
 #[test]

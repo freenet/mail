@@ -107,23 +107,39 @@ pub(crate) fn offer_contract_not_found(instance: &ContractInstanceId) {
     }
 }
 
-/// `rx`'s value, or `None` after the timeout or if its sender went away.
-async fn answer_of<T>(rx: oneshot::Receiver<T>) -> Option<T> {
-    #[cfg(target_family = "wasm")]
-    {
-        use futures::FutureExt;
-        let mut rx = rx.fuse();
-        let mut timer = gloo_timers::future::TimeoutFuture::new(REPLY_TIMEOUT_MS).fuse();
-        futures::select! {
-            answer = rx => answer.ok(),
-            _ = timer => None,
-        }
+#[cfg(target_family = "wasm")]
+fn timer(ms: u32) -> impl std::future::Future<Output = ()> + Unpin {
+    gloo_timers::future::TimeoutFuture::new(ms)
+}
+
+/// A native build has no browser timer: tests are all that wait here.
+#[cfg(not(target_family = "wasm"))]
+fn timer(ms: u32) -> impl std::future::Future<Output = ()> + Unpin {
+    use futures::FutureExt;
+    let (fire, fired) = oneshot::channel();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(u64::from(ms)));
+        let _ = fire.send(());
+    });
+    fired.map(|_| ())
+}
+
+/// `rx`'s value, or `None` after `timeout_ms` or if its sender went away.
+async fn answer_of<T>(rx: oneshot::Receiver<T>, timeout_ms: u32) -> Option<T> {
+    use futures::FutureExt;
+    let mut rx = rx.fuse();
+    let mut timer = timer(timeout_ms).fuse();
+    futures::select! {
+        answer = rx => answer.ok(),
+        _ = timer => None,
     }
-    #[cfg(not(target_family = "wasm"))]
-    {
-        let _ = REPLY_TIMEOUT_MS;
-        rx.await.ok()
-    }
+}
+
+/// A legacy delegate's reply. No reply in time is a silence, never an absence.
+async fn legacy_answer(rx: oneshot::Receiver<LegacyReply>, timeout_ms: u32) -> LegacyReply {
+    answer_of(rx, timeout_ms)
+        .await
+        .unwrap_or_else(|| LegacyReply::NoAnswer("no reply in time".to_string()))
 }
 
 /// The node, as the walk's reader.
@@ -156,9 +172,7 @@ impl LegacyTransport for NodeLegacy {
             .await;
         let reply = match sent {
             Err(e) => LegacyReply::NoAnswer(format!("send: {e}")),
-            Ok(()) => answer_of(rx)
-                .await
-                .unwrap_or_else(|| LegacyReply::NoAnswer("no reply in time".to_string())),
+            Ok(()) => legacy_answer(rx, REPLY_TIMEOUT_MS).await,
         };
         LEGACY_WAITER.with(|w| w.borrow_mut().remove(predecessor));
         reply
@@ -195,7 +209,7 @@ impl V1InboxReader for NodeInbox {
             blocking_subscribe: false,
         };
         let state = match client.send(request.into()).await {
-            Ok(()) => answer_of(rx).await.flatten(),
+            Ok(()) => answer_of(rx, REPLY_TIMEOUT_MS).await.flatten(),
             Err(_) => None,
         };
         INBOX_WAITER.with(|w| w.borrow_mut().remove(&key));
@@ -222,6 +236,28 @@ mod tests {
 
     fn key(b: u8) -> DelegateKey {
         DelegateKey::new([b; 32], CodeHash::new([b; 32]))
+    }
+
+    #[test]
+    fn no_reply_in_time_is_a_silence_never_an_absence() {
+        use futures::executor::block_on;
+        let (_held, rx) = oneshot::channel();
+        assert!(matches!(
+            block_on(legacy_answer(rx, 5)),
+            LegacyReply::NoAnswer(_)
+        ));
+        let (dropped, rx) = oneshot::channel();
+        drop(dropped);
+        assert!(matches!(
+            block_on(legacy_answer(rx, 60_000)),
+            LegacyReply::NoAnswer(_)
+        ));
+        let (tx, rx) = oneshot::channel();
+        tx.send(LegacyReply::NotInstalled).unwrap();
+        assert_eq!(
+            block_on(legacy_answer(rx, 60_000)),
+            LegacyReply::NotInstalled
+        );
     }
 
     #[test]
