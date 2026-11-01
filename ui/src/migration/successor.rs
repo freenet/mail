@@ -301,9 +301,7 @@ impl<S: MailStore, I: V1InboxReader> MailSuccessor<S, I> {
             Ok(_) => ItemWrite::written(),
             Err(e) if is_conflict(&e) => ItemWrite::already_authoritative(),
             // The identity is being deleted: the user's decision stands.
-            Err(e) if e.code() == Some(FailureCode::Refused) => {
-                ItemWrite::already_authoritative()
-            }
+            Err(e) if e.code() == Some(FailureCode::Refused) => ItemWrite::already_authoritative(),
             Err(e) => failed(e),
         }
     }
@@ -396,9 +394,8 @@ impl<S: MailStore, I: V1InboxReader> MailSuccessor<S, I> {
                     .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok())
                     .unwrap_or_else(|| serde_json::json!({}));
                 let merged = merge_fields(&present, &incoming);
-                (merged != present).then(|| {
-                    serde_json::to_vec(&merged).expect("a JSON value always encodes")
-                })
+                (merged != present)
+                    .then(|| serde_json::to_vec(&merged).expect("a JSON value always encodes"))
             })
             .await;
         match written {
@@ -420,7 +417,11 @@ impl<S: MailStore, I: V1InboxReader> MailSuccessor<S, I> {
             Ok(other) => return failed(crate::mail_delegate::unexpected(&other)),
             Err(e) => return failed(e),
         };
-        let Some(vk) = identities.iter().find(|i| i.addr == owner).map(|i| i.vk.clone()) else {
+        let Some(vk) = identities
+            .iter()
+            .find(|i| i.addr == owner)
+            .map(|i| i.vk.clone())
+        else {
             return ItemWrite::retryable("the identity is not imported yet".to_string());
         };
         let Some(ciphertexts) = self.inbox.ciphertexts(&vk).await else {

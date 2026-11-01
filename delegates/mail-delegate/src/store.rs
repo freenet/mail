@@ -192,10 +192,7 @@ pub fn shape(kind: ItemKind) -> (bool, usize) {
 /// THIS delegate's predecessors: copied forward they would claim the
 /// successor imported them, so an export leaves them out.
 pub fn exported(kind: ItemKind) -> bool {
-    !matches!(
-        kind,
-        ItemKind::MigrationJournal | ItemKind::MigrationMarker
-    )
+    !matches!(kind, ItemKind::MigrationJournal | ItemKind::MigrationMarker)
 }
 
 /// Per-kind cap (per owner for identity-owned kinds).

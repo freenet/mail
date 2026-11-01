@@ -97,9 +97,28 @@ it guards is broken.
 
 The `legacy_*.toml` registries are validated by `ui/build.rs`
 (`freenet-migrate-build`; an empty registry fails the build) and pinned by
-`ui/src/legacy_registry.rs`. They are not read at runtime yet: the inbox and
-AFT migrations still walk the in-source `LEGACY_*_CODE_HASHES` slices
-described below.
+`ui/src/legacy_registry.rs`. The delegate rows feed the walk below. The inbox
+and AFT migrations still walk the in-source `LEGACY_*_CODE_HASHES` slices
+described further on.
+
+### Migrating from the v0.2.x delegates
+
+`ui/src/migration/` moves a v0.2.x user's data into the mail delegate on every
+load, before the identities are listed, with the `freenet-migrate` walk and
+journal. `legacy_delegates.rs` reads each predecessor and maps its reply to
+items by content; `successor.rs` imports them through the mail delegate's
+normal operations, which never overwrite; `node.rs` is the real transport.
+
+- **No answer is not "nothing":** silence, an empty answer and a typed "not
+  installed" all leave a predecessor pending, so the journal is normally
+  never `Complete` and that is expected. `settled` is the only place that
+  decides the migration is finished. Do not seal anything as empty.
+- **The journal and markers are delegate items** (`ItemKind::MigrationJournal`,
+  `MigrationMarker`), per origin and never exported.
+- **Tests** drive the crate's real walk against the real delegate's handlers,
+  with old-format inputs taken only from `wire-v1/src/golden_v1.txt`. Add a
+  golden sample through `wire-v1/capture` rather than building an old reply
+  with today's types.
 
 ## Quick Reference
 

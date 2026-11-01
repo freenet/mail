@@ -350,11 +350,8 @@ pub(crate) fn map_identities(
                     continue;
                 };
                 let addr = address_of(&keys.ml_dsa_vk_bytes);
-                let body = contact_store::encode_keys(
-                    &alias,
-                    &info.extra.unwrap_or_default(),
-                    keys,
-                );
+                let body =
+                    contact_store::encode_keys(&alias, &info.extra.unwrap_or_default(), keys);
                 pairs.push((PairKey::Contact(addr).encode(), body));
             }
         }
@@ -454,7 +451,9 @@ fn map_alias(
     };
     if flags != LegacyFlags::default() {
         match owner {
-            Some(owner) => m.pairs.push((PairKey::Flags(owner).encode(), json(&flags)?)),
+            Some(owner) => m
+                .pairs
+                .push((PairKey::Flags(owner).encode(), json(&flags)?)),
             None => {
                 m.counts.orphan_flags += (flags.read.len() + flags.deleted.len()) as u32;
             }
@@ -465,7 +464,9 @@ fn map_alias(
     if state.settings != Default::default() {
         let body = json(&state.settings)?;
         match owner {
-            Some(owner) => m.pairs.push((PairKey::IdentitySettings(owner).encode(), body)),
+            Some(owner) => m
+                .pairs
+                .push((PairKey::IdentitySettings(owner).encode(), body)),
             None => m.orphan("settings", "", body)?,
         }
     }
@@ -615,7 +616,10 @@ impl<T: LegacyTransport> PredecessorSecretsIo for LegacyAdapter<T> {
         })
     }
 
-    async fn fetch_secrets(&mut self, predecessor: &DelegateKey) -> Result<Vec<SecretPair>, String> {
+    async fn fetch_secrets(
+        &mut self,
+        predecessor: &DelegateKey,
+    ) -> Result<Vec<SecretPair>, String> {
         let entry = self
             .entry(predecessor)
             .ok_or("a predecessor outside the lineage")?;

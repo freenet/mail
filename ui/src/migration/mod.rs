@@ -60,9 +60,13 @@ pub(crate) fn lineage() -> Vec<DelegateLineageEntry> {
     use crate::legacy_registry::{IDENTITY_LINEAGE, LOCAL_STATE_LINEAGE};
     let identity = IDENTITY_LINEAGE.iter().map(|e| DelegateLineageEntry {
         generation: e.generation + IDENTITY_GENERATION_OFFSET,
-        ..e.clone()
+        ..*e
     });
-    LOCAL_STATE_LINEAGE.iter().cloned().chain(identity).collect()
+    LOCAL_STATE_LINEAGE
+        .iter()
+        .cloned()
+        .chain(identity)
+        .collect()
 }
 
 fn policy() -> SecretSelectionPolicy {

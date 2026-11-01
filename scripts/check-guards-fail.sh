@@ -52,6 +52,9 @@ blind_tests() {
 protocol_tests() {
     cargo test --manifest-path "$STAGE/Cargo.toml" -p freenet-mail-protocol
 }
+ui_migration_tests() {
+    cargo test --manifest-path "$STAGE/Cargo.toml" -p freenet-email-ui --lib migration
+}
 candidate_check() { "$STAGE/scripts/check-delegate-candidate.sh"; }
 freeze_tests() { "$STAGE/scripts/release-freeze_test.sh"; }
 
@@ -73,6 +76,7 @@ baseline "delegate tests" delegate_tests
 baseline "delegate fault-injection runs" fault_tests
 baseline "delegate unreadable-key runs" blind_tests
 baseline "protocol tests" protocol_tests
+baseline "migration tests" ui_migration_tests
 baseline "release freeze tests" freeze_tests
 [ "$WASM" -eq 1 ] && baseline "candidate check" candidate_check
 if [ "$failures" -ne 0 ]; then
@@ -441,6 +445,85 @@ dt "legacy imports take generations from the counter" "$D/store.rs" \
     '        let generation = current + 1;
         self.put(rel, &encode_versioned(generation, body))?;' \
     imported_items_take_their_generation_from_the_counter
+
+# The legacy walk.
+M="$STAGE/ui/src/migration"
+ut() { # name file old new test...
+    guard "$1" "$2" "$3" "$4" "tests:$5" ui_migration_tests
+}
+ut "silence never reads as absence" "$M/legacy_delegates.rs" \
+    '            LegacyReply::NoAnswer(_) => ProbeVerdict::NoReply,
+        })
+    }
+
+    async fn fetch_secrets(
+        &mut self,
+        predecessor: &DelegateKey,
+    ) -> Result<Vec<SecretPair>, String> {
+        let entry = self
+            .entry(predecessor)
+            .ok_or("a predecessor outside the lineage")?;
+        let LegacyReply::Answer(bytes) = self.reply(predecessor).await? else {
+            return Err("no answer to read".into());
+        };' \
+    '            LegacyReply::NoAnswer(_) => ProbeVerdict::Executable,
+        })
+    }
+
+    async fn fetch_secrets(
+        &mut self,
+        predecessor: &DelegateKey,
+    ) -> Result<Vec<SecretPair>, String> {
+        let entry = self
+            .entry(predecessor)
+            .ok_or("a predecessor outside the lineage")?;
+        let LegacyReply::Answer(bytes) = self.reply(predecessor).await? else {
+            return Ok(Vec::new());
+        };' \
+    a_silent_get_is_unresponsive_never_absent_never_sealed
+ut "an empty answer is never sealed" "$M/legacy_delegates.rs" \
+    '    if manager.is_empty() {
+        return Err("answered with nothing, which does not prove it holds nothing".into());
+    }' \
+    '    if manager.is_empty() {
+        return Ok((Vec::new(), HashMap::new()));
+    }' \
+    scenario_an_answered_empty_store_is_never_sealed
+ut "an import never overwrites" "$M/successor.rs" \
+    '        match self.put(item, body, None).await {
+            Ok(_) => ItemWrite::written(),' \
+    '        match self.merged_put(item, |_| Some(body.clone())).await {
+            Ok(_) => ItemWrite::written(),' \
+    scenario_an_import_never_overwrites_what_the_new_delegate_holds
+ut "a migrated identity starts unconfirmed" "$M/successor.rs" \
+    '                kind: ImportKind::Migration,' \
+    '                kind: ImportKind::UserRestore,' \
+    scenario_a_populated_node_carries_everything_over
+ut "the archive is carried" "$M/legacy_delegates.rs" \
+    '    for (id, archived) in &state.archived {' \
+    '    for (id, archived) in state.archived.iter().take(0) {' \
+    scenario_a_populated_node_carries_everything_over
+ut "identities are walked first" "$M/mod.rs" \
+    '        generation: e.generation + IDENTITY_GENERATION_OFFSET,' \
+    '        generation: e.generation + IDENTITY_GENERATION_OFFSET - 2_000_000,' \
+    scenario_identities_are_walked_before_any_local_state
+ut "a silent identity generation holds back its aliases" "$M/legacy_delegates.rs" \
+    '        if owner.is_none() && aliases.incomplete {' \
+    '        if false {' \
+    scenario_an_alias_with_no_identity_is_kept_not_lost
+ut "a marker never lowers its data flag" "$M/successor.rs" \
+    '                started: Some(saw_data || self.started == Some(true)),' \
+    '                started: Some(saw_data),' \
+    a_marker_follows_the_crates_contract
+ut "the wildcard status retries" "$M/mod.rs" \
+    '        _ => Settled::Retry,' \
+    '        _ => Settled::Complete,' \
+    the_wildcard_status_arm_retries
+ut "the settings merge keeps what is stored" "$M/successor.rs" \
+    '        (present, _) => present.clone(),' \
+    '        (_, other) => other.clone(),' \
+    the_settings_merge_commutes_over_disjoint_fields
+
 # A rename that still compiles: only the pinned bytes can catch it. (A new
 # variant is caught earlier, by the wildcard-free match in golden.rs, at
 # compile time.)

@@ -1664,7 +1664,11 @@ fn migration_records_are_not_exported() {
         .iter()
         .map(|(k, _)| String::from_utf8(k.clone()).unwrap())
         .collect();
-    assert!(!keys.iter().any(|k| k.contains("/mj/") || k.contains("/mm/")));
+    assert!(
+        !keys
+            .iter()
+            .any(|k| k.contains("/mj/") || k.contains("/mm/"))
+    );
     assert!(keys.iter().any(|k| k.contains("it/lo/")), "user data stays");
 }
 

@@ -115,8 +115,9 @@ impl Delegate {
             request_id: RequestId([1; 16]),
             op,
         };
-        let inbound =
-            InboundDelegateMsg::ApplicationMessage(ApplicationMessage::new(to_cbor(&request).unwrap()));
+        let inbound = InboundDelegateMsg::ApplicationMessage(ApplicationMessage::new(
+            to_cbor(&request).unwrap(),
+        ));
         let origin = MessageOrigin::WebApp(ContractInstanceId::new(ORIGIN));
         let mut env = self.env.borrow_mut();
         let out = mail_delegate::handlers::process(&mut *env, Some(origin), inbound)
@@ -189,8 +190,14 @@ impl MailStore for Delegate {
 #[derive(Clone, Default)]
 struct Node {
     replies: Rc<RefCell<HashMap<[u8; 32], LegacyReply>>>,
-    asked: Rc<RefCell<Vec<(DelegateKey, Vec<u8>, Vec<u8>)>>>,
+    asked: Rc<RefCell<Vec<Asked>>>,
 }
+
+/// One request: the delegate, the parameters and the message.
+type Asked = (DelegateKey, Vec<u8>, Vec<u8>);
+
+/// One list's items, as `(id, body)`.
+type Listed = Vec<(Vec<u8>, Vec<u8>)>;
 
 impl Node {
     fn set(&self, entry: &freenet_migrate::DelegateLineageEntry, reply: LegacyReply) {
@@ -346,7 +353,14 @@ fn scenario_a_populated_node_carries_everything_over() {
 
     let c = outcome.counts;
     assert_eq!(
-        (c.identities, c.contacts, c.drafts, c.sent, c.kept, c.archived),
+        (
+            c.identities,
+            c.contacts,
+            c.drafts,
+            c.sent,
+            c.kept,
+            c.archived
+        ),
         (1, 1, 1, 1, 1, 1)
     );
     assert_eq!(c.flags_skipped, 0);
@@ -521,7 +535,7 @@ fn scenario_a_partial_import_reads_as_interrupted() {
 }
 
 /// What the user sees: every list's bodies, by id.
-fn visible(delegate: &Delegate) -> BTreeMap<String, Vec<(Vec<u8>, Vec<u8>)>> {
+fn visible(delegate: &Delegate) -> BTreeMap<String, Listed> {
     let mut out = BTreeMap::new();
     for identity in delegate.identities() {
         out.insert(
@@ -535,7 +549,7 @@ fn visible(delegate: &Delegate) -> BTreeMap<String, Vec<(Vec<u8>, Vec<u8>)>> {
             ItemKind::Archived,
             ItemKind::Flags,
         ] {
-            let mut items: Vec<(Vec<u8>, Vec<u8>)> = delegate
+            let mut items: Listed = delegate
                 .list(kind, Some(identity.addr))
                 .into_iter()
                 .map(|i| (i.item.id, i.body.into_vec()))
@@ -670,13 +684,11 @@ fn scenario_two_identities_with_one_alias_both_arrive() {
     let other: Vec<u8> = key_text.replace(&seed_nine, &seed_eight).into_bytes();
     node.set(
         im(205),
-        answer(
-            golden_edited(
-                "identity_state_seeded",
-                &key.to_string(),
-                &serde_json::to_string(&other).unwrap(),
-            ),
-        ),
+        answer(golden_edited(
+            "identity_state_seeded",
+            &key.to_string(),
+            &serde_json::to_string(&other).unwrap(),
+        )),
     );
     walk(&delegate, &node, no_inbox());
     let mut aliases: Vec<String> = delegate.identities().into_iter().map(|i| i.alias).collect();
@@ -748,7 +760,11 @@ fn scenario_an_undecodable_entry_is_refused_and_counted_not_hidden() {
     // The golden `identity_state`'s key bytes are no key at all.
     node.set(
         im(206),
-        answer(golden_edited("identity_state", r#""contact""#, r#""identity""#)),
+        answer(golden_edited(
+            "identity_state",
+            r#""contact""#,
+            r#""identity""#,
+        )),
     );
     let outcome = walk(&delegate, &node, no_inbox());
     assert_eq!(outcome.counts.refused, 1);
@@ -848,11 +864,19 @@ fn the_lineage_has_every_row_and_identities_rank_above_local_state() {
     );
     let lowest_identity = lineage
         .iter()
-        .filter(|e| IDENTITY_LINEAGE.iter().any(|i| i.delegate_key == e.delegate_key))
+        .filter(|e| {
+            IDENTITY_LINEAGE
+                .iter()
+                .any(|i| i.delegate_key == e.delegate_key)
+        })
         .map(|e| e.generation)
         .min()
         .unwrap();
-    let highest_local = LOCAL_STATE_LINEAGE.iter().map(|e| e.generation).max().unwrap();
+    let highest_local = LOCAL_STATE_LINEAGE
+        .iter()
+        .map(|e| e.generation)
+        .max()
+        .unwrap();
     assert!(lowest_identity > highest_local);
     assert_eq!(
         lineage_key(&lineage[0]).bytes(),
@@ -998,7 +1022,10 @@ fn the_walk_backs_off_only_for_a_run_of_typed_not_installed() {
     assert!(!walk_this_load(&settled_absent, 1));
     assert!(walk_this_load(&settled_absent, 0), "still walks sometimes");
     let silent = status(ABSENT_WALKS_BEFORE_BACKING_OFF, true);
-    assert!(walk_this_load(&silent, 1), "silence is asked again every load");
+    assert!(
+        walk_this_load(&silent, 1),
+        "silence is asked again every load"
+    );
     let complete = JournalStatus::Complete { rejected_items: 0 };
     assert!(!walk_this_load(&complete, 0));
 }
@@ -1006,10 +1033,7 @@ fn the_walk_backs_off_only_for_a_run_of_typed_not_installed() {
 #[test]
 fn only_a_complete_journal_settles_the_migration() {
     assert_eq!(settled(None), Settled::Retry);
-    assert_eq!(
-        settled(Some(&JournalStatus::NotStarted)),
-        Settled::Retry
-    );
+    assert_eq!(settled(Some(&JournalStatus::NotStarted)), Settled::Retry);
     assert_eq!(
         settled(Some(&JournalStatus::Incomplete {
             pending: Vec::new(),
@@ -1107,7 +1131,10 @@ fn the_settings_merge_commutes_over_disjoint_fields() {
     }
     let conflict = merge_fields(&serde_json::json!({"f": 1}), &serde_json::json!({"f": 2}));
     assert_eq!(conflict, serde_json::json!({"f": 1}), "present wins");
-    let filled = merge_fields(&serde_json::json!({"f": null}), &serde_json::json!({"f": 2}));
+    let filled = merge_fields(
+        &serde_json::json!({"f": null}),
+        &serde_json::json!({"f": 2}),
+    );
     assert_eq!(filled, serde_json::json!({"f": 2}), "null is missing");
 }
 

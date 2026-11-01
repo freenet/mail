@@ -51,12 +51,10 @@ pub(crate) fn classify_response(values: &[OutboundDelegateMsg]) -> LegacyReply {
 /// one naming none is taken to be the request in flight's.
 pub(crate) fn classify_error(error: &DelegateError, waiting: &DelegateKey) -> Option<LegacyReply> {
     match error {
-        DelegateError::Missing(key) => {
-            (key == waiting).then_some(LegacyReply::NotInstalled)
+        DelegateError::Missing(key) => (key == waiting).then_some(LegacyReply::NotInstalled),
+        DelegateError::RegisterError(key) | DelegateError::MissingSecret { key, .. } => {
+            (key == waiting).then(|| LegacyReply::NoAnswer(error.to_string()))
         }
-        DelegateError::RegisterError(key) | DelegateError::MissingSecret { key, .. } => (key
-            == waiting)
-            .then(|| LegacyReply::NoAnswer(error.to_string())),
         _ => Some(LegacyReply::NoAnswer(error.to_string())),
     }
 }
@@ -235,10 +233,7 @@ mod tests {
             LegacyReply::NoAnswer(_)
         ));
         let full = OutboundDelegateMsg::ApplicationMessage(ApplicationMessage::new(vec![1, 2]));
-        assert_eq!(
-            classify_response(&[full]),
-            LegacyReply::Answer(vec![1, 2])
-        );
+        assert_eq!(classify_response(&[full]), LegacyReply::Answer(vec![1, 2]));
     }
 
     #[test]
@@ -248,7 +243,10 @@ mod tests {
             classify_error(&DelegateError::Missing(waiting.clone()), &waiting),
             Some(LegacyReply::NotInstalled)
         );
-        assert_eq!(classify_error(&DelegateError::Missing(key(2)), &waiting), None);
+        assert_eq!(
+            classify_error(&DelegateError::Missing(key(2)), &waiting),
+            None
+        );
         assert!(matches!(
             classify_error(&DelegateError::ExecutionError("trap".into()), &waiting),
             Some(LegacyReply::NoAnswer(_))
