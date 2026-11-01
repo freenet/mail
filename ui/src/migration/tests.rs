@@ -5,8 +5,9 @@
 //! captured through the frozen crates. A test that needs a variation edits
 //! that JSON as text; none builds an old reply with today's types.
 //!
-//! Tests named `scenario_*` go through the crate's walk. Replacing its entry
-//! point with a panic fails exactly those (the PR records the run).
+//! Tests named `scenario_*` go through the crate's walk, as do the silence
+//! and back-off tests: replacing its entry point with a panic fails exactly
+//! those (the PR records the run).
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
@@ -742,7 +743,7 @@ fn scenario_a_mark_past_the_end_of_the_inbox_is_skipped_and_counted() {
 }
 
 #[test]
-fn scenario_a_journal_that_cannot_be_stored_stops_before_any_import() {
+fn a_journal_that_cannot_be_stored_stops_before_any_import() {
     let delegate = Delegate::new();
     delegate.die_after(0);
     let outcome = walk(&delegate, &populated_node(), six_messages());

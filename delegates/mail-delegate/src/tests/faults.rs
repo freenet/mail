@@ -665,12 +665,14 @@ impl Run {
                 });
             }
         }
-        self.send(Op::ListItems {
-            kind: ItemKind::Contact,
-            owner: None,
-            after: None,
-            limit: 256,
-        });
+        for kind in KINDS.iter().filter(|k| !store::shape(**k).0) {
+            self.send(Op::ListItems {
+                kind: *kind,
+                owner: None,
+                after: None,
+                limit: 256,
+            });
+        }
     }
 }
 
