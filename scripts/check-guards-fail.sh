@@ -584,8 +584,8 @@ ut "an orphan move never overwrites an item" "$M/orphans.rs" \
     '        Some(_) => Ok(()),' \
     moving_an_orphan_never_overwrites_an_item_already_there
 ut "a silent identity row never orphans its aliases" "$M/legacy_delegates.rs" \
-    'AliasOwner::Unresolved if orphan_unresolved && aliases.own_row_absent(generation) => None,' \
-    'AliasOwner::Unresolved if orphan_unresolved => None,' \
+    'AliasOwner::Unresolved if orphan_unresolved && aliases.own_row_absent(generation) => {' \
+    'AliasOwner::Unresolved if orphan_unresolved => {' \
     scenario_a_silent_identity_row_never_orphans_its_aliases
 guard "send asks an unconfirmed identity to confirm" "$STAGE/ui/src/app.rs" \
     '        if login::Identity::get_alias(&sender_for_send).is_some_and(|i| !i.confirmed) {' \
