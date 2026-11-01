@@ -432,10 +432,7 @@ dt "writing over an unreadable value never counts low (bytes)" "$D/store.rs" \
         });' \
     replacing_an_unreadable_value_never_counts_low
 dt "migration records never reach a successor" "$D/store.rs" \
-    '    !matches!(
-        kind,
-        ItemKind::MigrationJournal | ItemKind::MigrationMarker
-    )' \
+    '    !matches!(kind, ItemKind::MigrationJournal | ItemKind::MigrationMarker)' \
     '    let _ = kind;
     true' \
     migration_records_are_not_exported
