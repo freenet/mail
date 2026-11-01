@@ -755,6 +755,8 @@ pub(crate) fn list_name(kind: ItemKind) -> &'static str {
         ItemKind::Archived => "archived mail",
         ItemKind::Flags => "read and deleted marks",
         ItemKind::IdentitySettings | ItemKind::GlobalSettings => "settings",
+        ItemKind::MigrationJournal | ItemKind::MigrationMarker => "migration records",
+        ItemKind::LegacyOrphan => "unmatched older mail",
     }
 }
 

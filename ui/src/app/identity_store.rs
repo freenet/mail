@@ -613,8 +613,8 @@ pub(crate) struct LoadedIdentity {
 /// On drift the pending marker is set (so a session whose GET never resolves
 /// retries next time) and the current hash is stamped (so drift doesn't fire
 /// every session); the pending marker is cleared only once the migration PUT
-/// lands. With no drift, a first observation stamps the baseline and a stale
-/// pending marker is cleared.
+/// lands, so a session whose GET never resolved retries on the next load.
+/// With no drift, a first observation stamps the baseline.
 pub(crate) fn plan_migration(
     recorded: &mut Option<String>,
     pending: &mut Option<String>,
@@ -1643,8 +1643,16 @@ mod tests {
             (rec.as_deref(), pend.as_deref()),
             (Some("cur"), Some("old"))
         );
-        // Recorded == current with a leftover pending marker: stale, cleared.
+        // The session after that one: the hash is already stamped, and the
+        // marker alone says the migration has not landed.
         let (mut rec, mut pend) = (Some("cur".to_string()), Some("old".to_string()));
+        assert_eq!(
+            plan_migration(&mut rec, &mut pend, "cur"),
+            Some("old".into())
+        );
+        assert_eq!(pend.as_deref(), Some("old"));
+        // A marker naming the current hash has nothing to retry: cleared.
+        let (mut rec, mut pend) = (Some("cur".to_string()), Some("cur".to_string()));
         assert_eq!(plan_migration(&mut rec, &mut pend, "cur"), None);
         assert_eq!(pend, None);
     }

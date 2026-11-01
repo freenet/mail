@@ -105,12 +105,13 @@ pub(crate) fn build_migration_candidates(prior_hash: &str, legacy: &[&str]) -> V
 /// `current` hash.
 ///
 /// Rules:
-/// - If `prior == current`: no drift; ignore any stale marker (caller
-///   is responsible for clearing it separately).
-/// - Else if `pending` is set: prefer the marker (it's the source of
-///   truth for in-flight retries — see #251 improvement 5).
-/// - Else if `prior` is set: standard single-hop drift.
-/// - Else: first observation; nothing to migrate.
+/// - `pending` (unless it names `current`) wins, whatever `prior` says: the
+///   hash is stamped when a migration is planned, so a migration whose GET
+///   never resolved reads `prior == current` with the marker still set, and
+///   the marker is the only record that it must be retried (#251
+///   improvement 5). The marker is cleared only when the PUT lands.
+/// - Else if `prior` is set and differs from `current`: single-hop drift.
+/// - Else: no drift, or a first observation; nothing to migrate.
 ///
 /// Pure function — extracted so the precedence rules can be
 /// table-tested without a node.
@@ -119,11 +120,10 @@ pub(crate) fn select_migrate_from(
     pending: Option<&str>,
     current: &str,
 ) -> Option<String> {
-    match (prior, pending) {
-        (Some(p), _) if p == current => None,
+    match (prior, pending.filter(|p| *p != current)) {
         (_, Some(pending)) => Some(pending.to_string()),
-        (Some(p), None) => Some(p.to_string()),
-        (None, None) => None,
+        (Some(p), None) if p != current => Some(p.to_string()),
+        _ => None,
     }
 }
 
@@ -1637,10 +1637,24 @@ mod migration_logic_tests {
     }
 
     #[test]
-    fn select_ignores_pending_when_prior_matches_current() {
-        // Stale marker case — drift logic returns None, caller clears
-        // the marker separately.
-        assert_eq!(select_migrate_from(Some("cur"), Some("stale"), "cur"), None);
+    fn select_retries_pending_when_prior_matches_current() {
+        // Planning a migration stamps the current hash, so this is what a
+        // session whose GET never resolved leaves behind. Ignoring it would
+        // strand the mail under the old key for good.
+        assert_eq!(
+            select_migrate_from(Some("cur"), Some("old"), "cur"),
+            Some("old".to_string())
+        );
+    }
+
+    #[test]
+    fn select_ignores_a_pending_marker_naming_the_current_hash() {
+        // Migrating from the current key would re-PUT identical state.
+        assert_eq!(select_migrate_from(Some("cur"), Some("cur"), "cur"), None);
+        assert_eq!(
+            select_migrate_from(Some("old"), Some("cur"), "cur"),
+            Some("old".to_string())
+        );
     }
 
     #[test]

@@ -536,8 +536,9 @@ only when the PUT under the current inbox key succeeds. On startup
 `select_migrate_from` (in `ui/src/inbox.rs`) prefers a non-None
 pending marker over the recorded hash, so a session whose GET never
 resolved (node offline, contract expired) re-attempts on the next
-session. Stale markers (`prior == current` with a leftover pending
-value) are cleared in the no-drift branch.
+session, including when the recorded hash already equals the current
+one (planning a migration stamps it). A marker naming the current hash
+has nothing to retry and is cleared.
 
 **Container contract lockfile isolation (issue #198)**: the container
 contract and its shared types crate live OUTSIDE the freenet-email workspace:

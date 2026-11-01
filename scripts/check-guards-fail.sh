@@ -407,6 +407,40 @@ dt "a failure after a write is reported as partial" "$D/handlers.rs" \
 dt "a failed prune does not fail the deletion listing" "$D/handlers.rs" \
     '    let _ = prune_recordless_identities(s);' '    prune_recordless_identities(s)?;' \
     a_failed_prune_does_not_fail_the_deletion_listing
+dt "writing over an unreadable value never counts low (keys)" "$D/store.rs" \
+    '        let generation = self.next_generation(floor)?;
+        self.put(rel, &encode_versioned(generation, body))?;' \
+    '        let generation = self.next_generation(floor)?;
+        self.put(rel, &encode_versioned(generation, body))?;
+        self.adjust_usage(|u| Usage {
+            keys: u.keys.saturating_sub(2),
+            bytes: u.bytes,
+        });' \
+    replacing_an_unreadable_value_never_counts_low
+dt "writing over an unreadable value never counts low (bytes)" "$D/store.rs" \
+    '        let generation = self.next_generation(floor)?;
+        self.put(rel, &encode_versioned(generation, body))?;' \
+    '        let generation = self.next_generation(floor)?;
+        self.put(rel, &encode_versioned(generation, body))?;
+        self.adjust_usage(|u| Usage {
+            keys: u.keys,
+            bytes: u.bytes.saturating_sub(4096),
+        });' \
+    replacing_an_unreadable_value_never_counts_low
+dt "migration records never reach a successor" "$D/store.rs" \
+    '    !matches!(
+        kind,
+        ItemKind::MigrationJournal | ItemKind::MigrationMarker
+    )' \
+    '    let _ = kind;
+    true' \
+    migration_records_are_not_exported
+dt "legacy imports take generations from the counter" "$D/store.rs" \
+    '        let generation = self.next_generation(current)?;
+        self.put(rel, &encode_versioned(generation, body))?;' \
+    '        let generation = current + 1;
+        self.put(rel, &encode_versioned(generation, body))?;' \
+    imported_items_take_their_generation_from_the_counter
 # A rename that still compiles: only the pinned bytes can catch it. (A new
 # variant is caught earlier, by the wildcard-free match in golden.rs, at
 # compile time.)

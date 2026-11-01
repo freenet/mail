@@ -154,6 +154,16 @@ pub enum ItemKind {
     IdentitySettings,
     /// Owner: none. Id: empty.
     GlobalSettings,
+    /// The freenet-migrate completeness journal. Owner: none. Id: empty.
+    /// Never exported: it describes this delegate's own predecessors.
+    MigrationJournal,
+    /// The migration marker of one predecessor delegate. Owner: none. Id: the
+    /// predecessor's 32-byte delegate key. Never exported, for the same
+    /// reason: a copy in a successor would claim an import it never did.
+    MigrationMarker,
+    /// Local state of a v0.2.x alias that matches no identity, kept rather
+    /// than lost. Owner: none. Id: 16 bytes (a content hash).
+    LegacyOrphan,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

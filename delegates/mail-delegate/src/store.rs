@@ -36,6 +36,8 @@ use crate::env::Env;
 pub const MAX_IDENTITIES: usize = 16;
 pub const MAX_CONTACTS: usize = 2048;
 pub const MAX_DRAFTS: usize = 256;
+/// Predecessor delegates one origin keeps a migration marker for.
+pub const MAX_PREDECESSORS: usize = 256;
 /// Per identity, for each of sent, kept, archived and flags.
 pub const MAX_MESSAGES: usize = 4096;
 /// Keys one origin may hold, every kind included. Fits the per-kind caps for
@@ -150,10 +152,13 @@ pub fn kind_tag(kind: ItemKind) -> &'static str {
         ItemKind::Flags => "fl",
         ItemKind::IdentitySettings => "si",
         ItemKind::GlobalSettings => "sg",
+        ItemKind::MigrationJournal => "mj",
+        ItemKind::MigrationMarker => "mm",
+        ItemKind::LegacyOrphan => "lo",
     }
 }
 
-pub const ALL_KINDS: [ItemKind; 8] = [
+pub const ALL_KINDS: [ItemKind; 11] = [
     ItemKind::Contact,
     ItemKind::Draft,
     ItemKind::Sent,
@@ -162,6 +167,9 @@ pub const ALL_KINDS: [ItemKind; 8] = [
     ItemKind::Flags,
     ItemKind::IdentitySettings,
     ItemKind::GlobalSettings,
+    ItemKind::MigrationJournal,
+    ItemKind::MigrationMarker,
+    ItemKind::LegacyOrphan,
 ];
 
 /// Whether `kind` belongs to an identity, and the id length it takes.
@@ -174,8 +182,20 @@ pub fn shape(kind: ItemKind) -> (bool, usize) {
         | ItemKind::Archived
         | ItemKind::Flags => (true, 16),
         ItemKind::IdentitySettings => (true, 0),
-        ItemKind::GlobalSettings => (false, 0),
+        ItemKind::GlobalSettings | ItemKind::MigrationJournal => (false, 0),
+        ItemKind::MigrationMarker => (false, 32),
+        ItemKind::LegacyOrphan => (false, 16),
     }
+}
+
+/// Whether a successor receives this kind. The journal and the markers name
+/// THIS delegate's predecessors: copied forward they would claim the
+/// successor imported them, so an export leaves them out.
+pub fn exported(kind: ItemKind) -> bool {
+    !matches!(
+        kind,
+        ItemKind::MigrationJournal | ItemKind::MigrationMarker
+    )
 }
 
 /// Per-kind cap (per owner for identity-owned kinds).
@@ -183,8 +203,13 @@ pub fn cap(kind: ItemKind) -> usize {
     match kind {
         ItemKind::Contact => MAX_CONTACTS,
         ItemKind::Draft => MAX_DRAFTS,
-        ItemKind::Sent | ItemKind::Kept | ItemKind::Archived | ItemKind::Flags => MAX_MESSAGES,
-        ItemKind::IdentitySettings | ItemKind::GlobalSettings => 1,
+        ItemKind::Sent
+        | ItemKind::Kept
+        | ItemKind::Archived
+        | ItemKind::Flags
+        | ItemKind::LegacyOrphan => MAX_MESSAGES,
+        ItemKind::IdentitySettings | ItemKind::GlobalSettings | ItemKind::MigrationJournal => 1,
+        ItemKind::MigrationMarker => MAX_PREDECESSORS,
     }
 }
 
@@ -505,11 +530,13 @@ impl<'a> Space<'a> {
     /// (the host reports an unreadable value as absent, and nothing records
     /// sizes elsewhere), so they stay counted.
     ///
-    /// The usage record is therefore not exact. It runs high here and when
-    /// a counted write is then refused, and it can be lost altogether (an
-    /// unreadable record). Neither is allowed to stick: a write that finds
-    /// the record unknown, or that would be refused against it, recounts
-    /// what is stored first ([`Space::recount_step`]).
+    /// The usage record is therefore not exact. It runs high on both counts
+    /// (bytes here, and keys and bytes when a counted write is then refused
+    /// or writes over a value it could not read), and it can be lost
+    /// altogether (an unreadable record). It is never meant to run low.
+    /// Neither is allowed to stick: a write that finds the record unknown,
+    /// or that would be refused against it, recounts what is stored first
+    /// ([`Space::recount_step`]).
     fn forget_unsized_key(&mut self) {
         self.adjust_usage(|u| Usage {
             keys: u.keys.saturating_sub(1),
@@ -651,8 +678,9 @@ impl<'a> Space<'a> {
     /// unreadable value first counted its key exactly, but a refusal after
     /// the removal left the record gone and nothing written (fault seed
     /// 2404). Writing over an unreadable value counts its key a second
-    /// time instead: the usage record runs one key high, which a recount
-    /// corrects, and never low.
+    /// time and all its bytes again instead: the usage record runs high by
+    /// that key and by the old value's bytes, which a recount corrects, and
+    /// never low.
     pub fn write_over_unusable(
         &mut self,
         rel: &str,
@@ -1045,7 +1073,8 @@ mod tests {
     }
 
     /// Writing over a value that cannot be read replaces it, and never
-    /// counts low: at most its key a second time.
+    /// counts low: at most its key and its bytes a second time. Held against
+    /// a recount, which is what the store really holds.
     #[test]
     fn replacing_an_unreadable_value_never_counts_low() {
         let mut env = MemEnv::default();
@@ -1061,11 +1090,18 @@ mod tests {
         env.faults = None;
         let s = Space::new(&mut env, Origin([1; 32]));
         assert_eq!(s.read("a").unwrap(), Some((g, b"x".to_vec())));
-        let keys = s.usage().keys;
+        let counted = s.usage();
         assert!(
-            keys == before.keys || keys == before.keys + 1,
-            "{keys} keys counted, {} stored",
+            counted.keys == before.keys || counted.keys == before.keys + 1,
+            "{} keys counted, {} stored",
+            counted.keys,
             before.keys
+        );
+        assert!(
+            counted.bytes >= before.bytes,
+            "{} bytes counted, at least {} stored",
+            counted.bytes,
+            before.bytes
         );
     }
 

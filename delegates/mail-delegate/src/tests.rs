@@ -1621,6 +1621,94 @@ fn the_successor_export_asks_and_holds_exactly_the_data() {
 }
 
 #[test]
+fn migration_records_are_not_exported() {
+    let mut env = MemEnv::default();
+    create(&mut env, PROD, "alice");
+    let unowned = |kind, id: Vec<u8>| ItemRef {
+        kind,
+        owner: None,
+        id,
+    };
+    ack(put(
+        &mut env,
+        unowned(ItemKind::MigrationJournal, vec![]),
+        b"journal",
+        None,
+    ));
+    ack(put(
+        &mut env,
+        unowned(ItemKind::MigrationMarker, vec![7; 32]),
+        b"marker",
+        None,
+    ));
+    ack(put(
+        &mut env,
+        unowned(ItemKind::LegacyOrphan, vec![8; 16]),
+        b"orphan",
+        None,
+    ));
+    let export = Op::ExportForSuccessor {
+        source_generation: 3,
+        after: None,
+        session: None,
+    };
+    let (id, _, _) = prompt(&send(&mut env, app(PROD), export));
+    let page = match response(&answer(&mut env, PROD, id, ALLOW)).result {
+        Ok(Reply::ExportedSecrets { payload, .. }) => {
+            freenet_migrate::ExportedSecrets::from_bytes(&payload).unwrap()
+        }
+        other => panic!("{other:?}"),
+    };
+    let keys: Vec<String> = page
+        .secrets
+        .iter()
+        .map(|(k, _)| String::from_utf8(k.clone()).unwrap())
+        .collect();
+    assert!(!keys.iter().any(|k| k.contains("/mj/") || k.contains("/mm/")));
+    assert!(keys.iter().any(|k| k.contains("it/lo/")), "user data stays");
+}
+
+/// A migration record is one origin's: another origin neither reads it nor
+/// is confused by it, so a staging app walks its own migration.
+#[test]
+fn migration_records_belong_to_one_origin() {
+    let mut env = MemEnv::default();
+    let journal = ItemRef {
+        kind: ItemKind::MigrationJournal,
+        owner: None,
+        id: vec![],
+    };
+    ack(put(&mut env, journal.clone(), b"j", None));
+    match response(&send(&mut env, app(2), Op::GetItem { item: journal })).result {
+        Ok(Reply::Item(None)) => {}
+        other => panic!("{other:?}"),
+    }
+}
+
+/// v0.2.x items carry no generation. Whatever reaches this delegate takes
+/// one from its counter, so no two items share one and a re-created item
+/// never reuses the one it had.
+#[test]
+fn imported_items_take_their_generation_from_the_counter() {
+    let mut env = MemEnv::default();
+    let me = create(&mut env, PROD, "alice");
+    let g1 = ack(put(&mut env, draft(me.addr, 1), b"one", None));
+    let g2 = ack(put(&mut env, draft(me.addr, 2), b"two", None));
+    assert!(g2 > g1);
+    let deleted = response(&send(
+        &mut env,
+        app(PROD),
+        Op::DeleteItem {
+            item: draft(me.addr, 1),
+            expected_gen: g1,
+        },
+    ));
+    assert!(matches!(deleted.result, Ok(Reply::Deleted)));
+    let again = ack(put(&mut env, draft(me.addr, 1), b"one", None));
+    assert!(again > g2, "a generation is never reused");
+}
+
+#[test]
 fn the_successor_export_pages_within_the_response_budget() {
     let mut env = MemEnv::default();
     let me = create(&mut env, PROD, "alice");

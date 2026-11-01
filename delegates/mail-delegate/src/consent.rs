@@ -361,6 +361,8 @@ fn prompt_text(s: &Space<'_>, op: &Op) -> String {
                 ItemKind::Archived => "archived mail",
                 ItemKind::Flags => "read and deleted marks",
                 ItemKind::IdentitySettings | ItemKind::GlobalSettings => "settings",
+                ItemKind::MigrationJournal | ItemKind::MigrationMarker => "migration records",
+                ItemKind::LegacyOrphan => "unmatched older mail",
             };
             let whose = owner
                 .as_ref()
