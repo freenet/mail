@@ -830,6 +830,46 @@ fn a_message_flagged_read_is_imported() {
     assert_eq!(run_jobs(&mut env, PROD).imported, 1);
 }
 
+fn flags_body(env: &mut MemEnv, owner: Addr, id: [u8; 16]) -> Option<Vec<u8>> {
+    let item = message_item(ItemKind::Flags, owner, id);
+    match call(env, PROD, Op::GetItem { item }) {
+        Ok(Reply::Item(i)) => i.map(|i| i.body.into_vec()),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// The page shows a kept copy as read unless the message has flags that say
+/// otherwise, so an import carries them.
+#[test]
+fn an_import_says_it_is_unread() {
+    let mut env = env();
+    let me = create(&mut env, PROD, "alice");
+    let message = sealed(&me, "one");
+    deliver(&mut env, &me, std::slice::from_ref(&message));
+    assert_eq!(run_jobs(&mut env, PROD).imported, 1);
+    assert_eq!(
+        flags_body(&mut env, me.addr, id_of(&message)).as_deref(),
+        Some(&br#"{"read":false,"deleted":false}"#[..])
+    );
+}
+
+/// Flags that are there are the user's, whatever they say.
+#[test]
+fn an_import_leaves_existing_flags_as_they_are() {
+    let mut env = env();
+    let me = create(&mut env, PROD, "alice");
+    let message = sealed(&me, "one");
+    deliver(&mut env, &me, std::slice::from_ref(&message));
+    let flags = message_item(ItemKind::Flags, me.addr, id_of(&message));
+    let read = br#"{"read":true,"deleted":false}"#;
+    ack(put(&mut env, flags, read, None));
+    assert_eq!(run_jobs(&mut env, PROD).imported, 1);
+    assert_eq!(
+        flags_body(&mut env, me.addr, id_of(&message)).as_deref(),
+        Some(&read[..])
+    );
+}
+
 /// The page drops a deleted mark once the message left the inbox
 /// (`reclaim_flags`). An older state of the inbox can come back, from a peer
 /// or a re-fetch, still holding it.
@@ -1156,8 +1196,9 @@ fn an_identity_being_deleted_is_not_watched() {
 }
 
 /// A host fault during a scan leaves nothing a later run does not finish.
-#[test]
-fn a_refused_write_is_finished_by_the_next_run() {
+/// Writes naming the message are its flags (the first) and its kept copy (the
+/// second), so `nth` picks which one the host refuses.
+fn a_refused_write_is_finished(nth: u32) {
     let mut env = env();
     let me = create(&mut env, PROD, "alice");
     let message = sealed(&me, "one");
@@ -1166,11 +1207,22 @@ fn a_refused_write_is_finished_by_the_next_run() {
     faults.rules.push(Rule {
         op: FaultOp::SetFail,
         key_contains: store::hex(&id_of(&message)),
-        nth: 1,
+        nth,
     });
     env.faults = Some(faults);
     let run = run_jobs(&mut env, PROD);
     assert_eq!((run.imported, run.remaining), (0, 1));
     env.faults = None;
     assert_eq!(run_jobs(&mut env, PROD).imported, 1);
+    assert_eq!(kept_ids(&mut env, me.addr), vec![id_of(&message).to_vec()]);
+}
+
+#[test]
+fn a_refused_kept_write_is_finished_by_the_next_run() {
+    a_refused_write_is_finished(2);
+}
+
+#[test]
+fn a_refused_flags_write_is_finished_by_the_next_run() {
+    a_refused_write_is_finished(1);
 }

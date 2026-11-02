@@ -33,8 +33,16 @@ pub const DUTY_BURST_MS: u64 = 10_000;
 /// Estimated time to read and parse one inbox state. The delegate has only a
 /// clock in seconds, so duty is charged by estimate; core measures the real
 /// time of the runs it starts and defers a delegate that overspends.
-pub const SCAN_COST_MS: u64 = 50;
-/// Estimated time to decrypt one message and check its signature.
+///
+/// Measured on a real node (`cargo make test-e2e-background`, wasmtime, two
+/// inboxes of up to three messages): a run that scans and imports nothing takes
+/// 5 to 8 ms for two scans, so about 3 ms each, against the 50 ms first
+/// assumed. This is a few times that, for larger inboxes.
+pub const SCAN_COST_MS: u64 = 10;
+/// Estimated time to decrypt one message and check its signature. Measured
+/// at about 64 ms per imported message on the same node (a run importing
+/// three took 210 ms, one importing none 18 ms, both subscribing two inboxes),
+/// within twice the 40 ms first assumed, so left as it was.
 pub const MESSAGE_COST_MS: u64 = 40;
 
 /// The periodic wake-ups, by manifest tag.

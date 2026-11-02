@@ -214,6 +214,9 @@ struct Flags {
     deleted: bool,
 }
 
+/// The flags an import starts with, in the form the page writes them.
+const UNREAD_FLAGS: &[u8] = br#"{"read":false,"deleted":false}"#;
+
 /// A message's id: what the page keys kept copies, archives and flags by.
 pub fn message_id(ciphertext: &[u8]) -> [u8; 16] {
     let mut id = [0; 16];
@@ -283,6 +286,29 @@ fn scan(
             note_seen(s, &owner, &id)?;
             continue;
         };
+        // The page shows a kept copy as read unless the message has flags
+        // that say otherwise, so an import says it is unread. Written first:
+        // a run that stops between the two leaves flags and no copy, which
+        // the next run completes. Flags that exist stand: they are the
+        // user's (a delete was ruled out above).
+        match handlers::put_item(
+            s,
+            item(ItemKind::Flags, owner, id),
+            UNREAD_FLAGS.to_vec(),
+            None,
+        ) {
+            Ok(_) => {}
+            Err(f) if matches!(f.code, FailureCode::Conflict { .. }) => {}
+            Err(f) if f.code == FailureCode::CapReached => {
+                full = true;
+                done.remaining += 1;
+                continue;
+            }
+            Err(_) => {
+                done.remaining += 1;
+                continue;
+            }
+        }
         match handlers::put_item(s, item(ItemKind::Kept, owner, id), body, None) {
             Ok(_) => done.imported += 1,
             // Written since the lists were read. It stands.

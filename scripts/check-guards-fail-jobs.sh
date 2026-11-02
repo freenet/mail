@@ -148,7 +148,10 @@ dt "jobs: the signature is checked" "$W" \
 dt "jobs: the send time is kept" "$W" 'sent_at: Some(message.time.timestamp_millis()),' \
     'sent_at: None,' an_import_is_the_page_s_kept_copy_with_a_checked_signature
 dt "jobs: an import is create-only" "$H" "$TAKE_OVER" '        None => true,' \
-    a_copy_written_between_the_lists_and_the_write_stands
+    a_copy_written_between_the_lists_and_the_write_stands,an_import_leaves_existing_flags_as_they_are
+dt "jobs: an import says it is unread" "$W" \
+    'br#"{"read":false,"deleted":false}"#;' 'br#"{"read":true,"deleted":false}"#;' \
+    an_import_says_it_is_unread
 also "$H" "$TAKE_OVER" '        None => true,' \
     dt "jobs: a held message is not imported" "$W" \
     'if seen.contains(&id[..]) || held.contains(&id[..]) {' 'if seen.contains(&id[..]) {' \
@@ -159,9 +162,18 @@ dt "jobs: a message that never decrypts is left alone" "$W" \
     '            note_seen(s, &owner, &id)?;
             continue;' '            continue;' a_message_that_never_decrypts_costs_one_slice
 dt "jobs: the cap ends the slice" "$W" '                full = true;
-' '' the_kept_cap_stops_the_import_and_spends_no_more_of_the_slice
+                done.remaining += 1;
+            }' '                done.remaining += 1;
+            }' the_kept_cap_stops_the_import_and_spends_no_more_of_the_slice
 dt "jobs: a refused write is retried" "$W" '            Err(_) => done.remaining += 1,' \
-    '            Err(_) => note_seen(s, &owner, &id)?,' a_refused_write_is_finished_by_the_next_run
+    '            Err(_) => note_seen(s, &owner, &id)?,' a_refused_kept_write_is_finished_by_the_next_run
+dt "jobs: a refused flags write is retried" "$W" '            Err(_) => {
+                done.remaining += 1;
+                continue;
+            }' '            Err(_) => {
+                note_seen(s, &owner, &id)?;
+                continue;
+            }' a_refused_flags_write_is_finished_by_the_next_run
 
 # ── Never brings back a deleted message ─────────────────────────────────────
 dt "jobs: a tombstone stops an import" "$W" \
