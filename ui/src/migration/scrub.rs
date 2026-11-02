@@ -317,16 +317,19 @@ async fn write_snapshots<S: MailStore, T: LegacyTransport>(
                 let Some(decoded) = PairKey::decode(key).filter(is_compared) else {
                     continue;
                 };
-                // A value the delegate does not hold did not land: import
-                // never overwrites, so the row may hold the only copy. A
-                // newer row holding the key supersedes this copy; if that
-                // one differs from the delegate it is not recorded either.
+                // A value that neither landed nor is held did not land: import
+                // never overwrites, so the row may hold the only copy. What
+                // this walk wrote landed, whatever the page has done to it
+                // since. A newer row holding the key supersedes this copy; if
+                // that one differs from the delegate it is not recorded.
                 let newer = outcome.read_rows.iter().any(|(g, pairs)| {
                     *g > generation
                         && (*g >= IDENTITY_GENERATION_OFFSET) == is_identity_row(entry)
                         && pairs.iter().any(|(k, _, _)| k == key)
                 });
+                let landed = outcome.landed.contains(&(generation, key.clone()));
                 if newer
+                    || landed
                     || holds_now(store, &decoded, hash, settings.as_deref(), identities).await?
                 {
                     entries.insert(snapshot_entry(&decoded, hash));

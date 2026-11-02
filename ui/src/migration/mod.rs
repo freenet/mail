@@ -49,7 +49,7 @@
 //! origin, not in the crate's reserved `\0` keys, so a staging app walks its
 //! own migration and never reads production's.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;
 
 use freenet_mail_protocol::{Addr, IdentityInfo, Op, Reply};
@@ -202,6 +202,8 @@ pub(crate) struct WalkOutcome {
     pub released_markers: bool,
     /// What this walk read from each row, before importing it.
     pub read_rows: legacy_delegates::RowHashes,
+    /// The `(generation, key)` of each item this walk wrote verbatim.
+    pub landed: BTreeSet<(u32, Vec<u8>)>,
 }
 
 thread_local! {
@@ -316,6 +318,7 @@ where
                 silent_rows: 0,
                 released_markers: false,
                 read_rows: Default::default(),
+                landed: Default::default(),
             };
         }
     };
@@ -343,6 +346,7 @@ where
             counts: successor.into_counts(),
             released_markers,
             read_rows: Default::default(),
+            landed: Default::default(),
         };
     }
     let walks = pending_walks(&status, &lineage);
@@ -390,6 +394,7 @@ where
     );
     let newest_unsettled = predecessors.newest_unsettled_row(Some(&still_pending));
     let released_markers = release_held_markers(successor.store(), newest_unsettled).await;
+    let landed = successor.take_landed();
     let mut counts = successor.into_counts();
     counts.merge_mapping(predecessors.counts());
     WalkOutcome {
@@ -399,6 +404,7 @@ where
         silent_rows,
         released_markers,
         read_rows: predecessors.into_read(),
+        landed,
     }
 }
 

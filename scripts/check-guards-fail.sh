@@ -801,6 +801,11 @@ ut "the snapshot records only a value the delegate holds" "$S" \
     '                    || holds_now(store, &decoded, hash, settings.as_deref(), identities).await?' \
     '                    || present(store, &decoded, identities).await?' \
     a_silent_newer_row_answering_late_with_newer_text_blocks,a_resumed_row_that_an_old_tab_edited_blocks
+ut "what the walk wrote is recorded as landed" "$S" \
+    '                    || landed
+' \
+    '' \
+    an_item_the_page_changed_after_the_walk_wrote_it_does_not_block
 ut "an older copy of a newer item is recorded" "$S" \
     '                if newer
 ' \

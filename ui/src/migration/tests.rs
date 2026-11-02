@@ -772,6 +772,7 @@ fn the_notice_says_a_move_under_way_is_still_in_progress() {
         silent_rows: 0,
         released_markers: false,
         read_rows: Default::default(),
+        landed: Default::default(),
     };
     assert!(no_journal.unfinished());
 }

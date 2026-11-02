@@ -880,10 +880,11 @@ fn a_resumed_row_that_an_old_tab_edited_blocks() {
     assert!(first.unfinished(), "206's local state stays started");
     assert_eq!(delegate.list(ItemKind::Draft, Some(alice())).len(), 1);
     old_tab_edits_the_draft(&node);
-    let outcome = settle(&delegate, &node);
-    assert!(!outcome.unfinished());
-    scrub_now(&delegate, &node, &outcome);
+    let resumed = walk(&delegate, &node, six_messages());
+    assert!(!resumed.unfinished());
+    scrub_now(&delegate, &node, &resumed);
     back_up(&delegate, alice());
+    let outcome = settle(&delegate, &node);
     let blockers = scrub_now(&delegate, &node, &outcome);
     assert_eq!(
         blockers,
@@ -893,6 +894,30 @@ fn a_resumed_row_that_an_old_tab_edited_blocks() {
         }]
     );
     assert_nothing_deleted(&node, &blockers);
+}
+
+/// The page advances an item the walk just wrote (a sent message's delivery
+/// state is the usual one) before the snapshot is written. The item landed,
+/// and the old row's copy is the earlier state of it.
+#[test]
+fn an_item_the_page_changed_after_the_walk_wrote_it_does_not_block() {
+    let delegate = Delegate::new();
+    let node = usual_node();
+    let first = walk(&delegate, &node, six_messages());
+    let draft = &delegate.list(ItemKind::Draft, Some(alice()))[0];
+    let mut body: serde_json::Value = serde_json::from_slice(&draft.body).unwrap();
+    body["subject"] = json!("advanced by the page");
+    delegate
+        .send(Op::PutItem {
+            item: draft.item.clone(),
+            body: serde_json::to_vec(&body).unwrap().into(),
+            expected_gen: Some(draft.generation),
+        })
+        .unwrap();
+    scrub_now(&delegate, &node, &first);
+    back_up(&delegate, alice());
+    let outcome = settle(&delegate, &node);
+    assert_eq!(scrub_all(&delegate, &node, &outcome), Vec::new());
 }
 
 // ── The snapshot is per row ─────────────────────────────────────────────────
