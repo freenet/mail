@@ -80,14 +80,6 @@ pub fn note_seen(s: &mut Space<'_>, owner: &Addr, id: &[u8]) -> Result<(), Failu
     s.index_add(&rel, id, SEEN_PER_SHARD)
 }
 
-/// The node confirmed a subscription.
-pub fn note_subscribed(env: &mut dyn Env, id: jobs::ContractId) {
-    let now = env.now_secs().unwrap_or(0);
-    let mut budget = load_budget(env, now);
-    budget.note_subscribed(id);
-    save_budget(env, &budget);
-}
-
 /// Every run, from every trigger: plan, then do the plan. Returns what it did
 /// and the contract requests to send. Sends nothing to any page.
 pub fn run(env: &mut dyn Env, trigger: Trigger) -> (JobsRun, Vec<OutboundDelegateMsg>) {
@@ -97,29 +89,56 @@ pub fn run(env: &mut dyn Env, trigger: Trigger) -> (JobsRun, Vec<OutboundDelegat
     let mut budget = load_budget(env, now);
     let before = budget.clone();
     let plan = jobs::plan(trigger, &targets, &mut budget);
-    let mut out: Vec<OutboundDelegateMsg> = plan
-        .subscribe
-        .iter()
-        .map(|id| {
-            OutboundDelegateMsg::SubscribeContractRequest(SubscribeContractRequest::new(
-                ContractInstanceId::new(*id),
-            ))
-        })
-        .collect();
+    // The budget and the rotation are saved before any message is imported:
+    // core stops waiting for a run at 5 s and the guest is abandoned, and the
+    // next run must not start over on the same inboxes with a full budget.
+    if budget != before {
+        save_budget(env, &budget);
+    }
+    let before = budget.clone();
+    let unprompted = trigger.is_unprompted();
+    let mut out = Vec::new();
+    let mut held = Vec::new();
+    let mut read = 0;
     let mut left = plan.messages;
     for target in &plan.scan {
         let mut s = Space::new(&mut *env, target.origin);
-        if scan(&mut s, target, now, &mut left, &mut done).is_err() {
+        if scan(&mut s, target, now, &mut left, &mut read, &mut done).is_ok() {
+            held.push(target.id);
+            budget.note_held(&target.id);
+        } else {
             done.unknown += 1;
-            if plan.fetch_missing && budget.take_ops(1) == 1 {
+            // Only a run the node starts asks the network for an inbox it does
+            // not hold: a page's own read of its inbox does that a moment
+            // later, and this run would stall the page's calls behind it.
+            if unprompted
+                && plan.fetch_missing
+                && budget.may_ask(&target.id)
+                && budget.take_ops(1) == 1
+            {
+                budget.note_missing(target.id);
                 out.push(OutboundDelegateMsg::GetContractRequest(
                     GetContractRequest::new(ContractInstanceId::new(target.id)),
                 ));
             }
         }
     }
-    if trigger.is_unprompted() {
+    // A page's run subscribes only what this node holds, for the same reason.
+    let mut requests: Vec<OutboundDelegateMsg> = plan
+        .subscribe
+        .iter()
+        .filter(|id| unprompted || held.contains(id))
+        .map(|id| {
+            OutboundDelegateMsg::SubscribeContractRequest(SubscribeContractRequest::new(
+                ContractInstanceId::new(*id),
+            ))
+        })
+        .collect();
+    requests.append(&mut out);
+    let out = requests;
+    if unprompted {
         budget.charge_messages(plan.messages - left);
+        budget.charge_bytes(read);
     }
     if budget != before {
         save_budget(env, &budget);
@@ -205,6 +224,12 @@ struct V1Plaintext {
     title: String,
     content: String,
     from: String,
+    /// Not kept, but the page needs them to read a message (its
+    /// `DecryptedMessage`), so a message without them is no more readable here.
+    #[allow(dead_code)]
+    to: Vec<Vec<u8>>,
+    #[allow(dead_code)]
+    cc: Vec<String>,
     time: chrono::DateTime<chrono::Utc>,
 }
 
@@ -236,11 +261,13 @@ fn scan(
     target: &Target,
     now: u64,
     left: &mut usize,
+    read: &mut usize,
     done: &mut JobsRun,
 ) -> Result<(), Failure> {
     let state = s
         .env
         .contract_state(&target.id)
+        .inspect(|state| *read += state.len())
         .filter(|state| state.len() <= MAX_INBOX_BYTES)
         .ok_or_else(|| unknown("the inbox is not held here"))?;
     let inbox: V1Inbox =

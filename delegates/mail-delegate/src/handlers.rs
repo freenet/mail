@@ -55,7 +55,9 @@ pub fn process(
         }
         // The host's own messages. None is a request: they carry no origin,
         // are answered to nobody and say only which job to look at, so the
-        // gate above has nothing to decide.
+        // gate above has nothing to decide. A client can send a notification
+        // or a GET answer, so nothing durable depends on one beyond the duty
+        // a run spends; what they carry is never read.
         InboundDelegateMsg::Lifecycle(LifecycleEvent::NodeStarted { .. }) => {
             Ok(background(env, Trigger::NodeStarted))
         }
@@ -69,15 +71,10 @@ pub fn process(
         InboundDelegateMsg::GetContractResponse(r) => {
             Ok(background(env, contract_trigger(&r.contract_id)?))
         }
-        // A subscription that failed is asked for again by the next refresh.
-        InboundDelegateMsg::SubscribeContractResponse(r) => {
-            if r.result.is_ok()
-                && let Ok(id) = <[u8; 32]>::try_from(r.contract_id.as_bytes())
-            {
-                watch::note_subscribed(env, id);
-            }
-            Ok(Vec::new())
-        }
+        // Every refresh asks again for every subscription, so the answer is
+        // not recorded: a client can send this message, and a belief written
+        // from it would let one switch off another's watch.
+        InboundDelegateMsg::SubscribeContractResponse(_) => Ok(Vec::new()),
         _ => Err(DelegateError::Other(
             "the mail delegate accepts only application messages and prompt answers".into(),
         )),

@@ -5,7 +5,7 @@
 //! delegate does with each thing the node can hand it, not that a real node
 //! hands it over.
 
-use freenet_mail_protocol::{JobsRun, MAX_DECRYPT_BATCH};
+use freenet_mail_protocol::JobsRun;
 use freenet_mail_wire_v1::local_state::KeptMessage;
 use freenet_stdlib::prelude::{
     Capability, ContractNotification, DelegateManifest, GetContractResponse, LifecycleEvent,
@@ -14,6 +14,7 @@ use freenet_stdlib::prelude::{
 
 use super::*;
 use crate::crypto::{self, Keys, MixRng};
+use crate::env::Env;
 use crate::env::mem::{FaultOp, Faults, Rule};
 use crate::handlers::{load_identity, v1_inbox_id};
 use crate::jobs::*;
@@ -31,7 +32,6 @@ fn env() -> MemEnv {
 
 /// A v1 message to `to`, signed by a sender, as v0.2.x writes it.
 pub(super) fn sealed(to: &IdentityInfo, title: &str) -> Vec<u8> {
-    let sender = Keys::from_seeds(&DsaSeed([9; 32]), &KemSeed([8; 64]));
     let plaintext = serde_json::json!({
         "title": title,
         "content": format!("body of {title}"),
@@ -40,6 +40,12 @@ pub(super) fn sealed(to: &IdentityInfo, title: &str) -> Vec<u8> {
         "cc": [],
         "time": "2026-11-02T10:00:00Z",
     });
+    sealed_plain(to, title, plaintext)
+}
+
+/// As [`sealed`], with the plaintext given.
+fn sealed_plain(to: &IdentityInfo, title: &str, plaintext: serde_json::Value) -> Vec<u8> {
+    let sender = Keys::from_seeds(&DsaSeed([9; 32]), &KemSeed([8; 64]));
     let entropy = Entropy(*blake3::hash(title.as_bytes()).as_bytes());
     let mut rng = MixRng::new("test", &[7; 32], &entropy);
     let ek = crypto::decode_ek(&to.ek).unwrap();
@@ -308,21 +314,6 @@ fn operations_stop_at_300_a_minute_and_come_back_with_the_next() {
 }
 
 #[test]
-fn writes_stop_at_60_a_minute_per_contract_and_count_as_operations() {
-    let start = NOW - NOW % 60;
-    let mut b = Budget::new(start);
-    for _ in 0..60 {
-        assert!(b.take_write(&[1; 32]));
-    }
-    assert!(!b.take_write(&[1; 32]), "the 61st to one contract");
-    assert!(b.take_write(&[2; 32]), "another contract has its own count");
-    assert_eq!(b.take_ops(300), 300 - 61, "each write was an operation");
-    assert!(!b.take_write(&[3; 32]), "no operations left");
-    b.advance(start + 60);
-    assert!(b.take_write(&[1; 32]));
-}
-
-#[test]
 fn duty_refills_at_one_percent_up_to_the_burst() {
     let mut b = Budget::new(NOW);
     assert!(b.take_duty(10_000), "the whole burst, 10 s");
@@ -336,27 +327,42 @@ fn duty_refills_at_one_percent_up_to_the_burst() {
 }
 
 #[test]
-fn a_clock_stepping_back_refills_and_reopens_nothing() {
+fn a_clock_stepping_back_a_little_refills_and_reopens_nothing() {
     let mut b = Budget::new(NOW);
     assert!(b.take_duty(DUTY_BURST_MS));
     assert_eq!(b.take_ops(300), 300);
-    b.advance(NOW - 3600);
+    b.advance(NOW - CLOCK_RESET_SECS);
     b.advance(NOW);
     assert!(!b.take_duty(1));
     assert_eq!(b.take_ops(1), 0);
 }
 
 #[test]
+fn a_clock_stepping_far_back_starts_the_budget_over() {
+    let mut b = Budget::new(NOW + 10 * CLOCK_RESET_SECS);
+    assert!(b.take_duty(DUTY_BURST_MS));
+    assert_eq!(b.take_ops(300), 300);
+    b.advance(NOW);
+    assert!(b.take_duty(DUTY_BURST_MS), "a full budget again");
+    assert_eq!(b.take_ops(300), 300);
+    b.advance(NOW + 1);
+    assert!(
+        b.take_duty(DUTY_REFILL_MS_PER_SEC),
+        "and it refills from here"
+    );
+}
+
+#[test]
 fn a_run_decrypts_at_most_a_batch_and_a_node_run_at_most_its_duty() {
     let mut b = Budget::new(NOW);
-    assert_eq!(b.message_slice(true), MAX_DECRYPT_BATCH);
+    assert_eq!(b.message_slice(true), MAX_MESSAGES_PER_RUN);
     assert!(b.take_duty(DUTY_BURST_MS - MESSAGE_COST_MS * 3));
     assert_eq!(b.message_slice(true), 3);
     assert!(b.take_duty(1));
     assert_eq!(b.message_slice(true), 2, "a part-paid message is not taken");
     assert_eq!(
         b.message_slice(false),
-        MAX_DECRYPT_BATCH,
+        MAX_MESSAGES_PER_RUN,
         "a page has no duty"
     );
     b.charge_messages(100);
@@ -512,16 +518,77 @@ fn subscribed(me: &IdentityInfo, result: Result<(), String>) -> InboundDelegateM
 }
 
 #[test]
-fn a_confirmed_subscription_is_not_asked_for_again_until_the_node_restarts() {
+fn a_forged_subscription_answer_does_not_stop_the_next_refresh_asking() {
     let mut env = env();
     let me = create(&mut env, PROD, "alice");
-    let out = process(&mut env, None, subscribed(&me, Ok(()))).unwrap();
-    assert!(out.is_empty());
-    assert_eq!(subscribes(&wake(&mut env, "v1watch")), 0);
-    assert_eq!(subscribes(&send(&mut env, app(PROD), Op::RunJobs)), 0);
+    let before = env.secrets.clone();
+    for origin in [None, app(PROD), app(OTHER)] {
+        let out = process(&mut env, origin, subscribed(&me, Ok(()))).unwrap();
+        assert!(out.is_empty());
+    }
+    assert_eq!(env.secrets, before, "nothing durable came of the answers");
+    assert_eq!(subscribes(&wake(&mut env, "v1watch")), 1, "still asked");
+    deliver(&mut env, &me, &[]);
+    assert_eq!(subscribes(&send(&mut env, app(PROD), Op::RunJobs)), 1);
+    assert_eq!(
+        subscribes(&wake(&mut env, "v1watch")),
+        1,
+        "every refresh asks"
+    );
+}
+
+/// Wakes `v1watch` at `at` and says how many GETs it sent.
+fn watch_gets_at(env: &mut MemEnv, at: u64) -> usize {
+    env.now = Some(at);
+    gets(&wake(env, "v1watch"))
+}
+
+#[test]
+fn a_page_run_never_asks_the_network_for_an_inbox_this_node_lacks() {
+    let mut env = env();
+    let me = create(&mut env, PROD, "alice");
+    let out = send(&mut env, app(PROD), Op::RunJobs);
+    assert_eq!((gets(&out), subscribes(&out)), (0, 0), "{out:?}");
+    // One the node holds is subscribed, which does not wait on the network.
+    deliver(&mut env, &me, &[]);
+    let out = send(&mut env, app(PROD), Op::RunJobs);
+    assert_eq!((gets(&out), subscribes(&out)), (0, 1), "{out:?}");
+}
+
+#[test]
+fn a_missing_inbox_is_asked_for_at_doubling_intervals_up_to_a_day() {
+    let mut env = env();
+    create(&mut env, PROD, "alice");
+    let mut due = NOW;
+    for ask in 1..=9u32 {
+        assert_eq!(watch_gets_at(&mut env, due), 1, "ask {ask}");
+        let wait = (MISSING_BACKOFF_FIRST_SECS << (ask - 1)).min(MISSING_BACKOFF_MAX_SECS);
+        assert_eq!(watch_gets_at(&mut env, due + wait - 1), 0, "ask {ask}");
+        let out = wake(&mut env, "v1watch");
+        assert_eq!(subscribes(&out), 0, "a refresh waits for it too");
+        due += wait;
+    }
+    assert_eq!(MISSING_BACKOFF_MAX_SECS, 86_400);
+}
+
+#[test]
+fn a_missing_inbox_found_is_asked_for_at_once_if_it_goes_missing_again() {
+    let mut env = env();
+    let me = create(&mut env, PROD, "alice");
+    assert_eq!(watch_gets_at(&mut env, NOW), 1);
+    assert_eq!(watch_gets_at(&mut env, NOW + 10), 0, "backing off");
+    deliver(&mut env, &me, &[]);
+    wake(&mut env, "rescan");
+    env.contracts.clear();
+    assert_eq!(watch_gets_at(&mut env, NOW + 20), 1, "a success cleared it");
+}
+
+#[test]
+fn a_node_start_still_asks_for_a_missing_inbox_the_first_time() {
+    let mut env = env();
+    create(&mut env, PROD, "alice");
     let out = process(&mut env, None, node_started()).unwrap();
-    assert_eq!(subscribes(&out), 1, "a node start asks again");
-    assert_eq!(subscribes(&wake(&mut env, "v1watch")), 1, "until confirmed");
+    assert_eq!((gets(&out), subscribes(&out)), (1, 1));
 }
 
 #[test]
@@ -570,6 +637,7 @@ fn a_refused_get_is_unknown_and_asked_again() {
     assert!(answered.is_empty(), "{answered:?}");
     let run = run_jobs(&mut env, PROD);
     assert_eq!((run.unknown, run.scanned), (1, 0), "not an empty inbox");
+    env.now = Some(NOW + MISSING_BACKOFF_FIRST_SECS);
     assert_eq!(gets(&wake(&mut env, "v1watch")), 1, "asked again");
     // The state turns up: nothing about it was written off.
     let message = sealed(&me, "late");
@@ -1049,14 +1117,11 @@ fn a_recount_counts_the_tombstones() {
 fn a_backlog_is_taken_a_batch_at_a_time_and_resumes() {
     let mut env = env();
     let me = create(&mut env, PROD, "alice");
-    let total = MAX_DECRYPT_BATCH + 3;
+    let total = 12 + 3;
     let messages: Vec<Vec<u8>> = (0..total).map(|n| sealed(&me, &format!("m{n}"))).collect();
     deliver(&mut env, &me, &messages);
     let first = run_jobs(&mut env, PROD);
-    assert_eq!(
-        (first.imported as usize, first.remaining),
-        (MAX_DECRYPT_BATCH, 3)
-    );
+    assert_eq!((first.imported as usize, first.remaining), (12, 3));
     let second = run_jobs(&mut env, PROD);
     assert_eq!((second.imported, second.remaining), (3, 0));
     assert_eq!(kept_ids(&mut env, me.addr).len(), total);
@@ -1113,7 +1178,8 @@ fn the_kept_cap_stops_the_import_and_spends_no_more_of_the_slice() {
     let me = create(&mut env, PROD, "alice");
     deliver(&mut env, &me, &[sealed(&me, "one"), sealed(&me, "two")]);
     let mut budget = Budget::new(NOW);
-    assert!(budget.take_duty(DUTY_BURST_MS - SCAN_COST_MS - 5 * MESSAGE_COST_MS));
+    let scan = SCAN_COST_MS + read_cost_ms(env.contracts.values().next().unwrap().len());
+    assert!(budget.take_duty(DUTY_BURST_MS - scan - 5 * MESSAGE_COST_MS));
     let body = to_cbor(&budget).unwrap();
     Space::new(&mut env, GLOBAL)
         .put("bg/budget", &body)
@@ -1177,8 +1243,7 @@ fn each_origin_is_reached_and_a_17th_only_by_its_own_page() {
     let out = wake(&mut env, "v1watch");
     assert_eq!(subscribes(&out), 16);
     let last = 117;
-    let out = send(&mut env, app(last), Op::RunJobs);
-    assert_eq!(subscribes(&out), 1, "its own page still runs it");
+    assert_eq!(run_jobs(&mut env, last).unknown, 1, "its own page runs it");
 }
 
 #[test]
@@ -1225,4 +1290,172 @@ fn a_refused_kept_write_is_finished_by_the_next_run() {
 #[test]
 fn a_refused_flags_write_is_finished_by_the_next_run() {
     a_refused_write_is_finished(1);
+}
+
+// ── Round 1 fixes ───────────────────────────────────────────────────────────
+
+/// What a run takes at most is stated against the measured cost of an import
+/// (`MESSAGE_COST_MS`, 120 ms on a real node): with the scans it stays under a
+/// third of core's 5 s limit.
+const _: () = assert!(
+    MAX_MESSAGES_PER_RUN as u64 * MESSAGE_COST_MS + MAX_SCANS_PER_RUN as u64 * SCAN_COST_MS
+        <= 5_000 / 3
+);
+
+fn duty_left(env: &mut MemEnv) -> u64 {
+    let stored = Space::new(env, GLOBAL).get("bg/budget").unwrap();
+    from_cbor::<Budget>(&stored).unwrap().duty_ms
+}
+
+/// A host that stops the run after `sets` writes, as core does when it stops
+/// waiting at its time limit: the guest does not continue.
+struct Killed<'a> {
+    inner: &'a mut MemEnv,
+    sets: usize,
+}
+
+impl Env for Killed<'_> {
+    fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
+        self.inner.get(key)
+    }
+    fn set(&mut self, key: &[u8], value: &[u8]) -> bool {
+        assert!(self.sets > 0, "the run was stopped");
+        self.sets -= 1;
+        self.inner.set(key, value)
+    }
+    fn remove(&mut self, key: &[u8]) -> bool {
+        self.inner.remove(key)
+    }
+    fn host_random(&mut self) -> [u8; 32] {
+        self.inner.host_random()
+    }
+    fn now_secs(&self) -> Option<u64> {
+        self.inner.now_secs()
+    }
+    fn contract_state(&self, id: &[u8; 32]) -> Option<Vec<u8>> {
+        self.inner.contract_state(id)
+    }
+}
+
+#[test]
+fn a_run_stopped_by_the_host_resumes_without_repeating_or_losing() {
+    let mut env = env();
+    let mut ids: Vec<IdentityInfo> = (1..=6)
+        .map(|n| create(&mut env, PROD, &"a".repeat(n)))
+        .collect();
+    ids.sort_by_key(|i| i.addr.0);
+    let mut sent = Vec::new();
+    for me in &ids {
+        let messages: Vec<Vec<u8>> = (0..3).map(|n| sealed(me, &format!("m{n}"))).collect();
+        sent.push(
+            messages
+                .iter()
+                .map(|m| id_of(m).to_vec())
+                .collect::<Vec<_>>(),
+        );
+        deliver(&mut env, me, &messages);
+    }
+    // Four inboxes are scanned a run: the first run stops in the first of them.
+    let stopped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut host = Killed {
+            inner: &mut env,
+            sets: 8,
+        };
+        let tag = b"rescan".to_vec();
+        let _ = process(&mut host, None, InboundDelegateMsg::WakeupFired { tag });
+    }));
+    assert!(stopped.is_err(), "the run did not finish");
+    let kept = |env: &mut MemEnv, i: usize| kept_ids(env, ids[i].addr).len();
+    assert!(kept(&mut env, 0) < 3, "it stopped in the first inbox");
+    // The rotation moved before the imports, so the next run goes on with the
+    // inboxes the stopped one never reached.
+    wake(&mut env, "rescan");
+    assert_eq!((kept(&mut env, 4), kept(&mut env, 5)), (3, 3));
+    for _ in 0..4 {
+        wake(&mut env, "rescan");
+    }
+    for (i, want) in sent.iter().enumerate() {
+        let mut got = kept_ids(&mut env, ids[i].addr);
+        let mut want = want.clone();
+        got.sort();
+        want.sort();
+        assert_eq!(got, want, "identity {i}: all of it, once");
+    }
+    assert_eq!(run_jobs(&mut env, PROD).imported, 0, "nothing left to take");
+}
+
+#[test]
+fn a_page_run_does_not_move_the_rotation_of_a_later_identity() {
+    let mut targets: Vec<Target> = (1..=10).map(|n| target(n, 1)).collect();
+    targets.push(target(11, 2));
+    let mut b = Budget::new(NOW);
+    let mut reached = std::collections::BTreeSet::new();
+    for _ in 0..3 {
+        let p = plan(Trigger::Tick(Tick::Rescan), &targets, &mut b);
+        reached.extend(p.scan.iter().map(|t| t.id[0]));
+        // A page for another origin, with one identity, between node runs.
+        let page = plan(Trigger::RunJobs(Origin([2; 32])), &targets, &mut b);
+        assert_eq!(page.scan, [target(11, 2)]);
+    }
+    assert_eq!(reached.len(), 11, "{reached:?}");
+}
+
+#[test]
+fn a_large_inbox_state_is_charged_by_its_size() {
+    let mut env = env();
+    let me = create(&mut env, PROD, "alice");
+    let mut state = inbox_of(&[]);
+    state.truncate(state.len() - 1);
+    state.extend_from_slice(br#","pad":""#);
+    state.extend(std::iter::repeat_n(b'x', 8 << 20));
+    state.extend_from_slice(br#""}"#);
+    env.contracts.insert(v1_inbox_id(&me.vk).unwrap(), state);
+    wake(&mut env, "rescan");
+    assert_eq!(
+        duty_left(&mut env),
+        DUTY_BURST_MS - SCAN_COST_MS - 8 * SCAN_MS_PER_MIB,
+        "the flat cost and the size"
+    );
+}
+
+#[test]
+fn a_duplicate_notification_decrypts_nothing_and_is_charged_only_its_scan() {
+    let mut env = env();
+    let me = create(&mut env, PROD, "alice");
+    deliver(&mut env, &me, &[sealed(&me, "one"), sealed(&me, "two")]);
+    let id = v1_inbox_id(&me.vk).unwrap();
+    process(&mut env, None, notification(id, vec![])).unwrap();
+    assert_eq!(kept_ids(&mut env, me.addr).len(), 2);
+    let after_import = duty_left(&mut env);
+    assert!(after_import <= DUTY_BURST_MS - 2 * MESSAGE_COST_MS, "paid");
+    let scan = SCAN_COST_MS + read_cost_ms(env.contracts[&id].len());
+    for _ in 0..3 {
+        process(&mut env, None, notification(id, vec![])).unwrap();
+    }
+    assert_eq!(
+        duty_left(&mut env),
+        after_import - 3 * scan,
+        "a held message is skipped before it is decrypted"
+    );
+}
+
+#[test]
+fn a_message_the_page_could_not_read_is_not_kept_by_the_watch() {
+    let mut env = env();
+    let me = create(&mut env, PROD, "alice");
+    // No `to` or `cc`: the page's `DecryptedMessage` needs both.
+    let message = sealed_plain(
+        &me,
+        "bare",
+        serde_json::json!({
+            "title": "bare",
+            "content": "body",
+            "from": "bob",
+            "time": "2026-11-02T10:00:00Z",
+        }),
+    );
+    deliver(&mut env, &me, std::slice::from_ref(&message));
+    let run = run_jobs(&mut env, PROD);
+    assert_eq!((run.imported, run.remaining), (0, 0));
+    assert!(kept_ids(&mut env, me.addr).is_empty());
 }

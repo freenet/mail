@@ -34,19 +34,34 @@ dt "jobs: one subscription per contract" "$J" \
 # ── Budgets ─────────────────────────────────────────────────────────────────
 dt "jobs: 300 operations a minute" "$J" 'pub const MAX_OPS_PER_MINUTE: u32 = 300;' \
     'pub const MAX_OPS_PER_MINUTE: u32 = 301;' operations_stop_at_300_a_minute_and_come_back_with_the_next
-dt "jobs: 60 writes a minute" "$J" 'pub const MAX_WRITES_PER_MINUTE: u32 = 60;' \
-    'pub const MAX_WRITES_PER_MINUTE: u32 = 61;' writes_stop_at_60_a_minute_per_contract_and_count_as_operations
 dt "jobs: 1% duty" "$J" 'pub const DUTY_REFILL_MS_PER_SEC: u64 = 10;' \
     'pub const DUTY_REFILL_MS_PER_SEC: u64 = 11;' duty_refills_at_one_percent_up_to_the_burst
 dt "jobs: a 10 s burst" "$J" 'pub const DUTY_BURST_MS: u64 = 10_000;' \
     'pub const DUTY_BURST_MS: u64 = 10_001;' duty_refills_at_one_percent_up_to_the_burst
 dt "jobs: a clock stepping back" "$J" 'if now / 60 > self.minute {' 'if now / 60 != self.minute {' \
-    a_clock_stepping_back_refills_and_reopens_nothing
+    a_clock_stepping_back_a_little_refills_and_reopens_nothing
+dt "jobs: a clock far back starts over" "$J" \
+    'if now.saturating_add(CLOCK_RESET_SECS) < self.duty_at {' 'if false {' \
+    a_clock_stepping_far_back_starts_the_budget_over
+dt "jobs: a clock a little back does not" "$J" \
+    'if now.saturating_add(CLOCK_RESET_SECS) < self.duty_at {' 'if now < self.duty_at {' \
+    a_clock_stepping_back_a_little_refills_and_reopens_nothing
+dt "jobs: a run takes 12 messages at most" "$J" \
+    'pub const MAX_MESSAGES_PER_RUN: usize = 12;' 'pub const MAX_MESSAGES_PER_RUN: usize = 13;' \
+    a_backlog_is_taken_a_batch_at_a_time_and_resumes
+dt "jobs: the budget is saved before the imports" "$W" \
+    '    if budget != before {
+        save_budget(env, &budget);
+    }
+    let before = budget.clone();' '' \
+    a_run_stopped_by_the_host_resumes_without_repeating_or_losing
+dt "jobs: an inbox is charged by its size" "$W" 'budget.charge_bytes(read);' '' \
+    a_large_inbox_state_is_charged_by_its_size
 dt "jobs: a node run stops at its duty" "$J" \
-    'MAX_DECRYPT_BATCH.min((self.duty_ms / MESSAGE_COST_MS) as usize)' 'MAX_DECRYPT_BATCH' \
+    'MAX_MESSAGES_PER_RUN.min((self.duty_ms / MESSAGE_COST_MS) as usize)' 'MAX_MESSAGES_PER_RUN' \
     a_run_decrypts_at_most_a_batch_and_a_node_run_at_most_its_duty,a_node_run_spends_its_duty_and_stops
 dt "jobs: a batch is the most a run decrypts" "$J" \
-    'MAX_DECRYPT_BATCH.min((self.duty_ms / MESSAGE_COST_MS) as usize)' \
+    'MAX_MESSAGES_PER_RUN.min((self.duty_ms / MESSAGE_COST_MS) as usize)' \
     '((self.duty_ms / MESSAGE_COST_MS) as usize)' \
     a_run_decrypts_at_most_a_batch_and_a_node_run_at_most_its_duty
 dt "jobs: a run charges its messages" "$W" 'budget.charge_messages(plan.messages - left);' '' \
@@ -57,8 +72,10 @@ dt "jobs: scans stop at the duty" "$J" 'if unprompted && !budget.take_duty(SCAN_
     'if false {' a_node_run_with_no_duty_left_scans_nothing_and_a_page_still_does
 dt "jobs: scans rotate" "$J" 'budget.cursor = ((start + scan.len()) % eligible.len().max(1)) as u32;' \
     '' scans_rotate_so_every_inbox_is_reached_at_the_per_run_limit
-dt "jobs: a contract keeps the rotation" "$J" 'if !matches!(trigger, Trigger::Contract(_)) {' \
-    'if true {' a_contract_trigger_scans_only_that_contract_and_keeps_the_rotation
+dt "jobs: a contract keeps the rotation" "$J" 'if unprompted && !matches!(trigger, Trigger::Contract(_)) {' \
+    'if unprompted {' a_contract_trigger_scans_only_that_contract_and_keeps_the_rotation
+dt "jobs: a page run keeps the rotation" "$J" 'if unprompted && !matches!(trigger, Trigger::Contract(_)) {' \
+    'if !matches!(trigger, Trigger::Contract(_)) {' a_page_run_does_not_move_the_rotation_of_a_later_identity
 dt "jobs: a refresh stops at the operations left" "$J" \
     'subscribe.truncate(budget.take_ops(subscribe.len()));' '' \
     a_refresh_past_the_operation_limit_subscribes_the_best_it_can
@@ -77,15 +94,29 @@ dt "jobs: a run answers no page" "$H" 'watch::run(env, trigger).1' \
 dt "jobs: a new identity is recorded" "$H" 'watch::note_origin(&mut *s.env, origin);
             Ok(info(addr, generation, &record))' 'Ok(info(addr, generation, &record))' \
     a_new_identity_is_watched_with_no_page_ever_asking
-dt "jobs: node start refreshes" "$J" \
-    'if trigger == Trigger::NodeStarted {' 'if false {' \
-    a_confirmed_subscription_is_not_asked_for_again_until_the_node_restarts
-dt "jobs: a confirmed subscription is not asked for" "$J" \
-    '        subscribe.retain(|id| !budget.subscribed.contains(id));
-' '' a_confirmed_subscription_is_not_asked_for_again_until_the_node_restarts
-dt "jobs: only a success confirms" "$H" 'if r.result.is_ok()
-                && let Ok(id)' 'if let Ok(id)' \
-    a_failed_subscription_is_asked_for_again_by_the_next_refresh
+dt "jobs: a subscription answer writes nothing" "$H" \
+    'InboundDelegateMsg::SubscribeContractResponse(_) => Ok(Vec::new()),' \
+    'InboundDelegateMsg::SubscribeContractResponse(_) => { env.set(b"x", b"y"); Ok(Vec::new()) }' \
+    a_forged_subscription_answer_does_not_stop_the_next_refresh_asking
+dt "jobs: a page run asks no network" "$W" '            if unprompted
+                && plan.fetch_missing' '            if plan.fetch_missing' \
+    a_page_run_never_asks_the_network_for_an_inbox_this_node_lacks
+dt "jobs: a page run subscribes only held inboxes" "$W" \
+    '.filter(|id| unprompted || held.contains(id))' '.filter(|_| true)' \
+    a_page_run_never_asks_the_network_for_an_inbox_this_node_lacks
+dt "jobs: a missing inbox backs off" "$J" '.is_none_or(|(_, _, next)| self.duty_at >= *next)' \
+    '.is_none_or(|_| true)' \
+    a_missing_inbox_is_asked_for_at_doubling_intervals_up_to_a_day
+dt "jobs: the backoff doubles" "$J" '.saturating_mul(1u64 << (asks - 1).min(16))' '.saturating_mul(1)' \
+    a_missing_inbox_is_asked_for_at_doubling_intervals_up_to_a_day
+dt "jobs: the backoff stops at a day" "$J" '            .min(MISSING_BACKOFF_MAX_SECS);' '            ;' \
+    a_missing_inbox_is_asked_for_at_doubling_intervals_up_to_a_day
+dt "jobs: a refresh waits for the backoff" "$J" '            subscribe.retain(|id| budget.may_ask(id));' '' \
+    a_missing_inbox_is_asked_for_at_doubling_intervals_up_to_a_day
+dt "jobs: a success clears the backoff" "$W" '            budget.note_held(&target.id);' '' \
+    a_missing_inbox_found_is_asked_for_at_once_if_it_goes_missing_again
+dt "jobs: a missing inbox is noted" "$W" '                budget.note_missing(target.id);' '' \
+    a_missing_inbox_is_asked_for_at_doubling_intervals_up_to_a_day
 dt "jobs: an empty origin gives up its place" "$W" 'if !emptied.is_empty() {' 'if false {' \
     an_origin_with_no_identities_left_gives_up_its_place
 dt "jobs: the hourly tick refreshes" "$J" \
@@ -152,6 +183,12 @@ dt "jobs: an import is create-only" "$H" "$TAKE_OVER" '        None => true,' \
 dt "jobs: an import says it is unread" "$W" \
     'br#"{"read":false,"deleted":false}"#;' 'br#"{"read":true,"deleted":false}"#;' \
     an_import_says_it_is_unread
+dt "jobs: a held message is skipped before it is decrypted" "$W" \
+    'if seen.contains(&id[..]) || held.contains(&id[..]) {' 'if seen.contains(&id[..]) {' \
+    a_duplicate_notification_decrypts_nothing_and_is_charged_only_its_scan
+dt "jobs: a message the page cannot read is not kept" "$W" \
+    '    #[allow(dead_code)]
+    to: Vec<Vec<u8>>,' '' a_message_the_page_could_not_read_is_not_kept_by_the_watch
 also "$H" "$TAKE_OVER" '        None => true,' \
     dt "jobs: a held message is not imported" "$W" \
     'if seen.contains(&id[..]) || held.contains(&id[..]) {' 'if seen.contains(&id[..]) {' \
@@ -245,3 +282,30 @@ dt "jobs: a deleting identity is not watched" "$H" '            && !r.deleting
         {
             out.push((addr, g, r));' '        {
             out.push((addr, g, r));' an_identity_being_deleted_is_not_watched
+
+# ── The page's side: unread imports, deletion, the loop ─────────────────────
+UI="$STAGE/ui/src"
+uj() { guard "$1" "$2" "$3" "$4" "tests:$5" ui_jobs_tests; }
+uj "jobs: an import shows unread" "$UI/app.rs" \
+    'let read = is_read(mid) || !is_unread_import(mid);' 'let read = true;' \
+    kept_import_is_unread_until_read_and_a_migrated_copy_is_read
+uj "jobs: a read mark overrides the unread flags" "$UI/app.rs" \
+    'let read = is_read(mid) || !is_unread_import(mid);' 'let read = !is_unread_import(mid);' \
+    kept_import_is_unread_until_read_and_a_migrated_copy_is_read
+uj "jobs: only unread flags mark an import" "$UI/local_state/items.rs" \
+    'if !f.read && !f.deleted {' 'if !f.deleted {' \
+    unread_flags_mark_an_import_and_nothing_else_does
+uj "jobs: a deleted flag is not an unread import" "$UI/local_state/items.rs" \
+    'if !f.read && !f.deleted {' 'if !f.read {' \
+    unread_flags_mark_an_import_and_nothing_else_does
+uj "jobs: a delete takes back a copy imported meanwhile" "$UI/local_state/items.rs" \
+    '    // A background import between the first delete and the flags (the
+    // message had no kept copy yet) makes a copy beside the mark. The flags
+    // now stop any further import, so one more delete takes it back.
+    delete(message_item(ItemKind::Kept, &alias, msg_id)?)
+        .await
+        .map_err(boxed)
+}' '    Ok(())
+}' an_import_between_the_copies_and_the_mark_is_taken_back
+uj "jobs: the page loop starts once" "$UI/jobs.rs" '!s.replace(true)' 'true' \
+    the_loop_starts_once_however_often_the_identities_load

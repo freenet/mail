@@ -10,7 +10,7 @@
 //! cover everything: a page's `RunJobs` is not an unprompted run, and core
 //! charges a notification run's time without refusing it.
 
-use freenet_mail_protocol::{Addr, MAX_DECRYPT_BATCH};
+use freenet_mail_protocol::Addr;
 use serde::{Deserialize, Serialize};
 
 use crate::store::Origin;
@@ -21,10 +21,6 @@ pub type ContractId = [u8; 32];
 pub const MAX_SUBSCRIPTIONS: usize = 256;
 /// Contract operations per minute, for the whole delegate.
 pub const MAX_OPS_PER_MINUTE: u32 = 300;
-/// Contract writes per minute, per contract.
-pub const MAX_WRITES_PER_MINUTE: u32 = 60;
-/// Contracts [`Budget::take_write`] tracks in one minute.
-const MAX_WRITE_ENTRIES: usize = 256;
 /// Inbox states one run reads. The rest wait for a later run.
 pub const MAX_SCANS_PER_RUN: usize = 4;
 /// 1% of wall time, the share of it runs the node starts may use.
@@ -45,6 +41,30 @@ pub const SCAN_COST_MS: u64 = 10;
 /// for one that imported nothing and subscribed the same two inboxes, so about
 /// 65 and then about 117 ms per message, against the 40 ms first assumed.
 pub const MESSAGE_COST_MS: u64 = 120;
+/// Messages one run decrypts and imports, however much duty is left. Core
+/// stops waiting for a call at 5 s, and an import costs about 120 ms
+/// ([`MESSAGE_COST_MS`]), so 12 is 1.5 s with the four scans, about a third of
+/// the limit: a machine three times slower still finishes. A backlog takes
+/// more runs, which the rotation and the next wake-up supply.
+pub const MAX_MESSAGES_PER_RUN: usize = 12;
+/// Extra duty charged for reading an inbox state, per MiB of it, on top of
+/// [`SCAN_COST_MS`]. See the measurement note in the tests: copying and
+/// parsing an inbox takes about 40 ms a MiB natively, and this is several
+/// times that for the guest, which is slower and was not timed on a node.
+pub const SCAN_MS_PER_MIB: u64 = 150;
+/// What reading `bytes` of inbox state costs, beyond [`SCAN_COST_MS`].
+pub fn read_cost_ms(bytes: usize) -> u64 {
+    (bytes as u64).saturating_mul(SCAN_MS_PER_MIB) >> 20
+}
+/// A clock this far behind the last one seen has been set back, not
+/// jittered: the budget starts over (core still limits the runs it starts).
+pub const CLOCK_RESET_SECS: u64 = 86_400;
+/// First wait before asking again for an inbox this node does not hold. It
+/// doubles on each ask that finds it still missing, up to a day.
+pub const MISSING_BACKOFF_FIRST_SECS: u64 = 3_600;
+pub const MISSING_BACKOFF_MAX_SECS: u64 = 86_400;
+/// Inboxes whose backoff is remembered.
+const MAX_MISSING: usize = 256;
 
 /// The periodic wake-ups, by manifest tag.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -196,15 +216,16 @@ pub fn rank_subscriptions(candidates: &[Candidate]) -> Vec<ContractId> {
 pub struct Budget {
     minute: u64,
     ops: u32,
-    writes: Vec<(ContractId, u32)>,
-    duty_ms: u64,
+    pub(crate) duty_ms: u64,
     duty_at: u64,
     /// Where the next run's scans start.
     cursor: u32,
-    /// Subscriptions the node confirmed since it started. Not asked for again:
-    /// the delegate is parked while a request is out, and a page's calls wait
-    /// behind it. Losing this costs one repeat, which is harmless.
-    subscribed: Vec<ContractId>,
+    /// Inboxes this node did not hold when last asked for: the number of asks
+    /// that found them missing, and when to ask again. The delegate is parked
+    /// while a request for a missing contract is out and a page's calls wait
+    /// behind it, so a missing inbox is not asked for on every refresh. Cleared
+    /// by a scan that finds the inbox.
+    missing: Vec<(ContractId, u32, u64)>,
 }
 
 impl Budget {
@@ -213,21 +234,28 @@ impl Budget {
         Budget {
             minute: now / 60,
             ops: 0,
-            writes: Vec::new(),
             duty_ms: DUTY_BURST_MS,
             duty_at: now,
             cursor: 0,
-            subscribed: Vec::new(),
+            missing: Vec::new(),
         }
     }
 
-    /// Bring the windows up to `now`. A clock that steps back refills nothing
-    /// and reopens nothing.
+    /// Bring the windows up to `now`. A clock that steps back a little
+    /// refills nothing and reopens nothing; one that steps back by more than
+    /// [`CLOCK_RESET_SECS`] starts the budget over, so a clock that was once
+    /// far ahead does not stop the runs until real time catches up.
     pub fn advance(&mut self, now: u64) {
+        if now.saturating_add(CLOCK_RESET_SECS) < self.duty_at {
+            *self = Budget {
+                cursor: self.cursor,
+                ..Budget::new(now)
+            };
+            return;
+        }
         if now / 60 > self.minute {
             self.minute = now / 60;
             self.ops = 0;
-            self.writes.clear();
         }
         if now > self.duty_at {
             let refill = (now - self.duty_at).saturating_mul(DUTY_REFILL_MS_PER_SEC);
@@ -236,11 +264,34 @@ impl Budget {
         }
     }
 
-    /// The node confirmed a subscription.
-    pub fn note_subscribed(&mut self, id: ContractId) {
-        if !self.subscribed.contains(&id) && self.subscribed.len() < MAX_SUBSCRIPTIONS {
-            self.subscribed.push(id);
+    /// Whether this node may ask the network for `id` now.
+    pub fn may_ask(&self, id: &ContractId) -> bool {
+        self.missing
+            .iter()
+            .find(|(m, _, _)| m == id)
+            .is_none_or(|(_, _, next)| self.duty_at >= *next)
+    }
+
+    /// An ask for `id` found it still missing: wait twice as long as the last
+    /// time before the next.
+    pub fn note_missing(&mut self, id: ContractId) {
+        let at = self.missing.iter().position(|(m, _, _)| *m == id);
+        let asks = at.map_or(0, |i| self.missing[i].1).saturating_add(1);
+        let wait = MISSING_BACKOFF_FIRST_SECS
+            .saturating_mul(1u64 << (asks - 1).min(16))
+            .min(MISSING_BACKOFF_MAX_SECS);
+        let entry = (id, asks, self.duty_at.saturating_add(wait));
+        match at {
+            Some(i) => self.missing[i] = entry,
+            None if self.missing.len() < MAX_MISSING => self.missing.push(entry),
+            // Full: an entry makes room, as the tombstones do.
+            None => self.missing[0] = entry,
         }
+    }
+
+    /// `id` is held: forget its backoff.
+    pub fn note_held(&mut self, id: &ContractId) {
+        self.missing.retain(|(m, _, _)| m != id);
     }
 
     /// Take up to `want` operations; how many this minute still allows.
@@ -249,23 +300,6 @@ impl Budget {
         let granted = want.min(left);
         self.ops += granted as u32;
         granted
-    }
-
-    /// Take one write to `contract`, which is also an operation.
-    pub fn take_write(&mut self, contract: &ContractId) -> bool {
-        let at = self.writes.iter().position(|(id, _)| id == contract);
-        let room = match at {
-            Some(i) => self.writes[i].1 < MAX_WRITES_PER_MINUTE,
-            None => self.writes.len() < MAX_WRITE_ENTRIES,
-        };
-        if !room || self.take_ops(1) == 0 {
-            return false;
-        }
-        match at {
-            Some(i) => self.writes[i].1 += 1,
-            None => self.writes.push((*contract, 1)),
-        }
-        true
     }
 
     /// Charge `ms` of duty, if that much is left.
@@ -277,14 +311,19 @@ impl Budget {
         true
     }
 
-    /// The messages one run may decrypt: never past the batch limit that keeps
-    /// a call within the host's time limit, and for a run the node started,
-    /// never past the duty left.
+    /// The messages one run may decrypt: never past the per-run limit that
+    /// keeps a call within the host's time limit, and for a run the node
+    /// started, never past the duty left.
     pub fn message_slice(&self, unprompted: bool) -> usize {
         if !unprompted {
-            return MAX_DECRYPT_BATCH;
+            return MAX_MESSAGES_PER_RUN;
         }
-        MAX_DECRYPT_BATCH.min((self.duty_ms / MESSAGE_COST_MS) as usize)
+        MAX_MESSAGES_PER_RUN.min((self.duty_ms / MESSAGE_COST_MS) as usize)
+    }
+
+    /// Charge reading `bytes` of inbox state beyond the flat scan cost.
+    pub fn charge_bytes(&mut self, bytes: usize) {
+        self.duty_ms = self.duty_ms.saturating_sub(read_cost_ms(bytes));
     }
 
     /// Charge the messages a run actually took.
@@ -337,12 +376,12 @@ pub fn plan(trigger: Trigger, targets: &[Target], budget: &mut Budget) -> Plan {
             }
             scan.push(*t);
         }
-        if !matches!(trigger, Trigger::Contract(_)) {
+        // Only runs the node starts move the rotation: a page's run for one
+        // origin counts inboxes of that origin alone, so it would reset the
+        // rotation of the rest.
+        if unprompted && !matches!(trigger, Trigger::Contract(_)) {
             budget.cursor = ((start + scan.len()) % eligible.len().max(1)) as u32;
         }
-    }
-    if trigger == Trigger::NodeStarted {
-        budget.subscribed.clear();
     }
     let mut subscribe = Vec::new();
     if refresh {
@@ -356,7 +395,12 @@ pub fn plan(trigger: Trigger, targets: &[Target], budget: &mut Budget) -> Plan {
             })
             .collect();
         subscribe = rank_subscriptions(&candidates);
-        subscribe.retain(|id| !budget.subscribed.contains(id));
+        // A node run asks again for an inbox it found missing only once its
+        // backoff is over. A page's run subscribes only inboxes it finds
+        // held (see `crate::watch`), whatever the backoff says.
+        if unprompted {
+            subscribe.retain(|id| budget.may_ask(id));
+        }
         subscribe.truncate(budget.take_ops(subscribe.len()));
     }
     Plan {

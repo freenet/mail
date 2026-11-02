@@ -62,6 +62,11 @@ ui_local_tests() {
     cargo test --manifest-path "$STAGE/Cargo.toml" -p freenet-email-ui --lib \
         --no-default-features --features example-data,no-sync identity_store
 }
+ui_jobs_tests() {
+    cargo test --manifest-path "$STAGE/Cargo.toml" -p freenet-email-ui --lib \
+        --no-default-features --features example-data,no-sync \
+        -- kept_import_is_unread unread_flags_mark an_import_between the_loop_starts
+}
 candidate_check() { "$STAGE/scripts/check-delegate-candidate.sh"; }
 freeze_tests() { "$STAGE/scripts/release-freeze_test.sh"; }
 scrub_release_tests() { "$STAGE/scripts/check-release-scrub_test.sh"; }
@@ -86,6 +91,7 @@ baseline "delegate unreadable-key runs" blind_tests
 baseline "protocol tests" protocol_tests
 baseline "migration tests" ui_migration_tests
 baseline "local-delegate identity tests" ui_local_tests
+baseline "UI background jobs tests" ui_jobs_tests
 baseline "release freeze tests" freeze_tests
 baseline "release scrub tests" scrub_release_tests
 [ "$WASM" -eq 1 ] && baseline "candidate check" candidate_check
