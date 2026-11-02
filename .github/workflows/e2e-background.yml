@@ -1,0 +1,182 @@
+name: E2E (background jobs)
+
+# The delegate's background jobs on a real isolated 2-node network: the node
+# runs them with every tab closed (wake-up and notification), the page's own
+# run, and what a run costs. About 25 minutes, because it waits for the
+# `rescan` wake-up. Runs on a PR that touches the delegate, the protocol or the
+# jobs code, and nightly. It is not a required check (a path-filtered workflow
+# cannot be: it would never report on other PRs), so a failure is seen on the
+# run, not in the merge button. See AGENTS.md, "Background jobs".
+
+on:
+  pull_request:
+    paths:
+      - 'delegates/**'
+      - 'protocol/**'
+      - 'wire-v1/**'
+      - 'ui/src/jobs.rs'
+      - 'ui/src/mail_delegate/**'
+      - 'ui/src/local_state/**'
+      - 'ui/tests/background-proof.spec.ts'
+      - 'published-contract/candidate/**'
+      - '.github/workflows/e2e-background.yml'
+  schedule:
+    # Nightly at 05:30 UTC, an hour after the other real-node run.
+    - cron: '30 5 * * *'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  PLAYWRIGHT_BROWSERS: chromium
+
+jobs:
+  e2e-background:
+    # ubicloud-standard-8 — full Freenet network + dx build + headed
+    # browser. The free tier's 2 cores struggle with the parallel build
+    # and frequently push the run past the timeout.
+    runs-on: ubicloud-standard-8
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Install Rust
+        # Keep in sync with rust-toolchain.toml.
+        uses: dtolnay/rust-toolchain@1.99.1
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo-installed binaries
+        id: cache-bins
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/bin/cargo-make
+            ~/.cargo/bin/cargo-binstall
+            ~/.cargo/bin/fdev
+            ~/.cargo/bin/dx
+            ~/.cargo/bin/freenet
+          key: ${{ runner.os }}-cargo-bins-e2e-fnet-v0.2.151-dx-0.7.10-v2
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Verify cached binaries
+        id: verify-bins
+        run: |
+          missing=0
+          for bin in cargo-make cargo-binstall fdev dx freenet; do
+            if [ ! -x "$HOME/.cargo/bin/$bin" ]; then
+              echo "missing: $bin"
+              missing=1
+            fi
+          done
+          echo "missing=$missing" >> "$GITHUB_OUTPUT"
+
+      - name: Install cargo-binstall
+        if: steps.cache-bins.outputs.cache-hit != 'true' || steps.verify-bins.outputs.missing == '1'
+        uses: taiki-e/install-action@cargo-binstall
+
+      - name: Install cargo-make
+        if: steps.cache-bins.outputs.cache-hit != 'true' || steps.verify-bins.outputs.missing == '1'
+        run: cargo binstall -y --force cargo-make
+
+      - name: Install fdev + freenet
+        if: steps.cache-bins.outputs.cache-hit != 'true' || steps.verify-bins.outputs.missing == '1'
+        run: |
+          # Both binaries ship as prebuilt tarballs on freenet-core's
+          # GitHub releases. Pulling them is ~5s vs ~15min for the
+          # `cargo install` source compile that this job used before.
+          # The matching version is the freenet-core release tag — fdev
+          # crates.io versions (0.3.x) don't track 1:1 and don't carry
+          # binstall metadata, so we go direct to the release artifact.
+          REL="v0.2.151"
+          BASE="https://github.com/freenet/freenet-core/releases/download/${REL}"
+          mkdir -p "$HOME/.cargo/bin"
+          for bin in fdev freenet; do
+            curl -fsSL "${BASE}/${bin}-x86_64-unknown-linux-musl.tar.gz" \
+              | tar -xz -C "$HOME/.cargo/bin/" "${bin}"
+            chmod +x "$HOME/.cargo/bin/${bin}"
+          done
+          fdev --version
+          freenet --version
+
+      - name: Install Dioxus CLI
+        if: steps.cache-bins.outputs.cache-hit != 'true' || steps.verify-bins.outputs.missing == '1'
+        run: cargo binstall -y --force --version 0.7.10 dioxus-cli
+
+      - name: Install GNU tar
+        run: |
+          # Ubuntu's default tar is GNU tar — verify it's available
+          # under the name `tar` (compress-webapp prefers `gtar` then
+          # falls back to `tar` if it identifies as GNU).
+          tar --version | head -1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '20'
+
+      - name: Install Playwright test dependencies
+        run: npm install
+        working-directory: ./ui/tests
+
+      - name: Cache Playwright browser (chromium only)
+        id: cache-playwright
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-1.59.1-chromium
+
+      - name: Install Playwright chromium
+        if: steps.cache-playwright.outputs.cache-hit != 'true'
+        run: npx playwright install --with-deps chromium
+        working-directory: ./ui/tests
+
+      - name: Install Playwright system deps (cached browser)
+        if: steps.cache-playwright.outputs.cache-hit == 'true'
+        run: npx playwright install-deps chromium
+        working-directory: ./ui/tests
+
+      - name: Block freenet auto-update GitHub probe
+        # The pinned `freenet` binary (0.2.151) polls
+        # https://api.github.com/repos/freenet/freenet-core/releases/latest
+        # ~30s into startup and gracefully shuts down if a newer release
+        # exists. That race kills the iso gateway mid-test on any PR
+        # whose CI run lands after a freenet-core release. Block the
+        # update probe by routing api.github.com to localhost just for
+        # this job — Playwright + Actions artifact uploads use
+        # results-receiver.actions.githubusercontent.com / objects.git…
+        # which are unaffected.
+        run: |
+          echo "127.0.0.1 api.github.com" | sudo tee -a /etc/hosts
+          # Sanity: the resolver agrees and the freenet binary will see
+          # a refused connection, not a successful version response.
+          getent hosts api.github.com
+
+      - name: Run the background jobs proof
+        run: cargo make test-e2e-background
+        env:
+          FREENET_E2E_KEEP: '1'
+
+      - name: Upload the findings and Playwright artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-background-playwright
+          path: |
+            target/background-proof.json
+            ui/tests/test-results/
+            ui/tests/playwright-report/
+          if-no-files-found: ignore
+
+      - name: Upload iso-node logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-background-logs
+          path: |
+            ~/freenet-mail-iso/gw/logs/
+            ~/freenet-mail-iso/peer/logs/
+          if-no-files-found: ignore
