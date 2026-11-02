@@ -1779,9 +1779,11 @@ mod delegate_tests {
         let unread = message_id_for(b"imported by the background jobs");
         let read = message_id_for(b"read by the user");
         let bare = message_id_for(b"has no flags");
+        let deleted = message_id_for(b"deleted before it was read");
         for (id, body) in [
             (unread, r#"{"read":false,"deleted":false}"#),
             (read, r#"{"read":true,"deleted":false}"#),
+            (deleted, r#"{"read":false,"deleted":true}"#),
         ] {
             let full = full_id(id).unwrap();
             block_on(ops::put_item(
@@ -1800,6 +1802,7 @@ mod delegate_tests {
         assert!(super::super::is_unread_import(&key, unread));
         assert!(!super::super::is_unread_import(&key, read));
         assert!(!super::super::is_unread_import(&key, bare));
+        assert!(!super::super::is_unread_import(&key, deleted));
     }
 
     /// Two tabs change different settings fields from the same starting

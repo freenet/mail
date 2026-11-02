@@ -186,9 +186,12 @@ dt "jobs: an import says it is unread" "$W" \
 dt "jobs: a held message is skipped before it is decrypted" "$W" \
     'if seen.contains(&id[..]) || held.contains(&id[..]) {' 'if seen.contains(&id[..]) {' \
     a_duplicate_notification_decrypts_nothing_and_is_charged_only_its_scan
-dt "jobs: a message the page cannot read is not kept" "$W" \
+dt "jobs: a message the page cannot read is not kept (no to)" "$W" \
     '    #[allow(dead_code)]
     to: Vec<Vec<u8>>,' '' a_message_the_page_could_not_read_is_not_kept_by_the_watch
+dt "jobs: a message the page cannot read is not kept (no cc)" "$W" \
+    '    #[allow(dead_code)]
+    cc: Vec<String>,' '' a_message_the_page_could_not_read_is_not_kept_by_the_watch
 also "$H" "$TAKE_OVER" '        None => true,' \
     dt "jobs: a held message is not imported" "$W" \
     'if seen.contains(&id[..]) || held.contains(&id[..]) {' 'if seen.contains(&id[..]) {' \

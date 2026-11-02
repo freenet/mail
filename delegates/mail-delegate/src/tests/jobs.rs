@@ -1441,21 +1441,24 @@ fn a_duplicate_notification_decrypts_nothing_and_is_charged_only_its_scan() {
 
 #[test]
 fn a_message_the_page_could_not_read_is_not_kept_by_the_watch() {
-    let mut env = env();
-    let me = create(&mut env, PROD, "alice");
-    // No `to` or `cc`: the page's `DecryptedMessage` needs both.
-    let message = sealed_plain(
-        &me,
-        "bare",
-        serde_json::json!({
+    // The page's `DecryptedMessage` needs both `to` and `cc`: a message
+    // without either is shown as unreadable, so it is not kept here.
+    for missing in ["to", "cc"] {
+        let mut env = env();
+        let me = create(&mut env, PROD, "alice");
+        let mut plain = serde_json::json!({
             "title": "bare",
             "content": "body",
             "from": "bob",
+            "to": [],
+            "cc": [],
             "time": "2026-11-02T10:00:00Z",
-        }),
-    );
-    deliver(&mut env, &me, std::slice::from_ref(&message));
-    let run = run_jobs(&mut env, PROD);
-    assert_eq!((run.imported, run.remaining), (0, 0));
-    assert!(kept_ids(&mut env, me.addr).is_empty());
+        });
+        plain.as_object_mut().unwrap().remove(missing);
+        let message = sealed_plain(&me, "bare", plain);
+        deliver(&mut env, &me, std::slice::from_ref(&message));
+        let run = run_jobs(&mut env, PROD);
+        assert_eq!((run.imported, run.remaining), (0, 0), "no {missing}");
+        assert!(kept_ids(&mut env, me.addr).is_empty(), "no {missing}");
+    }
 }
