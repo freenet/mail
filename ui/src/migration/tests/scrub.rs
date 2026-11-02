@@ -6,9 +6,9 @@ use std::collections::HashSet;
 use freenet_mail_protocol::ItemRef;
 use serde_json::json;
 
-use super::super::ledger::ledger_item;
+use super::super::ledger::{ledger_item, record_identity_deleted, update_ledger};
 use super::super::scrub::{self, Blocker, clearing_order};
-use super::super::successor::{merged_put, settings_item};
+use super::super::successor::{MailStore, merged_put, settings_item};
 use super::*;
 
 const IDENTITY_205: u32 = 205 + IDENTITY_GENERATION_OFFSET;
@@ -34,7 +34,16 @@ fn settle(delegate: &Delegate, node: &Node) -> WalkOutcome {
 
 fn scrub_now(delegate: &Delegate, node: &Node, outcome: &WalkOutcome) -> Vec<Blocker> {
     let mut store = delegate.clone();
-    block_on(scrub::run(&mut store, node.clone(), outcome, || {}))
+    block_on(scrub::run_built(&mut store, node.clone(), outcome, || {}))
+}
+
+/// The loads a whole scrub takes: local state deleted, seen empty on a second
+/// load with the identities deleted then, and those seen empty on a third.
+/// Returns what any of them was stopped by.
+fn scrub_all(delegate: &Delegate, node: &Node, outcome: &WalkOutcome) -> Vec<Blocker> {
+    (0..3)
+        .flat_map(|_| scrub_now(delegate, node, outcome))
+        .collect()
 }
 
 /// The user confirms a backup of `addr`, as `mark_backed_up` stores it.
@@ -102,7 +111,7 @@ fn scenario_the_usual_user_is_scrubbed() {
     let node = usual_node();
     let outcome = ready(&delegate, &node);
     assert!(!outcome.status.as_ref().unwrap().is_complete());
-    assert_eq!(scrub_now(&delegate, &node, &outcome), Vec::new());
+    assert_eq!(scrub_all(&delegate, &node, &outcome), Vec::new());
 
     let ledger = delegate.ledger();
     assert_eq!(ledger.scrubbed.get(&206), Some(&true));
@@ -136,7 +145,7 @@ fn scenario_a_finished_scrub_stays_finished() {
     let delegate = Delegate::new();
     let node = usual_node();
     let outcome = ready(&delegate, &node);
-    scrub_now(&delegate, &node, &outcome);
+    scrub_all(&delegate, &node, &outcome);
     let sent = deletes(&node).len();
     let before = visible(&delegate);
     let outcome = walk(&delegate, &node, six_messages());
@@ -151,7 +160,7 @@ fn scenario_local_state_is_cleared_before_identities() {
     let delegate = Delegate::new();
     let node = usual_node();
     let outcome = ready(&delegate, &node);
-    scrub_now(&delegate, &node, &outcome);
+    scrub_all(&delegate, &node, &outcome);
     let order: Vec<bool> = deletes(&node)
         .iter()
         .map(|(key, _)| *key == lineage_key(im(206)))
@@ -169,7 +178,11 @@ fn scenario_an_interrupted_scrub_resumes_and_does_not_repeat() {
         let node = usual_node();
         let outcome = ready(&delegate, &node);
         *node.writes_left.borrow_mut() = Some(answered);
-        let blockers = scrub_now(&delegate, &node, &outcome);
+        let mut blockers = scrub_now(&delegate, &node, &outcome);
+        if answered == 4 {
+            assert_eq!(blockers, Vec::new(), "the identity row waits a load");
+            blockers = scrub_now(&delegate, &node, &outcome);
+        }
         let generation = if answered < 4 { 206 } else { IDENTITY_206 };
         assert_eq!(blockers, vec![Blocker::RowFailed { generation }]);
         assert_eq!(delegate.ledger().scrubbed.get(&generation), Some(&false));
@@ -179,7 +192,7 @@ fn scenario_an_interrupted_scrub_resumes_and_does_not_repeat() {
         // is sent again only if the row still shows the item.
         node.asked.borrow_mut().pop();
         *node.writes_left.borrow_mut() = None;
-        assert_eq!(scrub_now(&delegate, &node, &outcome), Vec::new());
+        assert_eq!(scrub_all(&delegate, &node, &outcome), Vec::new());
         let sent = deletes(&node);
         let distinct: HashSet<_> = sent.iter().collect();
         assert_eq!(sent.len(), 5, "{answered}");
@@ -193,14 +206,14 @@ fn scenario_a_row_emptied_before_its_journal_entry_finishes() {
     let delegate = Delegate::new();
     let node = usual_node();
     let outcome = ready(&delegate, &node);
-    scrub_now(&delegate, &node, &outcome);
+    scrub_all(&delegate, &node, &outcome);
     let mut store = delegate.clone();
-    block_on(super::super::ledger::update_ledger(&mut store, |l| {
+    block_on(update_ledger(&mut store, |l| {
         l.scrubbed.insert(IDENTITY_206, false);
     }))
     .unwrap();
     let sent = deletes(&node).len();
-    assert_eq!(scrub_now(&delegate, &node, &outcome), Vec::new());
+    assert_eq!(scrub_all(&delegate, &node, &outcome), Vec::new());
     assert_eq!(deletes(&node).len(), sent);
     assert_eq!(delegate.ledger().scrubbed.get(&IDENTITY_206), Some(&true));
 }
@@ -323,7 +336,7 @@ fn a_row_that_answers_empty_stands_as_absent() {
     node.set(im(205), answer(br#"{"identities":{}}"#.to_vec()));
     node.set(ls(205), answer(br#"{"aliases":{}}"#.to_vec()));
     let outcome = ready(&delegate, &node);
-    assert_eq!(scrub_now(&delegate, &node, &outcome), Vec::new());
+    assert_eq!(scrub_all(&delegate, &node, &outcome), Vec::new());
     assert_eq!(delegate.ledger().scrubbed.len(), 2);
 }
 
@@ -343,7 +356,8 @@ fn an_identity_row_waits_for_its_local_state_row() {
     assert_nothing_deleted(&node, &blockers);
 }
 
-/// The pairing as its own rule: the rows of the other generation still go.
+/// The pairing as its own rule. `run` never gets this far with a row that is
+/// not clear: it stops first, so this is a second line behind that.
 #[test]
 fn the_order_leaves_out_an_identity_row_with_its_local_state_pending() {
     let rows = lineage();
@@ -412,7 +426,7 @@ fn an_orphan_moved_before_the_snapshot_does_not_block() {
     let moved = block_on(orphans::move_alias(&mut store, "alice", alice()));
     assert_eq!(moved.moved, 5);
     back_up(&delegate, alice());
-    assert_eq!(scrub_now(&delegate, &node, &outcome), Vec::new());
+    assert_eq!(scrub_all(&delegate, &node, &outcome), Vec::new());
     assert_eq!(delegate.ledger().scrubbed.len(), 2);
     assert!(!row_text(&node, im(206)).contains("renamed"));
 }
@@ -453,10 +467,11 @@ fn an_imported_backup_time_does_not_count() {
 fn a_backup_on_the_first_load_counts() {
     let delegate = Delegate::new();
     let node = usual_node();
-    walk(&delegate, &node, six_messages());
+    let first = walk(&delegate, &node, six_messages());
+    scrub_now(&delegate, &node, &first);
     back_up(&delegate, alice());
     let outcome = settle(&delegate, &node);
-    assert_eq!(scrub_now(&delegate, &node, &outcome), Vec::new());
+    assert_eq!(scrub_all(&delegate, &node, &outcome), Vec::new());
 }
 
 /// An identity already on the mail delegate, which the walk did not count as
@@ -467,7 +482,7 @@ fn an_identity_the_ledger_does_not_list_needs_a_backup_too() {
     let node = usual_node();
     let outcome = ready(&delegate, &node);
     let mut store = delegate.clone();
-    block_on(super::super::ledger::update_ledger(&mut store, |l| {
+    block_on(update_ledger(&mut store, |l| {
         l.migrated.clear();
     }))
     .unwrap();
@@ -497,7 +512,7 @@ fn a_user_deletion_after_import_does_not_block() {
             expected_gen: drafts[0].generation,
         })
         .unwrap();
-    assert_eq!(scrub_now(&delegate, &node, &outcome), Vec::new());
+    assert_eq!(scrub_all(&delegate, &node, &outcome), Vec::new());
     assert!(!row_text(&node, ls(206)).contains("\"d1\":"));
 }
 
@@ -600,7 +615,8 @@ fn the_report_says_why_and_the_snapshot_is_written_once() {
     let ledger = delegate.ledger();
     let report = status_report(outcome.status.as_ref(), &ledger);
     assert!(report.contains("NoBackup"), "{report}");
-    assert_eq!(ledger.snapshot_chunks, Some(1));
+    assert_eq!(ledger.snapshot_rows.get(&206), Some(&1));
+    assert_eq!(ledger.snapshot_rows.get(&IDENTITY_206), Some(&1));
 
     // A later read does not widen it: the old tab's draft stays unproven.
     old_tab_writes(&node, ls(206), |state| {
@@ -620,4 +636,450 @@ fn the_report_says_why_and_the_snapshot_is_written_once() {
         unchanged(delegate.list(ItemKind::MigrationMarker, None)),
         unchanged(before)
     );
+}
+
+// ── The build ───────────────────────────────────────────────────────────────
+
+/// Every check passes and everything is ready, and a build without the flag
+/// sends nothing: `after_listing` can only reach `run`.
+#[test]
+fn a_default_build_cannot_reach_a_delete() {
+    assert!(!scrub::BUILT_IN, "run the tests without FREENET_MAIL_SCRUB");
+    let delegate = Delegate::new();
+    let node = usual_node();
+    let outcome = ready(&delegate, &node);
+    let before = delegate.ledger();
+    let mut store = delegate.clone();
+    let blockers = block_on(scrub::run(&mut store, node.clone(), &outcome, || {
+        panic!("no clearing starts")
+    }));
+    assert_eq!(blockers, vec![Blocker::NotBuilt]);
+    assert_nothing_deleted(&node, &blockers);
+    assert_eq!(delegate.ledger(), before, "nothing is written either");
+}
+
+// ── Values ──────────────────────────────────────────────────────────────────
+
+/// `edit` changes a draft of the row under the id it was imported with.
+fn old_tab_edits_the_draft(node: &Node) {
+    old_tab_writes(node, ls(206), |state| {
+        state["aliases"]["alice"]["drafts"]["d1"]["subject"] = json!("edited in the old tab");
+    });
+}
+
+/// The same id with newer text: deleting it would lose the only copy.
+#[test]
+fn an_item_changed_since_the_import_blocks() {
+    let delegate = Delegate::new();
+    let node = usual_node();
+    let outcome = ready(&delegate, &node);
+    old_tab_edits_the_draft(&node);
+    let blockers = scrub_now(&delegate, &node, &outcome);
+    assert_eq!(
+        blockers,
+        vec![Blocker::NotImported {
+            generation: 206,
+            ids: 1
+        }]
+    );
+    assert_nothing_deleted(&node, &blockers);
+}
+
+/// A contact re-saved under its alias keeps its address, so its id.
+#[test]
+fn a_contact_changed_since_the_import_blocks() {
+    let delegate = Delegate::new();
+    let node = usual_node();
+    let mut row: serde_json::Value =
+        serde_json::from_slice(&golden("identity_state_seeded")).unwrap();
+    let contact: serde_json::Value =
+        serde_json::from_slice(&golden("identity_state_contact")).unwrap();
+    let contacts = contact["identities"].as_object().unwrap();
+    let (name, entry) = contacts.iter().next().unwrap();
+    row["identities"][name] = entry.clone();
+    node.set(im(206), answer(serde_json::to_vec(&row).unwrap()));
+    let outcome = ready(&delegate, &node);
+    assert_eq!(delegate.list(ItemKind::Contact, None).len(), 1);
+    old_tab_writes(&node, im(206), |state| {
+        state["identities"][name]["extra"] = json!("changed in the old tab");
+    });
+    let blockers = scrub_now(&delegate, &node, &outcome);
+    assert_eq!(
+        blockers,
+        vec![Blocker::NotImported {
+            generation: IDENTITY_206,
+            ids: 1
+        }]
+    );
+    assert_nothing_deleted(&node, &blockers);
+}
+
+/// The user deleted the item here, then the row changed: the id is in the
+/// snapshot, which is not enough.
+#[test]
+fn a_deleted_item_whose_row_then_changed_blocks() {
+    let delegate = Delegate::new();
+    let node = usual_node();
+    let outcome = ready(&delegate, &node);
+    let drafts = delegate.list(ItemKind::Draft, Some(alice()));
+    delegate
+        .send(Op::DeleteItem {
+            item: drafts[0].item.clone(),
+            expected_gen: drafts[0].generation,
+        })
+        .unwrap();
+    old_tab_edits_the_draft(&node);
+    let blockers = scrub_now(&delegate, &node, &outcome);
+    assert_nothing_deleted(&node, &blockers);
+}
+
+/// An old tab keeps saving while the import runs, so the row changes before
+/// its snapshot is written. The snapshot holds what the walk read and landed,
+/// so the newer text is not taken for what landed.
+#[test]
+fn an_edit_during_the_import_is_not_snapshotted() {
+    let delegate = Delegate::new();
+    let node = usual_node();
+    let first = walk(&delegate, &node, six_messages());
+    old_tab_edits_the_draft(&node);
+    scrub_now(&delegate, &node, &first);
+    back_up(&delegate, alice());
+    let outcome = settle(&delegate, &node);
+    let blockers = scrub_now(&delegate, &node, &outcome);
+    assert_eq!(
+        blockers,
+        vec![Blocker::NotImported {
+            generation: 206,
+            ids: 1
+        }]
+    );
+    assert_nothing_deleted(&node, &blockers);
+}
+
+/// A tab that died before its first snapshot leaves no walk read to use: what
+/// still equals the import goes in, and scrub can still run.
+#[test]
+fn a_snapshot_written_late_takes_what_still_equals_the_import() {
+    let delegate = Delegate::new();
+    let node = usual_node();
+    let outcome = settle(&delegate, &node);
+    assert!(outcome.read_rows.is_empty(), "the walk read nothing new");
+    back_up(&delegate, alice());
+    let blockers = scrub_now(&delegate, &node, &outcome);
+    assert_eq!(
+        blockers,
+        vec![Blocker::NotImported {
+            generation: 206,
+            ids: 1
+        }],
+        "only the backed-up settings differ, and that blocks rather than guesses"
+    );
+    assert_nothing_deleted(&node, &blockers);
+}
+
+/// Identical text in the old row and the new delegate needs no snapshot entry.
+#[test]
+fn the_current_import_of_an_item_passes_without_a_snapshot_entry() {
+    let delegate = Delegate::new();
+    let node = usual_node();
+    let outcome = ready(&delegate, &node);
+    let original = row_text(&node, ls(206));
+    old_tab_edits_the_draft(&node);
+    let edited: serde_json::Value = serde_json::from_str(&row_text(&node, ls(206))).unwrap();
+    let draft: Draft =
+        serde_json::from_value(edited["aliases"]["alice"]["drafts"]["d1"].clone()).unwrap();
+    let body = serde_json::to_vec(&draft).unwrap();
+    let draft = &delegate.list(ItemKind::Draft, Some(alice()))[0];
+    delegate
+        .send(Op::PutItem {
+            item: draft.item.clone(),
+            body: body.into(),
+            expected_gen: Some(draft.generation),
+        })
+        .unwrap();
+    assert_ne!(original, row_text(&node, ls(206)));
+    assert_eq!(scrub_all(&delegate, &node, &outcome), Vec::new());
+}
+
+// ── The snapshot is per row ─────────────────────────────────────────────────
+
+/// A deletion on load 2, long before the other rows stand, does not block.
+#[test]
+fn a_deletion_on_the_second_load_does_not_block() {
+    let delegate = Delegate::new();
+    let node = usual_node();
+    let first = walk(&delegate, &node, six_messages());
+    scrub_now(&delegate, &node, &first);
+    let drafts = delegate.list(ItemKind::Draft, Some(alice()));
+    delegate
+        .send(Op::DeleteItem {
+            item: drafts[0].item.clone(),
+            expected_gen: drafts[0].generation,
+        })
+        .unwrap();
+    back_up(&delegate, alice());
+    let outcome = settle(&delegate, &node);
+    assert_eq!(scrub_all(&delegate, &node, &outcome), Vec::new());
+    assert!(!row_text(&node, ls(206)).contains("\"d1\":"));
+}
+
+// ── A row that comes back ───────────────────────────────────────────────────
+
+/// Local state stood as absent, so its identity row was cleared, and then it
+/// answers with its mail. It files under the kept alias table.
+#[test]
+fn a_row_that_returns_after_its_identity_row_went_is_filed() {
+    let delegate = Delegate::new();
+    let node = usual_node();
+    let mail = golden("ls_state");
+    node.set(ls(206), LegacyReply::NotInstalled);
+    let outcome = settle(&delegate, &node);
+    assert_eq!(
+        scrub_now(&delegate, &node, &outcome),
+        vec![Blocker::NoBackup(1)]
+    );
+    back_up(&delegate, alice());
+    assert_eq!(scrub_all(&delegate, &node, &outcome), Vec::new());
+    assert_eq!(row_text(&node, im(206)), r#"{"identities":{}}"#);
+
+    node.set(ls(206), answer(mail));
+    let outcome = walk(&delegate, &node, six_messages());
+    assert_eq!(orphan_count(&delegate), 0);
+    assert_eq!(delegate.list(ItemKind::Draft, Some(alice())).len(), 1);
+    assert_eq!(delegate.list(ItemKind::Archived, Some(alice())).len(), 1);
+    let pending = pending_walks(outcome.status.as_ref().unwrap(), &lineage());
+    assert!(!pending.contains_key(ls(206).delegate_key.as_slice()));
+
+    assert_eq!(scrub_all(&delegate, &node, &outcome), Vec::new());
+    assert_eq!(delegate.ledger().scrubbed.get(&206), Some(&true));
+}
+
+// ── Empty reads ─────────────────────────────────────────────────────────────
+
+/// One empty answer finishes nothing, and the identity row waits for local
+/// state to be finished, not just to look empty once.
+#[test]
+fn a_row_needs_two_loads_of_empty_answers() {
+    let delegate = Delegate::new();
+    let node = usual_node();
+    let outcome = ready(&delegate, &node);
+    assert_eq!(scrub_now(&delegate, &node, &outcome), Vec::new());
+    assert_eq!(delegate.ledger().scrubbed.get(&206), Some(&false));
+    assert_eq!(delegate.ledger().scrubbed.get(&IDENTITY_206), None);
+    assert!(row_text(&node, im(206)).contains("alice"));
+
+    assert_eq!(scrub_now(&delegate, &node, &outcome), Vec::new());
+    assert_eq!(delegate.ledger().scrubbed.get(&206), Some(&true));
+    assert_eq!(delegate.ledger().scrubbed.get(&IDENTITY_206), Some(&false));
+
+    assert_eq!(scrub_now(&delegate, &node, &outcome), Vec::new());
+    assert_eq!(delegate.ledger().scrubbed.get(&IDENTITY_206), Some(&true));
+}
+
+/// After an interruption a failed read looks empty. It takes the same two
+/// loads, and any answer with something in it starts them again.
+#[test]
+fn a_resumed_row_is_finished_only_by_two_empty_loads_in_a_row() {
+    let delegate = Delegate::new();
+    let node = usual_node();
+    let outcome = ready(&delegate, &node);
+    let mut store = delegate.clone();
+    block_on(update_ledger(&mut store, |l| {
+        l.scrubbed.insert(206, false);
+    }))
+    .unwrap();
+    let real = node.replies.borrow().get(&ls(206).delegate_key).cloned();
+    node.set(ls(206), answer(br#"{"aliases":{}}"#.to_vec()));
+    assert_eq!(scrub_now(&delegate, &node, &outcome), Vec::new());
+    assert_eq!(delegate.ledger().scrubbed.get(&206), Some(&false));
+    assert_eq!(deletes(&node), Vec::new());
+
+    node.set(ls(206), real.unwrap());
+    assert_eq!(scrub_now(&delegate, &node, &outcome), Vec::new());
+    assert_eq!(deletes(&node).len(), 4, "the row answered, so it resumes");
+    assert_eq!(delegate.ledger().scrubbed.get(&206), Some(&false));
+    assert!(row_text(&node, im(206)).contains("alice"));
+
+    assert_eq!(scrub_all(&delegate, &node, &outcome), Vec::new());
+    assert_eq!(delegate.ledger().scrubbed.get(&206), Some(&true));
+}
+
+// ── The window before the first delete ──────────────────────────────────────
+
+/// An old tab wrote between the checks and the first delete, for either kind
+/// of row: the frozen delegates delete by name, so nothing may be sent.
+#[test]
+fn a_row_changed_just_before_its_first_delete_is_left() {
+    let delegate = Delegate::new();
+    let node = usual_node();
+    let outcome = ready(&delegate, &node);
+    let mut changed: serde_json::Value = serde_json::from_str(&row_text(&node, ls(206))).unwrap();
+    changed["aliases"]["alice"]["kept"]["1"]["title"] = json!("changed");
+    let key = ls(206).delegate_key;
+    let next = answer(serde_json::to_vec(&changed).unwrap());
+    *node.change_after_read.borrow_mut() = Some((key, next));
+    let blockers = scrub_now(&delegate, &node, &outcome);
+    assert_eq!(blockers, vec![Blocker::RowFailed { generation: 206 }]);
+    assert_nothing_deleted(&node, &blockers);
+
+    let delegate = Delegate::new();
+    let node = usual_node();
+    let outcome = ready(&delegate, &node);
+    scrub_now(&delegate, &node, &outcome);
+    let sent = deletes(&node).len();
+    let mut changed: serde_json::Value = serde_json::from_str(&row_text(&node, im(206))).unwrap();
+    changed["identities"]["alice"]["extra"] = json!("changed");
+    let key = im(206).delegate_key;
+    let next = answer(serde_json::to_vec(&changed).unwrap());
+    *node.change_after_read.borrow_mut() = Some((key, next));
+    let blockers = scrub_now(&delegate, &node, &outcome);
+    assert_eq!(
+        blockers,
+        vec![Blocker::RowFailed {
+            generation: IDENTITY_206
+        }]
+    );
+    assert_eq!(deletes(&node).len(), sent);
+}
+
+// ── Deleted identities ──────────────────────────────────────────────────────
+
+/// The mail delegate, with `0` left out of its identity list and its status
+/// clean: what a failed read during the listing looks like.
+struct Unlisted(Delegate, Addr);
+
+impl MailStore for Unlisted {
+    async fn call(&mut self, op: Op) -> Result<Reply, CallError> {
+        match self.0.call(op).await? {
+            Reply::Identities(list) => Ok(Reply::Identities(
+                list.into_iter().filter(|i| i.addr != self.1).collect(),
+            )),
+            other => Ok(other),
+        }
+    }
+}
+
+fn scrub_unlisted(delegate: &Delegate, node: &Node, outcome: &WalkOutcome) -> Vec<Blocker> {
+    let mut store = Unlisted(delegate.clone(), alice());
+    block_on(scrub::run_built(&mut store, node.clone(), outcome, || {}))
+}
+
+/// Not being listed is not "the user deleted it", so its key stays.
+#[test]
+fn an_identity_that_is_only_unlisted_blocks() {
+    let delegate = Delegate::new();
+    let node = usual_node();
+    let outcome = ready(&delegate, &node);
+    let blockers = scrub_unlisted(&delegate, &node, &outcome);
+    assert_eq!(blockers, vec![Blocker::NoBackup(1)]);
+    assert_nothing_deleted(&node, &blockers);
+}
+
+/// The ledger's record is the evidence, and needs no backup.
+#[test]
+fn an_identity_the_user_deleted_does_not_block() {
+    let delegate = Delegate::new();
+    let node = usual_node();
+    let outcome = settle(&delegate, &node);
+    scrub_now(&delegate, &node, &outcome);
+    let mut store = delegate.clone();
+    block_on(record_identity_deleted(&mut store, alice())).unwrap();
+    for _ in 0..3 {
+        assert_eq!(scrub_unlisted(&delegate, &node, &outcome), Vec::new());
+    }
+    assert_eq!(delegate.ledger().scrubbed.get(&IDENTITY_206), Some(&true));
+}
+
+// ── Orphans ─────────────────────────────────────────────────────────────────
+
+#[test]
+fn discarded_orphans_do_not_block() {
+    let (delegate, node, outcome) = orphaned();
+    let mut store = delegate.clone();
+    let groups = orphans::groups(&block_on(orphans::stored(&mut store)).unwrap());
+    assert_eq!(groups[0].items.len(), 5, "each is shown");
+    assert!(
+        groups[0]
+            .items
+            .iter()
+            .any(|(_, line)| line.starts_with("draft: ")),
+        "{:?}",
+        groups[0].items
+    );
+    let (discarded, failure) = block_on(orphans::discard(&mut store, &groups[0]));
+    assert_eq!((discarded, failure), (5, None));
+    assert_eq!(orphan_count(&delegate), 0);
+    back_up(&delegate, alice());
+    assert_eq!(scrub_all(&delegate, &node, &outcome), Vec::new());
+    assert_eq!(delegate.ledger().scrubbed.len(), 2);
+}
+
+/// The count the user confirmed is what goes: an orphan that arrived after
+/// the list was shown stays.
+#[test]
+fn a_discard_takes_only_what_was_shown() {
+    let (delegate, _, _) = orphaned();
+    let mut store = delegate.clone();
+    let mut groups = orphans::groups(&block_on(orphans::stored(&mut store)).unwrap());
+    groups[0].items.truncate(2);
+    assert_eq!(block_on(orphans::discard(&mut store, &groups[0])).0, 2);
+    assert_eq!(orphan_count(&delegate), 3);
+}
+
+/// `read` marks with nowhere to go map to nothing, so such a row can stand as
+/// absent and is not `NotClear` for good.
+#[test]
+fn read_marks_with_no_identity_hold_nothing() {
+    let delegate = Delegate::new();
+    let node = usual_node();
+    node.set(
+        ls(205),
+        answer(br#"{"aliases":{"gone":{"read":[1]}}}"#.to_vec()),
+    );
+    let mut outcome = walk(&delegate, &node, six_messages());
+    scrub_now(&delegate, &node, &outcome);
+    for _ in 0..2 * HOLD_BACK_LOADS {
+        outcome = walk(&delegate, &node, six_messages());
+    }
+    back_up(&delegate, alice());
+    assert_eq!(scrub_all(&delegate, &node, &outcome), Vec::new());
+    assert_eq!(delegate.ledger().scrubbed.get(&206), Some(&true));
+    assert!(!delegate.ledger().scrubbed.contains_key(&205));
+}
+
+// ── The rest ────────────────────────────────────────────────────────────────
+
+/// A walk whose journal write failed is no basis for deleting anything.
+#[test]
+fn a_journal_that_was_not_stored_blocks() {
+    let delegate = Delegate::new();
+    let node = usual_node();
+    let mut outcome = ready(&delegate, &node);
+    let report = outcome.report.as_mut().expect("that load walked");
+    report.journal_error = Some("stored nothing".into());
+    let blockers = scrub_now(&delegate, &node, &outcome);
+    assert_eq!(blockers, vec![Blocker::NoJournal]);
+    assert_nothing_deleted(&node, &blockers);
+}
+
+/// v0.2.x never writes a kept key that is not a number, and if one appears the
+/// row stops rather than finishing with it left behind.
+#[test]
+fn a_kept_key_that_is_not_a_position_stops_the_row() {
+    let delegate = Delegate::new();
+    let node = usual_node();
+    let outcome = ready(&delegate, &node);
+    old_tab_writes(&node, ls(206), |state| {
+        let kept = state["aliases"]["alice"]["kept"].as_object_mut().unwrap();
+        let (position, value) = kept
+            .iter()
+            .next()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .unwrap();
+        kept.remove(&position);
+        kept.insert("not a number".to_string(), value);
+    });
+    let blockers = scrub_now(&delegate, &node, &outcome);
+    assert_eq!(blockers, vec![Blocker::RowFailed { generation: 206 }]);
+    assert_nothing_deleted(&node, &blockers);
 }

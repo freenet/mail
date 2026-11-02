@@ -1,7 +1,8 @@
 //! Orphans: items of a v0.2.x alias no identity could be found for. They stay
 //! here until the user says which identity they belong to. Moving never
-//! overwrites: an item already under that id stays and the orphan with it. A
-//! move is recorded, so scrub can tell it from an orphan that never landed.
+//! overwrites: an item already under that id stays and the orphan with it.
+//! The user can also discard them. Either is recorded, so scrub can tell it
+//! from an orphan that never landed.
 
 use std::collections::BTreeMap;
 
@@ -18,6 +19,18 @@ pub(crate) struct OrphanGroup {
     pub alias: String,
     /// `(kind, how many)`, e.g. `("archived", 2)`.
     pub kinds: BTreeMap<String, u32>,
+    /// Each one's item id and a line saying what it is, shown before a discard.
+    pub items: Vec<(Vec<u8>, String)>,
+}
+
+/// What the user sees of `orphan` before discarding it.
+fn label(orphan: &OrphanItem) -> String {
+    let body: serde_json::Value = serde_json::from_str(&orphan.body).unwrap_or_default();
+    let title = ["subject", "title"].iter().find_map(|f| body[f].as_str());
+    match title {
+        Some(title) => format!("{}: {title}", orphan.what),
+        None => orphan.what.clone(),
+    }
 }
 
 pub(crate) async fn stored<S: MailStore>(store: &mut S) -> Result<Vec<Item>, CallError> {
@@ -31,15 +44,20 @@ fn decoded(item: &Item) -> Option<OrphanItem> {
 /// Orphans by old alias. One that cannot be read is listed under its own
 /// empty alias, so it is still counted.
 pub(crate) fn groups(items: &[Item]) -> Vec<OrphanGroup> {
-    let mut by_alias: BTreeMap<String, BTreeMap<String, u32>> = BTreeMap::new();
+    let mut by_alias: BTreeMap<String, OrphanGroup> = BTreeMap::new();
     for item in items {
-        let (alias, what) = decoded(item).map_or_else(Default::default, |o| (o.alias, o.what));
-        *by_alias.entry(alias).or_default().entry(what).or_default() += 1;
+        let orphan = decoded(item);
+        let line = orphan.as_ref().map_or_else(|| "unreadable".into(), label);
+        let (alias, what) = orphan.map_or_else(Default::default, |o| (o.alias, o.what));
+        let group = by_alias.entry(alias.clone()).or_insert(OrphanGroup {
+            alias,
+            kinds: BTreeMap::new(),
+            items: Vec::new(),
+        });
+        *group.kinds.entry(what).or_default() += 1;
+        group.items.push((item.item.id.clone(), line));
     }
-    by_alias
-        .into_iter()
-        .map(|(alias, kinds)| OrphanGroup { alias, kinds })
-        .collect()
+    by_alias.into_values().collect()
 }
 
 /// Where a message orphan goes, by the same ids its pair would have had.
@@ -74,6 +92,26 @@ async fn create<S: MailStore>(store: &mut S, item: ItemRef, body: Vec<u8>) -> Re
     }
 }
 
+/// Record `orphan` as dealt with, then remove it.
+async fn retire<S: MailStore>(store: &mut S, orphan: &Item) -> Result<(), String> {
+    let id = hex(&orphan.item.id);
+    update_ledger(store, |l| {
+        if !l.moved.contains(&id) {
+            l.moved.push(id.clone());
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    let op = Op::DeleteItem {
+        item: orphan.item.clone(),
+        expected_gen: orphan.generation,
+    };
+    match store.call(op).await.map_err(|e| e.to_string())? {
+        Reply::Deleted | Reply::Ack { .. } => Ok(()),
+        other => Err(crate::mail_delegate::unexpected(&other).to_string()),
+    }
+}
+
 /// Move one orphan to `owner`: the item, then the record of the move, then
 /// the orphan, so an interruption leaves two copies and never none.
 pub(crate) async fn move_one<S: MailStore>(
@@ -98,22 +136,7 @@ pub(crate) async fn move_one<S: MailStore>(
         let item = destination(&decoded, owner).ok_or("an item of an unknown kind")?;
         create(store, item, decoded.body.into_bytes()).await?;
     }
-    let id = hex(&orphan.item.id);
-    update_ledger(store, |l| {
-        if !l.moved.contains(&id) {
-            l.moved.push(id.clone());
-        }
-    })
-    .await
-    .map_err(|e| e.to_string())?;
-    let op = Op::DeleteItem {
-        item: orphan.item.clone(),
-        expected_gen: orphan.generation,
-    };
-    match store.call(op).await.map_err(|e| e.to_string())? {
-        Reply::Deleted | Reply::Ack { .. } => Ok(()),
-        other => Err(crate::mail_delegate::unexpected(&other).to_string()),
-    }
+    retire(store, orphan).await
 }
 
 /// How moving an alias's orphans went.
@@ -157,4 +180,26 @@ pub(crate) async fn move_alias<S: MailStore>(
         }
     }
     result
+}
+
+/// Discard the orphans of `group` the user was shown, and only those: one that
+/// arrived since stays. Returns how many went, and why the last that stayed did.
+pub(crate) async fn discard<S: MailStore>(
+    store: &mut S,
+    group: &OrphanGroup,
+) -> (u32, Option<String>) {
+    let items = match stored(store).await {
+        Ok(items) => items,
+        Err(e) => return (0, Some(e.to_string())),
+    };
+    let (mut discarded, mut failure) = (0, None);
+    for orphan in &items {
+        if group.items.iter().any(|(id, _)| *id == orphan.item.id) {
+            match retire(store, orphan).await {
+                Ok(()) => discarded += 1,
+                Err(e) => failure = Some(e),
+            }
+        }
+    }
+    (discarded, failure)
 }

@@ -194,6 +194,25 @@ async fn move_orphans(alias: String, owner: Addr) {
     }
 }
 
+async fn discard_orphans(group: OrphanGroup) {
+    let (discarded, failure) = orphans::discard(&mut PageStore, &group).await;
+    let alias = &group.alias;
+    let (text, level) = match failure {
+        None => (
+            format!("Discarded {discarded} item(s) from `{alias}`."),
+            crate::toast::ToastLevel::Success,
+        ),
+        Some(why) => (
+            format!("Discarded {discarded} item(s) from `{alias}`. The rest stayed: {why}"),
+            crate::toast::ToastLevel::Error,
+        ),
+    };
+    crate::toast::push_toast_detached(text, level);
+    if let Ok(items) = orphans::stored(&mut PageStore).await {
+        MIGRATION.write().orphans = orphans::groups(&items);
+    }
+}
+
 async fn dismiss_notice() {
     MIGRATION.write().notice_dismissed = true;
     if let Err(e) = ledger::update_ledger(&mut PageStore, |l| l.notice_dismissed = true).await {
@@ -204,6 +223,9 @@ async fn dismiss_notice() {
 #[component]
 fn OrphanRow(group: OrphanGroup, identities: Vec<(String, Addr)>) -> Element {
     let mut target = use_signal(|| 0usize);
+    let mut confirming = use_signal(|| false);
+    let count = group.items.len();
+    let shown = group.clone();
     let what = group
         .kinds
         .iter()
@@ -238,6 +260,40 @@ fn OrphanRow(group: OrphanGroup, identities: Vec<(String, Addr)>) -> Element {
                     }
                 },
                 "Move here"
+            }
+            button {
+                class: "btn btn-ghost",
+                "data-testid": testid::FM_ORPHAN_DISCARD,
+                onclick: move |_| confirming.set(true),
+                "Discard"
+            }
+        }
+        if confirming() {
+            div {
+                class: "field-help",
+                "data-testid": testid::FM_ORPHAN_DISCARD_CONFIRM,
+                style: "margin-bottom:10px;",
+                p { "Discard {count} item(s) from `{group.alias}`? They are deleted for good." }
+                ul {
+                    for (_, line) in group.items.iter() {
+                        li { "{line}" }
+                    }
+                }
+                button {
+                    class: "btn btn-secondary",
+                    "data-testid": testid::FM_ORPHAN_DISCARD_CANCEL,
+                    onclick: move |_| confirming.set(false),
+                    "Keep them"
+                }
+                button {
+                    class: "btn btn-ghost",
+                    "data-testid": testid::FM_ORPHAN_DISCARD_SUBMIT,
+                    onclick: move |_| {
+                        confirming.set(false);
+                        crate::app::identity_store::spawn_detached(discard_orphans(shown.clone()));
+                    },
+                    "Discard {count} item(s)"
+                }
             }
         }
     }

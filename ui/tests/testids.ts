@@ -20,6 +20,10 @@ interface TestIds {
   fmOrphanGroup: string;
   fmOrphanTarget: string;
   fmOrphanMove: string;
+  fmOrphanDiscard: string;
+  fmOrphanDiscardConfirm: string;
+  fmOrphanDiscardSubmit: string;
+  fmOrphanDiscardCancel: string;
   fmConfirmIdentity: string;
   fmConfirmIdentitySubmit: string;
   fmConfirmIdentityCancel: string;

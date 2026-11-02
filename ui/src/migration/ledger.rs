@@ -3,7 +3,7 @@
 //! under ids no predecessor key can equal. That kind is per origin and never
 //! exported.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use freenet_mail_protocol::{Addr, Item, ItemKind, ItemRef, Op, Reply};
 use freenet_stdlib::prelude::blake3;
@@ -35,14 +35,20 @@ pub(crate) struct Ledger {
     /// is imported with the settings, so only a later value is a backup made
     /// since the move.
     pub migration_started_ms: Option<i64>,
-    /// How many chunks the imported-ids snapshot has, once it is written.
-    pub snapshot_chunks: Option<u32>,
-    /// Orphans moved to an identity, by item id in hex. The snapshot can be
-    /// written after a move, and could not then list what the move took away.
+    /// How many chunks each row's part of the imported-ids snapshot has, by
+    /// lineage generation, once it is written.
+    pub snapshot_rows: BTreeMap<u32, u32>,
+    /// Orphans moved to an identity or discarded, by item id in hex. The row's
+    /// snapshot can be written after that, and could not then list them.
     pub moved: Vec<String>,
+    /// Identities the user deleted here. Not being listed does not show that:
+    /// a read that failed leaves an identity out too.
+    pub deleted_identities: Vec<Addr>,
     /// Scrub's journal, by lineage generation: present once a row's clearing
     /// has begun, `true` once it is finished.
     pub scrubbed: BTreeMap<u32, bool>,
+    /// Loads in a row on which a row being cleared had nothing left to delete.
+    pub scrub_empty: BTreeMap<u32, u32>,
     /// What stopped scrub on the last load, for the status report.
     pub scrub_blockers: Vec<Blocker>,
 }
@@ -63,9 +69,47 @@ pub(crate) fn ledger_item() -> ItemRef {
     reserved_item(b"ledger", 0)
 }
 
-/// One chunk of the imported-ids snapshot.
-pub(crate) fn snapshot_item(index: u32) -> ItemRef {
-    reserved_item(b"imported ids", index)
+/// One chunk of a row's part of the imported-ids snapshot.
+pub(crate) fn snapshot_item(generation: u32, index: u32) -> ItemRef {
+    let name = [b"imported ids".as_slice(), &generation.to_le_bytes()].concat();
+    reserved_item(&name, index)
+}
+
+/// An identity row's alias table, kept when that row is cleared. It holds
+/// aliases and addresses, no key material.
+pub(crate) fn alias_table_item(generation: u32) -> ItemRef {
+    reserved_item(b"alias table", generation)
+}
+
+/// The kept alias tables of the rows whose clearing began, by lineage
+/// generation. One that cannot be read leaves its row's aliases unresolved,
+/// which keeps the mail waiting.
+pub(crate) async fn kept_alias_tables<S: MailStore>(
+    store: &mut S,
+    ledger: &Ledger,
+) -> BTreeMap<u32, HashMap<String, Addr>> {
+    let mut tables = BTreeMap::new();
+    for generation in ledger.scrubbed.keys().copied() {
+        if let Ok(Some(item)) = get_item(store, alias_table_item(generation)).await
+            && let Ok(table) = serde_json::from_slice(&item.body)
+        {
+            tables.insert(generation, table);
+        }
+    }
+    tables
+}
+
+/// Record that the user deleted `addr`.
+pub(crate) async fn record_identity_deleted<S: MailStore>(
+    store: &mut S,
+    addr: Addr,
+) -> Result<(), CallError> {
+    update_ledger(store, |l| {
+        if !l.deleted_identities.contains(&addr) {
+            l.deleted_identities.push(addr);
+        }
+    })
+    .await
 }
 
 /// The stored ledger. One that cannot be decoded is an error, never an empty

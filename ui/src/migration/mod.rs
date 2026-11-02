@@ -200,6 +200,8 @@ pub(crate) struct WalkOutcome {
     pub silent_rows: usize,
     /// Held contract migrations were let go, so the next listing plans them.
     pub released_markers: bool,
+    /// What this walk read from each row, before importing it.
+    pub read_rows: legacy_delegates::RowHashes,
 }
 
 thread_local! {
@@ -313,6 +315,7 @@ where
                 counts: successor.into_counts(),
                 silent_rows: 0,
                 released_markers: false,
+                read_rows: Default::default(),
             };
         }
     };
@@ -339,18 +342,21 @@ where
             report: None,
             counts: successor.into_counts(),
             released_markers,
+            read_rows: Default::default(),
         };
     }
     let walks = pending_walks(&status, &lineage);
-    let absent_answers = stored.map(|l| l.absent_answers).unwrap_or_default();
+    let stored = stored.unwrap_or_default();
+    let kept_tables = ledger::kept_alias_tables(successor.store(), &stored).await;
     let mut predecessors = LegacyAdapter::new(
         transport,
         lineage.clone(),
         walks,
         arrived,
-        absent_answers,
+        stored.absent_answers,
         Box::new(on_identities),
-    );
+    )
+    .with_kept_tables(kept_tables);
     let report = migrate_delegate_secrets_journaled(
         &mut successor,
         &mut predecessors,
@@ -392,6 +398,7 @@ where
         counts,
         silent_rows,
         released_markers,
+        read_rows: predecessors.into_read(),
     }
 }
 
@@ -475,6 +482,7 @@ pub(crate) fn status_report(status: Option<&JournalStatus>, ledger: &ledger::Led
         "rejected_items": status.map(JournalStatus::rejected_items),
         "rows": rows,
         "counts": ledger.totals,
+        "scrub_built": scrub::BUILT_IN,
         "scrubbed": ledger.scrubbed,
         "scrub_blockers": ledger.scrub_blockers,
     })

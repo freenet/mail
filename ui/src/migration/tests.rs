@@ -314,6 +314,9 @@ struct Node {
     writes_left: Rc<RefCell<Option<usize>>>,
     /// Deletes are acknowledged and change nothing.
     writes_ignored: Rc<RefCell<bool>>,
+    /// The next read of this row answers as before, then the row becomes
+    /// this: another tab's write landing just after a read.
+    change_after_read: Rc<RefCell<Option<([u8; 32], LegacyReply)>>>,
 }
 
 /// A legacy delete's name and arguments, `None` for any other message.
@@ -394,11 +397,15 @@ impl LegacyTransport for Node {
             }
             return LegacyReply::NoAnswer(EMPTY_REPLY.to_string());
         }
-        self.replies
-            .borrow()
-            .get(&<[u8; 32]>::try_from(predecessor.bytes()).unwrap())
-            .cloned()
-            .unwrap_or(LegacyReply::NotInstalled)
+        let key = <[u8; 32]>::try_from(predecessor.bytes()).unwrap();
+        let reply = self.replies.borrow().get(&key).cloned();
+        let mut change = self.change_after_read.borrow_mut();
+        if change.as_ref().is_some_and(|(row, _)| *row == key)
+            && let Some((row, next)) = change.take()
+        {
+            self.replies.borrow_mut().insert(row, next);
+        }
+        reply.unwrap_or(LegacyReply::NotInstalled)
     }
 }
 
@@ -761,6 +768,7 @@ fn the_notice_says_a_move_under_way_is_still_in_progress() {
         counts,
         silent_rows: 0,
         released_markers: false,
+        read_rows: Default::default(),
     };
     assert!(no_journal.unfinished());
 }

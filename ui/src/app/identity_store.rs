@@ -148,10 +148,21 @@ pub(crate) async fn delete_with_progress(
     if let Some(id) = progress {
         crate::toast::dismiss_toast_detached(id);
     }
+    if deleted.is_ok() {
+        record_deletion(&mut crate::migration::PageStore, addr).await;
+    }
     deleted.map_err(|e| {
         crate::log::error(format!("deleting identity `{alias}` failed: {e}"), None);
         deletion_failure_text(alias, &e, started)
     })
+}
+
+/// Tell scrub the user deleted `addr`. Without this it keeps waiting for a
+/// backup of an identity that is not listed, which is the safe way to fail.
+async fn record_deletion<S: crate::migration::successor::MailStore>(store: &mut S, addr: Addr) {
+    if let Err(e) = crate::migration::ledger::record_identity_deleted(store, addr).await {
+        crate::log::error(format!("recording a deletion failed: {e}"), None);
+    }
 }
 
 /// What the user is told when a deletion did not finish. A deletion that
@@ -1131,6 +1142,31 @@ pub(crate) async fn publish(identity: Identity, backed_up: bool) -> Result<(), D
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A finished deletion tells scrub: its absence from the list is no proof.
+    #[cfg(all(feature = "local-delegate", not(feature = "use-node")))]
+    #[test]
+    fn a_finished_deletion_is_recorded() {
+        use crate::mail_delegate::call;
+        use freenet_mail_protocol::{Entropy, Reply};
+        use futures::executor::block_on;
+        let Reply::CreatedIdentity { identity: id, .. } = block_on(call(Op::CreateIdentity {
+            alias: "record-deletion-test".into(),
+            description: String::new(),
+            ui_entropy: Entropy([9; 32]),
+        }))
+        .unwrap() else {
+            panic!("expected CreatedIdentity");
+        };
+        block_on(delete_with_progress(id.addr, id.generation, &id.alias)).unwrap();
+        let ledger = crate::migration::ledger::read_ledger(&mut crate::migration::PageStore);
+        assert!(
+            block_on(ledger)
+                .unwrap()
+                .deleted_identities
+                .contains(&id.addr)
+        );
+    }
 
     fn info(alias: &str, seed: u8) -> IdentityInfo {
         IdentityInfo {
