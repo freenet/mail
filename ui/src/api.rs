@@ -1228,17 +1228,21 @@ mod token_generator_management {
         AWAITING_REGISTRATION.with(|a| a.borrow_mut().insert(key.bytes().to_vec(), answered));
         delegate_api::create_delegate(client, TOKEN_GEN_CODE_HASH, TOKEN_GEN_CODE, params).await?;
         let timeout = gloo_timers::future::TimeoutFuture::new(REGISTRATION_WAIT_MS);
-        if let futures::future::Either::Right(_) =
-            futures::future::select(registered, timeout).await
-        {
-            AWAITING_REGISTRATION.with(|a| a.borrow_mut().remove(key.bytes()));
-            crate::log::error(
-                "the node did not confirm registering the token generator",
-                None,
-            );
-            return Ok(());
+        match futures::future::select(registered, timeout).await {
+            futures::future::Either::Left((Ok(_), _)) => {
+                REGISTERED.with(|r| r.borrow_mut().insert(key.bytes().to_vec()));
+            }
+            // A later registration took over the wait: this is not an answer,
+            // and that caller records the outcome.
+            futures::future::Either::Left((Err(_), _)) => {}
+            futures::future::Either::Right(_) => {
+                AWAITING_REGISTRATION.with(|a| a.borrow_mut().remove(key.bytes()));
+                crate::log::error(
+                    "the node did not confirm registering the token generator",
+                    None,
+                );
+            }
         }
-        REGISTERED.with(|r| r.borrow_mut().insert(key.bytes().to_vec()));
         Ok(())
     }
 

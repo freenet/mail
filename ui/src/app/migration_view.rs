@@ -340,6 +340,9 @@ pub(crate) fn ConfirmIdentityPrompt(
                     button {
                         class: "btn btn-ghost",
                         "data-testid": testid::FM_CONFIRM_IDENTITY_CANCEL,
+                        // Leaving now would drop the wait for the token
+                        // record, and the send would then fail without one.
+                        disabled: *working.read(),
                         onclick: move |_| on_cancel.call(()),
                         "Cancel"
                     }

@@ -2563,7 +2563,7 @@ fn the_limits_are_the_documented_numbers() {
         HOLD_BACK_LOADS, 3,
         "loads a silent newer row holds older ones"
     );
-    assert_eq!(ABSENT_WALKS_BEFORE_BACKING_OFF, 3);
+    assert_eq!(ABSENT_WALKS_BEFORE_BACKING_OFF, 4);
     assert_eq!(BACKED_OFF_ONE_LOAD_IN, 10);
     assert_eq!(SILENT_WALKS_BEFORE_SLOWING, 6);
     assert_eq!(SLOWED_ONE_LOAD_IN, 4);
@@ -2660,7 +2660,7 @@ fn one_young_row_keeps_the_walk_going_and_either_cause_slows_it() {
     // Half slowed by silence alone, half by "not installed" alone.
     let mut either = pending;
     for (i, row) in either.iter_mut().enumerate() {
-        let (attempts, streak) = if i % 2 == 0 { (6, 0) } else { (0, 3) };
+        let (attempts, streak) = if i % 2 == 0 { (6, 0) } else { (0, 4) };
         row.attempts = attempts;
         row.absent_streak = streak;
     }

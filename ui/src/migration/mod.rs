@@ -112,7 +112,9 @@ fn policy() -> SecretSelectionPolicy {
 
 /// How many walks in a row every pending predecessor must have answered "not
 /// installed" before the walk stops running on every load.
-const ABSENT_WALKS_BEFORE_BACKING_OFF: u32 = 3;
+// One past the hold: the load that releases a held marker must not be left to
+// the back-off's roll.
+const ABSENT_WALKS_BEFORE_BACKING_OFF: u32 = legacy_delegates::HOLD_BACK_LOADS + 1;
 /// Once it has, one load in this many still walks: "not installed" is not
 /// proof a predecessor holds nothing, and the node can change.
 const BACKED_OFF_ONE_LOAD_IN: u8 = 10;

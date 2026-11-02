@@ -953,7 +953,7 @@ echo "Using dev-server port $PORT"
 # it: dx starts children, and killing only the shell that launched it left
 # `dx serve` running, with its cwd in this worktree, after the run ended.
 set -m
-( cd "$ROOT/ui" && exec dx serve --port "$PORT" --features example-data,no-sync --no-default-features ) &
+( cd "$ROOT/ui" && exec dx serve --port "$PORT" --features example-data,no-sync --no-default-features </dev/null ) &
 DX_PID=$!
 set +m
 stop_dx() {
@@ -1027,6 +1027,9 @@ script_runner = "bash"
 script = '''
 set -euo pipefail
 ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
+# A root per checkout locally: `wipe` deletes the root, so a shared one would
+# kill a parallel run. CI has one run and collects logs from the default.
+if [ -z "${CI:-}" ]; then export FREENET_E2E_ROOT="${FREENET_E2E_ROOT:-$ROOT/target/iso}"; fi
 ISO_ROOT="${FREENET_E2E_ROOT:-$HOME/freenet-mail-iso}"
 # Ports come from the environment, or are free ones: a fixed 7510 collides
 # with whatever else is running on the machine.
@@ -1104,6 +1107,9 @@ script_runner = "bash"
 script = '''
 set -euo pipefail
 ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
+# A root per checkout locally: `wipe` deletes the root, so a shared one would
+# kill a parallel run. CI has one run and collects logs from the default.
+if [ -z "${CI:-}" ]; then export FREENET_E2E_ROOT="${FREENET_E2E_ROOT:-$ROOT/target/iso}"; fi
 ISO_ROOT="${FREENET_E2E_ROOT:-$HOME/freenet-mail-iso}"
 # Ports come from the environment, or are free ones: a fixed 7510 collides
 # with whatever else is running on the machine.

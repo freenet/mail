@@ -137,18 +137,23 @@ port_open() {
     (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null
 }
 
-# True when the pidfile names a live node of this harness, under this root.
+# True when the pidfile names a live node of this harness, under this root,
+# serving this port. A kept node on other ports proves nothing about this one.
 ours() {
     [ -f "$1" ] || return 1
-    local pid
+    local pid cmd
     pid="$(cat "$1")"
-    [ -n "$pid" ] && is_ours "$pid"
+    [ -n "$pid" ] && is_ours "$pid" || return 1
+    cmd=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)
+    [ -n "$cmd" ] || cmd=$(ps -o command= -p "$pid" 2>/dev/null || true)
+    case "$cmd " in *"--ws-api-port $2 "*) return 0 ;; esac
+    return 1
 }
 
 # A listener this harness did not start is never used: refuse, and name it.
 refuse_foreign_port() {
     local port="$1" pidfile="$2"
-    if port_open "$port" && ! ours "$pidfile"; then
+    if port_open "$port" && ! ours "$pidfile" "$port"; then
         echo "error: something this harness did not start is listening on :$port." >&2
         echo "       Refusing to use it: it may be a real node. Choose other ports" >&2
         echo "       (FREENET_ISO_GW_PORT and friends)." >&2
@@ -160,8 +165,8 @@ refuse_foreign_port() {
 # before anything that writes to that port.
 check_ours() {
     refuse_foreign_port "$GW_PORT_WS" "$GW_PIDFILE"
-    if ! ours "$GW_PIDFILE"; then
-        echo "error: no gateway of this harness is running under $ROOT." >&2
+    if ! ours "$GW_PIDFILE" "$GW_PORT_WS"; then
+        echo "error: no gateway of this harness is serving :$GW_PORT_WS under $ROOT." >&2
         exit 1
     fi
 }
