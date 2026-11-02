@@ -1134,7 +1134,7 @@ script_runner = "bash"
 # The build carries the test instrumentation (`e2e-probe`); build-ui reads this.
 script = '''
 set -euo pipefail
-FREENET_UI_FEATURES=e2e-probe exec cargo make test-e2e-background-run
+FREENET_E2E_PROBE_ISO=1 FREENET_UI_FEATURES=e2e-probe exec cargo make test-e2e-background-run
 '''
 
 [tasks.test-e2e-background-run]

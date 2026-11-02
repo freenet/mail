@@ -1090,8 +1090,11 @@ guard "the probe marker is chosen by the feature" "$STAGE/ui/src/jobs.rs" \
     'pub(crate) const PROBE_MARKER: &str = if true {' \
     "tests:the_probe_marker_is_there_only_with_the_feature" ui_jobs_tests
 guard "a publish refuses the probe" "$STAGE/scripts/check-release-scrub.sh" \
-    '    if grep -a -q -F -- "$PROBE_MARKER" "$file"; then' '    if false; then' \
+    '    if grep -a -q -F -- "$PROBE_MARKER" "$file" \' '    if false \' \
     "not ok - a production build with the probe is refused" scrub_release_tests
+guard "the probe is allowed only where the background proof says so" "$STAGE/scripts/check-release-scrub.sh" \
+    '[ "$ABSENT" -eq 1 ] && [ "${FREENET_E2E_PROBE_ISO:-}" = "1" ]' '[ "$ABSENT" -eq 1 ]' \
+    "not ok - a test publish refuses a build with the probe" scrub_release_tests
 guard "the freeze override needs the test flag" "$STAGE/scripts/check-release-freeze.sh" \
     'if [ "${RELEASE_FREEZE_TEST:-}" = "1" ]; then' 'if true; then' \
     "not ok - RELEASE_FREEZE_FILE without the test flag does not lift the freeze" freeze_tests

@@ -79,6 +79,8 @@ check "a production build with the probe is refused" 1 --dir "$TMP/probe-scrub"
 check "a production build with the probe and no scrub is refused" 1 --dir "$TMP/probe"
 check "a test publish refuses a build with the probe" 1 --absent --dir "$TMP/probe"
 check "a test publish refuses a build with scrub and the probe" 1 --absent --dir "$TMP/probe-scrub"
+FREENET_E2E_PROBE_ISO=1 check "the background proof's test publish takes the probe" 0 --absent --dir "$TMP/probe"
+FREENET_E2E_PROBE_ISO=1 check "a production build refuses the probe whatever the variable says" 1 --dir "$TMP/probe-scrub"
 check "a test publish refuses a build with the marker" 1 --absent --dir "$TMP/with"
 check "a test publish takes a build without it" 0 --absent --dir "$TMP/without"
 check "a test publish refuses a directory with no WASM" 1 --absent --dir "$TMP/none"
@@ -117,6 +119,12 @@ if task test-e2e-background-run | grep -q '^ *\*"e2e-probe test instrumentation"
     pass "test-e2e-background checks that its probe build is recognised"
 else
     fail "test-e2e-background does not check that its probe build is recognised"
+fi
+if [ "$(grep -r -l 'FREENET_E2E_PROBE_ISO=1' "$ROOT/Makefile.toml" "$ROOT/.github" "$ROOT/scripts/release.sh" 2>/dev/null | wc -l)" -eq 1 ] \
+    && task test-e2e-background | grep -q '^FREENET_E2E_PROBE_ISO=1 FREENET_UI_FEATURES=e2e-probe exec cargo make test-e2e-background-run$'; then
+    pass "only the background proof's build allows the probe"
+else
+    fail "something besides the background proof's build allows the probe"
 fi
 real_node="$(task test-e2e-real-node)"
 if printf '%s\n' "$real_node" | grep -q 'check-release-scrub.sh' \
