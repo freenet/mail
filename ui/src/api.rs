@@ -1197,7 +1197,7 @@ mod token_generator_management {
         static REGISTERED: RefCell<std::collections::HashSet<Vec<u8>>> =
             RefCell::new(std::collections::HashSet::new());
         /// Registrations sent and not yet answered, by delegate key.
-        static AWAITING_REGISTRATION: RefCell<HashMap<Vec<u8>, futures::channel::oneshot::Sender<()>>> =
+        static AWAITING_REGISTRATION: RefCell<HashMap<Vec<u8>, Vec<futures::channel::oneshot::Sender<()>>>> =
             RefCell::new(HashMap::new());
     }
 
@@ -1206,7 +1206,8 @@ mod token_generator_management {
 
     /// The node answered the registration of `key`.
     pub(super) fn registration_answered(key: &DelegateKey) {
-        if let Some(sender) = AWAITING_REGISTRATION.with(|a| a.borrow_mut().remove(key.bytes())) {
+        let waiting = AWAITING_REGISTRATION.with(|a| a.borrow_mut().remove(key.bytes()));
+        for sender in waiting.into_iter().flatten() {
             let _ = sender.send(());
         }
     }
@@ -1225,17 +1226,28 @@ mod token_generator_management {
         // The node compiles the delegate when it registers it, and a message
         // sent meanwhile finds no delegate: wait for its answer.
         let (answered, registered) = futures::channel::oneshot::channel();
-        AWAITING_REGISTRATION.with(|a| a.borrow_mut().insert(key.bytes().to_vec(), answered));
-        delegate_api::create_delegate(client, TOKEN_GEN_CODE_HASH, TOKEN_GEN_CODE, params).await?;
+        let first = AWAITING_REGISTRATION.with(|a| {
+            let mut awaiting = a.borrow_mut();
+            let waiting = awaiting.entry(key.bytes().to_vec()).or_default();
+            waiting.push(answered);
+            waiting.len() == 1
+        });
+        // One registration: a second send in the compile window joins the wait.
+        if first
+            && let Err(e) =
+                delegate_api::create_delegate(client, TOKEN_GEN_CODE_HASH, TOKEN_GEN_CODE, params)
+                    .await
+        {
+            AWAITING_REGISTRATION.with(|a| a.borrow_mut().remove(key.bytes()));
+            return Err(e);
+        }
         let timeout = gloo_timers::future::TimeoutFuture::new(REGISTRATION_WAIT_MS);
         match futures::future::select(registered, timeout).await {
             futures::future::Either::Left((Ok(_), _)) => {
                 REGISTERED.with(|r| r.borrow_mut().insert(key.bytes().to_vec()));
             }
-            // A later registration took over the wait: this is not an answer,
-            // and that caller records the outcome.
-            futures::future::Either::Left((Err(_), _)) => {}
-            futures::future::Either::Right(_) => {
+            // Timed out, or the first caller's request failed: no answer.
+            _ => {
                 AWAITING_REGISTRATION.with(|a| a.borrow_mut().remove(key.bytes()));
                 crate::log::error(
                     "the node did not confirm registering the token generator",

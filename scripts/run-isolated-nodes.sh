@@ -21,11 +21,17 @@
 #   scripts/run-isolated-nodes.sh status  # show running pids + ports
 #
 # Environment overrides:
-#   FREENET_E2E_ROOT  base dir for HOME + data + logs (default: ~/freenet-mail-iso)
+#   FREENET_E2E_ROOT  base dir for HOME + data + logs (default: target/iso in
+#                     this checkout, so `wipe` cannot reach a parallel run;
+#                     ~/freenet-mail-iso under CI, where logs are collected)
 
 set -euo pipefail
 
-ROOT="${FREENET_E2E_ROOT:-$HOME/freenet-mail-iso}"
+if [ -n "${CI:-}" ]; then
+    ROOT="${FREENET_E2E_ROOT:-$HOME/freenet-mail-iso}"
+else
+    ROOT="${FREENET_E2E_ROOT:-$(cd "$(dirname "$0")/.." && pwd)/target/iso}"
+fi
 GW_HOME="$ROOT/HOME-gw"
 PEER_HOME="$ROOT/HOME-peer"
 GW_DATA="$ROOT/gw/data"
