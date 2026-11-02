@@ -1875,25 +1875,32 @@ test.describe("Live node E2E", () => {
       !PEER_BASE_URL,
       "requires FREENET_EMAIL_BASE_URL to include the contract id",
     );
+    // The node keeps identities between tests, so `--repeat-each` needs an
+    // alias of its own per run. A node holds 16 identities per origin, which
+    // limits a repeat to about 15 runs from wiped nodes.
+    const run = test.info().repeatEachIndex;
+    const aliceAlias = run ? `${ALIAS_T7_ALICE}r${run}` : ALIAS_T7_ALICE;
+    const bobAlias = run ? `${ALIAS_T7_BOB}r${run}` : ALIAS_T7_BOB;
     const stopGwPump = startPermissionPump(ISO_GW_ORIGIN);
     const stopPeerPump = startPermissionPump(ISO_PEER_ORIGIN);
     const aliceCtx = await browser.newContext();
     const bobCtx = await browser.newContext();
+    await countHostPrompts(aliceCtx);
     const alicePage = await aliceCtx.newPage();
     const bobPage = await bobCtx.newPage();
 
     try {
       await Promise.all([alicePage.goto(""), bobPage.goto(PEER_BASE_URL)]);
       await Promise.all([
-        createIdentity(alicePage, ALIAS_T7_ALICE),
-        createIdentity(bobPage, ALIAS_T7_BOB),
+        createIdentity(alicePage, aliceAlias),
+        createIdentity(bobPage, bobAlias),
       ]);
 
       // Bob shares; alice imports — same proven setup as the #81 test.
       const bobApp = bobPage.frameLocator("iframe#app");
       await bobApp
         .locator(
-          `[data-testid="fm-id-row"][data-alias="${ALIAS_T7_BOB}"] [data-testid="fm-id-share"]`,
+          `[data-testid="fm-id-row"][data-alias="${bobAlias}"] [data-testid="fm-id-share"]`,
         )
         .click();
       const shareModal = bobApp.locator('[data-testid="fm-share-modal"]');
@@ -1909,7 +1916,7 @@ test.describe("Live node E2E", () => {
       await importModal.locator("textarea").fill(bobCard);
       await aliceApp
         .locator('input[placeholder="e.g. Alice (work)"]')
-        .fill(ALIAS_T7_BOB);
+        .fill(bobAlias);
       const verifyCheck = aliceApp.locator('[data-testid="fm-verify-check"]');
       await verifyCheck.waitFor({ timeout: 30_000 });
       await verifyCheck.click();
@@ -1918,18 +1925,18 @@ test.describe("Live node E2E", () => {
       // Alice composes + sends.
       await aliceApp
         .locator(
-          `[data-testid="fm-id-row"][data-alias="${ALIAS_T7_ALICE}"] [data-testid="fm-id-open"]`,
+          `[data-testid="fm-id-row"][data-alias="${aliceAlias}"] [data-testid="fm-id-open"]`,
         )
         .first()
         .click();
       await aliceApp.locator('[data-testid="fm-compose-btn"]').click();
       const sheet = aliceApp.locator('[data-testid="fm-compose-sheet"]');
       await sheet.locator('input[placeholder="alias or address"]').fill(
-        ALIAS_T7_BOB,
+        bobAlias,
       );
       await expect(
         aliceApp.getByTestId("compose-recipient-fingerprint"),
-        `fingerprint resolves for ${ALIAS_T7_BOB}`,
+        `fingerprint resolves for ${bobAlias}`,
       ).toBeVisible({ timeout: 15_000 });
       await sheet.locator('input[placeholder="subject"]').fill("persist subj");
       await sheet.locator("textarea.sheet-textarea").fill("persist body");
@@ -1940,12 +1947,19 @@ test.describe("Live node E2E", () => {
       ).toHaveCount(0, { timeout: 15_000 });
 
       // ── Pre-reload: message is in Sent, Drafts is empty ───────────
+      // The send's token request raises the host's permission prompt, which
+      // the pump answers, so the prompt is over the app for a moment shortly
+      // after the sheet closes. It lives in the shell page, where a click's
+      // hit check inside this iframe cannot see it: a click landing in that
+      // moment goes to the prompt and the app never hears of it (#367). Wait
+      // for it to come and go.
+      await expect
+        .poll(() => hostPromptsClosed(alicePage), {
+          message: "the send's permission prompt was answered",
+          timeout: 30_000,
+        })
+        .toBeGreaterThanOrEqual(1);
       await aliceApp.locator('[data-testid="fm-folder-sent"]').click();
-      // Once (1 in ~86 runs) the view stayed on Inbox after this click, with
-      // the pointer still over Sent and no overlay, navigation or error. Say
-      // so here rather than as a missing Sent card: the console then shows
-      // whether the click reached the app ("folder: clicked Sent") and
-      // whether the inbox view re-mounted ("inbox view: mounted").
       await expect(
         aliceApp.locator('[data-testid="fm-folder-sent"]'),
         "the Sent folder is selected after clicking it",
@@ -1975,7 +1989,7 @@ test.describe("Live node E2E", () => {
       ).toContainText(APP_NAME, { timeout: 60_000 });
       await aliceAfter
         .locator(
-          `[data-testid="fm-id-row"][data-alias="${ALIAS_T7_ALICE}"] [data-testid="fm-id-open"]`,
+          `[data-testid="fm-id-row"][data-alias="${aliceAlias}"] [data-testid="fm-id-open"]`,
         )
         .first()
         .click();
@@ -2767,6 +2781,38 @@ function startPermissionPump(origin: string = ISO_GW_ORIGIN): () => void {
   };
   const interval = setInterval(tick, 200);
   return () => clearInterval(interval);
+}
+
+/**
+ * Count the host permission prompts each page of `ctx` has closed. Polling
+ * for the prompt from here can miss it: the pump can answer it within
+ * milliseconds. The shell keeps one overlay element and hides it when no
+ * prompt is left.
+ */
+async function countHostPrompts(ctx: BrowserContext) {
+  await ctx.addInitScript(() => {
+    if (window !== window.top) return;
+    const page = window as unknown as { __hostPromptsClosed: number };
+    page.__hostPromptsClosed = 0;
+    new MutationObserver((changes) => {
+      for (const change of changes) {
+        const el = change.target as HTMLElement;
+        if (el.id === "__freenet_perm_overlay" && el.style.display === "none") {
+          page.__hostPromptsClosed += 1;
+        }
+      }
+    }).observe(document, {
+      subtree: true,
+      attributes: true,
+      attributeFilter: ["style"],
+    });
+  });
+}
+
+function hostPromptsClosed(page: Page): Promise<number> {
+  return page.evaluate(
+    () => (window as unknown as { __hostPromptsClosed: number }).__hostPromptsClosed,
+  );
 }
 
 /**
