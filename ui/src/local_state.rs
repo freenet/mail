@@ -33,6 +33,12 @@ thread_local! {
     /// load.
     static SNAPSHOT: RefCell<LocalState> = RefCell::new(LocalState::default());
 
+    /// Messages whose flags item says unread, by identity: what the delegate's
+    /// background jobs write when they import an arrival. A kept copy with no
+    /// such flags (a migrated one) is read. Replaced per identity by each load.
+    static UNREAD_IMPORTS: RefCell<HashMap<String, HashSet<MessageId>>> =
+        RefCell::new(HashMap::new());
+
     /// Draft ids the UI has optimistically deleted. Stale `replace_snapshot`
     /// echoes — e.g. an in-flight `save_draft` whose response lands after the
     /// `delete_draft` was issued — would otherwise resurrect them. Kept until
@@ -462,6 +468,18 @@ pub(crate) fn drafts_for(alias: &str) -> Vec<(String, Draft)> {
             .map(|(id, d)| (id.clone(), d.clone()))
             .collect()
     })
+}
+
+/// Record which of `alias`'s messages are imports not yet read.
+pub(crate) fn set_unread_imports(alias: &str, ids: HashSet<MessageId>) {
+    UNREAD_IMPORTS.with(|u| u.borrow_mut().insert(alias.to_string(), ids));
+}
+
+/// Whether `id` was imported by the background jobs and not read since. A
+/// read mark (`is_read`) overrides it.
+pub(crate) fn is_unread_import(alias: &str, id: MessageId) -> bool {
+    let alias = &state_key(alias);
+    UNREAD_IMPORTS.with(|u| u.borrow().get(alias).is_some_and(|ids| ids.contains(&id)))
 }
 
 pub(crate) fn is_read(alias: &str, id: MessageId) -> bool {

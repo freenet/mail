@@ -1285,6 +1285,7 @@ fn kept_render_time(
 fn kept_to_message(
     mid: freenet_mail_wire_v1::local_state::MessageId,
     kept: freenet_mail_wire_v1::local_state::KeptMessage,
+    read: bool,
 ) -> Message {
     let time = kept_render_time(&kept);
     Message {
@@ -1292,7 +1293,7 @@ fn kept_to_message(
         from: kept.from.into(),
         title: kept.title.into(),
         content: kept.content.into(),
-        read: true,
+        read,
         time,
         sender_vk: kept.sender_vk,
         signature_valid: kept.signature_valid,
@@ -1322,6 +1323,7 @@ fn merge_inbox_list(
     )>,
     is_archived: impl Fn(u64) -> bool,
     is_read: impl Fn(u64) -> bool,
+    is_unread_import: impl Fn(u64) -> bool,
 ) -> Vec<Message> {
     let mut out = Vec::with_capacity(live.len() + kept.len());
     for mut m in live {
@@ -1340,7 +1342,9 @@ fn merge_inbox_list(
         out.push(m);
     }
     // Merge kept-locally messages: rows the inbox contract has already
-    // evicted but the user has read. They are always read, and dedup by
+    // evicted but the user has read. They are read, except an import the
+    // delegate's background jobs made, whose flags say unread until the user
+    // reads it (a migrated copy has no such flags and stays read). Dedup by
     // id against the live contract messages. Archived rows are excluded —
     // they belong to the Archive folder, not Inbox.
     for (mid, kept) in kept {
@@ -1350,7 +1354,8 @@ fn merge_inbox_list(
         if is_archived(mid) {
             continue;
         }
-        out.push(kept_to_message(mid, kept));
+        let read = is_read(mid) || !is_unread_import(mid);
+        out.push(kept_to_message(mid, kept, read));
     }
     out
 }
@@ -3578,6 +3583,7 @@ fn MessageList() -> Element {
                 kept,
                 |id| crate::local_state::is_archived(&alias, id),
                 |id| crate::local_state::is_read(&alias, id),
+                |id| crate::local_state::is_unread_import(&alias, id),
             );
             crate::log::debug!("active id: {:?}; emails number: {}", id.alias, emails.len());
         }
@@ -6829,7 +6835,7 @@ mod kept_to_message_tests {
             sender_vk: vec![9, 8, 7, 6, 5],
             signature_valid: true,
         };
-        let msg = kept_to_message(42, kept);
+        let msg = kept_to_message(42, kept, true);
         assert_eq!(&*msg.sender_vk, &[9, 8, 7, 6, 5]);
         assert!(msg.signature_valid);
         assert!(msg.read);
@@ -6849,7 +6855,7 @@ mod kept_to_message_tests {
             sent_at: Some(50),
             ..Default::default()
         };
-        let msg = kept_to_message(42, kept);
+        let msg = kept_to_message(42, kept, true);
         assert!(msg.sender_vk.is_empty());
         assert!(!msg.signature_valid);
         assert!(matches!(
@@ -7276,10 +7282,40 @@ mod merge_inbox_list_tests {
     #[test]
     fn read_message_stays_in_inbox_via_is_read_overlay() {
         let live_rows = vec![live(0, "alice"), live(1, "bob")];
-        let merged = merge_inbox_list(live_rows, vec![], |_| false, |id| id == 0);
+        let merged = merge_inbox_list(live_rows, vec![], |_| false, |id| id == 0, |_| false);
         assert_eq!(merged.len(), 2, "both rows must remain after click-to-read");
         assert!(merged[0].read, "clicked row must surface as read");
         assert!(!merged[1].read, "unread row must remain unread");
+    }
+
+    /// A kept copy the background jobs imported shows unread, a migrated one
+    /// (no unread flags) shows read, and a read mark overrides the flags.
+    #[test]
+    fn kept_import_is_unread_until_read_and_a_migrated_copy_is_read() {
+        let entries = || {
+            vec![
+                (10u64, kept("imported")),
+                (11u64, kept("migrated")),
+                (12u64, kept("imported then read")),
+            ]
+        };
+        let merged = merge_inbox_list(
+            vec![],
+            entries(),
+            |_| false,
+            |id| id == 12,
+            |id| id == 10 || id == 12,
+        );
+        let read_of = |from: &str| {
+            merged
+                .iter()
+                .find(|m| &*m.from == from)
+                .map(|m| m.read)
+                .unwrap()
+        };
+        assert!(!read_of("imported"), "an import is unread");
+        assert!(read_of("migrated"), "a migrated copy stays read");
+        assert!(read_of("imported then read"), "a read mark overrides it");
     }
 
     /// Latent bug — kept here as a tripwire. If a future change re-adds
@@ -7301,7 +7337,13 @@ mod merge_inbox_list_tests {
         // (originally id=1) is now id=0.
         let live_after_evict = vec![live(0, "bob")];
 
-        let merged = merge_inbox_list(live_after_evict, kept_entries, |_| false, |_| false);
+        let merged = merge_inbox_list(
+            live_after_evict,
+            kept_entries,
+            |_| false,
+            |_| false,
+            |_| false,
+        );
         let froms: Vec<String> = merged.iter().map(|m| m.from.to_string()).collect();
         assert!(
             froms.iter().any(|f| f == "alice"),

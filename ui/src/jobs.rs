@@ -18,7 +18,7 @@
 use crate::mail_delegate::{CallError, ops};
 
 /// How often an open page asks, after the first run.
-pub(crate) const PERIOD_MS: u32 = 5 * 60 * 1000;
+pub(crate) const PERIOD_MS: u32 = 10 * 60 * 1000;
 /// Delay before the probe call, so it is sent while the run is out.
 const PROBE_AFTER_MS: u32 = 100;
 

@@ -100,13 +100,16 @@ recovery-key codec. Its encoding is pinned per variant in
   or archived copy, a deleted flag or a tombstone stops the import, and
   deleting a kept copy, an archive or a flags item leaves a tombstone first
   (`ix/sn/<addr>/<nibble>`, exported with the data). A list or flag that cannot
-  be read stops the import.
+  be read stops the import. An import also writes the message's flags as
+  unread, first and create-only, because the page shows a kept copy as read
+  unless its flags say otherwise (`local_state::is_unread_import`); a migrated
+  copy has no such flags and stays read.
   Documented limits: a deleted identity's subscription stays until core has an
   unsubscribe. Restoring a deleted identity can bring back a message deleted
   earlier, because its tombstones leave with the identity. Forged notifications
   can spend the duty budget but carry no data, since the inbox is read from the
   node's store.
-- **Page fallback:** `ui/src/jobs.rs` sends `RunJobs` on load and every five
+- **Page fallback:** `ui/src/jobs.rs` sends `RunJobs` on load and every ten
   minutes while a page is open, in a detached task beside the migration walk,
   so a node without the Background grant (or too old for it) gets the same
   planner. It publishes its last run as `data-jobs-run`, including how long a

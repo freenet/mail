@@ -38,8 +38,8 @@ const BASE_URL = process.env.FREENET_EMAIL_BASE_URL ?? "";
 const CONTRACT_ID = BASE_URL.match(/\/v1\/contract\/web\/([^/]+)\//)?.[1] ?? "";
 const PEER_BASE_URL = `${PEER}/v1/contract/web/${CONTRACT_ID}/`;
 const OUT = process.env.BACKGROUND_PROOF_OUT ?? "";
-// The manifest's `rescan` interval is 900 s; the wait is that plus margin.
-const WAKEUP_WAIT_S = parseInt(process.env.BACKGROUND_WAKEUP_WAIT_S ?? "1000", 10);
+// `rescan` first fires within 65 s of the grant, then every 900 s plus up to 10%: the second fire is due by 1055 s.
+const WAKEUP_WAIT_S = parseInt(process.env.BACKGROUND_WAKEUP_WAIT_S ?? "1070", 10);
 const IN_CI = !!process.env.CI;
 
 test.describe.configure({ retries: 0 });
@@ -130,21 +130,37 @@ async function createIdentity(page: Page, alias: string) {
   ).toBeVisible({ timeout: 30_000 });
 }
 
-/** alice imports bob's card, then sends `count` messages to bob. */
-async function sendMessages(page: Page, alice: string, bob: string, count: number) {
+/** The share card of identity `alias`, read from the home view. */
+async function cardOf(page: Page, alias: string): Promise<string> {
   const app = page.frameLocator("iframe#app");
   await app
-    .locator(`[data-testid="fm-id-row"][data-alias="${bob}"] [data-testid="fm-id-share"]`)
+    .locator(`[data-testid="fm-id-row"][data-alias="${alias}"] [data-testid="fm-id-share"]`)
     .click();
   const share = app.locator('[data-testid="fm-share-modal"]');
   await share.waitFor({ timeout: 10_000 });
   const card = (await share.getAttribute("data-share-text")) ?? "";
   await share.locator(".modal-x").click();
+  return card;
+}
+
+/**
+ * `alice`, on `page`, imports `bob`'s card and sends him `count` messages.
+ * Bob lives on the other node: a node's page loads every identity's inbox as
+ * its own, so importing an identity of the same node does not look it up.
+ */
+async function sendMessages(
+  page: Page,
+  alice: string,
+  bob: string,
+  card: string,
+  count: number,
+) {
+  const app = page.frameLocator("iframe#app");
   await app.locator('[data-testid="fm-contact-import"]').click();
   await app.locator('[data-testid="fm-import-contact-modal"] textarea').fill(card);
   await app.locator('input[placeholder="e.g. Alice (work)"]').fill(bob);
   const verify = app.locator('[data-testid="fm-verify-check"]');
-  await verify.waitFor({ timeout: 30_000 });
+  await verify.waitFor({ timeout: 90_000 });
   await verify.click();
   await app.locator('[data-testid="fm-import-submit"]').click();
   await app
@@ -212,24 +228,30 @@ test("the delegate's background jobs on a real node", async ({ browser }, testIn
     const registeredAt = Date.now();
 
     // 1. The manifest is accepted and the Background permission is asked for.
+    // The node's own prompt for the capability: it names running with the tab
+    // closed, and offers Allow and Not now. One per node.
+    const asksBackground = (p: Prompt) =>
+      /even with its tab closed/.test(JSON.stringify(p.body));
     await expect
-      .poll(() => prompts.length, { timeout: 60_000, message: "a host prompt appeared" })
-      .toBeGreaterThan(0);
+      .poll(() => new Set(prompts.filter(asksBackground).map((p) => p.origin)).size, {
+        timeout: 60_000,
+        message: "each node asked for the Background permission",
+      })
+      .toBe(2);
     note(
       "prompts",
-      prompts.map((p) => ({ origin: p.origin, body: p.body })),
+      prompts.filter(asksBackground).map((p) => ({ origin: p.origin, body: p.body })),
     );
-    const background = prompts.filter((p) => /background/i.test(JSON.stringify(p.body)));
-    expect(background.length, "a prompt asks for background permission").toBeGreaterThan(0);
 
-    await expect
-      .poll(() => logLines(GW_LOG_DIR, /Arming background delegates' wake-ups/).length, {
-        timeout: 60_000,
-        message: "the node armed the delegate's wake-ups after the grant",
-      })
-      .toBeGreaterThan(0);
-    note("gw_arming_log", logLines(GW_LOG_DIR, /Arming background delegates' wake-ups/));
-    const armedAt = Date.now();
+    // The node arms the wake-ups when the grant is stored (it logs that only at
+    // a node start). Each one's FIRST fire comes 5 to 65 s later, whatever its
+    // interval, and `v1watch` subscribes: so no identity is created until
+    // those have passed, or a later notification could import what the
+    // `rescan` wake-up is meant to. The next fires are an interval later
+    // (900 s plus up to 10%, for `rescan`; 3600 s for `v1watch`).
+    const armedAt = Math.max(...prompts.filter(asksBackground).map((p) => p.at));
+    note("first_fire_window_s", 70);
+    await new Promise((r) => setTimeout(r, Math.max(0, armedAt + 70_000 - Date.now())));
 
     // 2. Identities, then messages that arrive with nothing subscribed.
     const names = {
@@ -240,12 +262,26 @@ test("the delegate's background jobs on a real node", async ({ browser }, testIn
     await createIdentity(gwPage, names.gw.bob);
     await createIdentity(peerPage, names.peer.alice);
     await createIdentity(peerPage, names.peer.bob);
-    await sendMessages(gwPage, names.gw.alice, names.gw.bob, 1);
-    await sendMessages(peerPage, names.peer.alice, names.peer.bob, 3);
+    // Bob's card from each receiver; each sender sends to the other node's.
+    const cards = {
+      gw: await cardOf(gwPage, names.gw.bob),
+      peer: await cardOf(peerPage, names.peer.bob),
+    };
+    await Promise.all([
+      // The wake-up experiment's receiver is on the gateway: one message.
+      sendMessages(peerPage, names.peer.alice, names.gw.bob, cards.gw, 1),
+      // The cost experiment's receiver is on the peer: three.
+      sendMessages(gwPage, names.gw.alice, names.peer.bob, cards.peer, 3),
+    ]);
     const sentAt = Date.now();
     // What the pages published while they were open: their first run found no
     // identity, so nothing was subscribed.
-    note("gw_open_page_run", await jobsRecord(gwPage));
+    const gwBefore = await jobsRecord(gwPage);
+    note("gw_open_page_run", gwBefore);
+    expect(gwBefore.runs, "no page run happened after the identities existed").toBe(1);
+    const peerBefore = await jobsRecord(peerPage);
+    note("peer_open_page_run", peerBefore);
+    expect(peerBefore.runs, "no page run happened after the identities existed").toBe(1);
     await gwCtx.close();
     await peerCtx.close();
 
@@ -274,12 +310,23 @@ test("the delegate's background jobs on a real node", async ({ browser }, testIn
     note("sent_to_wakeup_check_ms", Date.now() - sentAt);
     note("registered_to_check_ms", Date.now() - registeredAt);
     note("gw_failed_runs", logLines(GW_LOG_DIR, /Lifecycle run failed/));
+    // And the message is there when the user opens the inbox.
+    const gwApp = gwOpen.frameLocator("iframe#app");
+    await gwApp
+      .locator(`[data-testid="fm-id-row"][data-alias="${names.gw.bob}"] [data-testid="fm-id-open"]`)
+      .first()
+      .click();
+    await expect(gwApp.getByText(/background 1/i), "the message is in the inbox").toBeVisible({
+      timeout: 60_000,
+    });
     await gwCtx2.close();
 
     // What each experiment must show.
     expect(first.unknown, "the cost run read every inbox").toBe(0);
+    expect(first.imported, "the page run imported the three").toBe(3);
+    expect(first.verified, "and verified their signatures").toBe(3);
     expect(woke.imported, "a page's own run had nothing left to import").toBe(0);
-    expect(woke.scanned, "the page's run read the inbox").toBe(1);
+    expect(woke.scanned, "the page run read both identities inboxes").toBe(2);
     expect(woke.unknown, "the inbox was known").toBe(0);
     expect(woke.kept, "the message was kept before any page asked").toBe(1);
     expect(woke.verified, "its signature verified inside the node's WASM").toBe(1);

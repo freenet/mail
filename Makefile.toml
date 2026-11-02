@@ -1163,6 +1163,9 @@ FREENET_ISO_GW_PORT="$GW_PORT" cargo make publish-email-iso
 
 CONTRACT_ID="$(cat "$ROOT/target/webapp/contract-id.txt")"
 BASE_URL="http://127.0.0.1:$GW_PORT/v1/contract/web/$CONTRACT_ID/"
+# BACKGROUND_PLAYWRIGHT_ARGS passes extra Playwright options through, split on
+# whitespace, e.g. BACKGROUND_PLAYWRIGHT_ARGS='--repeat-each=2'.
+read -r -a extra_args <<< "${BACKGROUND_PLAYWRIGHT_ARGS:-}"
 cd "$ROOT/ui/tests" && \
     FREENET_BACKGROUND_PROOF=1 \
     FREENET_EMAIL_BASE_URL="$BASE_URL" \
@@ -1170,7 +1173,7 @@ cd "$ROOT/ui/tests" && \
     FREENET_ISO_GW_LOG_DIR="$ISO_ROOT/gw/logs" \
     FREENET_ISO_PEER_LOG_DIR="$ISO_ROOT/peer/logs" \
     BACKGROUND_PROOF_OUT="${BACKGROUND_PROOF_OUT:-$ROOT/target/background-proof.json}" \
-    npx playwright test background-proof.spec.ts --project=chromium
+    npx playwright test background-proof.spec.ts --project=chromium ${extra_args[@]+"${extra_args[@]}"}
 '''
 
 [tasks.capture-v0-2-7-replies]

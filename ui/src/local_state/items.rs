@@ -858,6 +858,7 @@ pub(crate) async fn load(identities: &[(String, Addr)]) -> Result<LocalState, Ca
                 entry.archived.insert(id.to_string(), a);
             }
         }
+        let mut unread = std::collections::HashSet::new();
         for i in list_owned(*addr, ItemKind::Flags).await? {
             if let (Some(id), Some(f)) = (
                 message_id(&i.item.id),
@@ -869,8 +870,12 @@ pub(crate) async fn load(identities: &[(String, Addr)]) -> Result<LocalState, Ca
                 if f.deleted {
                     entry.deleted.push(id);
                 }
+                if !f.read && !f.deleted {
+                    unread.insert(id);
+                }
             }
         }
+        super::set_unread_imports(alias, unread);
         let settings = item(ItemKind::IdentitySettings, owner, Vec::new());
         if let Some(i) = readable_or_default(ops::get_item(settings).await)?
             && let Some(s) = decode("identity settings", &i.body)
@@ -1724,6 +1729,38 @@ mod delegate_tests {
             "no kept copy of a deleted message"
         );
         assert!(!state.is_read("items-read-del", id));
+    }
+
+    /// Flags that say unread (what the background jobs write for an import)
+    /// are known to the page as an unread import; flags that say read, or no
+    /// flags at all (a migrated copy), are not.
+    #[test]
+    fn unread_flags_mark_an_import_and_nothing_else_does() {
+        let addr = identity("items-unread");
+        let unread = message_id_for(b"imported by the background jobs");
+        let read = message_id_for(b"read by the user");
+        let bare = message_id_for(b"has no flags");
+        for (id, body) in [
+            (unread, r#"{"read":false,"deleted":false}"#),
+            (read, r#"{"read":true,"deleted":false}"#),
+        ] {
+            let full = full_id(id).unwrap();
+            block_on(ops::put_item(
+                ItemRef {
+                    kind: ItemKind::Flags,
+                    owner: Some(addr),
+                    id: full.to_vec(),
+                },
+                body.as_bytes().to_vec(),
+                None,
+            ))
+            .unwrap();
+        }
+        let key = super::super::addr_key(&addr);
+        let _ = loaded(&key, addr);
+        assert!(super::super::is_unread_import(&key, unread));
+        assert!(!super::super::is_unread_import(&key, read));
+        assert!(!super::super::is_unread_import(&key, bare));
     }
 
     /// Two tabs change different settings fields from the same starting
