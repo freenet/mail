@@ -43,6 +43,9 @@ serde_bytes = "0.11.19"
 ciborium = "0.2.2"
 zeroize = "1.8.2"
 freenet-stdlib = { workspace = true, features = ["net"] }
+# The legacy delegate walk and its completeness journal. Exact: it moves with
+# the stdlib line, and two stdlibs can never link.
+freenet-migrate = "=0.8.0"
 uuid = { version = "1.29.0", features = ["v4", "js"] }
 
 [target.'cfg(target_family = "wasm")'.dependencies]
@@ -70,6 +73,7 @@ features = [
     "HtmlInputElement",
     "HtmlTextAreaElement",
     "InputEvent",
+    "Location",
     "Navigator",
     "Performance",
     "Request",
@@ -93,6 +97,11 @@ no-sync = ["local-delegate"]
 # Run the mail delegate in the page instead of on a node (offline builds).
 local-delegate = ["dep:mail-delegate"]
 use-node = []
+
+[dev-dependencies]
+# The walk's tests run against the real delegate's handlers in every feature
+# set, so what they exercise is its compare-and-swap and never-overwrite rules.
+mail-delegate = { path = "../delegates/mail-delegate", features = ["v1-transition"] }
 
 [build-dependencies]
 # Validates the repo-root legacy_*.toml registries and generates their consts.

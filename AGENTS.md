@@ -97,9 +97,46 @@ it guards is broken.
 
 The `legacy_*.toml` registries are validated by `ui/build.rs`
 (`freenet-migrate-build`; an empty registry fails the build) and pinned by
-`ui/src/legacy_registry.rs`. They are not read at runtime yet: the inbox and
-AFT migrations still walk the in-source `LEGACY_*_CODE_HASHES` slices
-described below.
+`ui/src/legacy_registry.rs`. The delegate rows feed the walk below. The inbox
+and AFT migrations still walk the in-source `LEGACY_*_CODE_HASHES` slices
+described further on.
+
+### Migrating from the v0.2.x delegates
+
+`ui/src/migration/` moves a v0.2.x user's data into the mail delegate, with the
+`freenet-migrate` walk and journal. The walk runs after the page's first
+identity listing, so it delays nothing, and only on loads where the journal is
+not complete, at a slower cadence once rows have answered "not installed" or
+stayed silent (`walk_this_load`). `legacy_delegates.rs` reads each predecessor and maps its reply to
+items by content; `successor.rs` imports them through the mail delegate's
+normal operations, which never overwrite; `node.rs` is the real transport.
+
+- **No answer is not "nothing":** silence, an empty answer and a typed "not
+  installed" all leave a predecessor pending, so the journal is normally
+  never `Complete` and that is expected. `settled` is the only place that
+  decides the migration is finished. Do not seal anything as empty.
+- **Newest first is held, not assumed:** the first copy of a shared key to
+  land stands, so a newer row that gives nothing usable holds the older rows
+  of its family back for at most `HOLD_BACK_LOADS` loads. The limit matters: a
+  row can stay empty for good while the data sits in an older one. A typed "not
+  installed" never holds back.
+- **An alias is orphaned only on its own generation's word:** local state waits
+  until the identity row of the same generation has answered with something.
+- **A refusal retrying cannot change ends the walk:** a cap, or an identity
+  being deleted, is a counted permanent rejection and the item stays in the
+  predecessor. `NotFound` is one only for an identity known to have arrived
+  (`ArrivedIdentities`), because the delegate answers the same for one that is
+  still on its way. A user's deletion can still return on a transient retry.
+- **The journal and markers are delegate items** (`ItemKind::MigrationJournal`,
+  `MigrationMarker`), per origin and never exported.
+- **Tests** drive the crate's real walk against the real delegate's handlers,
+  with old-format inputs taken only from `wire-v1/src/golden_v1.txt`. Add a
+  golden sample through `wire-v1/capture` rather than building an old reply
+  with today's types. `cargo make test-e2e-legacy-migration` proves the path on
+  a real node: `tools/v1-node-seed` fills the frozen delegates, and
+  `ui/tests/legacy-migration.spec.ts` checks the data arrives. It wipes its
+  nodes because a load that finds those delegates missing counts towards the
+  walk's back-off.
 
 ## Quick Reference
 
@@ -536,8 +573,9 @@ only when the PUT under the current inbox key succeeds. On startup
 `select_migrate_from` (in `ui/src/inbox.rs`) prefers a non-None
 pending marker over the recorded hash, so a session whose GET never
 resolved (node offline, contract expired) re-attempts on the next
-session. Stale markers (`prior == current` with a leftover pending
-value) are cleared in the no-drift branch.
+session, including when the recorded hash already equals the current
+one (planning a migration stamps it). A marker naming the current hash
+has nothing to retry and is cleared.
 
 **Container contract lockfile isolation (issue #198)**: the container
 contract and its shared types crate live OUTSIDE the freenet-email workspace:
@@ -746,9 +784,15 @@ the AFT permission flow against the isolated 2-node network from
 cargo make test-e2e-real-node
 ```
 
-This wipes any prior iso-node state, brings up gw (7510) + peer
-(7511), publishes the webapp to the gw, then runs Playwright with
+This wipes any prior iso-node state, brings up gw + peer on free ports
+under `target/iso` (`FREENET_E2E_ROOT` and `FREENET_ISO_*` override them;
+CI uses `~/freenet-mail-iso`), publishes the webapp to the gw, then runs
+Playwright with
 `FREENET_EMAIL_BASE_URL` pointing at the published contract URL.
+The harness only writes to a node it started: `run-isolated-nodes.sh`
+refuses any listener its pidfile does not name, and `publish-email-iso`
+runs its `check-ours` first. nova runs a production gateway on the old
+default ports, 7510 and 31338.
 The spec covers identity creation, reload-persistence, and (gated on
 `FREENET_LIVE_E2E_SEND=1`) the send-via-address-book → AFT permission
 → inbox UPDATE round trip.
@@ -767,7 +811,7 @@ The host's permission overlay is driven by polling
 `startPermissionPump` helper in the spec. This avoids coupling
 to the gateway shell page's overlay HTML.
 
-Log assertions tail `~/freenet-mail-iso/gw/logs/freenet.*.log`
+Log assertions tail `<iso root>/gw/logs/freenet.*.log`
 (override via `FREENET_ISO_GW_LOG_DIR`) and grep for
 `UPDATE_PROPAGATION`, `allocate_token`, and the node compiling the mail
 delegate's code hash (proof the identity went through the delegate on

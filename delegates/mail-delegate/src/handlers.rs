@@ -1448,6 +1448,9 @@ pub fn export_profile(s: &Space<'_>, addr: &Addr) -> OpResult {
 pub fn exportable_keys(s: &Space<'_>) -> Result<Vec<String>, Failure> {
     let mut rels = Vec::new();
     let add_kind = |s: &Space<'_>, rels: &mut Vec<String>, kind, owner: Option<Addr>| {
+        if !store::exported(kind) {
+            return Ok(());
+        }
         let ix = index_rel(kind, owner.as_ref());
         let (_, ids) = s.index(&ix)?;
         if !ids.is_empty() {
@@ -1511,6 +1514,13 @@ fn exportable_identity_index(s: &Space<'_>) -> Result<Option<Vec<u8>>, Failure> 
 }
 
 /// One page of the freenet-migrate export of the caller's namespace.
+///
+/// The generation counter is not exported, and each value keeps its
+/// `[tag][generation][body]` envelope. A successor that imports these values
+/// verbatim must start its own counter above the largest generation it
+/// imported, or a later write there could reuse one. Items that reach this
+/// delegate from a v0.2.x delegate carry no generation: `PutItem` gives them
+/// a fresh one from the counter.
 pub fn export_for_successor(
     s: &Space<'_>,
     source_generation: u32,

@@ -1130,7 +1130,8 @@ fn ScrContacts() -> Element {
         // overlays the Contacts panel instead of dropping to the inbox.
         *import_contact_form.write() = crate::app::login::ImportContact::opened();
     };
-    let on_share = move |_| {
+    let mut confirm_share = use_signal(|| false);
+    let open_share = use_callback(move |()| {
         let Some(active) = user.read().logged_id().cloned() else {
             return;
         };
@@ -1146,7 +1147,15 @@ fn ScrContacts() -> Element {
             }),
         });
         share_contact_form.write().0 = true;
+    });
+    let on_share = move |_| {
+        // A migrated identity is confirmed by its owner before it is shared.
+        match super::migration_view::gate(user.read().logged_id().map(|i| i.confirmed)) {
+            super::migration_view::Gate::Ask => confirm_share.set(true),
+            super::migration_view::Gate::Go => open_share.call(()),
+        }
     };
+    let confirm_identity = user.read().logged_id().cloned();
 
     let needle = search.read().to_lowercase();
     let _ = ab_gen.0.read(); // re-run when a contact is added or removed.
@@ -1163,6 +1172,16 @@ fn ScrContacts() -> Element {
         .collect();
 
     rsx! {
+        if let Some(identity) = confirm_identity.filter(|_| *confirm_share.read()) {
+            super::migration_view::ConfirmIdentityPrompt {
+                identity,
+                on_confirmed: move |_| {
+                    confirm_share.set(false);
+                    open_share.call(());
+                },
+                on_cancel: move |_| confirm_share.set(false),
+            }
+        }
         div { class: "fm-set-inner",
             p { class: "fm-set-lede",
                 "Your address book. Imported via contact cards or share links; identified by their post-quantum fingerprint."

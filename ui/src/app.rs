@@ -32,6 +32,9 @@ pub(crate) mod backup_token;
 pub(crate) mod contact_store;
 pub(crate) mod identity_store;
 pub(crate) mod login;
+#[cfg(all(feature = "example-data", target_family = "wasm"))]
+mod migration_fixture;
+pub(crate) mod migration_view;
 pub(crate) mod settings;
 
 // In-memory mailbox for offline (`example-data`, `!use-node`) mode.
@@ -262,6 +265,15 @@ pub(crate) fn app() -> Element {
                                 login_ctl.write().updated = true;
                             }
                         }
+                        // The offline fixtures' migrated identities.
+                        #[cfg(feature = "example-data")]
+                        NodeAction::IdentitiesLoaded { identities } => {
+                            for loaded in identities {
+                                let identity = Identity::from_info(&loaded.info, UserId::new());
+                                Identity::upsert(identity, user_sig);
+                            }
+                            login_ctl.write().updated = true;
+                        }
                         NodeAction::RenameIdentity { old, new, identity } => {
                             // The in-page delegate holds the identity, as a
                             // node's would: rename it there, then relabel.
@@ -319,6 +331,8 @@ pub(crate) fn app() -> Element {
     }
     #[allow(unused_variables)]
     let actions = use_coroutine_handle::<NodeAction>();
+    #[cfg(all(feature = "example-data", target_family = "wasm"))]
+    use_hook(migration_fixture::start);
 
     // Storybook short-circuit (#270): when the URL carries `?story=<name>`
     // AND this is an `example-data` build, render the isolated thread-component
@@ -5782,7 +5796,18 @@ fn ComposeSheet() -> Element {
             });
         }
     });
+    let mut confirm_sender = use_signal(|| false);
+    let sender = user.read().logged_id().cloned();
     let send_now = use_callback(move |()| {
+        // A migrated identity is confirmed by its owner before it first sends.
+        // `let ... else` must leave the closure, so nothing below can run
+        // for an identity that has not been asked.
+        let migration_view::Gate::Go =
+            migration_view::gate(user.read().logged_id().map(|i| i.confirmed))
+        else {
+            confirm_sender.set(true);
+            return;
+        };
         let to_val = to.read().clone();
         // Mail goes to the address recorded when the recipient was chosen
         // (an alias, a clash label or a pasted bs58 inbox address), and is
@@ -6429,6 +6454,22 @@ fn ComposeSheet() -> Element {
                     }
                 }
             }
+            if *confirm_sender.read() && let Some(identity) = sender.clone() {
+                // The prompt sits inside this veil, whose click closes the
+                // compose sheet. A click in the prompt must not reach it: the
+                // sheet would unmount and take the confirmation, and the send
+                // it resumes, with it.
+                div { onclick: move |ev| { ev.stop_propagation(); },
+                    migration_view::ConfirmIdentityPrompt {
+                        identity,
+                        on_confirmed: move |_| {
+                            confirm_sender.set(false);
+                            send_now.call(());
+                        },
+                        on_cancel: move |_| confirm_sender.set(false),
+                    }
+                }
+            }
         }
     }
 }
@@ -6653,6 +6694,21 @@ mod time_format_tests {
     use super::{format_time_full, format_time_short};
     use chrono::{Duration, Local, Utc};
 
+    /// Noon on the previous calendar day. Not `now - 1 day`: on the 25-hour
+    /// day a clock change makes, late evening minus 24 hours is still today.
+    fn noon_yesterday() -> chrono::DateTime<Utc> {
+        let date = Local::now()
+            .date_naive()
+            .pred_opt()
+            .expect("a previous day");
+        date.and_hms_opt(12, 0, 0)
+            .expect("noon exists")
+            .and_local_timezone(Local)
+            .single()
+            .expect("noon is not ambiguous")
+            .with_timezone(&Utc)
+    }
+
     #[test]
     fn short_today_is_h_colon_mm() {
         let s = format_time_short(Utc::now());
@@ -6662,9 +6718,7 @@ mod time_format_tests {
 
     #[test]
     fn short_yesterday_says_yesterday() {
-        let now = Local::now();
-        let y = (now - Duration::days(1)).with_timezone(&Utc);
-        assert_eq!(format_time_short(y), "Yesterday");
+        assert_eq!(format_time_short(noon_yesterday()), "Yesterday");
     }
 
     #[test]
@@ -6685,9 +6739,7 @@ mod time_format_tests {
 
     #[test]
     fn full_yesterday_starts_with_yesterday() {
-        let now = Local::now();
-        let y = (now - Duration::days(1)).with_timezone(&Utc);
-        let s = format_time_full(y);
+        let s = format_time_full(noon_yesterday());
         assert!(s.starts_with("Yesterday, "), "got {s:?}");
     }
 

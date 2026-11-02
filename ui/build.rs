@@ -135,14 +135,12 @@ fn emit_legacy_registries(root: &Path) {
         .expect("freenet-migrate-build: legacy inbox registry");
     freenet_migrate_build::codegen()
         .registry(&identity)
-        .canonical_consts(false)
         .delegate_pair_view("LEGACY_IDENTITY_DELEGATES")
         .out_file("legacy_identity_delegate.rs")
         .emit()
         .expect("freenet-migrate-build: legacy identity delegate registry");
     freenet_migrate_build::codegen()
         .registry(&local_state)
-        .canonical_consts(false)
         .delegate_pair_view("LEGACY_LOCAL_STATE_DELEGATES")
         .out_file("legacy_local_state_delegate.rs")
         .emit()

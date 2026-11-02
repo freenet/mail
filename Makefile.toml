@@ -781,6 +781,8 @@ script = '''
 set -euo pipefail
 ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
 PORT="${FREENET_ISO_GW_PORT:-7510}"
+# A test webapp must only ever reach this harness's own gateway.
+bash "$ROOT/scripts/run-isolated-nodes.sh" check-ours
 contract_id=$(cat "$ROOT/target/webapp/contract-id.txt")
 echo "publishing with test contract id $contract_id to iso gateway :$PORT"
 fdev --port "$PORT" publish \
@@ -947,10 +949,22 @@ else
 fi
 echo "Using dev-server port $PORT"
 
-# Start dev server in background.
-cd "$ROOT/ui" && dx serve --port "$PORT" --features example-data,no-sync --no-default-features &
+# Start the dev server in its own process group, so the run can stop all of
+# it: dx starts children, and killing only the shell that launched it left
+# `dx serve` running, with its cwd in this worktree, after the run ended.
+set -m
+( cd "$ROOT/ui" && exec dx serve --port "$PORT" --features example-data,no-sync --no-default-features </dev/null ) &
 DX_PID=$!
-trap "kill $DX_PID 2>/dev/null || true" EXIT
+set +m
+stop_dx() {
+    kill -TERM -- "-$DX_PID" 2>/dev/null || true
+    for _ in $(seq 1 20); do
+        kill -0 -- "-$DX_PID" 2>/dev/null || return 0
+        sleep 0.25
+    done
+    kill -KILL -- "-$DX_PID" 2>/dev/null || true
+}
+trap stop_dx EXIT
 
 # Poll for readiness.
 echo "Waiting for dev server on port $PORT..."
@@ -973,7 +987,7 @@ if [ "$SERVER_READY" != "true" ]; then
 fi
 
 # Run Playwright. Pass PORT through so the config picks the same one.
-cd "$ROOT/ui/tests" && FREENET_EMAIL_BASE_URL="http://127.0.0.1:$PORT" npx playwright test
+cd "$ROOT/ui/tests" && FREENET_EMAIL_BASE_URL="http://127.0.0.1:$PORT" npx playwright test ${PLAYWRIGHT_ARGS:-}
 '''
 
 # ─── Real-node integration helpers ───────────────────────────────────────────
@@ -1013,8 +1027,20 @@ script_runner = "bash"
 script = '''
 set -euo pipefail
 ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
+# A root per checkout locally: `wipe` deletes the root, so a shared one would
+# kill a parallel run. CI has one run and collects logs from the default.
+if [ -z "${CI:-}" ]; then export FREENET_E2E_ROOT="${FREENET_E2E_ROOT:-$ROOT/target/iso}"; fi
 ISO_ROOT="${FREENET_E2E_ROOT:-$HOME/freenet-mail-iso}"
-GW_PORT="${FREENET_ISO_GW_PORT:-7510}"
+# Ports come from the environment, or are free ones: a fixed 7510 collides
+# with whatever else is running on the machine.
+free_port() {
+    python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])'
+}
+export FREENET_ISO_GW_PORT="${FREENET_ISO_GW_PORT:-$(free_port)}"
+export FREENET_ISO_PEER_PORT="${FREENET_ISO_PEER_PORT:-$(free_port)}"
+export FREENET_ISO_GW_NET_PORT="${FREENET_ISO_GW_NET_PORT:-$(free_port)}"
+export FREENET_ISO_PEER_NET_PORT="${FREENET_ISO_PEER_NET_PORT:-$(free_port)}"
+GW_PORT="$FREENET_ISO_GW_PORT"
 KEEP="${FREENET_E2E_KEEP:-0}"
 
 cleanup() {
@@ -1048,4 +1074,75 @@ cd "$ROOT/ui/tests" && \
     FREENET_ISO_GW_LOG_DIR="$ISO_ROOT/gw/logs" \
     FREENET_ISO_PEER_LOG_DIR="$ISO_ROOT/peer/logs" \
     npx playwright test live-node.spec.ts --project=chromium ${extra_args[@]+"${extra_args[@]}"}
+'''
+
+[tasks.capture-v0-2-7-replies]
+description = "Fill the frozen v0.2.7 delegates on a fresh isolated node and write their replies to ui/src/migration/captured_v0_2_7.txt"
+script_runner = "bash"
+script = '''
+set -euo pipefail
+ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
+free_port() {
+    python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])'
+}
+export FREENET_E2E_ROOT="${FREENET_E2E_ROOT:-$ROOT/target/capture-iso}"
+export FREENET_ISO_GW_PORT="${FREENET_ISO_GW_PORT:-$(free_port)}"
+export FREENET_ISO_PEER_PORT="${FREENET_ISO_PEER_PORT:-$(free_port)}"
+export FREENET_ISO_GW_NET_PORT="${FREENET_ISO_GW_NET_PORT:-$(free_port)}"
+export FREENET_ISO_PEER_NET_PORT="${FREENET_ISO_PEER_NET_PORT:-$(free_port)}"
+trap 'bash "$ROOT/scripts/run-isolated-nodes.sh" down' EXIT
+bash "$ROOT/scripts/run-isolated-nodes.sh" wipe
+bash "$ROOT/scripts/run-isolated-nodes.sh" up
+OUT="$ROOT/ui/src/migration/captured_v0_2_7.txt"
+RAW="$ROOT/target/captured_v0_2_7.raw"
+cargo run -q --manifest-path "$ROOT/Cargo.toml" -p v1-node-seed -- "$FREENET_ISO_GW_PORT" "$RAW"
+# Keep the file's comment header; replace the captured lines.
+{ grep '^#' "$OUT"; cat "$RAW"; } > "$OUT.new" && mv "$OUT.new" "$OUT"
+'''
+
+[tasks.test-e2e-legacy-migration]
+description = "Real-node migration: wipe iso nodes, publish, fill the frozen v0.2.7 delegates, check the data arrives in the current UI"
+dependencies = ["build", "derive-test-contract-id"]
+script_runner = "bash"
+script = '''
+set -euo pipefail
+ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
+# A root per checkout locally: `wipe` deletes the root, so a shared one would
+# kill a parallel run. CI has one run and collects logs from the default.
+if [ -z "${CI:-}" ]; then export FREENET_E2E_ROOT="${FREENET_E2E_ROOT:-$ROOT/target/iso}"; fi
+ISO_ROOT="${FREENET_E2E_ROOT:-$HOME/freenet-mail-iso}"
+# Ports come from the environment, or are free ones: a fixed 7510 collides
+# with whatever else is running on the machine.
+free_port() {
+    python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])'
+}
+export FREENET_ISO_GW_PORT="${FREENET_ISO_GW_PORT:-$(free_port)}"
+export FREENET_ISO_PEER_PORT="${FREENET_ISO_PEER_PORT:-$(free_port)}"
+export FREENET_ISO_GW_NET_PORT="${FREENET_ISO_GW_NET_PORT:-$(free_port)}"
+export FREENET_ISO_PEER_NET_PORT="${FREENET_ISO_PEER_NET_PORT:-$(free_port)}"
+GW_PORT="$FREENET_ISO_GW_PORT"
+KEEP="${FREENET_E2E_KEEP:-0}"
+
+cleanup() {
+    if [ "$KEEP" = "1" ]; then
+        echo "FREENET_E2E_KEEP=1 - leaving iso nodes up at $ISO_ROOT"
+    else
+        bash "$ROOT/scripts/run-isolated-nodes.sh" down
+    fi
+}
+trap cleanup EXIT
+
+# Fresh nodes: a load that finds these delegates missing counts towards the
+# walk's back-off, and the seed must be the only legacy data on the node.
+bash "$ROOT/scripts/run-isolated-nodes.sh" wipe
+bash "$ROOT/scripts/run-isolated-nodes.sh" up
+FREENET_ISO_GW_PORT="$GW_PORT" cargo make publish-email-iso
+cargo run --manifest-path "$ROOT/Cargo.toml" -p v1-node-seed -- "$GW_PORT"
+
+CONTRACT_ID="$(cat "$ROOT/target/webapp/contract-id.txt")"
+cd "$ROOT/ui/tests" && \
+    FREENET_LEGACY_SEEDED=1 \
+    FREENET_EMAIL_BASE_URL="http://127.0.0.1:$GW_PORT/v1/contract/web/$CONTRACT_ID/" \
+    FREENET_ISO_GW_PORT="$GW_PORT" \
+    npx playwright test legacy-migration.spec.ts --project=chromium
 '''

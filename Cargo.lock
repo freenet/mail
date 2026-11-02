@@ -1544,6 +1544,7 @@ dependencies = [
  "dioxus",
  "freenet-mail-protocol",
  "freenet-mail-wire-v1",
+ "freenet-migrate",
  "freenet-migrate-build",
  "freenet-stdlib 0.12.1",
  "futures",
@@ -4390,6 +4391,17 @@ dependencies = [
  "getrandom 0.4.3",
  "js-sys",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "v1-node-seed"
+version = "0.2.7"
+dependencies = [
+ "freenet-mail-wire-v1",
+ "freenet-stdlib 0.12.1",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite",
 ]
 
 [[package]]

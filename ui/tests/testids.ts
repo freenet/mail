@@ -10,6 +10,19 @@ import { join } from "node:path";
 // `[data-testid="${TID.fmIdRow}"]` so a rename in either source
 // trips one place instead of N call sites.
 interface TestIds {
+  fmMigrationStatus: string;
+  fmMigrationUnreachable: string;
+  fmMigrationRestore: string;
+  fmMigrationNotice: string;
+  fmMigrationBackup: string;
+  fmMigrationDismiss: string;
+  fmMigrationReport: string;
+  fmOrphanGroup: string;
+  fmOrphanTarget: string;
+  fmOrphanMove: string;
+  fmConfirmIdentity: string;
+  fmConfirmIdentitySubmit: string;
+  fmConfirmIdentityCancel: string;
   fmApp: string;
   fmAvatar: string;
   fmLogout: string;

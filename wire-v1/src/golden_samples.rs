@@ -405,6 +405,44 @@ fn golden_sample_bytes() -> Vec<(&'static str, Vec<u8>)> {
     let state = ls::LocalState::try_from(br#"{"aliases":{"bob":{}}}"#.as_slice()).unwrap();
     out.push(("ls_state_sparse", serde_json::to_vec(&state).unwrap()));
 
+    // What the v0.2.x client stored in `AliasInfo.key`, written out as text so
+    // nothing here depends on the client's own types: the JSON of its
+    // `StoredIdentityKeys` for an identity, `StoredContactKeys` for a contact.
+    let bytes_json = |b: &[u8]| {
+        b.iter()
+            .map(|x| x.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let identity_key = format!(
+        r#"{{"ml_dsa_seed":[{}],"ml_kem_seed":[{}]}}"#,
+        bytes_json(&[9u8; 32]),
+        bytes_json(&[10u8; 64]),
+    );
+    let ids = identity::IdentityManagement::try_from(
+        format!(
+            r#"{{"identities":{{"alice":{{"key":[{}],"extra":"home","kind":"identity","inbox_wasm_hash":"a","pending_migration_from":"b","aft_record_wasm_hash":"c","pending_aft_migration_from":"d"}}}}}}"#,
+            bytes_json(identity_key.as_bytes()),
+        )
+        .as_bytes(),
+    )
+    .unwrap();
+    out.push(("identity_state_seeded", serde_json::to_vec(&ids).unwrap()));
+    let contact_key = format!(
+        r#"{{"ml_dsa_vk_bytes":[{}],"ml_kem_ek_bytes":[{}],"suggested_alias":"bob","verified":true,"required_tier":"Day1","max_age_secs":3600,"inbox_wasm_hash":"h"}}"#,
+        bytes_json(&vk.encode()),
+        bytes_json(&ek),
+    );
+    let ids = identity::IdentityManagement::try_from(
+        format!(
+            r#"{{"identities":{{"bob":{{"key":[{}],"extra":"friend","kind":"contact"}}}}}}"#,
+            bytes_json(contact_key.as_bytes()),
+        )
+        .as_bytes(),
+    )
+    .unwrap();
+    out.push(("identity_state_contact", serde_json::to_vec(&ids).unwrap()));
+
     // Every variant of every serde-renamed enum, so a rename cannot hide
     // behind a variant no other sample happens to use.
     use ls::{Density, DeliveryState, FontSize, PermissionDecision, Theme, ThreadView};
@@ -496,9 +534,10 @@ fn golden_samples() -> Vec<GoldenSample> {
             n if n.starts_with("inbox_update_") => json_rt::<inbox::UpdateInbox>,
             "inbox_state" => json_rt::<inbox::Inbox>,
             n if n.starts_with("identity_msg_") => json_rt::<identity::IdentityMsg>,
-            "identity_state" | "identity_state_legacy" => {
-                json_rt::<identity::IdentityManagement>
-            }
+            "identity_state"
+            | "identity_state_legacy"
+            | "identity_state_seeded"
+            | "identity_state_contact" => json_rt::<identity::IdentityManagement>,
             "identity_enum_kind" => json_rt::<Vec<identity::EntryKind>>,
             n if n.starts_with("ls_msg_") => json_rt::<LocalStateMsg>,
             "ls_state" | "ls_state_sparse" => json_rt::<LocalState>,

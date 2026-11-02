@@ -52,6 +52,12 @@ blind_tests() {
 protocol_tests() {
     cargo test --manifest-path "$STAGE/Cargo.toml" -p freenet-mail-protocol
 }
+ui_migration_tests() {
+    cargo test --manifest-path "$STAGE/Cargo.toml" -p freenet-email-ui --lib migration
+}
+ui_notfound_tests() {
+    cargo test --manifest-path "$STAGE/Cargo.toml" -p freenet-email-ui --lib notfound_routing
+}
 candidate_check() { "$STAGE/scripts/check-delegate-candidate.sh"; }
 freeze_tests() { "$STAGE/scripts/release-freeze_test.sh"; }
 
@@ -73,6 +79,7 @@ baseline "delegate tests" delegate_tests
 baseline "delegate fault-injection runs" fault_tests
 baseline "delegate unreadable-key runs" blind_tests
 baseline "protocol tests" protocol_tests
+baseline "migration tests" ui_migration_tests
 baseline "release freeze tests" freeze_tests
 [ "$WASM" -eq 1 ] && baseline "candidate check" candidate_check
 if [ "$failures" -ne 0 ]; then
@@ -407,6 +414,335 @@ dt "a failure after a write is reported as partial" "$D/handlers.rs" \
 dt "a failed prune does not fail the deletion listing" "$D/handlers.rs" \
     '    let _ = prune_recordless_identities(s);' '    prune_recordless_identities(s)?;' \
     a_failed_prune_does_not_fail_the_deletion_listing
+dt "writing over an unreadable value never counts low (keys)" "$D/store.rs" \
+    '        let generation = self.next_generation(floor)?;
+        self.put(rel, &encode_versioned(generation, body))?;' \
+    '        let generation = self.next_generation(floor)?;
+        self.put(rel, &encode_versioned(generation, body))?;
+        self.adjust_usage(|u| Usage {
+            keys: u.keys.saturating_sub(2),
+            bytes: u.bytes,
+        });' \
+    replacing_an_unreadable_value_never_counts_low
+dt "writing over an unreadable value never counts low (bytes)" "$D/store.rs" \
+    '        let generation = self.next_generation(floor)?;
+        self.put(rel, &encode_versioned(generation, body))?;' \
+    '        let generation = self.next_generation(floor)?;
+        self.put(rel, &encode_versioned(generation, body))?;
+        self.adjust_usage(|u| Usage {
+            keys: u.keys,
+            bytes: u.bytes.saturating_sub(4096),
+        });' \
+    replacing_an_unreadable_value_never_counts_low
+dt "migration records never reach a successor" "$D/store.rs" \
+    '    !matches!(kind, ItemKind::MigrationJournal | ItemKind::MigrationMarker)' \
+    '    let _ = kind;
+    true' \
+    migration_records_are_not_exported
+dt "legacy imports take generations from the counter" "$D/store.rs" \
+    '        let generation = self.next_generation(current)?;
+        self.put(rel, &encode_versioned(generation, body))?;' \
+    '        let generation = current + 1;
+        self.put(rel, &encode_versioned(generation, body))?;' \
+    imported_items_take_their_generation_from_the_counter
+
+# The legacy walk.
+M="$STAGE/ui/src/migration"
+ut() { # name file old new test...
+    guard "$1" "$2" "$3" "$4" "tests:$5" ui_migration_tests
+}
+ut "silence never reads as absence" "$M/legacy_delegates.rs" \
+    '            LegacyReply::NoAnswer(_) => ProbeVerdict::NoReply,
+        })
+    }
+
+    async fn fetch_secrets(
+        &mut self,
+        predecessor: &DelegateKey,
+    ) -> Result<Vec<SecretPair>, String> {
+        let entry = self
+            .entry(predecessor)
+            .ok_or("a predecessor outside the lineage")?;
+        let read = self.read_row(&entry, predecessor).await;' \
+    '            LegacyReply::NoAnswer(_) => ProbeVerdict::Executable,
+        })
+    }
+
+    async fn fetch_secrets(
+        &mut self,
+        predecessor: &DelegateKey,
+    ) -> Result<Vec<SecretPair>, String> {
+        let entry = self
+            .entry(predecessor)
+            .ok_or("a predecessor outside the lineage")?;
+        if matches!(
+            self.reply(predecessor).await?,
+            LegacyReply::NoAnswer(_)
+        ) {
+            return Ok(Vec::new());
+        }
+        let read = self.read_row(&entry, predecessor).await;' \
+    a_silent_get_is_unresponsive_never_absent_never_sealed
+ut "no reply in time is never an absence" "$M/node.rs" \
+    '        .unwrap_or_else(|| LegacyReply::NoAnswer("no reply in time".to_string()))' \
+    '        .unwrap_or(LegacyReply::NotInstalled)' \
+    no_reply_in_time_is_a_silence_never_an_absence
+ut "an empty answer is never sealed" "$M/legacy_delegates.rs" \
+    '    if manager.is_empty() {
+        return Err("answered with nothing, which does not prove it holds nothing".into());
+    }' \
+    '    if manager.is_empty() {
+        return Ok((Vec::new(), HashMap::new()));
+    }' \
+    scenario_an_answered_empty_store_is_never_sealed
+ut "an import never overwrites" "$M/successor.rs" \
+    '        let conflict = match self.put(item.clone(), body, None).await {' \
+    '        let conflict = match self.merged_put(item.clone(), |_| Some(body.clone())).await {' \
+    scenario_an_import_never_overwrites_what_the_new_delegate_holds
+ut "a conflict does not prove an item is stored" "$M/successor.rs" \
+    '            Ok(None) => ItemWrite::retryable(format!("not stored after {conflict}")),' \
+    '            Ok(None) => ItemWrite::already_authoritative(),' \
+    scenario_a_false_conflict_does_not_pass_for_a_stored_item
+ut "a migrated identity starts unconfirmed" "$M/successor.rs" \
+    '                kind: ImportKind::Migration,' \
+    '                kind: ImportKind::UserRestore,' \
+    scenario_a_populated_node_carries_everything_over
+ut "the archive is carried" "$M/legacy_delegates.rs" \
+    '    for (id, archived) in &state.archived {' \
+    '    for (id, archived) in state.archived.iter().take(0) {' \
+    scenario_a_populated_node_carries_everything_over
+ut "identities are walked first" "$M/mod.rs" \
+    '        generation: e.generation + IDENTITY_GENERATION_OFFSET,' \
+    '        generation: e.generation + IDENTITY_GENERATION_OFFSET - 2_000_000,' \
+    scenario_identities_are_walked_before_any_local_state
+ut "a silent identity generation holds back its aliases" "$M/legacy_delegates.rs" \
+    '        if self.incomplete {
+            return AliasOwner::Unresolved;
+        }' \
+    '' \
+    a_silent_identity_generation_makes_an_unknown_alias_an_error
+ut "only a generation's own identities can orphan its aliases" "$M/legacy_delegates.rs" \
+    '        let Some((_, own)) = self.tables.iter().find(|(g, _)| *g == generation) else {
+            return AliasOwner::Unresolved;
+        };' \
+    '        let Some((_, own)) = self.tables.iter().find(|(g, _)| *g == generation) else {
+            return AliasOwner::NoIdentity;
+        };' \
+    scenario_local_state_waits_for_the_identities_of_its_generation
+ut "a newer row holds older ones back" "$M/legacy_delegates.rs" \
+    '                        .is_some_and(|row| row.attempts < HOLD_BACK_LOADS)' \
+    '                        .is_some_and(|_| false)' \
+    scenario_a_newer_row_that_answers_late_still_wins
+ut "the hold on older rows ends" "$M/legacy_delegates.rs" \
+    '                        .is_some_and(|row| row.attempts < HOLD_BACK_LOADS)' \
+    '                        .is_some_and(|_| true)' \
+    scenario_a_newer_row_that_stays_empty_holds_older_rows_only_for_a_while
+ut "only the newest row sets an identity's markers" "$M/successor.rs" \
+    '    if imported.is_some_and(|from| from >= generation) {' \
+    '    if false {' \
+    scenario_only_the_newest_row_holding_an_identity_sets_its_markers
+ut "read marks come from the newest row holding the alias" "$M/legacy_delegates.rs" \
+    '                let held = newer.aliases.contains(alias);' \
+    '                let held = false;' \
+    scenario_read_marks_come_from_the_newest_row_holding_the_alias
+ut "a cap ends the walk" "$M/successor.rs" \
+    '                self.counts.at_cap += 1;
+                ItemWrite::permanent(text)' \
+    '                self.counts.at_cap += 1;
+                ItemWrite::retryable(text)' \
+    scenario_a_cap_is_a_counted_rejection_and_the_walk_ends
+ut "an identity on its way is not a deleted one" "$M/successor.rs" \
+    '        let Some(owner) = owner.filter(|o| self.arrived.holds(o)) else {' \
+    '        let Some(owner) = owner else {' \
+    scenario_items_wait_for_an_identity_that_has_not_arrived
+ut "an unreadable journal is rebuilt" "$M/successor.rs" \
+    '            Err(e) if is_unreadable(&e) => {
+                self.journal_generation = None;' \
+    '            Err(e) if false && is_unreadable(&e) => {
+                self.journal_generation = None;' \
+    scenario_an_unreadable_journal_and_marker_are_rebuilt
+ut "one walk at a time" "$M/mod.rs" \
+    '    let _this_walk = one_walk.lock().await;' \
+    '    let _ = &one_walk;' \
+    scenario_walks_in_one_tab_run_one_at_a_time
+ut "a marker never lowers its data flag" "$M/successor.rs" \
+    '                started: Some(saw_data || self.started == Some(true)),' \
+    '                started: Some(saw_data),' \
+    a_marker_follows_the_crates_contract
+ut "the wildcard status retries" "$M/mod.rs" \
+    '        _ => Settled::Retry,' \
+    '        _ => Settled::Complete,' \
+    the_wildcard_status_arm_retries
+ut "the settings merge keeps what is stored" "$M/successor.rs" \
+    '        (present, _) => present.clone(),' \
+    '        (_, other) => other.clone(),' \
+    the_settings_merge_commutes_over_disjoint_fields
+
+ut "a typed not-installed never raises the Restore alarm" "$M/legacy_delegates.rs" \
+    '                LegacyReply::NotInstalled => false,' \
+    '                LegacyReply::NotInstalled => true,' \
+    only_a_silent_or_undecodable_row_counts_as_silent
+ut "an orphan move never overwrites an item" "$M/orphans.rs" \
+    '        Some(_) => Err("that identity already holds a different item with this id".to_string()),' \
+    '        Some(_) => Ok(()),' \
+    moving_an_orphan_never_overwrites_an_item_already_there
+ut "a silent identity row never orphans its aliases" "$M/legacy_delegates.rs" \
+    'AliasOwner::Unresolved if aliases.own_row_absent(generation) => None,' \
+    'AliasOwner::Unresolved => None,' \
+    scenario_a_silent_identity_row_never_orphans_its_aliases
+ut "one absent answer does not stand" "$M/legacy_delegates.rs" \
+    '.is_some_and(|answers| *answers >= HOLD_BACK_LOADS)' \
+    '.is_none_or(|answers| *answers < u32::MAX)' \
+    scenario_one_empty_answer_after_a_silence_orphans_nothing
+ut "a resolved identity row never stands as absent" "$M/legacy_delegates.rs" \
+    '        self.pending_walks
+            .get(entry.delegate_key.as_slice())
+            .is_some_and(|row| !row.started)
+            && self' \
+    '        true
+            && self' \
+    scenario_a_resolved_identity_row_never_stands_as_absent
+ut "one typed not-installed does not release a held marker" "$M/legacy_delegates.rs" \
+    '.is_some_and(|reply| row_holds_nothing(reply) && self.absence_stands(e))' \
+    '.is_some_and(|reply| row_holds_nothing(reply))' \
+    scenario_silence_past_the_hold_starts_no_contract_migration
+ut "a row whose import began never stands as absent" "$M/legacy_delegates.rs" \
+    '            .is_some_and(|row| !row.started)' \
+    '            .is_some_and(|_| true)' \
+    scenario_a_started_row_never_stands_as_absent
+ut "absent answers count only in a row" "$M/mod.rs" \
+    '                    l.absent_answers.remove(generation);' \
+    '' \
+    scenario_absent_answers_count_only_in_a_row
+ut "another generation's transient empty does not orphan" "$M/legacy_delegates.rs" \
+    '            } else if matches!(reply, Ok(r) if row_holds_nothing(&r)) && self.absence_stands(&entry)
+            {
+                tables.mark_absent(release);
+            } else {
+                tables.incomplete = true;
+            }' \
+    '            } else if matches!(&reply, Ok(r) if row_holds_nothing(r)) {
+                if self.absence_stands(&entry) {
+                    tables.mark_absent(release);
+                }
+            } else {
+                tables.incomplete = true;
+            }' \
+    scenario_a_transient_empty_in_another_generation_orphans_nothing
+ut "silence past the hold starts no contract migration" "$M/successor.rs" \
+    '                adopted.pending_held = hold && adopted.has_pending();' \
+    '                adopted.pending_held = false;' \
+    scenario_silence_past_the_hold_starts_no_contract_migration
+guard "held markers are not acted on" "$STAGE/ui/src/app/identity_store.rs" \
+    '    let Some(mut markers) = read.filter(|m| !m.pending_held) else {' \
+    '    let Some(mut markers) = read else {' \
+    "tests:scenario_silence_past_the_hold_starts_no_contract_migration" ui_migration_tests
+ut "held markers are released when the newer row settles" "$M/mod.rs" \
+    '    let released_markers = release_held_markers(successor.store(), newest_unsettled).await;' \
+    '    let released_markers = false && newest_unsettled.is_none();' \
+    scenario_silence_past_the_hold_starts_no_contract_migration
+ut "a held-back row counts nothing" "$M/legacy_delegates.rs" \
+    '        let mut mapped = MappingCounts::default();
+        let pairs = map_local_state(&bytes, entry.generation, &tables, &newer, &mut mapped)?;
+        self.counts.add(mapped);' \
+    '        let mut mapped = MappingCounts::default();
+        let pairs = map_local_state(&bytes, entry.generation, &tables, &newer, &mut self.counts)?;
+        self.counts.add(mapped);' \
+    scenario_a_row_held_back_counts_nothing
+guard "the gate asks an unconfirmed identity" "$STAGE/ui/src/app/migration_view.rs" \
+    '    if confirmed == Some(false) {' \
+    '    if confirmed == Some(true) {' \
+    "tests:an_unconfirmed_identity_is_asked_and_the_rest_go" ui_migration_tests
+guard "share asks the gate" "$STAGE/ui/src/app/settings.rs" \
+    'match super::migration_view::gate(user.read().logged_id().map(|i| i.confirmed)) {' \
+    'match (|_: Option<bool>| super::migration_view::Gate::Go)(user.read().logged_id().map(|i| i.confirmed)) {' \
+    "tests:share_and_send_go_through_the_gate" ui_migration_tests
+guard "an unconfirmed identity publishes nothing" "$STAGE/ui/src/api.rs" \
+    '        (_, Some(false), _) | (_, None, Some(false)) => NotFoundRoute::OwnUnconfirmed,
+        (_, Some(true), _) => NotFoundRoute::OwnInbox,
+        (_, None, Some(true)) => NotFoundRoute::OwnAftRecord,' \
+    '        (_, Some(_), _) => NotFoundRoute::OwnInbox,
+        (_, None, Some(_)) => NotFoundRoute::OwnAftRecord,' \
+    "tests:an_unconfirmed_identity_never_self_heals" ui_notfound_tests
+ut "NotFound is confirmed before an identity counts as gone" "$M/successor.rs" \
+    '            Ok(Reply::Status(status)) if status.unreadable_identities == 0' \
+    '            Ok(Reply::Status(_))' \
+    scenario_items_of_an_unreadable_identity_wait_for_it
+ut "a retry reads before it writes" "$M/successor.rs" \
+    '                Ok(Some(_)) => return ItemWrite::already_authoritative(),
+                Err(e) if !is_unreadable(&e)' \
+    '                Err(e) if !is_unreadable(&e)' \
+    scenario_a_retry_does_not_count_what_already_arrived
+guard "send asks the gate" "$STAGE/ui/src/app.rs" \
+    '            migration_view::gate(user.read().logged_id().map(|i| i.confirmed))' \
+    '            (|_: Option<bool>| migration_view::Gate::Go)(user.read().logged_id().map(|i| i.confirmed))' \
+    "tests:share_and_send_go_through_the_gate" ui_migration_tests
+guard "the list's word on confirmation wins" "$STAGE/ui/src/api.rs" \
+    '    listed.unwrap_or(held)' \
+    '    held' \
+    "tests:the_flag_routes_a_not_found_from_unconfirmed_to_publishing" ui_notfound_tests
+guard "an unconfirmed identity's arm publishes nothing" "$STAGE/ui/src/api.rs" \
+    '                            "contract of an unconfirmed identity not found (key={key}): not published"
+                        ));' \
+    '                            "contract of an unconfirmed identity not found (key={key}): not published"
+                        ));
+                        crate::app::identity_store::spawn_detached(async {});' \
+    "tests:the_unconfirmed_arm_has_no_publish_in_it" ui_notfound_tests
+
+ut "a silent predecessor does not delay the list" "$STAGE/ui/src/app/identity_store.rs" \
+    '    listing.await;
+    walk.await;' \
+    '    walk.await;
+    listing.await;' \
+    a_silent_predecessor_does_not_delay_the_list
+ut "the hold-back is three loads" "$M/legacy_delegates.rs" \
+    'pub(crate) const HOLD_BACK_LOADS: u32 = 3;' \
+    'pub(crate) const HOLD_BACK_LOADS: u32 = 1;' \
+    the_limits_are_the_documented_numbers,scenario_three_empty_loads_hold_back_and_the_fourth_releases
+ut "the back-off is one load in ten" "$M/mod.rs" \
+    'const BACKED_OFF_ONE_LOAD_IN: u8 = 10;' \
+    'const BACKED_OFF_ONE_LOAD_IN: u8 = 2;' \
+    the_back_off_runs_one_load_in_ten
+ut "the slowdown is one load in four" "$M/mod.rs" \
+    'const SLOWED_ONE_LOAD_IN: u8 = 4;' \
+    'const SLOWED_ONE_LOAD_IN: u8 = 10;' \
+    the_slowdown_runs_one_load_in_four
+ut "one young row keeps the walk going" "$M/mod.rs" \
+    '    let slowed = pending.iter().all(|p| {' \
+    '    let slowed = pending.iter().any(|p| {' \
+    one_young_row_keeps_the_walk_going_and_either_cause_slows_it
+ut "either cause slows the walk" "$M/mod.rs" \
+    '            && (p.absent_streak >= ABSENT_WALKS_BEFORE_BACKING_OFF
+                || p.attempts >= SILENT_WALKS_BEFORE_SLOWING)' \
+    '            && (p.absent_streak >= ABSENT_WALKS_BEFORE_BACKING_OFF
+                && p.attempts >= SILENT_WALKS_BEFORE_SLOWING)' \
+    one_young_row_keeps_the_walk_going_and_either_cause_slows_it
+ut "a lost swap is retried" "$M/successor.rs" \
+    'is_conflict(&e) && attempt + 1 < CAS_ATTEMPTS => attempt += 1,' \
+    'is_conflict(&e) && false => attempt += 1,' \
+    a_merged_write_retries_a_lost_swap_three_times
+ut "a conflict on a create is not a stored item" "$M/successor.rs" \
+    '            Ok(None) => ItemWrite::retryable(format!("not stored after {conflict}")),' \
+    '            Ok(None) => ItemWrite::written(),' \
+    scenario_a_false_conflict_is_not_a_stored_item_for_any_kind
+ut "NotFound asks the identity list" "$M/successor.rs" \
+    '                Ok(Reply::Identities(list)) if list.iter().all(|i| i.addr != owner)' \
+    '                Ok(Reply::Identities(_))' \
+    scenario_not_found_for_a_listed_identity_is_retried
+
+ut "a keyless error goes to nobody when two requests wait" "$M/node.rs" \
+    '        _ => None,
+    }
+}
+
+/// Offer a node delegate error' \
+    '        _ => waiting.first().cloned(),
+    }
+}
+
+/// Offer a node delegate error' \
+    an_error_is_attributed_to_one_waiter_or_to_none
+
 # A rename that still compiles: only the pinned bytes can catch it. (A new
 # variant is caught earlier, by the wildcard-free match in golden.rs, at
 # compile time.)

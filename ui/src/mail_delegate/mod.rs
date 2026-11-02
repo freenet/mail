@@ -215,6 +215,12 @@ pub(crate) fn may_be_mail_delegate_error(
     }
 }
 
+/// Whether a mail-delegate call is waiting for its answer.
+#[cfg_attr(not(feature = "use-node"), allow(dead_code))]
+pub(crate) fn calls_in_flight() -> bool {
+    PENDING.with(|p| !p.borrow().is_empty())
+}
+
 /// Why a waiting call was ended by [`fail_pending_calls`].
 const NODE_DELEGATE_ERROR: &str = "the node reported an error running the mail delegate";
 

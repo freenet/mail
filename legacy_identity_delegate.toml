@@ -2,10 +2,10 @@
 #
 # Every PREVIOUS identity-management delegate, so a migration can read
 # identities stored under an older delegate key (a delegate's secrets belong to
-# its key; a new key starts empty). The currently shipped delegate is NOT
-# listed: its hash comes from the committed artifact
-# (published-contract/wasm/v1/identity_management_code_hash), and
-# ui/src/legacy_registry.rs refuses a registry that contains it.
+# its key; a new key starts empty). The last generation is the one frozen in
+# published-contract/wasm/v1/, which the unified mail delegate replaced. The
+# mail delegate itself is NOT listed: ui/src/legacy_registry.rs refuses a
+# registry that contains it.
 #
 # Format: freenet-migrate-build's unified schema. `code_hash` is blake3 of the
 # delegate WASM (base58); `delegate_key` is blake3(code_hash ‖ params), which
@@ -23,3 +23,10 @@ code_hash = "2gFVM7AznH6gtMi2onvtKS2fosg3QFTnJSNNTYrHsrSV"
 delegate_key = "6ce4197510093e1f6e035dd077830a1cc0b9772cbfc1559ffa6c0012c15359bd"
 params_hex = "7b227365637265745f6b6579223a22353941453530393031363343373039344646453131464143343846354144423730353332433134343538393533394435373034343645423246333943414333313838454146323530384443363831393437453444304543314235463741343139227d"
 note = "identity-management as embedded in the live v0.2.5 webapp (#348)"
+
+[[delegate]]
+generation = 206
+code_hash = "BbtKhHhRR24CZ1vdnzErMtJejWxNL3VKAisgu6Wggkht"
+delegate_key = "08f93deef99256f513900e1a3cf258bd9d3f93cbef6a5b65133cceed42ac2dbc"
+params_hex = "7b227365637265745f6b6579223a22353941453530393031363343373039344646453131464143343846354144423730353332433134343538393533394435373034343645423246333943414333313838454146323530384443363831393437453444304543314235463741343139227d"
+note = "identity-management as shipped in v0.2.6 and v0.2.7 (published-contract/wasm/v1/)"

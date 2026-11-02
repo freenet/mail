@@ -90,6 +90,9 @@ fn kind_name(kind: &ItemKind) -> &'static str {
         ItemKind::Flags => "kind_flags",
         ItemKind::IdentitySettings => "kind_identity_settings",
         ItemKind::GlobalSettings => "kind_global_settings",
+        ItemKind::MigrationJournal => "kind_migration_journal",
+        ItemKind::MigrationMarker => "kind_migration_marker",
+        ItemKind::LegacyOrphan => "kind_legacy_orphan",
     }
 }
 
@@ -306,6 +309,9 @@ fn samples() -> Vec<(String, Vec<u8>)> {
         ItemKind::Flags,
         ItemKind::IdentitySettings,
         ItemKind::GlobalSettings,
+        ItemKind::MigrationJournal,
+        ItemKind::MigrationMarker,
+        ItemKind::LegacyOrphan,
     ] {
         out.push((kind_name(&kind).to_string(), enc(&kind)));
     }

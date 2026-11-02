@@ -540,6 +540,52 @@ pub(crate) struct MigrationMarkers {
     pub aft_record_wasm_hash: Option<String>,
     #[serde(default)]
     pub pending_aft_migration_from: Option<String>,
+    /// The v0.2.x release these markers were last imported from: only the
+    /// newest one holding the identity speaks for its contracts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub imported_generation: Option<u32>,
+    /// These pending migrations came from a row with a newer one that may
+    /// still hold this identity, which went silent. They wait for that row:
+    /// an old inbox put back over a newer one cannot be taken back.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pending_held: bool,
+}
+
+impl MigrationMarkers {
+    pub(crate) fn has_pending(&self) -> bool {
+        self.pending_migration_from.is_some() || self.pending_aft_migration_from.is_some()
+    }
+
+    /// Make the changes between `before` and `after`, leaving anything else
+    /// as it is: a walk may have written these markers since `before` was
+    /// read.
+    fn apply_changes(&mut self, before: &Self, after: &Self) {
+        fn apply(field: &mut Option<String>, before: &Option<String>, after: &Option<String>) {
+            if before != after {
+                field.clone_from(after);
+            }
+        }
+        apply(
+            &mut self.inbox_wasm_hash,
+            &before.inbox_wasm_hash,
+            &after.inbox_wasm_hash,
+        );
+        apply(
+            &mut self.pending_migration_from,
+            &before.pending_migration_from,
+            &after.pending_migration_from,
+        );
+        apply(
+            &mut self.aft_record_wasm_hash,
+            &before.aft_record_wasm_hash,
+            &after.aft_record_wasm_hash,
+        );
+        apply(
+            &mut self.pending_aft_migration_from,
+            &before.pending_aft_migration_from,
+            &after.pending_aft_migration_from,
+        );
+    }
 }
 
 const MARKERS_FIELD: &str = "migration";
@@ -613,8 +659,8 @@ pub(crate) struct LoadedIdentity {
 /// On drift the pending marker is set (so a session whose GET never resolves
 /// retries next time) and the current hash is stamped (so drift doesn't fire
 /// every session); the pending marker is cleared only once the migration PUT
-/// lands. With no drift, a first observation stamps the baseline and a stale
-/// pending marker is cleared.
+/// lands, so a session whose GET never resolved retries on the next load.
+/// With no drift, a first observation stamps the baseline.
 pub(crate) fn plan_migration(
     recorded: &mut Option<String>,
     pending: &mut Option<String>,
@@ -668,7 +714,87 @@ async fn report_unreadable_identities() {
     }
 }
 
+/// Confirm a migrated identity, from a fresh read of its generation.
+pub(crate) async fn confirm_identity(
+    addr: Addr,
+    user: Signal<crate::app::User>,
+) -> Result<(), String> {
+    let listed = ops::list_identities().await.map_err(|e| e.to_string())?;
+    let info = listed
+        .iter()
+        .find(|i| i.addr == addr)
+        .ok_or("this identity is no longer here")?;
+    // A retry after the record timed out finds it confirmed already.
+    if !info.confirmed {
+        let generation = ops::confirm_identity(addr, info.generation)
+            .await
+            .map_err(|e| e.to_string())?;
+        Identity::set_confirmed(&addr, generation, user);
+    }
+    // Its inbox and token record were not published while it was unconfirmed
+    // (`api::classify_notfound`): the GETs this sends again now can. A send
+    // needs the token record, so the prompt waits until the page holds it.
+    load_identities().await;
+    wait_for_token_record(addr).await
+}
+
+/// How long confirming waits for the token record to load.
+#[cfg(feature = "use-node")]
+const TOKEN_RECORD_WAIT_MS: u32 = 30_000;
+
+#[cfg(feature = "use-node")]
+async fn wait_for_token_record(addr: Addr) -> Result<(), String> {
+    const STEP_MS: u32 = 200;
+    for _ in 0..TOKEN_RECORD_WAIT_MS / STEP_MS {
+        let loaded =
+            Identity::by_addr(&addr).is_some_and(|i| crate::aft::AftRecords::has_record(&i));
+        if loaded {
+            return Ok(());
+        }
+        gloo_timers::future::TimeoutFuture::new(STEP_MS).await;
+    }
+    Err(
+        "This identity is confirmed, but its sending allowance has not loaded yet. \
+         Your draft is kept: try again in a moment."
+            .into(),
+    )
+}
+
+#[cfg(not(feature = "use-node"))]
+async fn wait_for_token_record(_addr: Addr) -> Result<(), String> {
+    Ok(())
+}
+
+/// A page load: the identities, then the migration, which runs after them so
+/// it delays nothing. While it runs an empty list shows that it is checking
+/// rather than offering to create an identity.
 pub(crate) async fn load_and_report() {
+    #[cfg(feature = "use-node")]
+    crate::app::migration_view::walk_starting();
+    list_then_walk(load_identities(), async {
+        #[cfg(feature = "use-node")]
+        crate::app::migration_view::after_listing(
+            crate::migration::node::NodeLegacy,
+            crate::migration::node::NodeInbox,
+        )
+        .await;
+    })
+    .await;
+}
+
+/// The listing finishes before the walk is polled, so a predecessor that never
+/// answers cannot delay it. Both are futures so a test can hold the walk.
+pub(crate) async fn list_then_walk(
+    listing: impl std::future::Future<Output = ()>,
+    walk: impl std::future::Future<Output = ()>,
+) {
+    listing.await;
+    walk.await;
+}
+
+/// Read the identities and their local state, and hand them to the node loop.
+/// Called again when the migration has brought more.
+pub(crate) async fn load_identities() {
     let infos = match with_retries(
         "loading identities",
         STARTUP_LOAD_RETRIES,
@@ -798,11 +924,11 @@ where
 /// the markers to write back, if they changed. Markers that could not be
 /// read (`None`) are unknown, never absent: nothing is planned and nothing
 /// is written, since writing defaults would wipe a pending migration marker.
-/// The next session tries again.
+/// The next session tries again. Held markers are not acted on at all.
 pub(crate) fn plan_load(
     read: Option<MigrationMarkers>,
 ) -> (Option<String>, Option<String>, Option<MigrationMarkers>) {
-    let Some(mut markers) = read else {
+    let Some(mut markers) = read.filter(|m| !m.pending_held) else {
         return (None, None, None);
     };
     let before = markers.clone();
@@ -837,9 +963,9 @@ pub(crate) async fn prepare(info: IdentityInfo) -> LoadedIdentity {
             None
         }
     };
-    let (inbox_migrate_from, aft_migrate_from, write) = plan_load(read);
-    if let Some(new) = write
-        && let Err(e) = update_markers(info.addr, move |m| *m = new.clone()).await
+    let (inbox_migrate_from, aft_migrate_from, write) = plan_load(read.clone());
+    if let (Some(new), Some(before)) = (write, read)
+        && let Err(e) = update_markers(info.addr, move |m| m.apply_changes(&before, &new)).await
     {
         crate::log::error(
             format!(
@@ -1609,6 +1735,8 @@ mod tests {
             pending_migration_from: None,
             aft_record_wasm_hash: Some("def".into()),
             pending_aft_migration_from: Some("old".into()),
+            imported_generation: Some(206),
+            pending_held: false,
         };
         let body = body_with_markers(Some(stored), &markers);
         assert_eq!(markers_from_body(Some(&body)), markers);
@@ -1643,8 +1771,16 @@ mod tests {
             (rec.as_deref(), pend.as_deref()),
             (Some("cur"), Some("old"))
         );
-        // Recorded == current with a leftover pending marker: stale, cleared.
+        // The session after that one: the hash is already stamped, and the
+        // marker alone says the migration has not landed.
         let (mut rec, mut pend) = (Some("cur".to_string()), Some("old".to_string()));
+        assert_eq!(
+            plan_migration(&mut rec, &mut pend, "cur"),
+            Some("old".into())
+        );
+        assert_eq!(pend.as_deref(), Some("old"));
+        // A marker naming the current hash has nothing to retry: cleared.
+        let (mut rec, mut pend) = (Some("cur".to_string()), Some("cur".to_string()));
         assert_eq!(plan_migration(&mut rec, &mut pend, "cur"), None);
         assert_eq!(pend, None);
     }
@@ -1661,6 +1797,8 @@ mod tests {
             pending_migration_from: None,
             aft_record_wasm_hash: Some(crate::aft::TOKEN_RECORD_CODE_HASH.to_string()),
             pending_aft_migration_from: None,
+            imported_generation: None,
+            pending_held: false,
         };
         let (inbox, aft, write) = plan_load(Some(read));
         assert_eq!(inbox.as_deref(), Some("old-inbox"));
@@ -1680,6 +1818,8 @@ mod tests {
             pending_migration_from: None,
             aft_record_wasm_hash: Some(crate::aft::TOKEN_RECORD_CODE_HASH.to_string()),
             pending_aft_migration_from: None,
+            imported_generation: None,
+            pending_held: false,
         };
         assert_eq!(plan_load(Some(read)), (None, None, None));
     }

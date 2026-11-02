@@ -227,6 +227,10 @@ enum NotFoundRoute {
     OwnInbox,
     /// Key is this client's own AFT token-allocation-record: same self-heal.
     OwnAftRecord,
+    /// Key belongs to a migrated identity its owner has not confirmed: nothing
+    /// is published for it. Confirming it reloads the identities, and the
+    /// GETs that sends land here as `OwnInbox` or `OwnAftRecord`.
+    OwnUnconfirmed,
     /// Not attributable to any of the above — log quietly, do not re-PUT.
     Unattributed,
 }
@@ -234,21 +238,28 @@ enum NotFoundRoute {
 /// Pure routing decision for a NotFound. The three sources are mutually
 /// exclusive in practice, so the order encodes priority: import first
 /// (cheapest, definitive), then own-inbox, then own-AFT, else unattributed.
+/// `own_inbox` and `own_aft` say whether the key is the identity's, and if so
+/// whether the identity is confirmed: an unconfirmed one publishes nothing.
 #[cfg_attr(not(feature = "use-node"), allow(dead_code))]
 fn classify_notfound(
     in_import_pending: bool,
-    is_own_inbox: bool,
-    is_own_aft: bool,
+    own_inbox: Option<bool>,
+    own_aft: Option<bool>,
 ) -> NotFoundRoute {
-    if in_import_pending {
-        NotFoundRoute::ContactImport
-    } else if is_own_inbox {
-        NotFoundRoute::OwnInbox
-    } else if is_own_aft {
-        NotFoundRoute::OwnAftRecord
-    } else {
-        NotFoundRoute::Unattributed
+    match (in_import_pending, own_inbox, own_aft) {
+        (true, _, _) => NotFoundRoute::ContactImport,
+        (_, Some(false), _) | (_, None, Some(false)) => NotFoundRoute::OwnUnconfirmed,
+        (_, Some(true), _) => NotFoundRoute::OwnInbox,
+        (_, None, Some(true)) => NotFoundRoute::OwnAftRecord,
+        (_, None, None) => NotFoundRoute::Unattributed,
     }
+}
+
+/// Whether an identity is confirmed: the list's word when it has one, else
+/// what the routing table held when the identity loaded.
+#[cfg_attr(not(feature = "use-node"), allow(dead_code))]
+fn confirmed_after_listing(held: bool, listed: Option<bool>) -> bool {
+    listed.unwrap_or(held)
 }
 
 #[cfg(test)]
@@ -260,11 +271,11 @@ mod notfound_routing {
         // A pending import key can never collide with an own key in
         // practice, but priority must still favour resolving the modal.
         assert_eq!(
-            classify_notfound(true, true, true),
+            classify_notfound(true, Some(true), Some(true)),
             NotFoundRoute::ContactImport
         );
         assert_eq!(
-            classify_notfound(true, false, false),
+            classify_notfound(true, None, None),
             NotFoundRoute::ContactImport
         );
     }
@@ -272,12 +283,12 @@ mod notfound_routing {
     #[test]
     fn own_inbox_when_not_import() {
         assert_eq!(
-            classify_notfound(false, true, false),
+            classify_notfound(false, Some(true), None),
             NotFoundRoute::OwnInbox
         );
         // Inbox takes priority over AFT if both somehow matched.
         assert_eq!(
-            classify_notfound(false, true, true),
+            classify_notfound(false, Some(true), Some(true)),
             NotFoundRoute::OwnInbox
         );
     }
@@ -285,16 +296,108 @@ mod notfound_routing {
     #[test]
     fn own_aft_when_only_aft() {
         assert_eq!(
-            classify_notfound(false, false, true),
+            classify_notfound(false, None, Some(true)),
             NotFoundRoute::OwnAftRecord
         );
+    }
+
+    /// A migrated identity with no inbox publishes nothing until its owner
+    /// says it is theirs: the confirm prompt exists for exactly this one.
+    #[test]
+    fn an_unconfirmed_identity_never_self_heals() {
+        let held = NotFoundRoute::OwnUnconfirmed;
+        assert_eq!(classify_notfound(false, Some(false), None), held);
+        assert_eq!(classify_notfound(false, None, Some(false)), held);
+        assert_eq!(
+            classify_notfound(true, Some(false), None),
+            NotFoundRoute::ContactImport
+        );
+    }
+
+    /// Confirming sends the GETs again, which is what runs the self-heal. The
+    /// text is read without its comments, so one cannot satisfy it.
+    #[test]
+    fn confirming_an_identity_runs_what_was_held() {
+        let source = include_str!("app/identity_store.rs");
+        let code: String = source
+            .lines()
+            .map(|l| l.split("//").next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let confirm = &code[code.find("fn confirm_identity").unwrap()..];
+        let confirm = &confirm[..confirm.find("\n}\n").unwrap()];
+        let confirmed = confirm.find("Identity::set_confirmed(").unwrap();
+        let reloaded = confirm.find("load_identities().await").unwrap();
+        let waited = confirm.find("wait_for_token_record(addr).await").unwrap();
+        assert!(confirmed < reloaded && reloaded < waited);
+    }
+
+    /// The routing table holds the identity as it loaded, and the list holds
+    /// the confirmation made since. Unconfirmed publishes nothing; confirming
+    /// moves the same key to the self-heal route.
+    #[test]
+    fn the_flag_routes_a_not_found_from_unconfirmed_to_publishing() {
+        let route = |held: bool, listed: Option<bool>| {
+            let c = super::confirmed_after_listing(held, listed);
+            (
+                classify_notfound(false, Some(c), None),
+                classify_notfound(false, None, Some(c)),
+            )
+        };
+        let held = (NotFoundRoute::OwnUnconfirmed, NotFoundRoute::OwnUnconfirmed);
+        let heals = (NotFoundRoute::OwnInbox, NotFoundRoute::OwnAftRecord);
+        assert_eq!(route(false, None), held);
+        assert_eq!(route(false, Some(false)), held);
+        assert_eq!(route(false, Some(true)), heals);
+        assert_eq!(route(true, None), heals);
+        // The list's word wins over what the table held.
+        assert_eq!(route(true, Some(false)), held);
+    }
+
+    /// The arm for an unconfirmed identity publishes nothing. Comments and
+    /// strings are removed first, so neither can satisfy or break this.
+    #[test]
+    fn the_unconfirmed_arm_has_no_publish_in_it() {
+        let source = include_str!("api.rs");
+        // The last one: the first is this test's own text.
+        let handler = &source[source.rfind("let route = classify_notfound(").unwrap()..];
+        let arm = &handler[handler.find("NotFoundRoute::OwnUnconfirmed =>").unwrap()..];
+        let arm = &arm[..arm.find("NotFoundRoute::Unattributed =>").unwrap()];
+        let mut bare = String::new();
+        for line in arm.lines() {
+            let mut in_string = false;
+            for c in line.chars() {
+                if c == '"' {
+                    in_string = !in_string;
+                } else if !in_string {
+                    bare.push(c);
+                }
+            }
+            bare.push('\n');
+        }
+        let bare: String = bare
+            .lines()
+            .map(|l| l.split("//").next().unwrap_or(""))
+            .collect();
+        for forbidden in [
+            "create_contract",
+            "spawn_detached",
+            "initial_inbox_state",
+            "put",
+            "await",
+        ] {
+            assert!(
+                !bare.contains(forbidden),
+                "the arm must not call `{forbidden}`: {bare}"
+            );
+        }
     }
 
     #[test]
     fn unattributed_when_no_table_owns_it() {
         // The case that previously fell through to "message not handled".
         assert_eq!(
-            classify_notfound(false, false, false),
+            classify_notfound(false, None, None),
             NotFoundRoute::Unattributed
         );
     }
@@ -1093,6 +1196,20 @@ mod token_generator_management {
         /// Token-generator delegates registered in this page session.
         static REGISTERED: RefCell<std::collections::HashSet<Vec<u8>>> =
             RefCell::new(std::collections::HashSet::new());
+        /// Registrations sent and not yet answered, by delegate key.
+        static AWAITING_REGISTRATION: RefCell<HashMap<Vec<u8>, Vec<futures::channel::oneshot::Sender<()>>>> =
+            RefCell::new(HashMap::new());
+    }
+
+    /// How long to wait for the node's answer to a registration.
+    const REGISTRATION_WAIT_MS: u32 = 15_000;
+
+    /// The node answered the registration of `key`.
+    pub(super) fn registration_answered(key: &DelegateKey) {
+        let waiting = AWAITING_REGISTRATION.with(|a| a.borrow_mut().remove(key.bytes()));
+        for sender in waiting.into_iter().flatten() {
+            let _ = sender.send(());
+        }
     }
 
     /// Register the token-generator delegate with `params` once per page
@@ -1106,8 +1223,38 @@ mod token_generator_management {
         if REGISTERED.with(|r| r.borrow().contains(key.bytes())) {
             return Ok(());
         }
-        delegate_api::create_delegate(client, TOKEN_GEN_CODE_HASH, TOKEN_GEN_CODE, params).await?;
-        REGISTERED.with(|r| r.borrow_mut().insert(key.bytes().to_vec()));
+        // The node compiles the delegate when it registers it, and a message
+        // sent meanwhile finds no delegate: wait for its answer.
+        let (answered, registered) = futures::channel::oneshot::channel();
+        let first = AWAITING_REGISTRATION.with(|a| {
+            let mut awaiting = a.borrow_mut();
+            let waiting = awaiting.entry(key.bytes().to_vec()).or_default();
+            waiting.push(answered);
+            waiting.len() == 1
+        });
+        // One registration: a second send in the compile window joins the wait.
+        if first
+            && let Err(e) =
+                delegate_api::create_delegate(client, TOKEN_GEN_CODE_HASH, TOKEN_GEN_CODE, params)
+                    .await
+        {
+            AWAITING_REGISTRATION.with(|a| a.borrow_mut().remove(key.bytes()));
+            return Err(e);
+        }
+        let timeout = gloo_timers::future::TimeoutFuture::new(REGISTRATION_WAIT_MS);
+        match futures::future::select(registered, timeout).await {
+            futures::future::Either::Left((Ok(_), _)) => {
+                REGISTERED.with(|r| r.borrow_mut().insert(key.bytes().to_vec()));
+            }
+            // Timed out, or the first caller's request failed: no answer.
+            _ => {
+                AWAITING_REGISTRATION.with(|a| a.borrow_mut().remove(key.bytes()));
+                crate::log::error(
+                    "the node did not confirm registering the token generator",
+                    None,
+                );
+            }
+        }
         Ok(())
     }
 
@@ -1426,9 +1573,18 @@ thread_local! {
     /// it is ("inbox" or "AFT record") and the identity's alias. The
     /// "not found ... re-PUTting" line is logged before the PUT is sent, so
     /// only the node's acknowledgement says the contract is held again.
-    static SELF_HEAL_PUTS: RefCell<Vec<(freenet_stdlib::prelude::ContractInstanceId, &'static str, Rc<str>)>> =
-        const { RefCell::new(Vec::new()) };
+    static SELF_HEAL_PUTS: RefCell<Vec<SelfHealPut>> = const { RefCell::new(Vec::new()) };
 }
+
+/// A self-heal PUT awaiting its ack: the contract, what it is, the alias, and
+/// the identity whose default token record it PUT (the AFT record's).
+#[cfg(feature = "use-node")]
+type SelfHealPut = (
+    freenet_stdlib::prelude::ContractInstanceId,
+    &'static str,
+    Rc<str>,
+    Option<crate::app::Identity>,
+);
 
 /// Remember a #288 self-heal PUT, so its acknowledgement is reported.
 #[cfg(feature = "use-node")]
@@ -1436,8 +1592,9 @@ fn await_self_heal_ack(
     id: freenet_stdlib::prelude::ContractInstanceId,
     what: &'static str,
     alias: Rc<str>,
+    default_record_of: Option<crate::app::Identity>,
 ) {
-    SELF_HEAL_PUTS.with(|p| p.borrow_mut().push((id, what, alias)));
+    SELF_HEAL_PUTS.with(|p| p.borrow_mut().push((id, what, alias, default_record_of)));
 }
 
 /// If `id` is a #288 self-heal PUT, report that the node now holds it.
@@ -1448,7 +1605,12 @@ fn self_heal_acked(id: &freenet_stdlib::prelude::ContractInstanceId) {
         let pos = p.iter().position(|(k, ..)| k == id)?;
         Some(p.remove(pos))
     });
-    if let Some((_, what, alias)) = acked {
+    if let Some((_, what, alias, default_record_of)) = acked {
+        // What was PUT is the default record and nothing GETs it again this
+        // session, yet a send needs it to assign a token.
+        if let Some(identity) = default_record_of {
+            crate::aft::AftRecords::seed_default_record(identity);
+        }
         crate::log::info(format!(
             "own {what} re-published (key={id}, alias=`{alias}`) — self-heal stored (#288)"
         ));
@@ -2492,6 +2654,11 @@ pub(crate) async fn node_comms(
                                 crate::log::error(format!("FIXME: {err}"), None)
                             }
                             RequestError::DelegateError(error) => {
+                                let token_call = crate::aft::token_request_in_flight();
+                                let others = token_call || crate::mail_delegate::calls_in_flight();
+                                if crate::migration::node::offer_error(error, others) {
+                                    return;
+                                }
                                 crate::log::error(
                                     format!("received delegate request error: {error}"),
                                     None,
@@ -2500,7 +2667,6 @@ pub(crate) async fn node_comms(
                                 // calls it may belong to now, as unknown,
                                 // rather than let them wait out their whole
                                 // timeout.
-                                let token_call = crate::aft::token_request_in_flight();
                                 if crate::mail_delegate::may_be_mail_delegate_error(
                                     error,
                                     crate::mail_delegate::node::key(),
@@ -2538,6 +2704,7 @@ pub(crate) async fn node_comms(
                     "GetResponse: key={key} state_size={}",
                     state.as_ref().len()
                 ));
+                crate::migration::node::offer_contract_state(&key, state.as_ref());
                 match InboxModel::contract_identity(&key) {
                     Some(identity) => {
                         crate::log::info(format!(
@@ -3231,6 +3398,11 @@ pub(crate) async fn node_comms(
                 }
             }
             HostResponse::DelegateResponse { key, values }
+                if crate::migration::node::takes_response(&key) =>
+            {
+                crate::migration::node::offer_response(&key, &values);
+            }
+            HostResponse::DelegateResponse { key, values }
                 if &key == crate::mail_delegate::node::key() =>
             {
                 // The mail delegate answers every request with exactly one
@@ -3257,6 +3429,7 @@ pub(crate) async fn node_comms(
                 // Phase 1 restore lands; for now, just ignore empty responses on
                 // the identities key.
                 if values.is_empty() {
+                    token_generator_management::registration_answered(&key);
                     let found = token_generator_management::CREATED_AFT_GEN.with(|keys| {
                         let pos = keys.borrow().iter().position(|(_, k)| k == &key);
                         if let Some(pos) = pos {
@@ -3404,6 +3577,7 @@ pub(crate) async fn node_comms(
                 // not handled" line every time we subscribe to inbox/AFT.
             }
             HostResponse::ContractResponse(ContractResponse::NotFound { instance_id }) => {
+                crate::migration::node::offer_contract_not_found(&instance_id);
                 // A GET resolved to NotFound: the contract isn't on the
                 // network. Three distinct sources land here, handled in
                 // priority order. They're mutually exclusive in practice
@@ -3425,10 +3599,18 @@ pub(crate) async fn node_comms(
                     contact_import::PENDING.with(|m| m.borrow_mut().remove(&instance_id));
                 let own_identity = InboxModel::contract_identity(&key);
                 let own_aft_identity = token_rec_to_id.get(&key).cloned();
+                // The tables hold a copy of the identity from when it loaded,
+                // so a confirmation since then is read from the list.
+                let confirmed = |id: &Identity| {
+                    confirmed_after_listing(
+                        id.confirmed,
+                        Identity::by_addr(&id.addr).map(|now| now.confirmed),
+                    )
+                };
                 let route = classify_notfound(
                     import_addr.is_some(),
-                    own_identity.is_some(),
-                    own_aft_identity.is_some(),
+                    own_identity.as_ref().map(confirmed),
+                    own_aft_identity.as_ref().map(confirmed),
                 );
                 match route {
                     NotFoundRoute::ContactImport => {
@@ -3460,7 +3642,7 @@ pub(crate) async fn node_comms(
                             "own inbox not found on the network (key={key}, alias=`{}`) — re-PUTting to self-heal (#288)",
                             identity.alias()
                         ));
-                        await_self_heal_ack(instance_id, "inbox", Rc::from(identity.alias()));
+                        await_self_heal_ack(instance_id, "inbox", Rc::from(identity.alias()), None);
                         let mut client = client.clone();
                         crate::app::identity_store::spawn_detached(async move {
                             let put = async {
@@ -3492,7 +3674,12 @@ pub(crate) async fn node_comms(
                             "own AFT record not found on the network (key={key}, alias=`{}`) — re-PUTting to self-heal (#288)",
                             identity.alias()
                         ));
-                        await_self_heal_ack(instance_id, "AFT record", Rc::from(identity.alias()));
+                        await_self_heal_ack(
+                            instance_id,
+                            "AFT record",
+                            Rc::from(identity.alias()),
+                            Some(identity.clone()),
+                        );
                         if let Err(e) =
                             token_record_management::create_contract(&mut client.clone(), &identity)
                                 .await
@@ -3505,6 +3692,11 @@ pub(crate) async fn node_comms(
                                 None,
                             );
                         }
+                    }
+                    NotFoundRoute::OwnUnconfirmed => {
+                        crate::log::info(format!(
+                            "contract of an unconfirmed identity not found (key={key}): not published"
+                        ));
                     }
                     NotFoundRoute::Unattributed => {
                         // Not an import, own inbox, or own AFT record. Log

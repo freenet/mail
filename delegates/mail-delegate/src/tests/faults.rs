@@ -52,12 +52,14 @@ const PINNED_BLIND_RUNS: &[(u64, usize, u32, u32)] = &[
     (934, 60, 200, 20),
 ];
 
-const KINDS: [ItemKind; 5] = [
+const KINDS: [ItemKind; 7] = [
     ItemKind::Draft,
     ItemKind::Sent,
     ItemKind::Kept,
     ItemKind::Flags,
     ItemKind::Contact,
+    ItemKind::MigrationMarker,
+    ItemKind::LegacyOrphan,
 ];
 
 struct Rng(u64);
@@ -663,12 +665,14 @@ impl Run {
                 });
             }
         }
-        self.send(Op::ListItems {
-            kind: ItemKind::Contact,
-            owner: None,
-            after: None,
-            limit: 256,
-        });
+        for kind in KINDS.iter().filter(|k| !store::shape(**k).0) {
+            self.send(Op::ListItems {
+                kind: *kind,
+                owner: None,
+                after: None,
+                limit: 256,
+            });
+        }
     }
 }
 
