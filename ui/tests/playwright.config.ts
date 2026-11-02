@@ -3,6 +3,13 @@ import { defineConfig, devices } from "@playwright/test";
 export default defineConfig({
   testDir: ".",
   testMatch: "*.spec.ts",
+  // The real-node migration spec needs the nodes and seed that
+  // `cargo make test-e2e-legacy-migration` sets up, which also sets this. The
+  // offline suite does not run it at all (a skip would exit 0), and the task
+  // finds no test, which Playwright reports as an error, if the variable is
+  // ever dropped.
+  testIgnore:
+    process.env.FREENET_LEGACY_SEEDED === "1" ? [] : ["legacy-migration.spec.ts"],
   timeout: 120_000,
   retries: 2,
   use: {

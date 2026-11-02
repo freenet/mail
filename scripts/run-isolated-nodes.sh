@@ -241,63 +241,61 @@ up() {
 }
 
 down() {
-    # Kill the entire process group (negative pgid). spawn_setsid puts
-    # each freenet under its own session, so this nukes any
-    # daemonized re-exec, child, or grandchild without relying on
-    # argv-matching (which macOS truncates).
+    # Kill by the PIDs recorded at startup, never by matching a command line:
+    # a prefix match on the iso root once killed a sibling test run. Kill the
+    # entire process group (negative pgid). spawn_setsid puts each freenet
+    # under its own session, so this takes any daemonized re-exec, child, or
+    # grandchild with it. Then check that what we recorded is gone.
+    local recorded=()
     for pgidfile in "$GW_PGIDFILE" "$PEER_PGIDFILE"; do
         if [ -f "$pgidfile" ]; then
             local pgid
             pgid=$(cat "$pgidfile")
             if [ -n "$pgid" ]; then
                 kill -TERM -- "-$pgid" 2>/dev/null || true
+                recorded+=("$pgid")
             fi
             rm -f "$pgidfile"
         fi
     done
-    if [ -f "$GW_PIDFILE" ]; then
-        kill "$(cat "$GW_PIDFILE")" 2>/dev/null || true
-        rm -f "$GW_PIDFILE"
-    fi
-    if [ -f "$PEER_PIDFILE" ]; then
-        kill "$(cat "$PEER_PIDFILE")" 2>/dev/null || true
-        rm -f "$PEER_PIDFILE"
-    fi
-    # Belt-and-suspenders: kill anything still bound to the iso WS
-    # ports. macOS `ps` truncates argv beyond ~32 chars, so the
-    # data-dir-based pkill from earlier versions silently missed
-    # processes whose argv had been trimmed.
-    for port in $GW_PORT_WS $PEER_PORT_WS; do
-        for pid in $(lsof -ti :"$port" -sTCP:LISTEN 2>/dev/null); do
-            kill "$pid" 2>/dev/null || true
-        done
-    done
-    # Final pass: any freenet process whose argv mentions the iso
-    # root, regardless of which leg it ran.
-    pkill -f "freenet network.*$ROOT" 2>/dev/null || true
-    # macOS truncates argv visible via pgrep in some cases (re-exec /
-    # fork patterns), so additionally kill any pid that holds an open
-    # file under the iso data tree. `lsof +D` recurses; safe because
-    # only freenet writes there.
-    if [ -d "$ROOT" ]; then
-        for pid in $(lsof -t +D "$ROOT" 2>/dev/null | sort -u); do
-            kill "$pid" 2>/dev/null || true
-        done
-    fi
-    # Wait for ports to drain so a back-to-back up doesn't race the
-    # bind. SIGKILL after a grace period.
-    for _ in $(seq 1 10); do
-        if ! lsof -i :$GW_PORT_WS -i :$PEER_PORT_WS -P -sTCP:LISTEN >/dev/null 2>&1; then
-            break
+    for pidfile in "$GW_PIDFILE" "$PEER_PIDFILE"; do
+        if [ -f "$pidfile" ]; then
+            local pid
+            pid=$(cat "$pidfile")
+            if [ -n "$pid" ]; then
+                kill "$pid" 2>/dev/null || true
+                recorded+=("$pid")
+            fi
+            rm -f "$pidfile"
         fi
-        sleep 0.5
     done
-    if lsof -i :$GW_PORT_WS -i :$PEER_PORT_WS -P -sTCP:LISTEN >/dev/null 2>&1; then
-        for port in $GW_PORT_WS $PEER_PORT_WS; do
-            for pid in $(lsof -ti :"$port" -sTCP:LISTEN 2>/dev/null); do
-                kill -9 "$pid" 2>/dev/null || true
-            done
+    # Verify the recorded processes died. A group that survives the grace
+    # period gets SIGKILL, and one that survives that is an error, not a
+    # quiet success: the next `up` would race it for the ports.
+    local alive=()
+    for id in ${recorded[@]+"${recorded[@]}"}; do
+        for _ in $(seq 1 20); do
+            kill -0 "$id" 2>/dev/null || break
+            sleep 0.25
         done
+        if kill -0 "$id" 2>/dev/null; then
+            kill -KILL -- "-$id" 2>/dev/null || true
+            kill -KILL "$id" 2>/dev/null || true
+            sleep 0.5
+            if kill -0 "$id" 2>/dev/null; then
+                alive+=("$id")
+            fi
+        fi
+    done
+    if [ "${#alive[@]}" -ne 0 ]; then
+        echo "error: recorded iso node processes still running after SIGKILL: ${alive[*]}" >&2
+        return 1
+    fi
+    # Nothing is killed by port, by open file or by command line: those reach
+    # processes that are not ours. If something else still holds a port, say
+    # so, and let `up` fail on the bind.
+    if lsof -i :$GW_PORT_WS -i :$PEER_PORT_WS -P -sTCP:LISTEN >/dev/null 2>&1; then
+        echo "warning: something not started by this script still listens on $GW_PORT_WS or $PEER_PORT_WS; not touching it" >&2
     fi
     echo "stopped"
 }

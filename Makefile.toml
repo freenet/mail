@@ -1058,7 +1058,16 @@ script = '''
 set -euo pipefail
 ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
 ISO_ROOT="${FREENET_E2E_ROOT:-$HOME/freenet-mail-iso}"
-GW_PORT="${FREENET_ISO_GW_PORT:-7510}"
+# Ports come from the environment, or are free ones: a fixed 7510 collides
+# with whatever else is running on the machine.
+free_port() {
+    python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])'
+}
+export FREENET_ISO_GW_PORT="${FREENET_ISO_GW_PORT:-$(free_port)}"
+export FREENET_ISO_PEER_PORT="${FREENET_ISO_PEER_PORT:-$(free_port)}"
+export FREENET_ISO_GW_NET_PORT="${FREENET_ISO_GW_NET_PORT:-$(free_port)}"
+export FREENET_ISO_PEER_NET_PORT="${FREENET_ISO_PEER_NET_PORT:-$(free_port)}"
+GW_PORT="$FREENET_ISO_GW_PORT"
 KEEP="${FREENET_E2E_KEEP:-0}"
 
 cleanup() {
