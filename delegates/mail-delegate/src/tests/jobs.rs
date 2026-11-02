@@ -1441,7 +1441,11 @@ fn a_missing_inbox_outside_the_scan_slice_waits_out_its_backoff() {
         assert_eq!((gets(&out), subscribes(&out)), (0, 0), "at +{later}");
     }
     env.now = Some(NOW + MISSING_BACKOFF_FIRST_SECS);
-    assert_eq!(subscribes(&wake(&mut env, "v1watch")), n, "asked again after");
+    assert_eq!(
+        subscribes(&wake(&mut env, "v1watch")),
+        n,
+        "asked again after"
+    );
 }
 
 #[test]
@@ -1451,7 +1455,9 @@ fn a_missing_inbox_with_the_duty_out_waits_out_its_backoff() {
     let mut budget = Budget::new(NOW);
     assert!(budget.take_duty(DUTY_BURST_MS));
     let body = to_cbor(&budget).unwrap();
-    Space::new(&mut env, GLOBAL).put("bg/budget", &body).unwrap();
+    Space::new(&mut env, GLOBAL)
+        .put("bg/budget", &body)
+        .unwrap();
     let out = wake(&mut env, "v1watch");
     assert_eq!((gets(&out), subscribes(&out)), (0, 1), "nothing scanned");
     env.now = Some(NOW + 10);
