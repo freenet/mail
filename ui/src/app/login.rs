@@ -1161,10 +1161,10 @@ pub(super) fn Identities() -> Element {
                             title: "Share your address with someone",
                             "data-testid": testid::FM_ID_SHARE,
                             onclick: move |_| {
-                                if Identity::get_alias(&unconfirmed_alias).is_some_and(|i| !i.confirmed) {
-                                    confirm_open.set(true);
-                                } else {
-                                    open_share.call(());
+                                let confirmed = Identity::get_alias(&unconfirmed_alias).map(|i| i.confirmed);
+                                match super::migration_view::gate(confirmed) {
+                                    super::migration_view::Gate::Ask => confirm_open.set(true),
+                                    super::migration_view::Gate::Go => open_share.call(()),
                                 }
                             },
                             "↗"

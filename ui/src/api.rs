@@ -255,6 +255,13 @@ fn classify_notfound(
     }
 }
 
+/// Whether an identity is confirmed: the list's word when it has one, else
+/// what the routing table held when the identity loaded.
+#[cfg_attr(not(feature = "use-node"), allow(dead_code))]
+fn confirmed_after_listing(held: bool, listed: Option<bool>) -> bool {
+    listed.unwrap_or(held)
+}
+
 #[cfg(test)]
 mod notfound_routing {
     use super::{NotFoundRoute, classify_notfound};
@@ -316,6 +323,66 @@ mod notfound_routing {
         let confirmed = confirm.find("Identity::set_confirmed").unwrap();
         let reloaded = confirm.find("spawn_detached(load_identities())").unwrap();
         assert!(confirmed < reloaded);
+    }
+
+    /// The routing table holds the identity as it loaded, and the list holds
+    /// the confirmation made since. Unconfirmed publishes nothing; confirming
+    /// moves the same key to the self-heal route.
+    #[test]
+    fn the_flag_routes_a_not_found_from_unconfirmed_to_publishing() {
+        let route = |held: bool, listed: Option<bool>| {
+            let c = super::confirmed_after_listing(held, listed);
+            (
+                classify_notfound(false, Some(c), None),
+                classify_notfound(false, None, Some(c)),
+            )
+        };
+        let held = (NotFoundRoute::OwnUnconfirmed, NotFoundRoute::OwnUnconfirmed);
+        let heals = (NotFoundRoute::OwnInbox, NotFoundRoute::OwnAftRecord);
+        assert_eq!(route(false, None), held);
+        assert_eq!(route(false, Some(false)), held);
+        assert_eq!(route(false, Some(true)), heals);
+        assert_eq!(route(true, None), heals);
+        // The list's word wins over what the table held.
+        assert_eq!(route(true, Some(false)), held);
+    }
+
+    /// The arm for an unconfirmed identity publishes nothing. Comments and
+    /// strings are removed first, so neither can satisfy or break this.
+    #[test]
+    fn the_unconfirmed_arm_has_no_publish_in_it() {
+        let source = include_str!("api.rs");
+        let handler = &source[source.find("let route = classify_notfound(").unwrap()..];
+        let arm = &handler[handler.find("NotFoundRoute::OwnUnconfirmed =>").unwrap()..];
+        let arm = &arm[..arm.find("NotFoundRoute::Unattributed =>").unwrap()];
+        let mut bare = String::new();
+        for line in arm.lines() {
+            let mut in_string = false;
+            for c in line.chars() {
+                if c == '"' {
+                    in_string = !in_string;
+                } else if !in_string {
+                    bare.push(c);
+                }
+            }
+            bare.push('\n');
+        }
+        let bare: String = bare
+            .lines()
+            .map(|l| l.split("//").next().unwrap_or(""))
+            .collect();
+        for forbidden in [
+            "create_contract",
+            "spawn_detached",
+            "initial_inbox_state",
+            "put",
+            "await",
+        ] {
+            assert!(
+                !bare.contains(forbidden),
+                "the arm must not call `{forbidden}`: {bare}"
+            );
+        }
     }
 
     #[test]
@@ -3467,7 +3534,10 @@ pub(crate) async fn node_comms(
                 // The tables hold a copy of the identity from when it loaded,
                 // so a confirmation since then is read from the list.
                 let confirmed = |id: &Identity| {
-                    Identity::get_alias(&id.alias).map_or(id.confirmed, |now| now.confirmed)
+                    confirmed_after_listing(
+                        id.confirmed,
+                        Identity::get_alias(&id.alias).map(|now| now.confirmed),
+                    )
                 };
                 let route = classify_notfound(
                     import_addr.is_some(),

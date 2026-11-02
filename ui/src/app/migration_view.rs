@@ -37,6 +37,26 @@ pub(crate) struct MigrationView {
     pub report: String,
 }
 
+/// What sending or sharing as an identity does first. A migrated identity is
+/// confirmed by its owner before it first sends or shares; one that is not
+/// logged in (`None`) is not asked, and the action fails on its own terms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Gate {
+    /// Show the confirm prompt and do nothing else yet.
+    Ask,
+    /// Go ahead.
+    Go,
+}
+
+/// The gate for an identity whose confirmed flag is `confirmed`.
+pub(crate) fn gate(confirmed: Option<bool>) -> Gate {
+    if confirmed == Some(false) {
+        Gate::Ask
+    } else {
+        Gate::Go
+    }
+}
+
 /// The identity whose recovery-key panel the notice asked to open.
 pub(crate) static BACKUP_REQUEST: GlobalSignal<Option<Addr>> = Signal::global(|| None);
 

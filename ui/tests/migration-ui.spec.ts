@@ -90,3 +90,40 @@ test("a migrated identity is confirmed before it is shared", async ({ page }) =>
   await expect(prompt).toHaveCount(0);
   await expect(testid(page, TID.fmShareModal)).toBeVisible();
 });
+
+// An identity nobody has confirmed does not send. The prompt shows, nothing
+// leaves (no Sent toast, nothing in Sent), and confirming sends exactly once.
+// Deleting the early return in the send handler fails this test.
+test("a migrated identity cannot send until it is confirmed, and confirming sends", async ({
+  page,
+}) => {
+  await open(page, "data");
+  await page
+    .locator(`[data-testid="${TID.fmIdRow}"][data-alias="alice"] [data-testid="${TID.fmIdOpen}"]`)
+    .click();
+  await page.locator(`[data-testid="${TID.fmApp}"]`).waitFor({ timeout: 10_000 });
+  const burger = page.locator('[data-testid="fm-hamburger"]');
+  if (await burger.isVisible().catch(() => false)) await burger.click();
+  await testid(page, TID.fmComposeBtn).click();
+  const sheet = testid(page, TID.fmComposeSheet);
+  await sheet.waitFor({ timeout: 5_000 });
+  await sheet.locator('input[placeholder="alias or address"]').fill("address2");
+  await sheet.locator('input[placeholder="subject"]').fill("held until confirmed");
+  await sheet.locator("textarea.sheet-textarea").fill("body");
+
+  await testid(page, TID.fmSend).click();
+  const prompt = testid(page, TID.fmConfirmIdentity);
+  await expect(prompt).toContainText("Confirm this identity is yours");
+  // Long enough for a send that was not held to show its toast.
+  await page.waitForTimeout(1_500);
+  const sent = page.locator(`[data-testid="${TID.fmToast}"]`).filter({ hasText: "Sent" });
+  await expect(sent).toHaveCount(0);
+  await expect(sheet).toBeVisible();
+
+  await testid(page, TID.fmConfirmIdentitySubmit).click();
+  await expect(prompt).toHaveCount(0);
+  await expect(sent).toHaveCount(1, { timeout: 5_000 });
+  if (await burger.isVisible().catch(() => false)) await burger.click();
+  await page.locator('[data-testid="fm-folder-sent"]').click();
+  await expect(testid(page, TID.fmSentCard)).toHaveCount(1);
+});

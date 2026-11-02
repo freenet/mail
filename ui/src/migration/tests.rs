@@ -2347,26 +2347,52 @@ fn only_a_silent_or_undecodable_row_counts_as_silent() {
     }
 }
 
-/// A migrated identity is confirmed by its owner before it first sends.
-/// Every place a contact card is built checks first. The prompt shows the
-/// card of the identity it is asking about, and is not a share.
+/// A migrated identity is confirmed by its owner before it first sends or
+/// shares. Share and send both ask `gate`; the offline Playwright suite
+/// drives the screens (`migration-ui.spec.ts`).
 #[test]
-fn sharing_asks_an_unconfirmed_identity_to_confirm_first() {
-    let settings = include_str!("../app/settings.rs");
-    let click = &settings[settings.find("let on_share = move |_|").unwrap()..];
-    let asks = click.find("confirm_share.set(true)").unwrap();
-    let opens = click.find("open_share.call(())").unwrap();
-    assert!(asks < opens, "settings checks first");
-    assert!(click[..asks].contains("if user.read().logged_id().is_some_and(|i| !i.confirmed) {"));
+fn an_unconfirmed_identity_is_asked_and_the_rest_go() {
+    use crate::app::migration_view::{Gate, gate};
+    assert_eq!(gate(Some(false)), Gate::Ask);
+    assert_eq!(gate(Some(true)), Gate::Go);
+    assert_eq!(
+        gate(None),
+        Gate::Go,
+        "nobody is logged in: nothing to confirm"
+    );
+}
 
-    let login = include_str!("../app/login.rs");
+/// Share and send both go through the gate before they do anything, and the
+/// send's gate leaves the closure when it asks (a `let ... else` must
+/// diverge), so nothing after it can run.
+#[test]
+fn share_and_send_go_through_the_gate() {
+    fn code(source: &str) -> String {
+        source
+            .lines()
+            .map(|l| l.split("//").next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+    let app = code(include_str!("../app.rs"));
+    let send = &app[app.find("let send_now = use_callback").unwrap()..];
+    let gated = send.find("migration_view::gate(").unwrap();
+    assert!(gated < send.find("let to_val = to.read()").unwrap());
+    assert!(send[gated..].contains("else {"));
+    let settings = code(include_str!("../app/settings.rs"));
+    let click = &settings[settings.find("let on_share = move |_|").unwrap()..];
+    assert!(
+        click.find("migration_view::gate(").unwrap() < click.find("open_share.call(())").unwrap()
+    );
+    let login = code(include_str!("../app/login.rs"));
     let click = &login[login.find("testid::FM_ID_SHARE").unwrap()..];
-    let asks = click.find("confirm_open.set(true)").unwrap();
-    assert!(asks < click.find("open_share.call(())").unwrap());
+    assert!(
+        click.find("migration_view::gate(").unwrap() < click.find("open_share.call(())").unwrap()
+    );
 
     let sites = [
-        ("settings", settings),
-        ("login", login),
+        ("settings", include_str!("../app/settings.rs")),
+        ("login", include_str!("../app/login.rs")),
         ("the prompt", include_str!("../app/migration_view.rs")),
     ];
     for (name, source) in sites {
@@ -2376,18 +2402,4 @@ fn sharing_asks_an_unconfirmed_identity_to_confirm_first() {
             "{name}: a new card site needs the check"
         );
     }
-}
-
-#[test]
-fn sending_asks_an_unconfirmed_identity_to_confirm_first() {
-    let source = include_str!("../app.rs");
-    let send = &source[source.find("let send_now = use_callback").unwrap()..];
-    let asks = send.find("confirm_sender.set(true)").unwrap();
-    let reads_recipient = send.find("let to_val = to.read()").unwrap();
-    assert!(
-        asks < reads_recipient,
-        "the check precedes everything the send does"
-    );
-    let check = "if user.read().logged_id().is_some_and(|i| !i.confirmed) {";
-    assert!(send[..asks].trim_end().ends_with(check) || send[..asks].contains(check));
 }

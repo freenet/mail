@@ -5800,10 +5800,14 @@ fn ComposeSheet() -> Element {
     let sender = user.read().logged_id().cloned();
     let send_now = use_callback(move |()| {
         // A migrated identity is confirmed by its owner before it first sends.
-        if user.read().logged_id().is_some_and(|i| !i.confirmed) {
+        // `let ... else` must leave the closure, so nothing below can run
+        // for an identity that has not been asked.
+        let migration_view::Gate::Go =
+            migration_view::gate(user.read().logged_id().map(|i| i.confirmed))
+        else {
             confirm_sender.set(true);
             return;
-        }
+        };
         let to_val = to.read().clone();
         // Mail goes to the address recorded when the recipient was chosen
         // (an alias, a clash label or a pasted bs58 inbox address), and is
@@ -6451,13 +6455,19 @@ fn ComposeSheet() -> Element {
                 }
             }
             if *confirm_sender.read() && let Some(identity) = sender.clone() {
-                migration_view::ConfirmIdentityPrompt {
-                    identity,
-                    on_confirmed: move |_| {
-                        confirm_sender.set(false);
-                        send_now.call(());
-                    },
-                    on_cancel: move |_| confirm_sender.set(false),
+                // The prompt sits inside this veil, whose click closes the
+                // compose sheet. A click in the prompt must not reach it: the
+                // sheet would unmount and take the confirmation, and the send
+                // it resumes, with it.
+                div { onclick: move |ev| { ev.stop_propagation(); },
+                    migration_view::ConfirmIdentityPrompt {
+                        identity,
+                        on_confirmed: move |_| {
+                            confirm_sender.set(false);
+                            send_now.call(());
+                        },
+                        on_cancel: move |_| confirm_sender.set(false),
+                    }
                 }
             }
         }

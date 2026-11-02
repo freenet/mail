@@ -1150,10 +1150,9 @@ fn ScrContacts() -> Element {
     });
     let on_share = move |_| {
         // A migrated identity is confirmed by its owner before it is shared.
-        if user.read().logged_id().is_some_and(|i| !i.confirmed) {
-            confirm_share.set(true);
-        } else {
-            open_share.call(());
+        match super::migration_view::gate(user.read().logged_id().map(|i| i.confirmed)) {
+            super::migration_view::Gate::Ask => confirm_share.set(true),
+            super::migration_view::Gate::Go => open_share.call(()),
         }
     };
     let confirm_identity = user.read().logged_id().cloned();

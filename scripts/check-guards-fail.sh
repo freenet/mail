@@ -640,14 +640,14 @@ ut "a held-back row counts nothing" "$M/legacy_delegates.rs" \
         let pairs = map_local_state(&bytes, entry.generation, &tables, &newer, &mut self.counts)?;
         self.counts.add(mapped);' \
     scenario_a_row_held_back_counts_nothing
-guard "share asks an unconfirmed identity to confirm" "$STAGE/ui/src/app/settings.rs" \
-    '        if user.read().logged_id().is_some_and(|i| !i.confirmed) {
-            confirm_share.set(true);
-        } else {' \
-    '        if false {
-            confirm_share.set(true);
-        } else {' \
-    "tests:sharing_asks_an_unconfirmed_identity_to_confirm_first" ui_migration_tests
+guard "the gate asks an unconfirmed identity" "$STAGE/ui/src/app/migration_view.rs" \
+    '    if confirmed == Some(false) {' \
+    '    if confirmed == Some(true) {' \
+    "tests:an_unconfirmed_identity_is_asked_and_the_rest_go" ui_migration_tests
+guard "share asks the gate" "$STAGE/ui/src/app/settings.rs" \
+    'match super::migration_view::gate(user.read().logged_id().map(|i| i.confirmed)) {' \
+    'match (|_: Option<bool>| super::migration_view::Gate::Go)(user.read().logged_id().map(|i| i.confirmed)) {' \
+    "tests:share_and_send_go_through_the_gate" ui_migration_tests
 guard "an unconfirmed identity publishes nothing" "$STAGE/ui/src/api.rs" \
     '        (_, Some(false), _) | (_, None, Some(false)) => NotFoundRoute::OwnUnconfirmed,
         (_, Some(true), _) => NotFoundRoute::OwnInbox,
@@ -664,10 +664,21 @@ ut "a retry reads before it writes" "$M/successor.rs" \
                 Err(e) if !is_unreadable(&e)' \
     '                Err(e) if !is_unreadable(&e)' \
     scenario_a_retry_does_not_count_what_already_arrived
-guard "send asks an unconfirmed identity to confirm" "$STAGE/ui/src/app.rs" \
-    '        if user.read().logged_id().is_some_and(|i| !i.confirmed) {' \
-    '        if false && user.read().logged_id().is_some_and(|i| !i.confirmed) {' \
-    "tests:sending_asks_an_unconfirmed_identity_to_confirm_first" ui_migration_tests
+guard "send asks the gate" "$STAGE/ui/src/app.rs" \
+    '            migration_view::gate(user.read().logged_id().map(|i| i.confirmed))' \
+    '            (|_: Option<bool>| migration_view::Gate::Go)(user.read().logged_id().map(|i| i.confirmed))' \
+    "tests:share_and_send_go_through_the_gate" ui_migration_tests
+guard "the list's word on confirmation wins" "$STAGE/ui/src/api.rs" \
+    '    listed.unwrap_or(held)' \
+    '    held' \
+    "tests:the_flag_routes_a_not_found_from_unconfirmed_to_publishing" ui_notfound_tests
+guard "an unconfirmed identity's arm publishes nothing" "$STAGE/ui/src/api.rs" \
+    '                            "contract of an unconfirmed identity not found (key={key}): not published"
+                        ));' \
+    '                            "contract of an unconfirmed identity not found (key={key}): not published"
+                        ));
+                        crate::app::identity_store::spawn_detached(async {});' \
+    "tests:the_unconfirmed_arm_has_no_publish_in_it" ui_notfound_tests
 
 # A rename that still compiles: only the pinned bytes can catch it. (A new
 # variant is caught earlier, by the wildcard-free match in golden.rs, at
