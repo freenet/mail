@@ -473,8 +473,7 @@ impl<S: MailStore, I: V1InboxReader> MailSuccessor<S, I> {
     /// Bring the ledger up to date, with `mapping` counted and `also` applied.
     /// A change to the totals brings a dismissed notice back. A ledger that
     /// cannot be written costs the notice, never the walk: what was not
-    /// recorded goes with the next write. The ledger holds counts and the
-    /// notice's state only; nothing the walk decides rests on it.
+    /// recorded goes with the next write.
     pub(crate) async fn update_ledger(
         &mut self,
         mapping: MappingCounts,

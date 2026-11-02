@@ -1,13 +1,14 @@
 //! Orphans: items of a v0.2.x alias no identity could be found for. They stay
 //! here until the user says which identity they belong to. Moving never
-//! overwrites: an item already under that id stays and the orphan with it.
+//! overwrites: an item already under that id stays and the orphan with it. A
+//! move is recorded, so scrub can tell it from an orphan that never landed.
 
 use std::collections::BTreeMap;
 
 use freenet_mail_protocol::{Addr, FailureCode, Item, ItemKind, ItemRef, Op, Reply};
 
-use super::ledger::list_items;
-use super::legacy_delegates::{OrphanItem, id16, text_id};
+use super::ledger::{list_items, update_ledger};
+use super::legacy_delegates::{OrphanItem, hex, id16, text_id};
 use super::successor::{MailStore, get_item, merge_fields, merged_put, put_item, settings_item};
 use crate::mail_delegate::CallError;
 
@@ -73,8 +74,8 @@ async fn create<S: MailStore>(store: &mut S, item: ItemRef, body: Vec<u8>) -> Re
     }
 }
 
-/// Move one orphan to `owner`: the item first, then the orphan, so an
-/// interruption leaves two copies and never none.
+/// Move one orphan to `owner`: the item, then the record of the move, then
+/// the orphan, so an interruption leaves two copies and never none.
 pub(crate) async fn move_one<S: MailStore>(
     store: &mut S,
     orphan: &Item,
@@ -97,6 +98,14 @@ pub(crate) async fn move_one<S: MailStore>(
         let item = destination(&decoded, owner).ok_or("an item of an unknown kind")?;
         create(store, item, decoded.body.into_bytes()).await?;
     }
+    let id = hex(&orphan.item.id);
+    update_ledger(store, |l| {
+        if !l.moved.contains(&id) {
+            l.moved.push(id.clone());
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?;
     let op = Op::DeleteItem {
         item: orphan.item.clone(),
         expected_gen: orphan.generation,

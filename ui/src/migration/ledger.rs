@@ -1,7 +1,7 @@
-//! The migration's own record: what the upgrade notice counts and whether it
-//! was dismissed. A `MigrationMarker` item under an id no predecessor key can
-//! equal. That kind is per origin and never exported, and the walk never reads
-//! it.
+//! The migration's own record: what the upgrade notice counts, whether it was
+//! dismissed, and scrub's journal ([`super::scrub`]). `MigrationMarker` items
+//! under ids no predecessor key can equal. That kind is per origin and never
+//! exported.
 
 use std::collections::BTreeMap;
 
@@ -10,6 +10,7 @@ use freenet_stdlib::prelude::blake3;
 use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
 
+use super::scrub::Blocker;
 use super::successor::{MailStore, MigrationCounts, get_item, merged_put};
 use crate::mail_delegate::CallError;
 
@@ -18,9 +19,9 @@ use crate::mail_delegate::CallError;
 pub(crate) struct Ledger {
     pub totals: MigrationCounts,
     pub notice_dismissed: bool,
-    /// Each identity row's absent-or-empty answers in a row, by lineage
-    /// generation. Any other answer ends the run. The journal cannot give
-    /// this: its streak counts typed "not installed" only.
+    /// Each row's absent-or-empty answers in a row, by lineage generation.
+    /// Any other answer ends the run. The journal cannot give this: its
+    /// streak counts typed "not installed" only.
     pub absent_answers: BTreeMap<u32, u32>,
     /// The last walk found a row silent or unreadable. Loads that do not walk
     /// show this.
@@ -30,6 +31,20 @@ pub(crate) struct Ledger {
     /// The identities the walk brought in: the notice offers each one's
     /// recovery key.
     pub migrated: Vec<Addr>,
+    /// Page time before the first walk imported anything. `last_backup_at`
+    /// is imported with the settings, so only a later value is a backup made
+    /// since the move.
+    pub migration_started_ms: Option<i64>,
+    /// How many chunks the imported-ids snapshot has, once it is written.
+    pub snapshot_chunks: Option<u32>,
+    /// Orphans moved to an identity, by item id in hex. The snapshot can be
+    /// written after a move, and could not then list what the move took away.
+    pub moved: Vec<String>,
+    /// Scrub's journal, by lineage generation: present once a row's clearing
+    /// has begun, `true` once it is finished.
+    pub scrubbed: BTreeMap<u32, bool>,
+    /// What stopped scrub on the last load, for the status report.
+    pub scrub_blockers: Vec<Blocker>,
 }
 
 fn reserved_item(name: &[u8], index: u32) -> ItemRef {
@@ -46,6 +61,11 @@ fn reserved_item(name: &[u8], index: u32) -> ItemRef {
 
 pub(crate) fn ledger_item() -> ItemRef {
     reserved_item(b"ledger", 0)
+}
+
+/// One chunk of the imported-ids snapshot.
+pub(crate) fn snapshot_item(index: u32) -> ItemRef {
+    reserved_item(b"imported ids", index)
 }
 
 /// The stored ledger. One that cannot be decoded is an error, never an empty

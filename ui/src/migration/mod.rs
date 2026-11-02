@@ -42,7 +42,8 @@
 //!   [`legacy_delegates::HOLD_BACK_LOADS`] loads in a row, its items go to the
 //!   orphans, which the user can move to an identity ([`orphans`]). A row the
 //!   journal holds as resolved had data, so it never stands as absent.
-//! - **The predecessors are never modified.** Nothing here deletes from them.
+//! - **The walk never modifies a predecessor.** Only [`scrub`] deletes from
+//!   them, and it has rules of its own.
 //!
 //! The journal and the markers live in the mail delegate under the caller's
 //! origin, not in the crate's reserved `\0` keys, so a staging app walks its
@@ -63,6 +64,7 @@ pub(crate) mod legacy_delegates;
 #[cfg(feature = "use-node")]
 pub(crate) mod node;
 pub(crate) mod orphans;
+pub(crate) mod scrub;
 pub(crate) mod successor;
 #[cfg(test)]
 mod tests;
@@ -315,6 +317,18 @@ where
         }
     };
     let stored = ledger::read_ledger(successor.store()).await.ok();
+    if stored
+        .as_ref()
+        .is_some_and(|l| l.migration_started_ms.is_none())
+    {
+        let now = chrono::Utc::now().timestamp_millis();
+        let stamp = |l: &mut ledger::Ledger| {
+            l.migration_started_ms.get_or_insert(now);
+        };
+        if let Err(e) = ledger::update_ledger(successor.store(), stamp).await {
+            crate::log::error(format!("recording the migration's start failed: {e}"), None);
+        }
+    }
     if !walk_this_load(&status, roll) {
         // A walk that resolved the last row can die before it lets go.
         let released_markers =
@@ -346,7 +360,7 @@ where
     )
     .await;
     let silent_rows = predecessors.silent_rows();
-    let answers = predecessors.identity_answers();
+    let answers = predecessors.row_answers();
     let rejected = report.status.as_ref().map(JournalStatus::rejected_items);
     successor
         .update_ledger(predecessors.counts(), |l| {
@@ -461,6 +475,8 @@ pub(crate) fn status_report(status: Option<&JournalStatus>, ledger: &ledger::Led
         "rejected_items": status.map(JournalStatus::rejected_items),
         "rows": rows,
         "counts": ledger.totals,
+        "scrubbed": ledger.scrubbed,
+        "scrub_blockers": ledger.scrub_blockers,
     })
     .to_string()
 }

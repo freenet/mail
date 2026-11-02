@@ -686,7 +686,7 @@ impl<T: LegacyTransport> LegacyAdapter<T> {
     /// the journal holds as resolved, or whose import began, had data, so an
     /// absent answer from it can only be a failed read, however often it
     /// comes.
-    fn absence_stands(&self, entry: &DelegateLineageEntry) -> bool {
+    pub(crate) fn absence_stands(&self, entry: &DelegateLineageEntry) -> bool {
         self.pending_walks
             .get(entry.delegate_key.as_slice())
             .is_some_and(|row| !row.started)
@@ -764,18 +764,54 @@ impl<T: LegacyTransport> LegacyAdapter<T> {
         tables
     }
 
-    /// What this load's answer from each identity row it asked was: whether
-    /// it was absent or empty, by lineage generation. Anything else, a
-    /// silence included, ends a run of them.
-    pub(crate) fn identity_answers(&self) -> Vec<(u32, bool)> {
+    /// What this load's answer from each row it asked was: whether it was
+    /// absent or empty, by lineage generation. Anything else, a silence
+    /// included, ends a run of them.
+    pub(crate) fn row_answers(&self) -> Vec<(u32, bool)> {
         self.lineage
             .iter()
-            .filter(|e| e.generation >= IDENTITY_GENERATION_OFFSET)
             .filter_map(|e| {
                 let reply = self.replies.get(e.delegate_key.as_slice())?;
-                Some((e.generation, row_holds_nothing(reply)))
+                Some((e.generation, entry_holds_nothing(e, reply)))
             })
             .collect()
+    }
+
+    /// Whether `entry` answers now that it holds nothing.
+    pub(crate) async fn holds_nothing(&mut self, entry: &DelegateLineageEntry) -> bool {
+        let reply = self.reply(&lineage_key(entry)).await;
+        reply.is_ok_and(|reply| entry_holds_nothing(entry, &reply))
+    }
+
+    /// The bytes `entry` answered with on this adapter's last read of it.
+    pub(crate) fn answer(&self, entry: &DelegateLineageEntry) -> Option<&[u8]> {
+        match self.replies.get(entry.delegate_key.as_slice())? {
+            LegacyReply::Answer(bytes) => Some(bytes),
+            _ => None,
+        }
+    }
+
+    /// What `entry` holds now, from a new read.
+    pub(crate) async fn reread(&mut self, entry: &DelegateLineageEntry) -> Option<&[u8]> {
+        self.replies.remove(entry.delegate_key.as_slice());
+        self.reply(&lineage_key(entry)).await.ok()?;
+        self.answer(entry)
+    }
+
+    /// Send `entry` one message that changes it.
+    pub(crate) async fn send(
+        &mut self,
+        entry: &DelegateLineageEntry,
+        request: Vec<u8>,
+    ) -> LegacyReply {
+        let params = if entry.generation >= IDENTITY_GENERATION_OFFSET {
+            IDENTITY_PARAMS
+        } else {
+            LOCAL_STATE_PARAMS
+        };
+        self.transport
+            .ask(&lineage_key(entry), params, request)
+            .await
     }
 
     /// The aliases held by the local-state rows newer than `generation`.
@@ -888,6 +924,32 @@ fn row_holds_nothing(reply: &LegacyReply) -> bool {
         LegacyReply::NotInstalled => true,
         LegacyReply::Answer(bytes) => {
             IdentityManagement::try_from(bytes.as_slice()).is_ok_and(|m| m.is_empty())
+        }
+        LegacyReply::NoAnswer(_) => false,
+    }
+}
+
+/// [`row_holds_nothing`], for a row of either family. A local-state row holds
+/// nothing if mapping it gives no pair: `deleted` marks alone are never
+/// imported.
+fn entry_holds_nothing(entry: &DelegateLineageEntry, reply: &LegacyReply) -> bool {
+    if entry.generation >= IDENTITY_GENERATION_OFFSET {
+        return row_holds_nothing(reply);
+    }
+    match reply {
+        LegacyReply::NotInstalled => true,
+        LegacyReply::Answer(bytes) => {
+            LocalState::try_from(bytes.as_slice()).is_ok_and(|mut state| {
+                *state.global_settings() == GlobalSettings::default()
+                    && state.aliases_mut().values().all(|alias| {
+                        alias.drafts.is_empty()
+                            && alias.sent.is_empty()
+                            && alias.kept.is_empty()
+                            && alias.archived.is_empty()
+                            && alias.read.is_empty()
+                            && alias.settings == Default::default()
+                    })
+            })
         }
         LegacyReply::NoAnswer(_) => false,
     }
