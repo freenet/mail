@@ -421,10 +421,13 @@ fn an_orphan_blocks() {
 /// nor the snapshot. The record of the move is what lets scrub run.
 #[test]
 fn an_orphan_moved_before_the_snapshot_does_not_block() {
-    let (delegate, node, outcome) = orphaned();
+    let (delegate, node, _wrote_them) = orphaned();
     let mut store = delegate.clone();
     let moved = block_on(orphans::move_alias(&mut store, "alice", alice()));
     assert_eq!(moved.moved, 5);
+    // A load that wrote none of them, so only the record of the move says
+    // they landed.
+    let outcome = walk(&delegate, &node, six_messages());
     back_up(&delegate, alice());
     assert_eq!(scrub_all(&delegate, &node, &outcome), Vec::new());
     assert_eq!(delegate.ledger().scrubbed.len(), 2);
@@ -1164,7 +1167,7 @@ fn a_message_or_settings_pair_alone_names_the_owner() {
 
 #[test]
 fn discarded_orphans_do_not_block() {
-    let (delegate, node, outcome) = orphaned();
+    let (delegate, node, _wrote_them) = orphaned();
     let mut store = delegate.clone();
     let groups = orphans::groups(&block_on(orphans::stored(&mut store)).unwrap());
     assert_eq!(groups[0].items.len(), 5, "each is shown");
@@ -1179,6 +1182,9 @@ fn discarded_orphans_do_not_block() {
     let (discarded, failure) = block_on(orphans::discard(&mut store, &groups[0]));
     assert_eq!((discarded, failure), (5, None));
     assert_eq!(orphan_count(&delegate), 0);
+    // A load that wrote none of them, so only the record of the discard says
+    // they landed.
+    let outcome = walk(&delegate, &node, six_messages());
     back_up(&delegate, alice());
     assert_eq!(scrub_all(&delegate, &node, &outcome), Vec::new());
     assert_eq!(delegate.ledger().scrubbed.len(), 2);
