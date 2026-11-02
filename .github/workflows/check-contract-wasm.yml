@@ -68,22 +68,6 @@ jobs:
           fi
           echo "relevant=$relevant" >> "$GITHUB_OUTPUT"
 
-  # Reads the committed candidate, which `check-drift` proves is the source's
-  # build, so it needs no toolchain. A failure here means a node could not
-  # instantiate the delegate.
-  check-delegate-imports:
-    needs: changes
-    if: ${{ !cancelled() && needs.changes.outputs.relevant != 'false' }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: The check fails on what it should
-        run: bash scripts/check-delegate-imports_test.sh
-
-      - name: The delegate imports only the host's functions
-        run: bash scripts/check-delegate-imports.sh
-
   check-drift:
     needs: changes
     # Run unless `changes` positively said "docs only". If `changes`
@@ -196,6 +180,16 @@ jobs:
       # the reviewed source builds.
       - name: Verify the mail-delegate candidate is the source's build
         run: bash scripts/check-delegate-candidate.sh
+
+      # Reads the committed candidate, which the step above proves is the
+      # source's build. A failure here means a node could not instantiate the
+      # delegate. It is a step of this required job, not a job of its own,
+      # so it blocks without a new required check.
+      - name: The imports check fails on what it should
+        run: bash scripts/check-delegate-imports_test.sh
+
+      - name: The delegate imports only the host's functions
+        run: bash scripts/check-delegate-imports.sh
 
       # A guard only ever seen passing is not known to work. This applies,
       # to a staged copy, the regression each delegate guard exists to catch

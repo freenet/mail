@@ -101,9 +101,20 @@ recovery-key codec. Its encoding is pinned per variant in
   deleting a kept copy, an archive or a flags item leaves a tombstone first
   (`ix/sn/<addr>/<nibble>`, exported with the data). A list or flag that cannot
   be read stops the import.
+  Documented limits: a deleted identity's subscription stays until core has an
+  unsubscribe. Restoring a deleted identity can bring back a message deleted
+  earlier, because its tombstones leave with the identity. Forged notifications
+  can spend the duty budget but carry no data, since the inbox is read from the
+  node's store.
+- **Page fallback:** `ui/src/jobs.rs` sends `RunJobs` on load and every five
+  minutes while a page is open, in a detached task beside the migration walk,
+  so a node without the Background grant (or too old for it) gets the same
+  planner. It publishes its last run as `data-jobs-run`, including how long a
+  call sent while the run was out waited (`probe_ms`). `cargo make
+  test-e2e-background` proves the node-side path on real nodes.
 - **Imports:** a node refuses to instantiate a module that imports a function
-  it does not provide. `scripts/check-delegate-imports.sh` (CI
-  `check-delegate-imports`) compares the candidate's imports to
+  it does not provide. `scripts/check-delegate-imports.sh` (a step of CI
+  `check-drift`, so it blocks) compares the candidate's imports to
   `scripts/delegate-imports-allowlist.txt`, which a delegate test pins to the
   stdlib's host set.
 
