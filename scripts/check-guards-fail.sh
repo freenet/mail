@@ -530,11 +530,11 @@ ut "only a generation's own identities can orphan its aliases" "$M/legacy_delega
         };' \
     scenario_local_state_waits_for_the_identities_of_its_generation
 ut "a newer row holds older ones back" "$M/legacy_delegates.rs" \
-    '                        .is_some_and(|walks| *walks < HOLD_BACK_LOADS)' \
+    '                        .is_some_and(|row| row.attempts < HOLD_BACK_LOADS)' \
     '                        .is_some_and(|_| false)' \
     scenario_a_newer_row_that_answers_late_still_wins
 ut "the hold on older rows ends" "$M/legacy_delegates.rs" \
-    '                        .is_some_and(|walks| *walks < HOLD_BACK_LOADS)' \
+    '                        .is_some_and(|row| row.attempts < HOLD_BACK_LOADS)' \
     '                        .is_some_and(|_| true)' \
     scenario_a_newer_row_that_stays_empty_holds_older_rows_only_for_a_while
 ut "only the newest row sets an identity's markers" "$M/successor.rs" \
@@ -596,11 +596,20 @@ ut "one absent answer does not stand" "$M/legacy_delegates.rs" \
     scenario_one_empty_answer_after_a_silence_orphans_nothing
 ut "a resolved identity row never stands as absent" "$M/legacy_delegates.rs" \
     '        self.pending_walks
-            .contains_key(entry.delegate_key.as_slice())
-            && self
-                .absent_answers' \
-    '        self.absent_answers' \
+            .get(entry.delegate_key.as_slice())
+            .is_some_and(|row| !row.started)
+            && self' \
+    '        true
+            && self' \
     scenario_a_resolved_identity_row_never_stands_as_absent
+ut "one typed not-installed does not release a held marker" "$M/legacy_delegates.rs" \
+    '.is_some_and(|reply| row_holds_nothing(reply) && self.absence_stands(e))' \
+    '.is_some_and(|reply| row_holds_nothing(reply))' \
+    scenario_silence_past_the_hold_starts_no_contract_migration
+ut "a row whose import began never stands as absent" "$M/legacy_delegates.rs" \
+    '            .is_some_and(|row| !row.started)' \
+    '            .is_some_and(|_| true)' \
+    scenario_a_started_row_never_stands_as_absent
 ut "absent answers count only in a row" "$M/mod.rs" \
     '                    l.absent_answers.remove(generation);' \
     '' \
@@ -629,8 +638,8 @@ guard "held markers are not acted on" "$STAGE/ui/src/app/identity_store.rs" \
     '    let Some(mut markers) = read else {' \
     "tests:scenario_silence_past_the_hold_starts_no_contract_migration" ui_migration_tests
 ut "held markers are released when the newer row settles" "$M/mod.rs" \
-    '    let released_markers = held && release_held_markers(successor.store(), newest_unsettled).await;' \
-    '    let released_markers = false && held && newest_unsettled.is_none();' \
+    '    let released_markers = release_held_markers(successor.store(), newest_unsettled).await;' \
+    '    let released_markers = false && newest_unsettled.is_none();' \
     scenario_silence_past_the_hold_starts_no_contract_migration
 ut "a held-back row counts nothing" "$M/legacy_delegates.rs" \
     '        let mut mapped = MappingCounts::default();
