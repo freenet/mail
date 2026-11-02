@@ -595,7 +595,7 @@ ut "an orphan move never overwrites an item" "$M/orphans.rs" \
     moving_an_orphan_never_overwrites_an_item_already_there
 ut "a silent identity row never orphans its aliases" "$M/legacy_delegates.rs" \
     'AliasOwner::Unresolved if self.own_row_absent(generation) => Some(None),' \
-    'AliasOwner::Unresolved if false => Some(None),' \
+    'AliasOwner::Unresolved if true => Some(None),' \
     scenario_a_silent_identity_row_never_orphans_its_aliases
 ut "one absent answer does not stand" "$M/legacy_delegates.rs" \
     '.is_some_and(|answers| *answers >= HOLD_BACK_LOADS)' \
