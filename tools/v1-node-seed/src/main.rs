@@ -7,13 +7,20 @@
 //! test node, and it refuses to finish unless the delegates read back what it
 //! wrote.
 //!
-//! Usage: `v1-node-seed <ws port>`
+//! Usage: `v1-node-seed <ws port> [capture file]`
+//!
+//! With a capture file it also writes the delegates' own `GetIdentities` and
+//! `GetAll` replies there, as hex lines: the bytes `ui/src/migration/
+//! captured_v0_2_7.txt` holds. Regenerate that file with
+//! `cargo make capture-v0-2-7-replies`.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use freenet_mail_wire_v1::identity::{EntryKind, IdentityMsg};
-use freenet_mail_wire_v1::local_state::{ArchivedMessage, LocalStateMsg};
+use freenet_mail_wire_v1::local_state::{
+    ArchivedMessage, Draft, KeptMessage, LocalStateMsg, SentMessage,
+};
 use freenet_stdlib::client_api::{ClientRequest, DelegateRequest, HostResponse, WebApi};
 use freenet_stdlib::prelude::*;
 
@@ -95,6 +102,26 @@ async fn reply(api: &mut WebApi) -> Result<Vec<u8>, String> {
         .unwrap_or_default())
 }
 
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The key of the contact `bob` in wire-v1's golden identity state: real key
+/// bytes, so the contact is one the migration can import.
+fn contact_key() -> Result<Vec<u8>, String> {
+    let golden = include_str!("../../../wire-v1/src/golden_v1.txt");
+    let line = golden
+        .lines()
+        .find_map(|l| l.strip_prefix("identity_state_contact "))
+        .ok_or("no contact sample")?;
+    let bytes: Vec<u8> = (0..line.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&line[i..i + 2], 16).map_err(|e| e.to_string()))
+        .collect::<Result<_, _>>()?;
+    let state: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    serde_json::from_value(state["identities"]["bob"]["key"].clone()).map_err(|e| e.to_string())
+}
+
 fn identity_message(message: &IdentityMsg) -> Result<Vec<u8>, String> {
     Vec::<u8>::try_from(message).map_err(|e| e.to_string())
 }
@@ -124,7 +151,13 @@ async fn seed(port: &str) -> Result<(), String> {
         extra: Some("seeded".into()),
         kind: Some(EntryKind::Identity),
     };
-    for message in [IdentityMsg::Init, create] {
+    let contact = IdentityMsg::CreateIdentity {
+        alias: "bob".into(),
+        key: contact_key()?,
+        extra: Some("friend".into()),
+        kind: Some(EntryKind::Contact),
+    };
+    for message in [IdentityMsg::Init, create, contact] {
         identity.ask(&mut api, identity_message(&message)?).await?;
     }
     let archive = LocalStateMsg::ArchiveMessage {
@@ -140,7 +173,43 @@ async fn seed(port: &str) -> Result<(), String> {
             quoted_excerpt: None,
         },
     };
-    for message in [LocalStateMsg::Init, archive] {
+    let alias = || ALIAS.to_string();
+    let bob = || "bob".to_string();
+    let kept = LocalStateMsg::MarkRead {
+        alias: alias(),
+        msg_id: 3,
+        kept: KeptMessage {
+            from: bob(),
+            title: "read and kept".into(),
+            content: "a message read on v0.2.7".into(),
+            kept_at: 1_761_000_001_000,
+            sent_at: Some(1_761_000_000_500),
+            ..Default::default()
+        },
+    };
+    let draft = LocalStateMsg::SaveDraft {
+        alias: alias(),
+        id: "d1".into(),
+        draft: Draft {
+            to: bob(),
+            subject: "unsent".into(),
+            body: "a draft".into(),
+            updated_at: 1_761_000_002_000,
+            ..Default::default()
+        },
+    };
+    let sent = LocalStateMsg::SaveSent {
+        alias: alias(),
+        id: "s1".into(),
+        sent: SentMessage {
+            to: bob(),
+            subject: "sent".into(),
+            body: "a sent message".into(),
+            sent_at: 1_761_000_003_000,
+            ..Default::default()
+        },
+    };
+    for message in [LocalStateMsg::Init, archive, kept, draft, sent] {
         local_state
             .ask(&mut api, local_state_message(&message)?)
             .await?;
@@ -155,6 +224,14 @@ async fn seed(port: &str) -> Result<(), String> {
     let holds = |bytes: &[u8], text: &str| String::from_utf8_lossy(bytes).contains(text);
     if !holds(&identities, ALIAS) || !holds(&state, ARCHIVED_TITLE) {
         return Err("the delegates did not read back what was written".to_string());
+    }
+    if let Some(path) = std::env::args().nth(2) {
+        let lines = format!(
+            "identity_reply {}\nlocal_state_reply {}\n",
+            hex(&identities),
+            hex(&state)
+        );
+        std::fs::write(&path, lines).map_err(|e| format!("{path}: {e}"))?;
     }
     println!(
         "seeded `{ALIAS}` under {} and its archive under {}",

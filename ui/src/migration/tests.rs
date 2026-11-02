@@ -2684,3 +2684,94 @@ fn scenario_not_found_for_a_listed_identity_is_retried() {
     assert_eq!(pending_count(&outcome.status), 1);
     assert_eq!(delegate.list(ItemKind::Archived, Some(alice())).len(), 1);
 }
+
+// ---- Replies captured from the frozen delegates ----
+
+/// A reply the frozen v0.2.7 delegates gave on a real node
+/// (`captured_v0_2_7.txt`; see its header for how to regenerate it).
+fn captured(name: &str) -> Vec<u8> {
+    let hex = include_str!("captured_v0_2_7.txt")
+        .lines()
+        .find_map(|l| l.strip_prefix(name)?.strip_prefix(' '))
+        .unwrap_or_else(|| panic!("no captured reply {name}"));
+    (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+        .collect()
+}
+
+fn captured_node() -> Node {
+    let node = Node::default();
+    node.set(im(206), answer(captured("identity_reply")));
+    node.set(ls(206), answer(captured("local_state_reply")));
+    node
+}
+
+/// The walk over what the delegates themselves answered: the identity, the
+/// contact, and a draft, a sent message, a kept message with its read mark and
+/// an archived one, none of them produced by this repository's own types.
+#[test]
+fn scenario_the_frozen_delegates_own_replies_are_carried_over() {
+    let delegate = Delegate::new();
+    let outcome = walk(&delegate, &captured_node(), six_messages());
+
+    let identities = delegate.identities();
+    assert_eq!(identities.len(), 1);
+    assert_eq!(identities[0].alias, "alice");
+    assert_eq!(identities[0].addr, alice());
+    assert_eq!(identities[0].description, "seeded");
+    assert!(!identities[0].confirmed);
+
+    let owner = Some(alice());
+    let drafts = delegate.list(ItemKind::Draft, owner);
+    let draft: Draft = serde_json::from_slice(&drafts[0].body).unwrap();
+    assert_eq!(
+        (draft.to.as_str(), draft.subject.as_str()),
+        ("bob", "unsent")
+    );
+    let sent = delegate.list(ItemKind::Sent, owner);
+    let sent: SentMessage = serde_json::from_slice(&sent[0].body).unwrap();
+    assert_eq!(sent.body, "a sent message");
+    let kept = delegate.list(ItemKind::Kept, owner);
+    let kept: KeptMessage = serde_json::from_slice(&kept[0].body).unwrap();
+    assert_eq!(kept.content, "a message read on v0.2.7");
+    let archived = delegate.list(ItemKind::Archived, owner);
+    assert_eq!(archived.len(), 1);
+    let archived: ArchivedMessage = serde_json::from_slice(&archived[0].body).unwrap();
+    assert_eq!(archived.title, "kept from v0.2.7");
+
+    let contacts = delegate.list(ItemKind::Contact, None);
+    assert_eq!(contacts.len(), 1);
+    let contact = crate::app::contact_store::decode(&contacts[0].item, &contacts[0].body)
+        .expect("readable as a contact");
+    assert_eq!(&*contact.local_alias, "bob");
+    assert_eq!(contact.description, "friend");
+
+    // The delegate marked messages 3 and 4 read.
+    assert_eq!(read_marks(&delegate), positions(&[3, 4]));
+    assert!(!outcome.unfinished());
+    let c = outcome.counts;
+    assert_eq!(
+        (
+            c.identities,
+            c.contacts,
+            c.drafts,
+            c.sent,
+            c.kept,
+            c.archived
+        ),
+        (1, 1, 1, 1, 1, 1)
+    );
+}
+
+/// A walk of the same bytes a second time brings nothing twice.
+#[test]
+fn scenario_walking_the_captured_replies_again_adds_nothing() {
+    let delegate = Delegate::new();
+    walk(&delegate, &captured_node(), six_messages());
+    let again = walk(&delegate, &captured_node(), six_messages());
+    assert_eq!(again.counts.identities, 0);
+    assert_eq!(again.counts.drafts, 0);
+    assert_eq!(delegate.identities().len(), 1);
+    assert_eq!(delegate.list(ItemKind::Archived, Some(alice())).len(), 1);
+}

@@ -1050,6 +1050,30 @@ cd "$ROOT/ui/tests" && \
     npx playwright test live-node.spec.ts --project=chromium ${extra_args[@]+"${extra_args[@]}"}
 '''
 
+[tasks.capture-v0-2-7-replies]
+description = "Fill the frozen v0.2.7 delegates on a fresh isolated node and write their replies to ui/src/migration/captured_v0_2_7.txt"
+script_runner = "bash"
+script = '''
+set -euo pipefail
+ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
+free_port() {
+    python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])'
+}
+export FREENET_E2E_ROOT="${FREENET_E2E_ROOT:-$ROOT/target/capture-iso}"
+export FREENET_ISO_GW_PORT="${FREENET_ISO_GW_PORT:-$(free_port)}"
+export FREENET_ISO_PEER_PORT="${FREENET_ISO_PEER_PORT:-$(free_port)}"
+export FREENET_ISO_GW_NET_PORT="${FREENET_ISO_GW_NET_PORT:-$(free_port)}"
+export FREENET_ISO_PEER_NET_PORT="${FREENET_ISO_PEER_NET_PORT:-$(free_port)}"
+trap 'bash "$ROOT/scripts/run-isolated-nodes.sh" down' EXIT
+bash "$ROOT/scripts/run-isolated-nodes.sh" wipe
+bash "$ROOT/scripts/run-isolated-nodes.sh" up
+OUT="$ROOT/ui/src/migration/captured_v0_2_7.txt"
+RAW="$ROOT/target/captured_v0_2_7.raw"
+cargo run -q --manifest-path "$ROOT/Cargo.toml" -p v1-node-seed -- "$FREENET_ISO_GW_PORT" "$RAW"
+# Keep the file's comment header; replace the captured lines.
+{ grep '^#' "$OUT"; cat "$RAW"; } > "$OUT.new" && mv "$OUT.new" "$OUT"
+'''
+
 [tasks.test-e2e-legacy-migration]
 description = "Real-node migration: wipe iso nodes, publish, fill the frozen v0.2.7 delegates, check the data arrives in the current UI"
 dependencies = ["build", "derive-test-contract-id"]
