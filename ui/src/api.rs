@@ -327,8 +327,9 @@ mod notfound_routing {
         let confirm = &code[code.find("fn confirm_identity").unwrap()..];
         let confirm = &confirm[..confirm.find("\n}\n").unwrap()];
         let confirmed = confirm.find("Identity::set_confirmed(").unwrap();
-        let reloaded = confirm.find("spawn_detached(load_identities())").unwrap();
-        assert!(confirmed < reloaded);
+        let reloaded = confirm.find("load_identities().await").unwrap();
+        let waited = confirm.find("wait_for_token_record(addr).await").unwrap();
+        assert!(confirmed < reloaded && reloaded < waited);
     }
 
     /// The routing table holds the identity as it loaded, and the list holds

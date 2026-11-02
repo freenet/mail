@@ -242,7 +242,9 @@ pub(crate) fn MigrationPanel(identities: Vec<(String, Addr)>) -> Element {
         .filter(|(_, addr)| view.migrated.contains(addr))
         .cloned()
         .collect();
-    let show_notice = !view.notice_dismissed && (view.in_progress || !view.totals.is_empty());
+    // Nothing counted means nothing was found to move: a user with no v0.2.x
+    // data, whose journal could not be stored this load, sees no notice.
+    let show_notice = !view.notice_dismissed && !view.totals.is_empty();
     rsx! {
         if let Some(line) = line {
             div { class: "field-help", "data-testid": testid::FM_MIGRATION_STATUS, "{line}" }
