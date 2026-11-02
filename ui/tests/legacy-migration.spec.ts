@@ -168,6 +168,11 @@ test("a v0.2.7 identity and its archive arrive from the frozen delegates", async
     await expect(modal.locator('[data-testid="fm-backup-key"]')).toBeVisible({ timeout: 30_000 });
     await modal.locator('[data-testid="fm-backup-saved"]').click();
     await expect(modal.locator('[data-testid="fm-backup-saved-note"]')).toBeVisible();
+    await expect(app.locator("html"), "the stamp is stored").toHaveAttribute(
+      "data-pending-saves",
+      "0",
+      { timeout: 30_000 },
+    );
 
     const report = app.locator('[data-testid="fm-migration-report"]');
     const cleared = /"scrubbed":\{"1000206":true,"206":true\}/;
