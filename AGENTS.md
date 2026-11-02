@@ -82,6 +82,30 @@ recovery-key codec. Its encoding is pinned per variant in
 - **Randomness and time:** never add `getrandom` or `rand`. Randomness is the
   host's `rand_bytes` mixed with entropy the UI sends; prompt expiry uses
   the host clock.
+- **Background jobs:** the manifest in `src/lib.rs` asks for `NodeStarted`, the
+  Background capability and four wake-ups, which the node honours only with
+  the user's grant. Those runs have no origin and answer nobody: the requests
+  gate is unchanged, and `ix/bg/origins` in the delegate's own namespace (the
+  all-zero origin, which the gate refuses) lists whom they work for.
+  `jobs.rs` is the planner, pure functions only; `watch.rs` does the plan, and
+  every trigger, a page's `RunJobs` included, goes through `watch::run`, so
+  there is no second path to keep in step. Budgets (`jobs::Budget`) mirror
+  core's for runs the node starts, and a run takes a bounded slice and resumes.
+- **v1 watch:** reads the inbox from the node's store, never from the message
+  that prompted the look. A notification or GET answer is only a reason to
+  look, so duplicates and reordering change nothing, and a dropped one is
+  covered by the next wake-up. No state is Unknown, never empty: core answers a
+  refused GET exactly like a missing contract. Arrivals are stored by
+  `put_item` as create-only kept copies. A deleted message stays gone: a kept
+  or archived copy, a deleted flag or a tombstone stops the import, and
+  deleting a kept copy, an archive or a flags item leaves a tombstone first
+  (`ix/sn/<addr>/<nibble>`, exported with the data). A list or flag that cannot
+  be read stops the import.
+- **Imports:** a node refuses to instantiate a module that imports a function
+  it does not provide. `scripts/check-delegate-imports.sh` (CI
+  `check-delegate-imports`) compares the candidate's imports to
+  `scripts/delegate-imports-allowlist.txt`, which a delegate test pins to the
+  stdlib's host set.
 
 Its WASM lives under `published-contract/candidate/` until a release
 freezes it into `published-contract/wasm/v2/`.

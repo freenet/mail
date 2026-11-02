@@ -124,6 +124,9 @@ shows() {
 guard() { # name file old new expected command...
     local name="$1" file="$2" old="$3" new="$4" expected="$5"
     shift 5
+    if [ -n "${GUARD_ONLY:-}" ] && ! [[ "$name" =~ $GUARD_ONLY ]]; then
+        return
+    fi
     cp "$file" "$file.orig"
     if ! replace "$file" "$old" "$new"; then
         echo "not ok - $name: mutation not applied"
@@ -993,6 +996,18 @@ ut "a keyless error goes to nobody when two requests wait" "$M/node.rs" \
 # A rename that still compiles: only the pinned bytes can catch it. (A new
 # variant is caught earlier, by the wildcard-free match in golden.rs, at
 # compile time.)
+# A regression that takes a second edit: `also file old new guard ...`.
+also() {
+    local file="$1" old="$2" new="$3" keep
+    shift 3
+    keep="$(mktemp "$STAGE/also.XXXXXX")"
+    cp "$file" "$keep"
+    replace "$file" "$old" "$new"
+    "$@"
+    mv "$keep" "$file"
+}
+source "$ROOT/scripts/check-guards-fail-jobs.sh"
+
 guard "protocol encoding is pinned" "$STAGE/protocol/src/lib.rs" \
     'pub enum FailureCode {
     NotFound,' 'pub enum FailureCode {

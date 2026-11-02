@@ -170,7 +170,12 @@ fn the_built_delegate_declares_its_lifecycle_capability_and_wake_ups() {
         "/../../published-contract/candidate/mail_delegate"
     ))
     .unwrap();
-    let manifest = DelegateManifest::from_wasm(&wasm)
+    // fdev's wrapper comes first: a version, a hash and a length.
+    let module = wasm
+        .windows(4)
+        .position(|w| w == b"\0asm")
+        .expect("a WASM module");
+    let manifest = DelegateManifest::from_wasm(&wasm[module..])
         .unwrap()
         .expect("a manifest");
     assert_eq!(manifest.lifecycle, vec![LifecycleKind::NodeStarted]);
@@ -186,6 +191,28 @@ fn the_built_delegate_declares_its_lifecycle_capability_and_wake_ups() {
         .map(|(secs, (tag, _))| (tag.as_bytes().to_vec(), *secs))
         .collect();
     assert_eq!(wakeups, expected, "as the node reads them, none clamped");
+}
+
+#[test]
+fn the_import_allowlist_is_the_stdlib_host_set() {
+    let allowlist = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../scripts/delegate-imports-allowlist.txt"
+    ))
+    .unwrap();
+    let listed: Vec<(String, String)> = allowlist
+        .lines()
+        .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
+        .map(|l| {
+            let (module, name) = l.split_once(' ').unwrap();
+            (module.to_string(), name.to_string())
+        })
+        .collect();
+    let host: Vec<(String, String)> = freenet_stdlib::host_imports::DECLARED_HOST_IMPORTS
+        .iter()
+        .map(|i| (i.module.to_string(), i.name.to_string()))
+        .collect();
+    assert_eq!(listed, host);
 }
 
 #[test]
@@ -296,13 +323,13 @@ fn writes_stop_at_60_a_minute_per_contract_and_count_as_operations() {
 #[test]
 fn duty_refills_at_one_percent_up_to_the_burst() {
     let mut b = Budget::new(NOW);
-    assert!(b.take_duty(DUTY_BURST_MS), "the whole burst");
+    assert!(b.take_duty(10_000), "the whole burst, 10 s");
     assert!(!b.take_duty(1), "and not a millisecond more");
     b.advance(NOW + 1);
-    assert!(!b.take_duty(DUTY_REFILL_MS_PER_SEC + 1));
-    assert!(b.take_duty(DUTY_REFILL_MS_PER_SEC), "1% of one second");
+    assert!(!b.take_duty(11));
+    assert!(b.take_duty(10), "1% of one second");
     b.advance(NOW + 1_000_000);
-    assert!(b.take_duty(DUTY_BURST_MS));
+    assert!(b.take_duty(10_000));
     assert!(!b.take_duty(1), "the burst is the ceiling");
 }
 
@@ -566,7 +593,9 @@ fn an_origin_list_that_cannot_be_read_is_unknown() {
     deliver(&mut env, &me, &[sealed(&me, "one")]);
     let key = Space::new(&mut env, GLOBAL).full_key("ix/bg/origins");
     blind_key(&mut env, String::from_utf8(key).unwrap());
-    assert!(wake(&mut env, "rescan").is_empty());
+    let (run, out) = watch::run(&mut env, Trigger::Tick(Tick::Rescan));
+    assert_eq!((run.unknown, run.scanned), (1, 0));
+    assert!(out.is_empty());
     env.faults = None;
     assert!(kept_ids(&mut env, me.addr).is_empty());
     wake(&mut env, "rescan");
@@ -611,7 +640,12 @@ fn an_out_of_order_notification_reads_the_current_state() {
     deliver(&mut env, &me, &[one.clone(), two.clone()]);
     // The node's store is at the newer state; the older state's notification
     // arrives last.
-    process(&mut env, None, notification(id, inbox_of(&[one.clone()]))).unwrap();
+    process(
+        &mut env,
+        None,
+        notification(id, inbox_of(std::slice::from_ref(&one))),
+    )
+    .unwrap();
     let mut got = kept_ids(&mut env, me.addr);
     got.sort();
     let mut want = vec![id_of(&one).to_vec(), id_of(&two).to_vec()];
@@ -974,10 +1008,16 @@ fn a_message_that_never_decrypts_costs_one_slice() {
 }
 
 #[test]
-fn the_kept_cap_stops_the_import_and_counts_what_is_left() {
+fn the_kept_cap_stops_the_import_and_spends_no_more_of_the_slice() {
     let mut env = env();
     let me = create(&mut env, PROD, "alice");
     deliver(&mut env, &me, &[sealed(&me, "one"), sealed(&me, "two")]);
+    let mut budget = Budget::new(NOW);
+    assert!(budget.take_duty(DUTY_BURST_MS - SCAN_COST_MS - 5 * MESSAGE_COST_MS));
+    let body = to_cbor(&budget).unwrap();
+    Space::new(&mut env, GLOBAL)
+        .put("bg/budget", &body)
+        .unwrap();
     // Only the list: the cap is on its length.
     let ix = index_rel(ItemKind::Kept, Some(&me.addr));
     let list: Vec<ByteBuf> = (0..store::MAX_MESSAGES as u32)
@@ -993,8 +1033,11 @@ fn the_kept_cap_stops_the_import_and_counts_what_is_left() {
     let (generation, _) = s.index(&ix).unwrap();
     s.write_if(&ix, generation, &to_cbor(&list).unwrap())
         .unwrap();
-    let run = run_jobs(&mut env, PROD);
+    let (run, _) = watch::run(&mut env, Trigger::Tick(Tick::Rescan));
     assert_eq!((run.imported, run.remaining), (0, 2));
+    let stored = Space::new(&mut env, GLOBAL).get("bg/budget").unwrap();
+    let left: Budget = from_cbor(&stored).unwrap();
+    assert_eq!(left.message_slice(true), 4, "one message found the cap");
 }
 
 // ── Gate ────────────────────────────────────────────────────────────────────

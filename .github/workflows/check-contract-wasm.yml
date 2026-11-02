@@ -68,6 +68,22 @@ jobs:
           fi
           echo "relevant=$relevant" >> "$GITHUB_OUTPUT"
 
+  # Reads the committed candidate, which `check-drift` proves is the source's
+  # build, so it needs no toolchain. A failure here means a node could not
+  # instantiate the delegate.
+  check-delegate-imports:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.relevant != 'false' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: The check fails on what it should
+        run: bash scripts/check-delegate-imports_test.sh
+
+      - name: The delegate imports only the host's functions
+        run: bash scripts/check-delegate-imports.sh
+
   check-drift:
     needs: changes
     # Run unless `changes` positively said "docs only". If `changes`
