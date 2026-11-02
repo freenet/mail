@@ -94,7 +94,9 @@ if task test-e2e-legacy-migration | grep -q '^bash "$ROOT/scripts/check-release-
 else
     fail "test-e2e-legacy-migration does not check the build it published"
 fi
-if task test-e2e-real-node | grep -q 'check-release-scrub.sh'; then
+real_node="$(task test-e2e-real-node)"
+if printf '%s\n' "$real_node" | grep -q 'check-release-scrub.sh' \
+    && printf '%s\n' "$real_node" | grep -q '^ *\*"has scrub off"\*) ;;$'; then
     pass "test-e2e-real-node checks that the default build is refused"
 else
     fail "test-e2e-real-node does not check that the default build is refused"

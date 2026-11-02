@@ -241,6 +241,9 @@ fn holds_fields(stored: &serde_json::Value, value: &serde_json::Value) -> bool {
 /// Whether the mail delegate holds `key` as the import of `value` now: the
 /// same bytes, or for settings, which merge, the same fields. An identity's
 /// address fixes its signing seed, so its alias and description are compared.
+/// The user may have backed up since the import, so an identity's
+/// `last_backup_at`, and only that field, is not compared: it is no copy of
+/// anything the legacy row holds.
 async fn is_import_of<S: MailStore>(
     store: &mut S,
     key: &PairKey,
@@ -266,7 +269,14 @@ async fn is_import_of<S: MailStore>(
     }
     let json = |bytes: &[u8]| serde_json::from_slice::<serde_json::Value>(bytes).ok();
     let both = json(&stored.body).zip(json(value));
-    Ok(both.is_some_and(|(stored, value)| holds_fields(&stored, &value)))
+    Ok(both.is_some_and(|(stored, mut value)| {
+        if matches!(key, PairKey::IdentitySettings(_))
+            && let Some(fields) = value.as_object_mut()
+        {
+            fields.remove("last_backup_at");
+        }
+        holds_fields(&stored, &value)
+    }))
 }
 
 /// Whether the mail delegate holds `key` as the import of a value read earlier,
@@ -627,21 +637,15 @@ async fn keep_alias_table<S: MailStore, T: LegacyTransport>(
     Ok(())
 }
 
-/// The order rows are cleared in: local state, then the identity rows whose
-/// generation's local-state row is clear.
+/// The order rows are cleared in: local state, then identities. Every row is
+/// clear before any is touched, which is what keeps an identity row from going
+/// while its local-state row is pending.
 pub(super) fn clearing_order<'a>(
     targets: &[&'a DelegateLineageEntry],
-    not_clear: &HashSet<u32>,
 ) -> Vec<&'a DelegateLineageEntry> {
     let (identities, local): (Vec<_>, Vec<_>) =
         targets.iter().copied().partition(|e| is_identity_row(e));
-    let paired = |e: &&DelegateLineageEntry| {
-        !not_clear.contains(&(e.generation - IDENTITY_GENERATION_OFFSET))
-    };
-    local
-        .into_iter()
-        .chain(identities.into_iter().filter(paired))
-        .collect()
+    local.into_iter().chain(identities).collect()
 }
 
 /// Clear `order`, journaling each row. Stops at the first that fails, and the
@@ -746,7 +750,7 @@ async fn attempt<S: MailStore, T: LegacyTransport>(
             not_clear.insert(entry.generation);
         }
     }
-    let order = clearing_order(&targets, &not_clear);
+    let order = clearing_order(&targets);
     if !not_clear.is_empty() {
         let generations: BTreeSet<u32> = not_clear.into_iter().collect();
         let blockers = generations.into_iter();

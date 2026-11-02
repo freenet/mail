@@ -744,9 +744,9 @@ ut "an empty local-state row can stand as absent" "$M/legacy_delegates.rs" \
     'LocalState::try_from(bytes.as_slice()).is_ok_and(|mut state| false && {' \
     a_row_that_answers_empty_stands_as_absent
 ut "an identity row waits for its local-state row" "$S" \
-    '.chain(identities.into_iter().filter(paired))' \
-    '.chain(identities.into_iter().filter(|e| paired(e) || true))' \
-    the_order_leaves_out_an_identity_row_with_its_local_state_pending
+    '    if !not_clear.is_empty() {' \
+    '    if false && !not_clear.is_empty() {' \
+    an_identity_row_waits_for_its_local_state_row
 ut "a rejected item blocks scrub" "$S" \
     '    if rejected > 0 {' \
     '    if rejected > u32::MAX - 1 {' \
@@ -796,7 +796,7 @@ ut "the snapshot takes what the walk read" "$S" \
 ut "a late snapshot takes only what still equals the import" "$S" \
     'if is_import_of(store, &key, value, identities).await? {' \
     'if present(store, &key, identities).await? {' \
-    a_snapshot_written_late_takes_what_still_equals_the_import
+    a_late_snapshot_does_not_take_a_changed_setting
 ut "the snapshot records only a value the delegate holds" "$S" \
     '                    || holds_now(store, &decoded, hash, settings.as_deref(), identities).await?' \
     '                    || present(store, &decoded, identities).await?' \
@@ -911,16 +911,33 @@ ut "every identity being scrubbed is backed up" "$S" \
     'let count = unprotected(store, scrubbed.take(0).collect(), ledger, identities).await?;' \
     an_identity_the_ledger_does_not_list_needs_a_backup_too
 ut "local state is cleared before identities" "$S" \
-    '    local
-        .into_iter()
-        .chain(identities.into_iter().filter(paired))
-        .collect()' \
-    '    identities
-        .into_iter()
-        .filter(paired)
-        .chain(local)
-        .collect()' \
+    '    local.into_iter().chain(identities).collect()' \
+    '    identities.into_iter().chain(local).collect()' \
     scenario_local_state_is_cleared_before_identities
+ut "a failed row forgets the empty loads it had counted" "$S" \
+    '        let Some(deleted) = clear_row(adapter, entry).await else {
+            update_ledger(store, |l| {
+                l.scrub_empty.remove(&generation);
+            })
+            .await?;' \
+    '        let Some(deleted) = clear_row(adapter, entry).await else {' \
+    a_failed_row_starts_its_empty_loads_again
+ut "a backup at the migration start is not after it" "$S" \
+    'is_some_and(|(at, since)| at > since)' \
+    'is_some_and(|(at, since)| at >= since)' \
+    a_backup_stamped_at_the_migration_start_does_not_count
+ut "a missing snapshot chunk blocks" "$S" \
+    '            let chunk = chunk.ok_or(Blocker::NoSnapshot)?;' \
+    '            let Some(chunk) = chunk else { continue };' \
+    a_missing_snapshot_chunk_blocks
+ut "a backup made before a late snapshot does not block" "$S" \
+    '            fields.remove("last_backup_at");' \
+    '            let _ = fields;' \
+    a_snapshot_written_late_takes_what_still_equals_the_import
+ut "only last_backup_at is left out of a settings comparison" "$S" \
+    '            fields.remove("last_backup_at");' \
+    '            fields.clear();' \
+    a_late_snapshot_does_not_take_a_changed_setting
 ut "a cleared row is not cleared again" "$S" \
     '.filter(|e| ledger.scrubbed.get(&e.generation) != Some(&true))' \
     '.filter(|e| ledger.scrubbed.get(&e.generation) != Some(&false) || true)' \
@@ -1016,8 +1033,8 @@ bash "$ROOT/scripts/check-release-scrub.sh"' \
     '' \
     "not ok - test-e2e-legacy-migration does not check the build it published" scrub_release_tests
 guard "the default real-node task checks its build is refused" "$STAGE/Makefile.toml" \
-    'if bash "$ROOT/scripts/check-release-scrub.sh" > /dev/null 2>&1; then' \
-    'if false; then' \
+    '    *"has scrub off"*) ;;' \
+    '    *) ;;' \
     "not ok - test-e2e-real-node does not check that the default build is refused" scrub_release_tests
 guard "a test signing refuses a build with scrub" "$STAGE/Makefile.toml" \
     'if [ "${FREENET_MAIL_SCRUB_ISO:-}" != "1" ]; then

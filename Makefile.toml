@@ -520,9 +520,10 @@ set -euo pipefail
 ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
 # dx keeps the hashed files of earlier builds here, and compress-webapp packs
 # this directory, so an old build would ship beside the new one.
-rm -rf "$ROOT/target/dx/app/${BUILD_PROFILE}/web/public"
+# Release only, as compress-webapp and check-release-scrub.sh read it.
+rm -rf "$ROOT/target/dx/app/release/web/public"
 cd "$ROOT/ui"
-dx build "--${BUILD_PROFILE}" --features use-node
+dx build --release --features use-node
 '''
 
 [tasks.build]
@@ -1101,10 +1102,14 @@ bash "$ROOT/scripts/run-isolated-nodes.sh" up
 # Publish to the iso gateway (port-overridden fdev).
 FREENET_ISO_GW_PORT="$GW_PORT" cargo make publish-email-iso
 # This is the default build, scrub off: the release check must refuse it.
-if bash "$ROOT/scripts/check-release-scrub.sh" > /dev/null 2>&1; then
-    echo "error: the release scrub check passed a build without scrub" >&2
-    exit 1
-fi
+refused="$(bash "$ROOT/scripts/check-release-scrub.sh" 2>&1 || true)"
+case "$refused" in
+    *"has scrub off"*) ;;
+    *)
+        echo "error: the release scrub check did not refuse the build for having scrub off: $refused" >&2
+        exit 1
+        ;;
+esac
 
 CONTRACT_ID="$(cat "$ROOT/target/webapp/contract-id.txt")"
 BASE_URL="http://127.0.0.1:$GW_PORT/v1/contract/web/$CONTRACT_ID/"

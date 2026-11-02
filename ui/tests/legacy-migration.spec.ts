@@ -185,6 +185,26 @@ test("a v0.2.7 identity and its archive arrive from the frozen delegates", async
     await identity.locator('[data-testid="fm-id-open"]').click();
     await app.locator('[data-testid="fm-folder-archive"]').click();
     await expect(card, "the new delegate still holds it").toBeVisible({ timeout: 30_000 });
+    // The rest of what was cleared from the old copy: the identity (opened
+    // above), the draft, the sent messages and the contact.
+    if (await burger.isVisible().catch(() => false)) await burger.click();
+    await app.locator('[data-testid="fm-folder-drafts"]').click();
+    await expect(
+      app.locator('[data-testid="fm-draft-card"]').filter({ hasText: "unsent" }),
+      "the draft is still there",
+    ).toHaveCount(1, { timeout: 30_000 });
+    if (await burger.isVisible().catch(() => false)) await burger.click();
+    await app.locator('[data-testid="fm-folder-sent"]').click();
+    await expect(
+      app.locator('[data-testid="fm-sent-card"]'),
+      "the seeded sent message and the one sent here",
+    ).toHaveCount(2, { timeout: 30_000 });
+    if (await burger.isVisible().catch(() => false)) await burger.click();
+    await app.locator('[data-testid="fm-sidebar-contacts"]').click();
+    await expect(
+      app.locator(".fm-contact-row .alias").filter({ hasText: "bob" }),
+      "the contact is still there",
+    ).toHaveCount(1, { timeout: 30_000 });
     expect(pumpError, "the permission pump hit an error").toBeNull();
   } finally {
     clearInterval(pump);

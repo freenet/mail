@@ -6,8 +6,8 @@ use std::collections::HashSet;
 use freenet_mail_protocol::ItemRef;
 use serde_json::json;
 
-use super::super::ledger::{ledger_item, record_identity_deleted, update_ledger};
-use super::super::scrub::{self, Blocker, clearing_order};
+use super::super::ledger::{ledger_item, record_identity_deleted, snapshot_item, update_ledger};
+use super::super::scrub::{self, Blocker};
 use super::super::successor::{MailStore, merged_put, settings_item};
 use super::*;
 
@@ -85,6 +85,15 @@ fn assert_nothing_deleted(node: &Node, blockers: &[Blocker]) {
     assert_eq!(deletes(node), Vec::new(), "{blockers:?}");
 }
 
+/// Scrub finished for 206 and sent `sent` legacy deletes. An empty blocker
+/// list alone is also what a scrub that deleted nothing returns.
+fn assert_scrubbed(delegate: &Delegate, node: &Node, sent: usize) {
+    let ledger = delegate.ledger();
+    assert_eq!(ledger.scrubbed.get(&206), Some(&true));
+    assert_eq!(ledger.scrubbed.get(&IDENTITY_206), Some(&true));
+    assert_eq!(deletes(node).len(), sent);
+}
+
 fn row_text(node: &Node, entry: &freenet_migrate::DelegateLineageEntry) -> String {
     match node.replies.borrow().get(&entry.delegate_key) {
         Some(LegacyReply::Answer(bytes)) => String::from_utf8(bytes.clone()).unwrap(),
@@ -137,6 +146,31 @@ fn scenario_the_usual_user_is_scrubbed() {
 
     let absent = [lineage_key(im(205)), lineage_key(ls(205))];
     assert!(deletes(&node).iter().all(|(key, _)| !absent.contains(key)));
+}
+
+/// The snapshot comes from the walk that did the importing, and nothing waits
+/// on a row to stand as absent: both generations answer, so one walk resolves
+/// them (`usual_node` needs several, whose last walks read nothing and so use
+/// the late path). The deletes must have happened.
+#[test]
+fn scenario_a_scrub_after_the_importing_walk_deletes() {
+    let delegate = Delegate::new();
+    let node = usual_node();
+    node.set(im(205), answer(golden("identity_state_seeded")));
+    let mut older: serde_json::Value = serde_json::from_slice(&golden("ls_state")).unwrap();
+    older["aliases"]["alice"]["drafts"]["d1"]["subject"] = json!("an earlier subject");
+    node.set(ls(205), answer(serde_json::to_vec(&older).unwrap()));
+    let outcome = walk(&delegate, &node, six_messages());
+    assert!(!outcome.read_rows.is_empty(), "the walk read and wrote");
+    assert_eq!(
+        scrub_now(&delegate, &node, &outcome),
+        vec![Blocker::NoBackup(1)]
+    );
+    back_up(&delegate, alice());
+    assert_eq!(scrub_all(&delegate, &node, &outcome), Vec::new());
+    assert_scrubbed(&delegate, &node, 10);
+    assert_eq!(delegate.ledger().scrubbed.get(&205), Some(&true));
+    assert!(row_text(&node, im(205)).contains(r#""identities":{}"#));
 }
 
 /// A later load neither repeats a delete nor brings anything back.
@@ -356,21 +390,6 @@ fn an_identity_row_waits_for_its_local_state_row() {
     assert_nothing_deleted(&node, &blockers);
 }
 
-/// The pairing as its own rule. `run` never gets this far with a row that is
-/// not clear: it stops first, so this is a second line behind that.
-#[test]
-fn the_order_leaves_out_an_identity_row_with_its_local_state_pending() {
-    let rows = lineage();
-    let row = |generation| rows.iter().find(|e| e.generation == generation).unwrap();
-    let targets = [row(IDENTITY_206), row(205), row(IDENTITY_205)];
-    let not_clear = HashSet::from([206]);
-    let order: Vec<u32> = clearing_order(&targets, &not_clear)
-        .iter()
-        .map(|e| e.generation)
-        .collect();
-    assert_eq!(order, [205, IDENTITY_205]);
-}
-
 #[test]
 fn a_rejected_item_blocks() {
     let delegate = Delegate::new();
@@ -475,6 +494,7 @@ fn a_backup_on_the_first_load_counts() {
     back_up(&delegate, alice());
     let outcome = settle(&delegate, &node);
     assert_eq!(scrub_all(&delegate, &node, &outcome), Vec::new());
+    assert_scrubbed(&delegate, &node, 5);
 }
 
 /// An identity already on the mail delegate, which the walk did not count as
@@ -565,6 +585,78 @@ fn an_extra_item_does_not_mask_a_missing_one() {
         drafts["d2"] = drafts["d1"].clone();
     });
     let blockers = scrub_now(&delegate, &node, &outcome);
+    assert_eq!(
+        blockers,
+        vec![Blocker::NotImported {
+            generation: 206,
+            ids: 1
+        }]
+    );
+    assert_nothing_deleted(&node, &blockers);
+}
+
+/// A failed row forgets the loads it had counted. Load 1 deletes, then the row
+/// fills again and a delete does not take, so the next empty answer is the
+/// first of two, not the second.
+#[test]
+fn a_failed_row_starts_its_empty_loads_again() {
+    let delegate = Delegate::new();
+    let node = usual_node();
+    let outcome = ready(&delegate, &node);
+    assert_eq!(scrub_now(&delegate, &node, &outcome), Vec::new());
+    assert_eq!(delegate.ledger().scrub_empty.get(&206), Some(&1));
+    let emptied = row_text(&node, ls(206));
+    node.set(ls(206), answer(golden("ls_state")));
+    *node.writes_ignored.borrow_mut() = true;
+    assert_eq!(
+        scrub_now(&delegate, &node, &outcome),
+        vec![Blocker::RowFailed { generation: 206 }]
+    );
+    *node.writes_ignored.borrow_mut() = false;
+    node.set(ls(206), answer(emptied.into_bytes()));
+    assert_eq!(scrub_now(&delegate, &node, &outcome), Vec::new());
+    assert_eq!(delegate.ledger().scrubbed.get(&206), Some(&false));
+}
+
+/// A backup stamped at the moment the migration began is not after it.
+#[test]
+fn a_backup_stamped_at_the_migration_start_does_not_count() {
+    let delegate = Delegate::new();
+    let node = usual_node();
+    let outcome = settle(&delegate, &node);
+    let at = delegate.ledger().migration_started_ms.unwrap();
+    let mut store = delegate.clone();
+    block_on(merged_put(&mut store, settings_item(alice()), |stored| {
+        let mut settings: serde_json::Value = serde_json::from_slice(stored?).unwrap();
+        settings["last_backup_at"] = json!(at);
+        Some(serde_json::to_vec(&settings).unwrap())
+    }))
+    .unwrap();
+    let blockers = scrub_now(&delegate, &node, &outcome);
+    assert_eq!(blockers, vec![Blocker::NoBackup(1)]);
+    assert_nothing_deleted(&node, &blockers);
+}
+
+/// A snapshot chunk that is gone is not an empty one.
+#[test]
+fn a_missing_snapshot_chunk_blocks() {
+    let delegate = Delegate::new();
+    let node = usual_node();
+    let outcome = ready(&delegate, &node);
+    let wanted = snapshot_item(206, 0);
+    let chunk = delegate
+        .list(ItemKind::MigrationMarker, None)
+        .into_iter()
+        .find(|i| i.item.id == wanted.id)
+        .expect("the chunk was written");
+    delegate
+        .send(Op::DeleteItem {
+            item: chunk.item,
+            expected_gen: chunk.generation,
+        })
+        .unwrap();
+    let blockers = scrub_now(&delegate, &node, &outcome);
+    assert_eq!(blockers, vec![Blocker::NoSnapshot]);
     assert_nothing_deleted(&node, &blockers);
 }
 
@@ -744,6 +836,13 @@ fn a_deleted_item_whose_row_then_changed_blocks() {
         .unwrap();
     old_tab_edits_the_draft(&node);
     let blockers = scrub_now(&delegate, &node, &outcome);
+    assert_eq!(
+        blockers,
+        vec![Blocker::NotImported {
+            generation: 206,
+            ids: 1
+        }]
+    );
     assert_nothing_deleted(&node, &blockers);
 }
 
@@ -826,7 +925,8 @@ fn a_second_value_of_one_key_did_not_land() {
 }
 
 /// A tab that died before its first snapshot leaves no walk read to use: what
-/// still equals the import goes in, and scrub can still run.
+/// still equals the import goes in, and scrub can still run. The user backed up
+/// in between, which changes `last_backup_at` and only that.
 #[test]
 fn a_snapshot_written_late_takes_what_still_equals_the_import() {
     let delegate = Delegate::new();
@@ -834,14 +934,32 @@ fn a_snapshot_written_late_takes_what_still_equals_the_import() {
     let outcome = settle(&delegate, &node);
     assert!(outcome.read_rows.is_empty(), "the walk read nothing new");
     back_up(&delegate, alice());
+    assert_eq!(scrub_all(&delegate, &node, &outcome), Vec::new());
+    assert_scrubbed(&delegate, &node, 5);
+}
+
+/// Another settings field changed before the late snapshot is not the import,
+/// so the row is kept.
+#[test]
+fn a_late_snapshot_does_not_take_a_changed_setting() {
+    let delegate = Delegate::new();
+    let node = usual_node();
+    let outcome = settle(&delegate, &node);
+    back_up(&delegate, alice());
+    let mut store = delegate.clone();
+    block_on(merged_put(&mut store, settings_item(alice()), |stored| {
+        let mut settings: serde_json::Value = serde_json::from_slice(stored?).unwrap();
+        settings["display_name"] = json!("changed after the import");
+        Some(serde_json::to_vec(&settings).unwrap())
+    }))
+    .unwrap();
     let blockers = scrub_now(&delegate, &node, &outcome);
     assert_eq!(
         blockers,
         vec![Blocker::NotImported {
             generation: 206,
             ids: 1
-        }],
-        "only the backed-up settings differ, and that blocks rather than guesses"
+        }]
     );
     assert_nothing_deleted(&node, &blockers);
 }
@@ -954,6 +1072,7 @@ fn an_item_the_page_changed_after_the_walk_wrote_it_does_not_block() {
     back_up(&delegate, alice());
     let outcome = settle(&delegate, &node);
     assert_eq!(scrub_all(&delegate, &node, &outcome), Vec::new());
+    assert_scrubbed(&delegate, &node, 5);
 }
 
 // ── The snapshot is per row ─────────────────────────────────────────────────
@@ -976,6 +1095,7 @@ fn a_deletion_on_the_second_load_does_not_block() {
     let outcome = settle(&delegate, &node);
     assert_eq!(scrub_all(&delegate, &node, &outcome), Vec::new());
     assert!(!row_text(&node, ls(206)).contains("\"d1\":"));
+    assert_scrubbed(&delegate, &node, 5);
 }
 
 // ── A row that comes back ───────────────────────────────────────────────────
@@ -986,9 +1106,7 @@ fn a_deletion_on_the_second_load_does_not_block() {
 fn a_row_that_returns_after_its_identity_row_went_is_filed() {
     let delegate = Delegate::new();
     let node = usual_node();
-    // Without its old backup time: the identity was backed up while the row
-    // was away, and a stamp that differs from the delegate's blocks.
-    let mail = golden_edited("ls_state", r#","last_backup_at":9"#, "");
+    let mail = golden("ls_state");
     node.set(ls(206), LegacyReply::NotInstalled);
     let outcome = settle(&delegate, &node);
     assert_eq!(
