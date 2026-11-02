@@ -55,6 +55,9 @@ protocol_tests() {
 ui_migration_tests() {
     cargo test --manifest-path "$STAGE/Cargo.toml" -p freenet-email-ui --lib migration
 }
+ui_notfound_tests() {
+    cargo test --manifest-path "$STAGE/Cargo.toml" -p freenet-email-ui --lib notfound_routing
+}
 candidate_check() { "$STAGE/scripts/check-delegate-candidate.sh"; }
 freeze_tests() { "$STAGE/scripts/release-freeze_test.sh"; }
 
@@ -549,8 +552,8 @@ ut "a cap ends the walk" "$M/successor.rs" \
                 ItemWrite::retryable(text)' \
     scenario_a_cap_is_a_counted_rejection_and_the_walk_ends
 ut "an identity on its way is not a deleted one" "$M/successor.rs" \
-    '            Some(FailureCode::NotFound) if owner.is_some_and(|o| self.arrived.holds(&o)) => {' \
-    '            Some(FailureCode::NotFound) if owner.is_some() => {' \
+    '        let Some(owner) = owner.filter(|o| self.arrived.holds(o)) else {' \
+    '        let Some(owner) = owner else {' \
     scenario_items_wait_for_an_identity_that_has_not_arrived
 ut "an unreadable journal is rebuilt" "$M/successor.rs" \
     '            Err(e) if is_unreadable(&e) => {
@@ -588,14 +591,8 @@ ut "a silent identity row never orphans its aliases" "$M/legacy_delegates.rs" \
     'AliasOwner::Unresolved => None,' \
     scenario_a_silent_identity_row_never_orphans_its_aliases
 ut "one absent answer does not stand" "$M/legacy_delegates.rs" \
-    '.is_some_and(|answers| *answers >= HOLD_BACK_LOADS)
-    }
-
-    /// Every identity generation' \
-    '.is_none_or(|answers| *answers < u32::MAX)
-    }
-
-    /// Every identity generation' \
+    '.is_some_and(|answers| *answers >= HOLD_BACK_LOADS)' \
+    '.is_none_or(|answers| *answers < u32::MAX)' \
     scenario_one_empty_answer_after_a_silence_orphans_nothing
 ut "a resolved identity row never stands as absent" "$M/legacy_delegates.rs" \
     '        self.pending_walks
@@ -609,16 +606,19 @@ ut "absent answers count only in a row" "$M/mod.rs" \
     '' \
     scenario_absent_answers_count_only_in_a_row
 ut "another generation's transient empty does not orphan" "$M/legacy_delegates.rs" \
-    '            } else {
+    '            } else if matches!(reply, Ok(r) if row_holds_nothing(&r)) && self.absence_stands(&entry)
+            {
+                tables.mark_absent(release);
+            } else {
                 tables.incomplete = true;
-            }
-        }
-        tables' \
-    '            } else {
-                tables.incomplete |= !matches!(&reply, Ok(r) if row_holds_nothing(r));
-            }
-        }
-        tables' \
+            }' \
+    '            } else if matches!(&reply, Ok(r) if row_holds_nothing(r)) {
+                if self.absence_stands(&entry) {
+                    tables.mark_absent(release);
+                }
+            } else {
+                tables.incomplete = true;
+            }' \
     scenario_a_transient_empty_in_another_generation_orphans_nothing
 ut "silence past the hold starts no contract migration" "$M/successor.rs" \
     '                adopted.pending_held = hold && adopted.has_pending();' \
@@ -629,8 +629,7 @@ guard "held markers are not acted on" "$STAGE/ui/src/app/identity_store.rs" \
     '    let Some(mut markers) = read else {' \
     "tests:scenario_silence_past_the_hold_starts_no_contract_migration" ui_migration_tests
 ut "held markers are released when the newer row settles" "$M/mod.rs" \
-    '    let released_markers =
-        held && release_held_markers(successor.store(), newest_unsettled).await;' \
+    '    let released_markers = held && release_held_markers(successor.store(), newest_unsettled).await;' \
     '    let released_markers = false && held && newest_unsettled.is_none();' \
     scenario_silence_past_the_hold_starts_no_contract_migration
 ut "a held-back row counts nothing" "$M/legacy_delegates.rs" \
@@ -655,7 +654,7 @@ guard "an unconfirmed identity publishes nothing" "$STAGE/ui/src/api.rs" \
         (_, None, Some(true)) => NotFoundRoute::OwnAftRecord,' \
     '        (_, Some(_), _) => NotFoundRoute::OwnInbox,
         (_, None, Some(_)) => NotFoundRoute::OwnAftRecord,' \
-    "tests:an_unconfirmed_identity_never_self_heals" ui_migration_tests
+    "tests:an_unconfirmed_identity_never_self_heals" ui_notfound_tests
 ut "NotFound is confirmed before an identity counts as gone" "$M/successor.rs" \
     '            Ok(Reply::Status(status)) if status.unreadable_identities == 0' \
     '            Ok(Reply::Status(_))' \

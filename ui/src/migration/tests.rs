@@ -1167,16 +1167,24 @@ fn scenario_identities_are_announced_before_the_mail() {
 }
 
 /// A row held back maps again next load: its marks are not news, and a walk
-/// that did nothing must not raise a notice.
+/// that did nothing must not raise a notice. `alice` maps first and has
+/// deleted marks to count; `zed` is the alias that holds the row back.
 #[test]
 fn scenario_a_row_held_back_counts_nothing() {
     let delegate = Delegate::new();
     let node = Node::default();
-    node.set(im(206), LegacyReply::NoAnswer("timed out".into()));
-    node.set(ls(206), answer(golden("ls_state")));
+    let mut state: serde_json::Value = serde_json::from_slice(&golden("ls_state")).unwrap();
+    let alice_state = state["aliases"]["alice"].clone();
+    state["aliases"]["zed"] = alice_state;
+    node.set(im(206), answer(golden("identity_state_seeded")));
+    node.set(im(205), LegacyReply::NoAnswer("timed out".into()));
+    node.set(ls(206), answer(serde_json::to_vec(&state).unwrap()));
+    let outcome = walk(&delegate, &node, no_inbox());
+    assert_eq!(outcome.counts.identities, 1);
     let outcome = walk(&delegate, &node, no_inbox());
     assert!(outcome.counts.is_empty());
-    assert!(delegate.ledger().totals.is_empty());
+    let totals = delegate.ledger().totals;
+    assert_eq!((totals.deleted_marks, totals.flags_skipped), (0, 0));
 }
 
 /// The silence alarm stays up on a load that does not walk, and goes when a
