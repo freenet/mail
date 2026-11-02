@@ -327,7 +327,7 @@ async fn write_snapshots<S: MailStore, T: LegacyTransport>(
                         && (*g >= IDENTITY_GENERATION_OFFSET) == is_identity_row(entry)
                         && pairs.iter().any(|(k, _, _)| k == key)
                 });
-                let landed = outcome.landed.contains(&(generation, key.clone()));
+                let landed = outcome.landed.contains(&(generation, key.clone(), *hash));
                 if newer
                     || landed
                     || holds_now(store, &decoded, hash, settings.as_deref(), identities).await?

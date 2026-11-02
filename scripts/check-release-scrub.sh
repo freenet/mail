@@ -33,7 +33,7 @@ MARKER="freenet-mail:scrub-built-in"
 
 found=0
 while IFS= read -r -d '' file; do
-    found=1
+    found=$((found + 1))
     if [ "$ABSENT" -eq 1 ]; then
         if grep -a -q -F -- "$MARKER" "$file"; then
             echo "error: $file has scrub: it was built with FREENET_MAIL_SCRUB=1." >&2
@@ -48,6 +48,12 @@ while IFS= read -r -d '' file; do
 done < <(find "$DIR" -type f -name '*.wasm' -print0 2>/dev/null)
 if [ "$found" -eq 0 ]; then
     echo "error: no WASM under $DIR to check for scrub" >&2
+    exit 1
+fi
+# build-ui clears this directory. More than one file is an old build left
+# beside the new one, and this check could not say which of them ships.
+if [ "$found" -gt 1 ]; then
+    echo "error: $found WASM files under $DIR: rebuild with \`cargo make build-ui\`" >&2
     exit 1
 fi
 if [ "$ABSENT" -eq 1 ]; then echo "ok: the build has no scrub"; else echo "ok: the build has scrub"; fi

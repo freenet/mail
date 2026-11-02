@@ -806,6 +806,10 @@ ut "what the walk wrote is recorded as landed" "$S" \
 ' \
     '' \
     an_item_the_page_changed_after_the_walk_wrote_it_does_not_block
+ut "landed means this value, not this key" "$S" \
+    'let landed = outcome.landed.contains(&(generation, key.clone(), *hash));' \
+    'let landed = outcome.landed.iter().any(|(g, k, _)| *g == generation && k == key);' \
+    a_second_value_of_one_key_did_not_land
 ut "an older copy of a newer item is recorded" "$S" \
     '                if newer
 ' \

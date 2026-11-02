@@ -203,7 +203,7 @@ pub(crate) struct WalkOutcome {
     /// What this walk read from each row, before importing it.
     pub read_rows: legacy_delegates::RowHashes,
     /// The `(generation, key)` of each item this walk wrote verbatim.
-    pub landed: BTreeSet<(u32, Vec<u8>)>,
+    pub landed: BTreeSet<(u32, Vec<u8>, [u8; 16])>,
 }
 
 thread_local! {

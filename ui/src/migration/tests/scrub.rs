@@ -792,6 +792,39 @@ fn an_older_copy_of_a_newer_item_does_not_block() {
     assert_eq!(delegate.ledger().scrubbed.get(&206), Some(&true));
 }
 
+/// v0.2.7 let one contact sit under two labels. Both map to one key, only one
+/// lands, and the other's label exists nowhere else, so the rows stay.
+#[test]
+fn a_second_value_of_one_key_did_not_land() {
+    let delegate = Delegate::new();
+    let node = usual_node();
+    let mut state: serde_json::Value =
+        serde_json::from_slice(&golden("identity_state_seeded")).unwrap();
+    let contacts: serde_json::Value =
+        serde_json::from_slice(&golden("identity_state_contact")).unwrap();
+    let bob = contacts["identities"]["bob"].clone();
+    let mut other = bob.clone();
+    other["extra"] = json!("the same person, another label");
+    state["identities"]["bob"] = bob;
+    state["identities"]["robert"] = other;
+    node.set(im(206), answer(serde_json::to_vec(&state).unwrap()));
+    node.set(im(205), answer(golden("identity_state_seeded")));
+    node.set(ls(205), answer(golden("ls_state")));
+    // One walk, so the snapshot comes from the walk that did the writing: what
+    // it records for this key is the question.
+    let outcome = walk(&delegate, &node, six_messages());
+    scrub_now(&delegate, &node, &outcome);
+    back_up(&delegate, alice());
+    let blockers = scrub_all(&delegate, &node, &outcome);
+    assert!(
+        blockers
+            .iter()
+            .any(|b| matches!(b, Blocker::NotImported { .. })),
+        "{blockers:?}"
+    );
+    assert_nothing_deleted(&node, &blockers);
+}
+
 /// A tab that died before its first snapshot leaves no walk read to use: what
 /// still equals the import goes in, and scrub can still run.
 #[test]

@@ -401,11 +401,11 @@ pub(crate) struct MailSuccessor<S, I> {
     arrived: ArrivedIdentities,
     /// The `(generation, key)` of each pair this walk wrote verbatim. Settings
     /// merge, so they are not here.
-    landed: BTreeSet<(u32, Vec<u8>)>,
+    landed: BTreeSet<(u32, Vec<u8>, [u8; 16])>,
 }
 
 impl<S: MailStore, I: V1InboxReader> MailSuccessor<S, I> {
-    pub(crate) fn take_landed(&mut self) -> BTreeSet<(u32, Vec<u8>)> {
+    pub(crate) fn take_landed(&mut self) -> BTreeSet<(u32, Vec<u8>, [u8; 16])> {
         std::mem::take(&mut self.landed)
     }
 
@@ -872,7 +872,11 @@ impl<S: MailStore, I: V1InboxReader> SuccessorSecretsIo for MailSuccessor<S, I> 
         if matches!(outcome, ItemWrite::Written) {
             self.count(&key);
             if !matches!(key, PairKey::IdentitySettings(_) | PairKey::GlobalSettings) {
-                self.landed.insert((item.generation, item.key.to_vec()));
+                // The value too: one row can hold a key twice (a contact under
+                // two labels), and only the one written landed.
+                let value = super::legacy_delegates::id16(&[item.value]);
+                self.landed
+                    .insert((item.generation, item.key.to_vec(), value));
             }
         }
         outcome
