@@ -630,6 +630,21 @@ impl AftRecords {
         })
     }
 
+    /// Whether the page holds a token record for `identity`.
+    pub fn has_record(identity: &Identity) -> bool {
+        RECORDS.with(|recs| recs.borrow().contains_key(identity))
+    }
+
+    /// The node acked the PUT of `identity`'s default record, so the page
+    /// holds it without a GET. A record already cached stays.
+    pub fn seed_default_record(identity: Identity) {
+        RECORDS.with(|recs| {
+            recs.borrow_mut()
+                .entry(identity)
+                .or_insert_with(|| TokenAllocationRecord::new(HashMap::new()));
+        });
+    }
+
     pub fn update_record(identity: Identity, update_data: UpdateData) -> Result<(), DynError> {
         let record = match update_data {
             StateUpdate(state) => {

@@ -108,6 +108,52 @@ test("a v0.2.7 identity and its archive arrive from the frozen delegates", async
     await expect(app.locator('[data-testid="fm-archive-body"]')).toContainText(
       ARCHIVED_BODY,
     );
+
+    // The seeded identity has no v1 inbox, so it arrives unconfirmed. Sending
+    // asks the user to confirm it, and confirming must resume the send on a
+    // real node: the token record is created on the node and the page has to
+    // hold it before the send runs. An offline test cannot show this.
+    const burger = app.locator('[data-testid="fm-hamburger"]');
+    if (await burger.isVisible().catch(() => false)) await burger.click();
+    await app.locator('[data-testid="fm-compose-btn"]').click();
+    const sheet = app.locator('[data-testid="fm-compose-sheet"]');
+    await sheet.locator('input[placeholder="alias or address"]').fill(ALIAS);
+    await sheet.locator('input[placeholder="subject"]').fill("sent after confirming");
+    await sheet.locator("textarea.sheet-textarea").fill("body after confirming");
+    await sheet.locator('[data-testid="fm-send"]').click();
+    const prompt = app.locator('[data-testid="fm-confirm-identity"]');
+    await expect(prompt, "an unconfirmed identity is asked to confirm").toBeVisible({
+      timeout: 15_000,
+    });
+    await app.locator('[data-testid="fm-confirm-identity-submit"]').click();
+    await expect(prompt, "the prompt closes once confirmed").toHaveCount(0, {
+      timeout: 60_000,
+    });
+    await expect(sheet, "the send resumed and the sheet closed").toHaveCount(0, {
+      timeout: 30_000,
+    });
+    if (await burger.isVisible().catch(() => false)) await burger.click();
+    await app.locator('[data-testid="fm-folder-sent"]').click();
+    const sent = app.locator('[data-testid="fm-sent-card"]');
+    await expect(
+      sent.filter({ hasText: "sent after confirming" }),
+      "the message reaches Sent as delivered",
+    ).toHaveAttribute("data-delivery-state", "Delivered", { timeout: 90_000 });
+    await expect(
+      sent.filter({ hasText: "sent after confirming" }).and(app.locator('[data-delivery-state="Failed"]')),
+      "the new message has no Failed row",
+    ).toHaveCount(0);
+    // The seeded identity has a draft of its own; the one just sent is gone.
+    if (await burger.isVisible().catch(() => false)) await burger.click();
+    await app.locator('[data-testid="fm-folder-drafts"]').click();
+    await expect(
+      app.locator('[data-testid="fm-draft-card"]').filter({ hasText: "sent after confirming" }),
+      "no draft of the sent message is left",
+    ).toHaveCount(0);
+    await expect(
+      app.locator('[data-testid="fm-draft-card"]').filter({ hasText: "unsent" }),
+      "the seeded draft is still there",
+    ).toHaveCount(1);
     expect(pumpError, "the permission pump hit an error").toBeNull();
   } finally {
     clearInterval(pump);

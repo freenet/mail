@@ -724,14 +724,44 @@ pub(crate) async fn confirm_identity(
         .iter()
         .find(|i| i.addr == addr)
         .ok_or("this identity is no longer here")?;
-    let generation = ops::confirm_identity(addr, info.generation)
-        .await
-        .map_err(|e| e.to_string())?;
-    Identity::set_confirmed(&addr, generation, user);
+    // A retry after the record timed out finds it confirmed already.
+    if !info.confirmed {
+        let generation = ops::confirm_identity(addr, info.generation)
+            .await
+            .map_err(|e| e.to_string())?;
+        Identity::set_confirmed(&addr, generation, user);
+    }
     // Its inbox and token record were not published while it was unconfirmed
-    // (`api::classify_notfound`): the GETs this sends again now can. It does
-    // not hold up what the prompt was opened for.
-    spawn_detached(load_identities());
+    // (`api::classify_notfound`): the GETs this sends again now can. A send
+    // needs the token record, so the prompt waits until the page holds it.
+    load_identities().await;
+    wait_for_token_record(addr).await
+}
+
+/// How long confirming waits for the token record to load.
+#[cfg(feature = "use-node")]
+const TOKEN_RECORD_WAIT_MS: u32 = 30_000;
+
+#[cfg(feature = "use-node")]
+async fn wait_for_token_record(addr: Addr) -> Result<(), String> {
+    const STEP_MS: u32 = 200;
+    for _ in 0..TOKEN_RECORD_WAIT_MS / STEP_MS {
+        let loaded =
+            Identity::by_addr(&addr).is_some_and(|i| crate::aft::AftRecords::has_record(&i));
+        if loaded {
+            return Ok(());
+        }
+        gloo_timers::future::TimeoutFuture::new(STEP_MS).await;
+    }
+    Err(
+        "This identity is confirmed, but its sending allowance has not loaded yet. \
+         Your draft is kept: try again in a moment."
+            .into(),
+    )
+}
+
+#[cfg(not(feature = "use-node"))]
+async fn wait_for_token_record(_addr: Addr) -> Result<(), String> {
     Ok(())
 }
 

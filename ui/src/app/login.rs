@@ -289,6 +289,11 @@ impl Identity {
         ALIASES.with(|aliases| aliases.borrow_mut().push(identity));
     }
 
+    /// The live identity at `addr`, if any.
+    pub(crate) fn by_addr(addr: &freenet_mail_protocol::Addr) -> Option<Identity> {
+        ALIASES.with(|aliases| aliases.borrow().iter().find(|a| &a.addr == addr).cloned())
+    }
+
     /// The identity was confirmed, at `generation`.
     pub(crate) fn set_confirmed(
         addr: &freenet_mail_protocol::Addr,

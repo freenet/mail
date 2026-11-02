@@ -314,6 +314,7 @@ pub(crate) fn ConfirmIdentityPrompt(
 ) -> Element {
     let user = use_context::<Signal<crate::app::User>>();
     let mut error = use_signal(String::new);
+    let mut working = use_signal(|| false);
     let addr = identity.addr;
     let address = crate::app::address_book::ContactCard::from_identity(&identity).encode();
     let fingerprint = crate::app::address_book::fingerprint_words(
@@ -343,15 +344,21 @@ pub(crate) fn ConfirmIdentityPrompt(
                     button {
                         class: "btn btn-primary",
                         "data-testid": testid::FM_CONFIRM_IDENTITY_SUBMIT,
+                        disabled: *working.read(),
                         onclick: move |_| {
+                            working.set(true);
+                            error.set(String::new());
                             spawn(async move {
-                                match crate::app::identity_store::confirm_identity(addr, user).await {
+                                let confirmed =
+                                    crate::app::identity_store::confirm_identity(addr, user).await;
+                                working.set(false);
+                                match confirmed {
                                     Ok(()) => on_confirmed.call(()),
                                     Err(e) => error.set(e),
                                 }
                             });
                         },
-                        "This is mine"
+                        if *working.read() { "Confirming…" } else { "This is mine" }
                     }
                 }
             }

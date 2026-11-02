@@ -1195,6 +1195,19 @@ mod token_generator_management {
         /// Token-generator delegates registered in this page session.
         static REGISTERED: RefCell<std::collections::HashSet<Vec<u8>>> =
             RefCell::new(std::collections::HashSet::new());
+        /// Registrations sent and not yet answered, by delegate key.
+        static AWAITING_REGISTRATION: RefCell<HashMap<Vec<u8>, futures::channel::oneshot::Sender<()>>> =
+            RefCell::new(HashMap::new());
+    }
+
+    /// How long to wait for the node's answer to a registration.
+    const REGISTRATION_WAIT_MS: u32 = 15_000;
+
+    /// The node answered the registration of `key`.
+    pub(super) fn registration_answered(key: &DelegateKey) {
+        if let Some(sender) = AWAITING_REGISTRATION.with(|a| a.borrow_mut().remove(key.bytes())) {
+            let _ = sender.send(());
+        }
     }
 
     /// Register the token-generator delegate with `params` once per page
@@ -1208,7 +1221,22 @@ mod token_generator_management {
         if REGISTERED.with(|r| r.borrow().contains(key.bytes())) {
             return Ok(());
         }
+        // The node compiles the delegate when it registers it, and a message
+        // sent meanwhile finds no delegate: wait for its answer.
+        let (answered, registered) = futures::channel::oneshot::channel();
+        AWAITING_REGISTRATION.with(|a| a.borrow_mut().insert(key.bytes().to_vec(), answered));
         delegate_api::create_delegate(client, TOKEN_GEN_CODE_HASH, TOKEN_GEN_CODE, params).await?;
+        let timeout = gloo_timers::future::TimeoutFuture::new(REGISTRATION_WAIT_MS);
+        if let futures::future::Either::Right(_) =
+            futures::future::select(registered, timeout).await
+        {
+            AWAITING_REGISTRATION.with(|a| a.borrow_mut().remove(key.bytes()));
+            crate::log::error(
+                "the node did not confirm registering the token generator".to_string(),
+                None,
+            );
+            return Ok(());
+        }
         REGISTERED.with(|r| r.borrow_mut().insert(key.bytes().to_vec()));
         Ok(())
     }
@@ -1528,9 +1556,18 @@ thread_local! {
     /// it is ("inbox" or "AFT record") and the identity's alias. The
     /// "not found ... re-PUTting" line is logged before the PUT is sent, so
     /// only the node's acknowledgement says the contract is held again.
-    static SELF_HEAL_PUTS: RefCell<Vec<(freenet_stdlib::prelude::ContractInstanceId, &'static str, Rc<str>)>> =
-        const { RefCell::new(Vec::new()) };
+    static SELF_HEAL_PUTS: RefCell<Vec<SelfHealPut>> = const { RefCell::new(Vec::new()) };
 }
+
+/// A self-heal PUT awaiting its ack: the contract, what it is, the alias, and
+/// the identity whose default token record it PUT (the AFT record's).
+#[cfg(feature = "use-node")]
+type SelfHealPut = (
+    freenet_stdlib::prelude::ContractInstanceId,
+    &'static str,
+    Rc<str>,
+    Option<crate::app::Identity>,
+);
 
 /// Remember a #288 self-heal PUT, so its acknowledgement is reported.
 #[cfg(feature = "use-node")]
@@ -1538,8 +1575,9 @@ fn await_self_heal_ack(
     id: freenet_stdlib::prelude::ContractInstanceId,
     what: &'static str,
     alias: Rc<str>,
+    default_record_of: Option<crate::app::Identity>,
 ) {
-    SELF_HEAL_PUTS.with(|p| p.borrow_mut().push((id, what, alias)));
+    SELF_HEAL_PUTS.with(|p| p.borrow_mut().push((id, what, alias, default_record_of)));
 }
 
 /// If `id` is a #288 self-heal PUT, report that the node now holds it.
@@ -1550,7 +1588,12 @@ fn self_heal_acked(id: &freenet_stdlib::prelude::ContractInstanceId) {
         let pos = p.iter().position(|(k, ..)| k == id)?;
         Some(p.remove(pos))
     });
-    if let Some((_, what, alias)) = acked {
+    if let Some((_, what, alias, default_record_of)) = acked {
+        // What was PUT is the default record and nothing GETs it again this
+        // session, yet a send needs it to assign a token.
+        if let Some(identity) = default_record_of {
+            crate::aft::AftRecords::seed_default_record(identity);
+        }
         crate::log::info(format!(
             "own {what} re-published (key={id}, alias=`{alias}`) — self-heal stored (#288)"
         ));
@@ -3369,6 +3412,7 @@ pub(crate) async fn node_comms(
                 // Phase 1 restore lands; for now, just ignore empty responses on
                 // the identities key.
                 if values.is_empty() {
+                    token_generator_management::registration_answered(&key);
                     let found = token_generator_management::CREATED_AFT_GEN.with(|keys| {
                         let pos = keys.borrow().iter().position(|(_, k)| k == &key);
                         if let Some(pos) = pos {
@@ -3543,7 +3587,7 @@ pub(crate) async fn node_comms(
                 let confirmed = |id: &Identity| {
                     confirmed_after_listing(
                         id.confirmed,
-                        Identity::get_alias(&id.alias).map(|now| now.confirmed),
+                        Identity::by_addr(&id.addr).map(|now| now.confirmed),
                     )
                 };
                 let route = classify_notfound(
@@ -3581,7 +3625,7 @@ pub(crate) async fn node_comms(
                             "own inbox not found on the network (key={key}, alias=`{}`) — re-PUTting to self-heal (#288)",
                             identity.alias()
                         ));
-                        await_self_heal_ack(instance_id, "inbox", Rc::from(identity.alias()));
+                        await_self_heal_ack(instance_id, "inbox", Rc::from(identity.alias()), None);
                         let mut client = client.clone();
                         crate::app::identity_store::spawn_detached(async move {
                             let put = async {
@@ -3613,7 +3657,12 @@ pub(crate) async fn node_comms(
                             "own AFT record not found on the network (key={key}, alias=`{}`) — re-PUTting to self-heal (#288)",
                             identity.alias()
                         ));
-                        await_self_heal_ack(instance_id, "AFT record", Rc::from(identity.alias()));
+                        await_self_heal_ack(
+                            instance_id,
+                            "AFT record",
+                            Rc::from(identity.alias()),
+                            Some(identity.clone()),
+                        );
                         if let Err(e) =
                             token_record_management::create_contract(&mut client.clone(), &identity)
                                 .await
