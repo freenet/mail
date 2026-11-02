@@ -1233,7 +1233,7 @@ mod token_generator_management {
         {
             AWAITING_REGISTRATION.with(|a| a.borrow_mut().remove(key.bytes()));
             crate::log::error(
-                "the node did not confirm registering the token generator".to_string(),
+                "the node did not confirm registering the token generator",
                 None,
             );
             return Ok(());
