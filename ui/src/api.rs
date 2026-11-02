@@ -314,7 +314,7 @@ mod notfound_routing {
         let confirm = &source[source.find("fn confirm_identity").unwrap()..];
         let confirm = &confirm[..confirm.find("\n}\n").unwrap()];
         let confirmed = confirm.find("Identity::set_confirmed").unwrap();
-        let reloaded = confirm.find("load_identities().await").unwrap();
+        let reloaded = confirm.find("spawn_detached(load_identities())").unwrap();
         assert!(confirmed < reloaded);
     }
 
