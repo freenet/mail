@@ -227,6 +227,10 @@ enum NotFoundRoute {
     OwnInbox,
     /// Key is this client's own AFT token-allocation-record: same self-heal.
     OwnAftRecord,
+    /// Key belongs to a migrated identity its owner has not confirmed: nothing
+    /// is published for it. Confirming it reloads the identities, and the
+    /// GETs that sends land here as `OwnInbox` or `OwnAftRecord`.
+    OwnUnconfirmed,
     /// Not attributable to any of the above — log quietly, do not re-PUT.
     Unattributed,
 }
@@ -234,20 +238,20 @@ enum NotFoundRoute {
 /// Pure routing decision for a NotFound. The three sources are mutually
 /// exclusive in practice, so the order encodes priority: import first
 /// (cheapest, definitive), then own-inbox, then own-AFT, else unattributed.
+/// `own_inbox` and `own_aft` say whether the key is the identity's, and if so
+/// whether the identity is confirmed: an unconfirmed one publishes nothing.
 #[cfg_attr(not(feature = "use-node"), allow(dead_code))]
 fn classify_notfound(
     in_import_pending: bool,
-    is_own_inbox: bool,
-    is_own_aft: bool,
+    own_inbox: Option<bool>,
+    own_aft: Option<bool>,
 ) -> NotFoundRoute {
-    if in_import_pending {
-        NotFoundRoute::ContactImport
-    } else if is_own_inbox {
-        NotFoundRoute::OwnInbox
-    } else if is_own_aft {
-        NotFoundRoute::OwnAftRecord
-    } else {
-        NotFoundRoute::Unattributed
+    match (in_import_pending, own_inbox, own_aft) {
+        (true, _, _) => NotFoundRoute::ContactImport,
+        (_, Some(false), _) | (_, None, Some(false)) => NotFoundRoute::OwnUnconfirmed,
+        (_, Some(true), _) => NotFoundRoute::OwnInbox,
+        (_, None, Some(true)) => NotFoundRoute::OwnAftRecord,
+        (_, None, None) => NotFoundRoute::Unattributed,
     }
 }
 
@@ -260,11 +264,11 @@ mod notfound_routing {
         // A pending import key can never collide with an own key in
         // practice, but priority must still favour resolving the modal.
         assert_eq!(
-            classify_notfound(true, true, true),
+            classify_notfound(true, Some(true), Some(true)),
             NotFoundRoute::ContactImport
         );
         assert_eq!(
-            classify_notfound(true, false, false),
+            classify_notfound(true, None, None),
             NotFoundRoute::ContactImport
         );
     }
@@ -272,12 +276,12 @@ mod notfound_routing {
     #[test]
     fn own_inbox_when_not_import() {
         assert_eq!(
-            classify_notfound(false, true, false),
+            classify_notfound(false, Some(true), None),
             NotFoundRoute::OwnInbox
         );
         // Inbox takes priority over AFT if both somehow matched.
         assert_eq!(
-            classify_notfound(false, true, true),
+            classify_notfound(false, Some(true), Some(true)),
             NotFoundRoute::OwnInbox
         );
     }
@@ -285,16 +289,40 @@ mod notfound_routing {
     #[test]
     fn own_aft_when_only_aft() {
         assert_eq!(
-            classify_notfound(false, false, true),
+            classify_notfound(false, None, Some(true)),
             NotFoundRoute::OwnAftRecord
         );
+    }
+
+    /// A migrated identity with no inbox publishes nothing until its owner
+    /// says it is theirs: the confirm prompt exists for exactly this one.
+    #[test]
+    fn an_unconfirmed_identity_never_self_heals() {
+        let held = NotFoundRoute::OwnUnconfirmed;
+        assert_eq!(classify_notfound(false, Some(false), None), held);
+        assert_eq!(classify_notfound(false, None, Some(false)), held);
+        assert_eq!(
+            classify_notfound(true, Some(false), None),
+            NotFoundRoute::ContactImport
+        );
+    }
+
+    /// Confirming sends the GETs again, which is what runs the self-heal.
+    #[test]
+    fn confirming_an_identity_runs_what_was_held() {
+        let source = include_str!("app/identity_store.rs");
+        let confirm = &source[source.find("fn confirm_identity").unwrap()..];
+        let confirm = &confirm[..confirm.find("\n}\n").unwrap()];
+        let confirmed = confirm.find("Identity::set_confirmed").unwrap();
+        let reloaded = confirm.find("load_identities().await").unwrap();
+        assert!(confirmed < reloaded);
     }
 
     #[test]
     fn unattributed_when_no_table_owns_it() {
         // The case that previously fell through to "message not handled".
         assert_eq!(
-            classify_notfound(false, false, false),
+            classify_notfound(false, None, None),
             NotFoundRoute::Unattributed
         );
     }
@@ -3436,10 +3464,15 @@ pub(crate) async fn node_comms(
                     contact_import::PENDING.with(|m| m.borrow_mut().remove(&instance_id));
                 let own_identity = InboxModel::contract_identity(&key);
                 let own_aft_identity = token_rec_to_id.get(&key).cloned();
+                // The tables hold a copy of the identity from when it loaded,
+                // so a confirmation since then is read from the list.
+                let confirmed = |id: &Identity| {
+                    Identity::get_alias(&id.alias).map_or(id.confirmed, |now| now.confirmed)
+                };
                 let route = classify_notfound(
                     import_addr.is_some(),
-                    own_identity.is_some(),
-                    own_aft_identity.is_some(),
+                    own_identity.as_ref().map(confirmed),
+                    own_aft_identity.as_ref().map(confirmed),
                 );
                 match route {
                     NotFoundRoute::ContactImport => {
@@ -3516,6 +3549,11 @@ pub(crate) async fn node_comms(
                                 None,
                             );
                         }
+                    }
+                    NotFoundRoute::OwnUnconfirmed => {
+                        crate::log::info(format!(
+                            "contract of an unconfirmed identity not found (key={key}): not published"
+                        ));
                     }
                     NotFoundRoute::Unattributed => {
                         // Not an import, own inbox, or own AFT record. Log

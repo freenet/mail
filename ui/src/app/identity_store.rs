@@ -686,6 +686,9 @@ pub(crate) async fn confirm_identity(
         .await
         .map_err(|e| e.to_string())?;
     Identity::set_confirmed(&addr, generation, user);
+    // Its inbox and token record were not published while it was unconfirmed
+    // (`api::classify_notfound`): the GETs this sends again now can.
+    load_identities().await;
     Ok(())
 }
 

@@ -28,6 +28,8 @@ pub(crate) struct MigrationView {
     pub unreachable: bool,
     pub totals: MigrationCounts,
     pub rejected: u32,
+    /// The move may be part done ([`crate::migration::WalkOutcome::unfinished`]).
+    pub in_progress: bool,
     pub notice_dismissed: bool,
     pub orphans: Vec<OrphanGroup>,
     pub report: String,
@@ -38,11 +40,17 @@ pub(crate) static BACKUP_REQUEST: GlobalSignal<Option<Addr>> = Signal::global(||
 
 pub(crate) static MIGRATION: GlobalSignal<MigrationView> = Signal::global(MigrationView::default);
 
-/// The summary line of the upgrade notice.
-pub(crate) fn notice_summary(c: &MigrationCounts, rejected: u32) -> String {
+/// The summary line of the upgrade notice. While the move is `in_progress`
+/// the counts are what has arrived so far, and it does not say "Moved".
+pub(crate) fn notice_summary(c: &MigrationCounts, rejected: u32, in_progress: bool) -> String {
+    let lead = if in_progress {
+        "Your move from your previous version of Mail is still in progress. So far"
+    } else {
+        "Moved from your previous version of Mail"
+    };
     format!(
-        "Moved from your previous version of Mail: {} identities, {} contacts, {} drafts, {} \
-         sent, {} kept, {} archived. {} skipped, {} orphaned, {} rejected.",
+        "{lead}: {} identities, {} contacts, {} drafts, {} sent, {} kept, {} archived. {} \
+         skipped, {} orphaned, {} rejected.",
         c.identities,
         c.contacts,
         c.drafts,
@@ -102,6 +110,7 @@ where
         let mut view = MIGRATION.write();
         view.walking = false;
         view.unreachable = outcome.silent_rows > 0;
+        view.in_progress = outcome.unfinished();
     }
     refresh(outcome.status.as_ref()).await;
     if let Ok(listed) = ops::list_identities().await {
@@ -189,7 +198,7 @@ pub(crate) fn MigrationPanel(identities: Vec<(String, Addr)>) -> Element {
     let mut import_backup = use_context::<Signal<ImportBackup>>();
     let line = view.walking.then_some(CHECKING_TEXT);
     let backup_target = identities.first().map(|(_, addr)| *addr);
-    let show_notice = !view.notice_dismissed && !view.totals.is_empty();
+    let show_notice = !view.notice_dismissed && (view.in_progress || !view.totals.is_empty());
     rsx! {
         if let Some(line) = line {
             div { class: "field-help", "data-testid": testid::FM_MIGRATION_STATUS, "{line}" }
@@ -213,7 +222,7 @@ pub(crate) fn MigrationPanel(identities: Vec<(String, Addr)>) -> Element {
                 class: "field-help",
                 "data-testid": testid::FM_MIGRATION_NOTICE,
                 style: "margin-bottom:10px;",
-                p { "{notice_summary(&view.totals, view.rejected)}" }
+                p { "{notice_summary(&view.totals, view.rejected, view.in_progress)}" }
                 p { "{RETRY_DISCLOSURE}" }
                 button {
                     class: "btn btn-secondary",

@@ -394,7 +394,7 @@ impl<S: MailStore, I: V1InboxReader> MailSuccessor<S, I> {
     /// predecessor: a cap (or every later load would re-offer everything,
     /// undoing the user's deletions to make room) and an identity being or
     /// already deleted. `owner` is the identity the item belongs to.
-    fn failed(&mut self, owner: Option<Addr>, error: CallError) -> ItemWrite<String> {
+    async fn failed(&mut self, owner: Option<Addr>, error: CallError) -> ItemWrite<String> {
         let text = error.to_string();
         match error.code() {
             Some(FailureCode::BadInput) => ItemWrite::permanent(text),
@@ -403,11 +403,34 @@ impl<S: MailStore, I: V1InboxReader> MailSuccessor<S, I> {
                 ItemWrite::permanent(text)
             }
             Some(FailureCode::Refused) if owner.is_some() => self.identity_gone(text),
-            Some(FailureCode::NotFound) if owner.is_some_and(|o| self.arrived.holds(&o)) => {
-                self.identity_gone(text)
+            Some(FailureCode::NotFound) if owner.is_some() => {
+                if self.is_deleted(owner).await {
+                    self.identity_gone(text)
+                } else {
+                    ItemWrite::retryable(text)
+                }
             }
             _ => ItemWrite::retryable(text),
         }
+    }
+
+    /// Whether `owner` reached the delegate and is gone. `NotFound` does not
+    /// prove it: the delegate gives the same answer for a record that failed
+    /// to read, so its index is asked. Listed but unreadable, or a question
+    /// that gets no answer, means try again.
+    async fn is_deleted(&mut self, owner: Option<Addr>) -> bool {
+        let Some(owner) = owner.filter(|o| self.arrived.holds(o)) else {
+            return false;
+        };
+        let readable = matches!(
+            self.store.call(Op::GetStatus).await,
+            Ok(Reply::Status(status)) if status.unreadable_identities == 0
+        );
+        readable
+            && matches!(
+                self.store.call(Op::ListIdentities).await,
+                Ok(Reply::Identities(list)) if list.iter().all(|i| i.addr != owner)
+            )
     }
 
     fn identity_gone(&mut self, text: String) -> ItemWrite<String> {
@@ -474,18 +497,27 @@ impl<S: MailStore, I: V1InboxReader> MailSuccessor<S, I> {
 
     /// Import an item that may not exist yet: a stored one stands. A
     /// `Conflict` alone does not prove that: it can be about the index, on a
-    /// create of an item that is not there, so the item is looked at.
-    async fn create(&mut self, item: ItemRef, body: Vec<u8>) -> ItemWrite<String> {
+    /// create of an item that is not there, so the item is looked at. A create
+    /// over the same bytes also succeeds, so a `retry` reads first: an item
+    /// from an earlier attempt is not written, and not counted, twice.
+    async fn create(&mut self, item: ItemRef, body: Vec<u8>, retry: bool) -> ItemWrite<String> {
         let owner = item.owner;
+        if retry {
+            match self.get(item.clone()).await {
+                Ok(Some(_)) => return ItemWrite::already_authoritative(),
+                Err(e) if !is_unreadable(&e) => return self.failed(owner, e).await,
+                _ => {}
+            }
+        }
         let conflict = match self.put(item.clone(), body, None).await {
             Ok(_) => return ItemWrite::written(),
             Err(e) if is_conflict(&e) => e,
-            Err(e) => return self.failed(owner, e),
+            Err(e) => return self.failed(owner, e).await,
         };
         match self.get(item).await {
             Ok(Some(_)) => ItemWrite::already_authoritative(),
             Ok(None) => ItemWrite::retryable(format!("not stored after {conflict}")),
-            Err(e) => self.failed(owner, e),
+            Err(e) => self.failed(owner, e).await,
         }
     }
 
@@ -522,7 +554,9 @@ impl<S: MailStore, I: V1InboxReader> MailSuccessor<S, I> {
                     already_present,
                 }) => break (identity, already_present),
                 Ok(other) => {
-                    return self.failed(None, crate::mail_delegate::unexpected(&other));
+                    return self
+                        .failed(None, crate::mail_delegate::unexpected(&other))
+                        .await;
                 }
                 // Another identity holds the name: a different address, so
                 // this one takes a name of its own.
@@ -530,7 +564,7 @@ impl<S: MailStore, I: V1InboxReader> MailSuccessor<S, I> {
                     attempt += 1;
                     alias = distinct_alias(&identity.alias, &addr);
                 }
-                Err(e) => return self.failed(Some(addr), e),
+                Err(e) => return self.failed(Some(addr), e).await,
             }
         };
         if info.addr != addr {
@@ -541,7 +575,7 @@ impl<S: MailStore, I: V1InboxReader> MailSuccessor<S, I> {
             .adopt_markers(&info, &identity.markers, generation)
             .await
         {
-            return self.failed(Some(addr), e);
+            return self.failed(Some(addr), e).await;
         }
         if already_present {
             return ItemWrite::already_authoritative();
@@ -590,7 +624,7 @@ impl<S: MailStore, I: V1InboxReader> MailSuccessor<S, I> {
         match written {
             Ok(true) => ItemWrite::written(),
             Ok(false) => ItemWrite::already_authoritative(),
-            Err(e) => self.failed(owner, e),
+            Err(e) => self.failed(owner, e).await,
         }
     }
 
@@ -607,16 +641,18 @@ impl<S: MailStore, I: V1InboxReader> MailSuccessor<S, I> {
         let identities = match self.store.call(Op::ListIdentities).await {
             Ok(Reply::Identities(list)) => list,
             Ok(other) => {
-                return self.failed(Some(owner), crate::mail_delegate::unexpected(&other));
+                return self
+                    .failed(Some(owner), crate::mail_delegate::unexpected(&other))
+                    .await;
             }
-            Err(e) => return self.failed(Some(owner), e),
+            Err(e) => return self.failed(Some(owner), e).await,
         };
         let Some(vk) = identities
             .iter()
             .find(|i| i.addr == owner)
             .map(|i| i.vk.clone())
         else {
-            if self.arrived.holds(&owner) {
+            if self.is_deleted(Some(owner)).await {
                 return self.identity_gone("the identity was deleted".to_string());
             }
             return ItemWrite::retryable("the identity is not imported yet".to_string());
@@ -658,7 +694,7 @@ impl<S: MailStore, I: V1InboxReader> MailSuccessor<S, I> {
                 })
                 .await;
             if let Err(e) = written {
-                return self.failed(Some(owner), e);
+                return self.failed(Some(owner), e).await;
             }
         }
         ItemWrite::written()
@@ -680,7 +716,8 @@ impl<S: MailStore, I: V1InboxReader> MailSuccessor<S, I> {
         }
     }
 
-    async fn apply(&mut self, key: PairKey, value: &[u8], generation: u32) -> ItemWrite<String> {
+    async fn apply(&mut self, key: PairKey, item: &RecoveredSecret<'_>) -> ItemWrite<String> {
+        let (value, generation, retry) = (item.value, item.generation, item.retry);
         match key {
             PairKey::Identity(addr) => {
                 let release = generation.saturating_sub(super::IDENTITY_GENERATION_OFFSET);
@@ -688,7 +725,7 @@ impl<S: MailStore, I: V1InboxReader> MailSuccessor<S, I> {
             }
             PairKey::Contact(addr) => {
                 let item = unowned(ItemKind::Contact, addr.0.to_vec());
-                self.create(item, value.to_vec()).await
+                self.create(item, value.to_vec(), retry).await
             }
             PairKey::Message { kind, owner, id } => {
                 let item = ItemRef {
@@ -696,7 +733,7 @@ impl<S: MailStore, I: V1InboxReader> MailSuccessor<S, I> {
                     owner: Some(owner),
                     id: id.to_vec(),
                 };
-                self.create(item, value.to_vec()).await
+                self.create(item, value.to_vec(), retry).await
             }
             PairKey::Flags(owner) => self.import_flags(owner, value).await,
             PairKey::IdentitySettings(owner) => {
@@ -708,7 +745,7 @@ impl<S: MailStore, I: V1InboxReader> MailSuccessor<S, I> {
             }
             PairKey::Orphan(id) => {
                 let item = unowned(ItemKind::LegacyOrphan, id.to_vec());
-                self.create(item, value.to_vec()).await
+                self.create(item, value.to_vec(), retry).await
             }
             PairKey::Refused(_) => {
                 self.counts.refused += 1;
@@ -786,7 +823,7 @@ impl<S: MailStore, I: V1InboxReader> SuccessorSecretsIo for MailSuccessor<S, I> 
         let Some(key) = PairKey::decode(item.key) else {
             return ItemWrite::permanent("an unknown item key".to_string());
         };
-        let outcome = self.apply(key.clone(), item.value, item.generation).await;
+        let outcome = self.apply(key.clone(), item).await;
         if matches!(outcome, ItemWrite::Written) {
             self.count(&key);
         }

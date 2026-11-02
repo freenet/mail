@@ -142,6 +142,25 @@ impl Delegate {
         assert_eq!(env.secrets.len(), before - 1, "one record");
     }
 
+    /// Make an identity's record read as absent while the index lists it, and
+    /// return it. The delegate cannot tell that from a deleted record.
+    fn hide_identity(&self, addr: Addr) -> (Vec<u8>, Vec<u8>) {
+        let rel = mail_delegate::store::identity_rel(&addr).into_bytes();
+        let mut env = self.env.borrow_mut();
+        let key = env
+            .secrets
+            .keys()
+            .find(|key| key.ends_with(&rel))
+            .cloned()
+            .expect("the identity is stored");
+        let value = env.secrets.remove(&key).unwrap();
+        (key, value)
+    }
+
+    fn restore_identity(&self, (key, value): (Vec<u8>, Vec<u8>)) {
+        self.env.borrow_mut().secrets.insert(key, value);
+    }
+
     fn fault(&self, op: &Op) -> Option<FailureCode> {
         let mut faults = self.faults.borrow_mut();
         match op {
@@ -224,6 +243,10 @@ impl Delegate {
             Ok(Reply::Item(item)) => item,
             other => panic!("{other:?}"),
         }
+    }
+
+    fn ledger(&self) -> super::ledger::Ledger {
+        block_on(super::ledger::read_ledger(&mut self.clone())).unwrap()
     }
 
     fn markers_written(&self) -> Vec<StoredMarker> {
@@ -619,6 +642,48 @@ fn scenario_an_interrupted_migration_finishes_on_the_next_load() {
 
 /// While an import is partial the journal says so, and a finished walk
 /// clears it. A kill between two writes of one predecessor is what leaves it.
+/// A retry offers every item again. One that arrived on the earlier attempt
+/// was not written now, and the notice must not count it twice.
+#[test]
+fn scenario_a_retry_does_not_count_what_already_arrived() {
+    let delegate = Delegate::new();
+    let node = populated_node();
+    delegate.faults.borrow_mut().false_conflict = Some(ItemKind::Archived);
+    let first = walk(&delegate, &node, no_inbox());
+    assert_eq!((first.counts.drafts, first.counts.archived), (1, 0));
+    assert!(first.unfinished(), "206's local state stays started");
+
+    let second = walk(&delegate, &node, no_inbox());
+    assert_eq!((second.counts.drafts, second.counts.archived), (0, 1));
+    let totals = delegate.ledger().totals;
+    assert_eq!((totals.drafts, totals.sent, totals.kept), (1, 1, 1));
+    assert_eq!(totals.archived, 1);
+    assert!(!second.unfinished());
+}
+
+/// While the walk may be part done the notice does not say it moved anything.
+#[test]
+fn the_notice_says_a_move_under_way_is_still_in_progress() {
+    use crate::app::migration_view::notice_summary;
+    let counts = super::successor::MigrationCounts {
+        archived: 5,
+        ..Default::default()
+    };
+    let done = notice_summary(&counts, 0, false);
+    assert!(done.starts_with("Moved from"), "{done}");
+    let moving = notice_summary(&counts, 0, true);
+    assert!(!moving.contains("Moved"), "{moving}");
+    assert!(moving.contains("still in progress") && moving.contains("5 archived"));
+
+    let no_journal = WalkOutcome {
+        status: None,
+        report: None,
+        counts,
+        silent_rows: 0,
+    };
+    assert!(no_journal.unfinished());
+}
+
 #[test]
 fn scenario_a_partial_import_reads_as_interrupted() {
     let mut saw_interrupted = 0;
@@ -1085,6 +1150,29 @@ fn scenario_items_of_an_identity_that_is_gone_are_a_counted_rejection() {
     let outcome = walk(&delegate, &node, six_messages());
     assert!(outcome.counts.identity_gone > 0);
     assert_eq!(pending_count(&outcome.status), 1, "206's local state ended");
+}
+
+/// `NotFound` also answers an identity record that failed to read. That
+/// identity is listed, so its items are not a rejection: they wait, and arrive
+/// once the record reads again.
+#[test]
+fn scenario_items_of_an_unreadable_identity_wait_for_it() {
+    let delegate = Delegate::new();
+    let node = populated_node();
+    node.set(ls(206), LegacyReply::NoAnswer("timed out".into()));
+    walk(&delegate, &node, no_inbox());
+    node.set(ls(206), answer(golden("ls_state")));
+
+    let record = delegate.hide_identity(alice());
+    for _ in 0..3 {
+        let outcome = walk(&delegate, &node, no_inbox());
+        assert_eq!(outcome.counts.identity_gone, 0);
+        assert_eq!(pending_count(&outcome.status), 2, "206's local state waits");
+    }
+    delegate.restore_identity(record);
+    let outcome = walk(&delegate, &node, no_inbox());
+    assert_eq!(pending_count(&outcome.status), 1);
+    assert_eq!(delegate.list(ItemKind::Archived, Some(alice())).len(), 1);
 }
 
 /// `NotFound` for an identity still on its way means nothing of the kind, and
@@ -2020,6 +2108,36 @@ fn only_a_silent_or_undecodable_row_counts_as_silent() {
 }
 
 /// A migrated identity is confirmed by its owner before it first sends.
+/// Every place a contact card is built checks first. The prompt shows the
+/// card of the identity it is asking about, and is not a share.
+#[test]
+fn sharing_asks_an_unconfirmed_identity_to_confirm_first() {
+    let settings = include_str!("../app/settings.rs");
+    let click = &settings[settings.find("let on_share = move |_|").unwrap()..];
+    let asks = click.find("confirm_share.set(true)").unwrap();
+    let opens = click.find("open_share.call(())").unwrap();
+    assert!(asks < opens, "settings checks first");
+    assert!(click[..asks].contains("if user.read().logged_id().is_some_and(|i| !i.confirmed) {"));
+
+    let login = include_str!("../app/login.rs");
+    let click = &login[login.find("testid::FM_ID_SHARE").unwrap()..];
+    let asks = click.find("confirm_open.set(true)").unwrap();
+    assert!(asks < click.find("open_share.call(())").unwrap());
+
+    let sites = [
+        ("settings", settings),
+        ("login", login),
+        ("the prompt", include_str!("../app/migration_view.rs")),
+    ];
+    for (name, source) in sites {
+        assert_eq!(
+            source.matches("ContactCard::from_identity").count(),
+            1,
+            "{name}: a new card site needs the check"
+        );
+    }
+}
+
 #[test]
 fn sending_asks_an_unconfirmed_identity_to_confirm_first() {
     let source = include_str!("../app.rs");

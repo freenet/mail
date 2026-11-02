@@ -620,6 +620,30 @@ ut "another generation's transient empty does not orphan" "$M/legacy_delegates.r
         }
         tables' \
     scenario_a_transient_empty_in_another_generation_orphans_nothing
+guard "share asks an unconfirmed identity to confirm" "$STAGE/ui/src/app/settings.rs" \
+    '        if user.read().logged_id().is_some_and(|i| !i.confirmed) {
+            confirm_share.set(true);
+        } else {' \
+    '        if false {
+            confirm_share.set(true);
+        } else {' \
+    "tests:sharing_asks_an_unconfirmed_identity_to_confirm_first" ui_migration_tests
+guard "an unconfirmed identity publishes nothing" "$STAGE/ui/src/api.rs" \
+    '        (_, Some(false), _) | (_, None, Some(false)) => NotFoundRoute::OwnUnconfirmed,
+        (_, Some(true), _) => NotFoundRoute::OwnInbox,
+        (_, None, Some(true)) => NotFoundRoute::OwnAftRecord,' \
+    '        (_, Some(_), _) => NotFoundRoute::OwnInbox,
+        (_, None, Some(_)) => NotFoundRoute::OwnAftRecord,' \
+    "tests:an_unconfirmed_identity_never_self_heals" ui_migration_tests
+ut "NotFound is confirmed before an identity counts as gone" "$M/successor.rs" \
+    '            Ok(Reply::Status(status)) if status.unreadable_identities == 0' \
+    '            Ok(Reply::Status(_))' \
+    scenario_items_of_an_unreadable_identity_wait_for_it
+ut "a retry reads before it writes" "$M/successor.rs" \
+    '                Ok(Some(_)) => return ItemWrite::already_authoritative(),
+                Err(e) if !is_unreadable(&e)' \
+    '                Err(e) if !is_unreadable(&e)' \
+    scenario_a_retry_does_not_count_what_already_arrived
 guard "send asks an unconfirmed identity to confirm" "$STAGE/ui/src/app.rs" \
     '        if login::Identity::get_alias(&sender_for_send).is_some_and(|i| !i.confirmed) {' \
     '        if false && login::Identity::get_alias(&sender_for_send).is_some_and(|i| !i.confirmed) {' \

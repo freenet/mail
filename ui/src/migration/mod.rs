@@ -143,6 +143,21 @@ pub(crate) fn walk_this_load(status: &JournalStatus, roll: u8) -> bool {
     !slowed || roll.is_multiple_of(SLOWED_ONE_LOAD_IN)
 }
 
+impl WalkOutcome {
+    /// Whether the move may be part done: an import under way, or a journal
+    /// that could not be read or stored. What arrived is then not everything
+    /// the user had, and the notice must not say it moved.
+    pub(crate) fn unfinished(&self) -> bool {
+        self.status
+            .as_ref()
+            .is_none_or(JournalStatus::interrupted_import)
+            || self
+                .report
+                .as_ref()
+                .is_some_and(|r| r.journal_error.is_some())
+    }
+}
+
 /// Whether the walk has nothing left to do for good.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Settled {
