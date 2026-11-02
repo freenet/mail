@@ -69,11 +69,8 @@ pub(crate) enum Blocker {
     },
     Rejected(u32),
     Orphans(u32),
-    /// A row holds entries that cannot be mapped, ever.
-    Unmappable {
-        generation: u32,
-        entries: u32,
-    },
+    /// Entries of the rows that cannot be mapped, ever.
+    Unmappable(u32),
     /// A row to clear gave no usable answer to the fresh read.
     Unread {
         generation: u32,
@@ -220,6 +217,24 @@ async fn backed_up_since<S: MailStore>(
     Ok(at.zip(since).is_some_and(|(at, since)| at > since))
 }
 
+/// How many of `addrs` the mail delegate holds with no backup since the
+/// migration began. One it no longer holds is an identity the user deleted
+/// there, which has nothing to protect.
+async fn unprotected<S: MailStore>(
+    store: &mut S,
+    addrs: HashSet<Addr>,
+    ledger: &Ledger,
+    identities: &HashSet<Addr>,
+) -> Result<u32, CallError> {
+    let mut count = 0;
+    for addr in addrs.into_iter().filter(|a| identities.contains(a)) {
+        if !backed_up_since(store, addr, ledger.migration_started_ms).await? {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
 /// The checks that need no read of a legacy row, so that a user who has not
 /// backed up does not pay for those reads on every load.
 async fn cheap_blockers<S: MailStore>(
@@ -237,14 +252,10 @@ async fn cheap_blockers<S: MailStore>(
     if !orphans.is_empty() {
         found.push(Blocker::Orphans(orphans.len() as u32));
     }
-    let mut unprotected = 0;
-    for addr in ledger.migrated.iter().filter(|a| identities.contains(a)) {
-        if !backed_up_since(store, *addr, ledger.migration_started_ms).await? {
-            unprotected += 1;
-        }
-    }
-    if unprotected > 0 {
-        found.push(Blocker::NoBackup(unprotected));
+    let migrated = ledger.migrated.iter().copied().collect();
+    let count = unprotected(store, migrated, ledger, identities).await?;
+    if count > 0 {
+        found.push(Blocker::NoBackup(count));
     }
     Ok(found)
 }
@@ -287,38 +298,28 @@ async fn row_blockers<S: MailStore>(
     identities: &HashSet<Addr>,
 ) -> Result<Vec<Blocker>, Blocker> {
     let mut found = Vec::new();
-    for (generation, keys) in rows {
-        let refused = keys.iter().filter(|k| matches!(k, PairKey::Refused(_)));
-        let entries = refused.count() as u32;
-        if entries > 0 {
-            let generation = *generation;
-            found.push(Blocker::Unmappable {
-                generation,
-                entries,
-            });
-        }
+    let all = || rows.iter().flat_map(|(_, keys)| keys);
+    let refused = all().filter(|k| matches!(k, PairKey::Refused(_))).count();
+    if refused > 0 {
+        found.push(Blocker::Unmappable(refused as u32));
     }
-    let mut unprotected = BTreeSet::new();
-    for key in rows.iter().flat_map(|(_, keys)| keys) {
-        if let PairKey::Identity(addr) = key
-            && identities.contains(addr)
-            && !backed_up_since(store, *addr, ledger.migration_started_ms).await?
-        {
-            unprotected.insert(addr.0);
-        }
-    }
-    if !unprotected.is_empty() {
-        found.push(Blocker::NoBackup(unprotected.len() as u32));
+    let scrubbed = all().filter_map(|key| match key {
+        PairKey::Identity(addr) => Some(*addr),
+        _ => None,
+    });
+    let count = unprotected(store, scrubbed.collect(), ledger, identities).await?;
+    if count > 0 {
+        found.push(Blocker::NoBackup(count));
     }
     let snapshot = read_snapshot(store, chunks).await?;
     for (generation, keys) in rows {
         let mut ids = 0;
         for key in compared(keys) {
+            // Read first: a record that fails to read must stop this, even
+            // for an id the snapshot lists.
+            let stored = present(store, key, identities).await?;
             let moved = matches!(key, PairKey::Orphan(id) if ledger.moved.contains(&hex(id)));
-            if !moved
-                && !snapshot.contains(&snapshot_id(key))
-                && !present(store, key, identities).await?
-            {
+            if !stored && !moved && !snapshot.contains(&snapshot_id(key)) {
                 ids += 1;
             }
         }
@@ -387,7 +388,7 @@ async fn clear_row<T: LegacyTransport>(
 
 /// The order rows are cleared in: local state, then the identity rows whose
 /// generation's local-state row is clear.
-fn clearing_order<'a>(
+pub(super) fn clearing_order<'a>(
     targets: &[&'a DelegateLineageEntry],
     not_clear: &HashSet<u32>,
 ) -> Vec<&'a DelegateLineageEntry> {
