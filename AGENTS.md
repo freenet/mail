@@ -784,9 +784,15 @@ the AFT permission flow against the isolated 2-node network from
 cargo make test-e2e-real-node
 ```
 
-This wipes any prior iso-node state, brings up gw (7510) + peer
-(7511), publishes the webapp to the gw, then runs Playwright with
+This wipes any prior iso-node state, brings up gw + peer on free ports
+under `target/iso` (`FREENET_E2E_ROOT` and `FREENET_ISO_*` override them;
+CI uses `~/freenet-mail-iso`), publishes the webapp to the gw, then runs
+Playwright with
 `FREENET_EMAIL_BASE_URL` pointing at the published contract URL.
+The harness only writes to a node it started: `run-isolated-nodes.sh`
+refuses any listener its pidfile does not name, and `publish-email-iso`
+runs its `check-ours` first. nova runs a production gateway on the old
+default ports, 7510 and 31338.
 The spec covers identity creation, reload-persistence, and (gated on
 `FREENET_LIVE_E2E_SEND=1`) the send-via-address-book → AFT permission
 → inbox UPDATE round trip.
@@ -805,7 +811,7 @@ The host's permission overlay is driven by polling
 `startPermissionPump` helper in the spec. This avoids coupling
 to the gateway shell page's overlay HTML.
 
-Log assertions tail `~/freenet-mail-iso/gw/logs/freenet.*.log`
+Log assertions tail `<iso root>/gw/logs/freenet.*.log`
 (override via `FREENET_ISO_GW_LOG_DIR`) and grep for
 `UPDATE_PROPAGATION`, `allocate_token`, and the node compiling the mail
 delegate's code hash (proof the identity went through the delegate on

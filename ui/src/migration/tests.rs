@@ -2587,12 +2587,13 @@ fn scenario_three_empty_loads_hold_back_and_the_fourth_releases() {
     assert_eq!(delegate.identities().len(), 1, "released on load 4");
 }
 
-/// Typed "not installed" rows back off to one load in ten, from the third walk.
+/// Typed "not installed" rows back off to one load in ten, from the fourth
+/// walk: the walk that ends a hold is never left to the roll.
 #[test]
 fn the_back_off_runs_one_load_in_ten() {
     let delegate = Delegate::new();
     let mut status = None;
-    for _ in 0..3 {
+    for _ in 0..4 {
         status = walk(&delegate, &Node::default(), no_inbox()).status;
     }
     let status = status.unwrap();

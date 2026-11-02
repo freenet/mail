@@ -6694,6 +6694,21 @@ mod time_format_tests {
     use super::{format_time_full, format_time_short};
     use chrono::{Duration, Local, Utc};
 
+    /// Noon on the previous calendar day. Not `now - 1 day`: on the 25-hour
+    /// day a clock change makes, late evening minus 24 hours is still today.
+    fn noon_yesterday() -> chrono::DateTime<Utc> {
+        let date = Local::now()
+            .date_naive()
+            .pred_opt()
+            .expect("a previous day");
+        date.and_hms_opt(12, 0, 0)
+            .expect("noon exists")
+            .and_local_timezone(Local)
+            .single()
+            .expect("noon is not ambiguous")
+            .with_timezone(&Utc)
+    }
+
     #[test]
     fn short_today_is_h_colon_mm() {
         let s = format_time_short(Utc::now());
@@ -6703,9 +6718,7 @@ mod time_format_tests {
 
     #[test]
     fn short_yesterday_says_yesterday() {
-        let now = Local::now();
-        let y = (now - Duration::days(1)).with_timezone(&Utc);
-        assert_eq!(format_time_short(y), "Yesterday");
+        assert_eq!(format_time_short(noon_yesterday()), "Yesterday");
     }
 
     #[test]
@@ -6726,9 +6739,7 @@ mod time_format_tests {
 
     #[test]
     fn full_yesterday_starts_with_yesterday() {
-        let now = Local::now();
-        let y = (now - Duration::days(1)).with_timezone(&Utc);
-        let s = format_time_full(y);
+        let s = format_time_full(noon_yesterday());
         assert!(s.starts_with("Yesterday, "), "got {s:?}");
     }
 
