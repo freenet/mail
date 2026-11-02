@@ -80,6 +80,14 @@ pub fn note_seen(s: &mut Space<'_>, owner: &Addr, id: &[u8]) -> Result<(), Failu
     s.index_add(&rel, id, SEEN_PER_SHARD)
 }
 
+/// The node confirmed a subscription.
+pub fn note_subscribed(env: &mut dyn Env, id: jobs::ContractId) {
+    let now = env.now_secs().unwrap_or(0);
+    let mut budget = load_budget(env, now);
+    budget.note_subscribed(id);
+    save_budget(env, &budget);
+}
+
 /// Every run, from every trigger: plan, then do the plan. Returns what it did
 /// and the contract requests to send. Sends nothing to any page.
 pub fn run(env: &mut dyn Env, trigger: Trigger) -> (JobsRun, Vec<OutboundDelegateMsg>) {
@@ -136,8 +144,12 @@ fn targets(env: &mut dyn Env, trigger: Trigger, done: &mut JobsRun) -> Vec<Targe
         }
     };
     let mut out = Vec::new();
+    let mut emptied = Vec::new();
     for origin in origins {
         let s = Space::new(&mut *env, origin);
+        if matches!(s.index(store::IDENTITY_INDEX), Ok((_, ids)) if ids.is_empty()) {
+            emptied.push(origin.0.to_vec());
+        }
         let Ok(identities) = handlers::all_identities(&s) else {
             done.unknown += 1;
             continue;
@@ -148,6 +160,11 @@ fn targets(env: &mut dyn Env, trigger: Trigger, done: &mut JobsRun) -> Vec<Targe
                 Err(_) => done.unknown += 1,
             }
         }
+    }
+    // An origin with no identities left gives its place up: a new identity
+    // or its `RunJobs` lists it again.
+    if !emptied.is_empty() {
+        let _ = Space::new(&mut *env, GLOBAL).index_remove_many(ORIGIN_INDEX, &emptied);
     }
     out
 }

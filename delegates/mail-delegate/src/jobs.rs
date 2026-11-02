@@ -192,6 +192,10 @@ pub struct Budget {
     duty_at: u64,
     /// Where the next run's scans start.
     cursor: u32,
+    /// Subscriptions the node confirmed since it started. Not asked for again:
+    /// the delegate is parked while a request is out, and a page's calls wait
+    /// behind it. Losing this costs one repeat, which is harmless.
+    subscribed: Vec<ContractId>,
 }
 
 impl Budget {
@@ -204,6 +208,7 @@ impl Budget {
             duty_ms: DUTY_BURST_MS,
             duty_at: now,
             cursor: 0,
+            subscribed: Vec::new(),
         }
     }
 
@@ -219,6 +224,13 @@ impl Budget {
             let refill = (now - self.duty_at).saturating_mul(DUTY_REFILL_MS_PER_SEC);
             self.duty_ms = self.duty_ms.saturating_add(refill).min(DUTY_BURST_MS);
             self.duty_at = now;
+        }
+    }
+
+    /// The node confirmed a subscription.
+    pub fn note_subscribed(&mut self, id: ContractId) {
+        if !self.subscribed.contains(&id) && self.subscribed.len() < MAX_SUBSCRIPTIONS {
+            self.subscribed.push(id);
         }
     }
 
@@ -320,6 +332,9 @@ pub fn plan(trigger: Trigger, targets: &[Target], budget: &mut Budget) -> Plan {
             budget.cursor = ((start + scan.len()) % eligible.len().max(1)) as u32;
         }
     }
+    if trigger == Trigger::NodeStarted {
+        budget.subscribed.clear();
+    }
     let mut subscribe = Vec::new();
     if refresh {
         let candidates: Vec<Candidate> = eligible
@@ -332,6 +347,7 @@ pub fn plan(trigger: Trigger, targets: &[Target], budget: &mut Budget) -> Plan {
             })
             .collect();
         subscribe = rank_subscriptions(&candidates);
+        subscribe.retain(|id| !budget.subscribed.contains(id));
         subscribe.truncate(budget.take_ops(subscribe.len()));
     }
     Plan {

@@ -499,23 +499,55 @@ fn a_new_identity_is_watched_with_no_page_ever_asking() {
     );
 }
 
+fn subscribed(me: &IdentityInfo, result: Result<(), String>) -> InboundDelegateMsg<'static> {
+    InboundDelegateMsg::SubscribeContractResponse(SubscribeContractResponse {
+        contract_id: ContractInstanceId::new(v1_inbox_id(&me.vk).unwrap()),
+        result,
+        context: DelegateContext::default(),
+    })
+}
+
 #[test]
-fn node_start_subscribes_again() {
+fn a_confirmed_subscription_is_not_asked_for_again_until_the_node_restarts() {
     let mut env = env();
-    create(&mut env, PROD, "alice");
+    let me = create(&mut env, PROD, "alice");
+    let out = process(&mut env, None, subscribed(&me, Ok(()))).unwrap();
+    assert!(out.is_empty());
+    assert_eq!(subscribes(&wake(&mut env, "v1watch")), 0);
+    assert_eq!(subscribes(&send(&mut env, app(PROD), Op::RunJobs)), 0);
     let out = process(&mut env, None, node_started()).unwrap();
-    assert_eq!(subscribes(&out), 1);
+    assert_eq!(subscribes(&out), 1, "a node start asks again");
+    assert_eq!(subscribes(&wake(&mut env, "v1watch")), 1, "until confirmed");
+}
+
+#[test]
+fn an_origin_with_no_identities_left_gives_up_its_place() {
+    let mut env = env();
+    let me = create(&mut env, PROD, "alice");
+    assert_eq!(
+        Space::new(&mut env, GLOBAL)
+            .index("ix/bg/origins")
+            .unwrap()
+            .1
+            .len(),
+        1
+    );
+    let mut s = prod(&mut env);
+    let (generation, _) = load_identity(&s, &me.addr).unwrap().unwrap();
+    assert_eq!(
+        crate::handlers::delete_identity_now(&mut s, &me.addr, generation),
+        Ok(Reply::Deleted)
+    );
+    wake(&mut env, "rescan");
+    let (_, listed) = Space::new(&mut env, GLOBAL).index("ix/bg/origins").unwrap();
+    assert!(listed.is_empty());
 }
 
 #[test]
 fn a_failed_subscription_is_asked_for_again_by_the_next_refresh() {
     let mut env = env();
     let me = create(&mut env, PROD, "alice");
-    let answer = InboundDelegateMsg::SubscribeContractResponse(SubscribeContractResponse {
-        contract_id: ContractInstanceId::new(v1_inbox_id(&me.vk).unwrap()),
-        result: Err("refused".into()),
-        context: DelegateContext::default(),
-    });
+    let answer = subscribed(&me, Err("refused".into()));
     assert!(process(&mut env, None, answer).unwrap().is_empty());
     assert_eq!(subscribes(&wake(&mut env, "v1watch")), 1);
 }

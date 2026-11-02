@@ -70,7 +70,14 @@ pub fn process(
             Ok(background(env, contract_trigger(&r.contract_id)?))
         }
         // A subscription that failed is asked for again by the next refresh.
-        InboundDelegateMsg::SubscribeContractResponse(_) => Ok(Vec::new()),
+        InboundDelegateMsg::SubscribeContractResponse(r) => {
+            if r.result.is_ok()
+                && let Ok(id) = <[u8; 32]>::try_from(r.contract_id.as_bytes())
+            {
+                watch::note_subscribed(env, id);
+            }
+            Ok(Vec::new())
+        }
         _ => Err(DelegateError::Other(
             "the mail delegate accepts only application messages and prompt answers".into(),
         )),

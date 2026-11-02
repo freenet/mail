@@ -78,8 +78,16 @@ dt "jobs: a new identity is recorded" "$H" 'watch::note_origin(&mut *s.env, orig
             Ok(info(addr, generation, &record))' 'Ok(info(addr, generation, &record))' \
     a_new_identity_is_watched_with_no_page_ever_asking
 dt "jobs: node start refreshes" "$J" \
-    'Trigger::NodeStarted => &[Job::V1Refresh, Job::V1Scan, Job::DrainOwn],' \
-    'Trigger::NodeStarted => &[Job::V1Scan, Job::DrainOwn],' node_start_subscribes_again
+    'if trigger == Trigger::NodeStarted {' 'if false {' \
+    a_confirmed_subscription_is_not_asked_for_again_until_the_node_restarts
+dt "jobs: a confirmed subscription is not asked for" "$J" \
+    '        subscribe.retain(|id| !budget.subscribed.contains(id));
+' '' a_confirmed_subscription_is_not_asked_for_again_until_the_node_restarts
+dt "jobs: only a success confirms" "$H" 'if r.result.is_ok()
+                && let Ok(id)' 'if let Ok(id)' \
+    a_failed_subscription_is_asked_for_again_by_the_next_refresh
+dt "jobs: an empty origin gives up its place" "$W" 'if !emptied.is_empty() {' 'if false {' \
+    an_origin_with_no_identities_left_gives_up_its_place
 dt "jobs: the hourly tick refreshes" "$J" \
     'Trigger::Tick(Tick::V1Watch) => &[Job::V1Refresh, Job::V1Scan],' \
     'Trigger::Tick(Tick::V1Watch) => &[Job::V1Scan],' \
