@@ -12,25 +12,54 @@
 #
 # Usage: scripts/check-guards-fail.sh            (all guards)
 #        scripts/check-guards-fail.sh --no-wasm  (skip the WASM rebuilds)
+#        scripts/check-guards-fail.sh --shard I/N  (guards whose index mod N is I)
+#        scripts/check-guards-fail.sh --list     (print the guard names, run none)
+# Every shard runs the baselines. A shard with no guard fails.
 # Exit status: 0 = every guard failed as it should, 1 = one did not.
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 WASM=1
-[ "${1:-}" = "--no-wasm" ] && WASM=0
+SHARD_I="" SHARD_N="" LIST=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --no-wasm) WASM=0 ;;
+        --list) LIST=1 ;;
+        --shard)
+            shift
+            [[ "${1:-}" =~ ^([0-9]+)/([0-9]+)$ ]] || { echo "usage: --shard I/N" >&2; exit 2; }
+            SHARD_I="${BASH_REMATCH[1]}" SHARD_N="${BASH_REMATCH[2]}"
+            if [ "$SHARD_N" -lt 1 ] || [ "$SHARD_I" -ge "$SHARD_N" ]; then
+                echo "--shard I/N needs 0 <= I < N" >&2; exit 2
+            fi
+            ;;
+        *) echo "unknown argument: $1" >&2; exit 2 ;;
+    esac
+    shift
+done
+GUARD_INDEX=0 GUARDS_RUN=0
+# True when the next guard belongs to another shard. Advances the index, so
+# it is called exactly once per guard, before any other filter.
+other_shard() {
+    local i=$GUARD_INDEX
+    GUARD_INDEX=$((GUARD_INDEX + 1))
+    [ -n "$SHARD_N" ] && [ $((i % SHARD_N)) -ne "$SHARD_I" ]
+}
 mkdir -p "$ROOT/target"
 STAGE="$(mktemp -d "$ROOT/target/guards.XXXXXX")"
 trap 'rm -r -- "$STAGE"' EXIT
 # Shared across mutations so dependencies compile once.
 export CARGO_TARGET_DIR="$ROOT/target/guards-cargo"
 
+if [ "$LIST" -eq 0 ]; then
 (cd "$ROOT" && git ls-files -z --cached --others --exclude-standard \
     | tar --null --ignore-failed-read -T - -cf -) | tar -xf - -C "$STAGE"
 # The copy keeps the checkout's mtimes, which can be older than artifacts in
 # the shared target dir built from a MUTATED copy by an earlier run; cargo
 # would then think those fresh. Make every staged file newer.
 find "$STAGE" -type f -exec touch {} +
+fi
 D="$STAGE/delegates/mail-delegate/src"
 
 # The seeded fault-injection run is slow, so the per-guard delegate runs skip
@@ -85,6 +114,7 @@ baseline() { # name command...
         failures=$((failures + 1))
     fi
 }
+if [ "$LIST" -eq 0 ]; then
 baseline "delegate tests" delegate_tests
 baseline "delegate fault-injection runs" fault_tests
 baseline "delegate unreadable-key runs" blind_tests
@@ -98,6 +128,7 @@ baseline "release scrub tests" scrub_release_tests
 if [ "$failures" -ne 0 ]; then
     echo "the guards fail without any regression applied; nothing below would mean anything"
     exit 1
+fi
 fi
 
 replace() { # file old new: exact, single occurrence
@@ -130,9 +161,17 @@ shows() {
 guard() { # name file old new expected command...
     local name="$1" file="$2" old="$3" new="$4" expected="$5"
     shift 5
+    if [ "$LIST" -eq 1 ]; then
+        other_shard || echo "$name"
+        return
+    fi
+    if other_shard; then
+        return
+    fi
     if [ -n "${GUARD_ONLY:-}" ] && ! [[ "$name" =~ $GUARD_ONLY ]]; then
         return
     fi
+    GUARDS_RUN=$((GUARDS_RUN + 1))
     cp "$file" "$file.orig"
     if ! replace "$file" "$old" "$new"; then
         echo "not ok - $name: mutation not applied"
@@ -1006,6 +1045,10 @@ ut "a keyless error goes to nobody when two requests wait" "$M/node.rs" \
 also() {
     local file="$1" old="$2" new="$3" keep
     shift 3
+    if [ "$LIST" -eq 1 ]; then
+        "$@"
+        return
+    fi
     keep="$(mktemp "$STAGE/also.XXXXXX")"
     cp "$file" "$keep"
     replace "$file" "$old" "$new"
@@ -1105,13 +1148,24 @@ if [ "$WASM" -eq 1 ]; then
         'FAIL: published-contract/candidate/mail_delegate is not what' candidate_check
     # The release guard's own tests build real WASM and show each refusal,
     # including each of its two feature checks alone.
-    if "$ROOT/scripts/check-release-delegate_test.sh" > "$STAGE/out" 2>&1; then
-        echo "ok - release guard: refusals shown on real builds"
-    else
-        echo "not ok - release guard tests"
-        cat "$STAGE/out"
-        failures=$((failures + 1))
+    if [ "$LIST" -eq 1 ]; then
+        other_shard || echo "release guard: refusals shown on real builds"
+    elif ! other_shard; then
+        GUARDS_RUN=$((GUARDS_RUN + 1))
+        if "$ROOT/scripts/check-release-delegate_test.sh" > "$STAGE/out" 2>&1; then
+            echo "ok - release guard: refusals shown on real builds"
+        else
+            echo "not ok - release guard tests"
+            cat "$STAGE/out"
+            failures=$((failures + 1))
+        fi
     fi
+fi
+
+[ "$LIST" -eq 1 ] && exit 0
+if [ -n "$SHARD_N" ] && [ -z "${GUARD_ONLY:-}" ] && [ "$GUARDS_RUN" -eq 0 ]; then
+    echo "shard $SHARD_I/$SHARD_N ran no guard: a shard that checks nothing must not pass"
+    exit 1
 fi
 
 [ "$failures" -eq 0 ] || { echo "$failures guard(s) did not fail as they should"; exit 1; }
