@@ -40,6 +40,7 @@ fn op_name(op: &Op) -> &'static str {
         Op::RevokeExportGrant => "op_revoke_export_grant",
         Op::ListDeletingIdentities => "op_list_deleting_identities",
         Op::RepairIndex { .. } => "op_repair_index",
+        Op::RunJobs => "op_run_jobs",
     }
 }
 
@@ -62,6 +63,7 @@ fn reply_name(reply: &Reply) -> &'static str {
         Reply::ExportedSecrets { .. } => "reply_exported_secrets",
         Reply::Continue { .. } => "reply_continue",
         Reply::CreatedIdentity { .. } => "reply_created_identity",
+        Reply::JobsRun(_) => "reply_jobs_run",
     }
 }
 
@@ -214,6 +216,7 @@ fn ops() -> Vec<Op> {
         },
         Op::RevokeExportGrant,
         Op::ListDeletingIdentities,
+        Op::RunJobs,
         Op::RepairIndex {
             kind: Some(ItemKind::Draft),
             owner: Some(a),
@@ -266,6 +269,12 @@ fn replies() -> Vec<Reply> {
             session: None,
         },
         Reply::Continue { remaining: 12 },
+        Reply::JobsRun(JobsRun {
+            scanned: 1,
+            imported: 2,
+            unknown: 3,
+            remaining: 4,
+        }),
         Reply::CreatedIdentity {
             identity: identity(),
             recovery_key: "fmail-key-1:x".into(),

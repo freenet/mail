@@ -214,6 +214,22 @@ fn owner_part(owner: Option<&Addr>) -> String {
     owner.map_or_else(|| "-".to_string(), |a| hex(&a.0))
 }
 
+/// The tombstone shards of `owner` (`crate::watch::note_seen`). Sixteen, by
+/// the first nibble of the id, so a tombstone rewrites one small record.
+pub fn seen_rels(owner: &Addr) -> impl Iterator<Item = String> + use<> {
+    let owner = hex(&owner.0);
+    (0..16).map(move |shard| format!("ix/sn/{owner}/{shard:x}"))
+}
+
+/// The tombstone shard of message `id`.
+pub fn seen_rel(owner: &Addr, id: &[u8]) -> String {
+    format!(
+        "ix/sn/{}/{:x}",
+        hex(&owner.0),
+        id.first().copied().unwrap_or(0) >> 4
+    )
+}
+
 pub fn index_rel(kind: ItemKind, owner: Option<&Addr>) -> String {
     format!("ix/{}/{}", kind_tag(kind), owner_part(owner))
 }
@@ -603,6 +619,9 @@ impl<'a> Space<'a> {
                 let addr = Addr(a);
                 out.push((identity_rel(&addr), true));
                 out.push((deleted_rel(&addr), false));
+                for rel in seen_rels(&addr) {
+                    listed(&mut out, &rel);
+                }
                 owners.push(Some(addr));
             }
         }

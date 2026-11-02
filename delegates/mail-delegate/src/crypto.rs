@@ -7,8 +7,8 @@
 use chacha20poly1305::aead::Aead;
 use chacha20poly1305::{KeyInit, XChaCha20Poly1305, XNonce};
 use freenet_mail_protocol::{DsaSeed, Entropy, KemSeed};
-use ml_dsa::signature::{Keypair, Signer};
-use ml_dsa::{MlDsa65, SigningKey};
+use ml_dsa::signature::{Keypair, Signer, Verifier};
+use ml_dsa::{EncodedVerifyingKey, MlDsa65, SigningKey, VerifyingKey};
 use ml_kem::kem::{Decapsulate, Encapsulate, Key, KeyExport};
 use ml_kem::{DecapsulationKey, EncapsulationKey, MlKem768};
 
@@ -100,6 +100,20 @@ fn hkdf_v1_message_key(shared_secret: &[u8]) -> [u8; 32] {
     hk.expand(V1_MESSAGE_KEY_INFO, &mut okm)
         .expect("32 bytes is a valid HKDF-SHA256 output length");
     okm
+}
+
+/// Whether `signature` is `sender_vk`'s over `content`. False for a legacy
+/// unsigned message and for anything that does not decode.
+pub fn verify_v1(content: &[u8], sender_vk: &[u8], signature: &[u8]) -> bool {
+    let Ok(encoded) = EncodedVerifyingKey::<MlDsa65>::try_from(sender_vk) else {
+        return false;
+    };
+    let Ok(signature) = ml_dsa::Signature::<MlDsa65>::try_from(signature) else {
+        return false;
+    };
+    VerifyingKey::<MlDsa65>::decode(&encoded)
+        .verify(content, &signature)
+        .is_ok()
 }
 
 /// Decode a v1 encapsulation key.

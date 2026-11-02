@@ -276,6 +276,7 @@ fn reply_name(reply: &Reply) -> &'static str {
         Reply::ExportedSecrets { .. } => "ExportedSecrets",
         Reply::Continue { .. } => "Continue",
         Reply::CreatedIdentity { .. } => "CreatedIdentity",
+        Reply::JobsRun(_) => "JobsRun",
     }
 }
 
