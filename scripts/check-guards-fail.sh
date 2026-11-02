@@ -721,6 +721,19 @@ ut "NotFound asks the identity list" "$M/successor.rs" \
     '                Ok(Reply::Identities(_))' \
     scenario_not_found_for_a_listed_identity_is_retried
 
+ut "a keyless error goes to nobody when two requests wait" "$M/node.rs" \
+    '        _ => None,
+    }
+}
+
+/// Offer a node delegate error' \
+    '        _ => waiting.first().cloned(),
+    }
+}
+
+/// Offer a node delegate error' \
+    an_error_is_attributed_to_one_waiter_or_to_none
+
 # A rename that still compiles: only the pinned bytes can catch it. (A new
 # variant is caught earlier, by the wildcard-free match in golden.rs, at
 # compile time.)

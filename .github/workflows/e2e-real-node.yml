@@ -159,6 +159,16 @@ jobs:
           # Don't tear down on failure — uploads below capture state.
           FREENET_E2E_KEEP: '1'
 
+      - name: Keep the real-node run's logs
+        # The legacy migration step wipes the iso nodes, and their logs with
+        # them. A failure of the run above must still be diagnosable.
+        if: always()
+        run: |
+          mkdir -p "$HOME/freenet-mail-iso-live"
+          for node in gw peer; do
+            cp -r "$HOME/freenet-mail-iso/$node/logs" "$HOME/freenet-mail-iso-live/$node-logs" 2>/dev/null || true
+          done
+
       - name: Run real-node legacy migration
         run: cargo make test-e2e-legacy-migration
         env:
@@ -180,6 +190,7 @@ jobs:
         with:
           name: e2e-real-node-logs
           path: |
+            ~/freenet-mail-iso-live/
             ~/freenet-mail-iso/gw/logs/
             ~/freenet-mail-iso/peer/logs/
             ~/freenet-mail-iso/gw/data/secrets/

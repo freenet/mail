@@ -76,12 +76,31 @@ pub(crate) fn offer_response(key: &DelegateKey, values: &[OutboundDelegateMsg]) 
     }
 }
 
+/// The legacy request an error belongs to, among those `waiting`. The walk asks
+/// one predecessor at a time (`ONE_WALK` admits one walk, and each row is asked
+/// and answered before the next), so there is normally one: an error that
+/// names no delegate is then that request's. With more than one, an error that
+/// names none cannot be told apart and goes to nobody, so each waiter times out
+/// into a silence (never an absence); one that names a delegate still goes to
+/// its own.
+fn choose_waiter(error: &DelegateError, waiting: &[DelegateKey]) -> Option<DelegateKey> {
+    if let [only] = waiting {
+        return Some(only.clone());
+    }
+    match error {
+        DelegateError::Missing(key)
+        | DelegateError::RegisterError(key)
+        | DelegateError::MissingSecret { key, .. } => waiting.iter().find(|k| *k == key).cloned(),
+        _ => None,
+    }
+}
+
 /// Offer a node delegate error to the waiting legacy request. Returns whether
 /// it took it; if so the error is not a mail-delegate call's. A row that is
 /// simply not installed is an expected answer, not an error.
 pub(crate) fn offer_error(error: &DelegateError, others_in_flight: bool) -> bool {
-    let waiting = LEGACY_WAITER.with(|w| w.borrow().keys().next().cloned());
-    let Some(key) = waiting else {
+    let waiting: Vec<DelegateKey> = LEGACY_WAITER.with(|w| w.borrow().keys().cloned().collect());
+    let Some(key) = choose_waiter(error, &waiting) else {
         return false;
     };
     let Some(reply) = classify_error(error, &key, others_in_flight) else {
@@ -297,6 +316,25 @@ mod tests {
             ),
             Some(LegacyReply::NoAnswer(_))
         ));
+    }
+
+    /// One request at a time is the normal case, and an error naming no
+    /// delegate is its own. With two waiting, only an error that names a
+    /// delegate is given to one, and only to that one.
+    #[test]
+    fn an_error_is_attributed_to_one_waiter_or_to_none() {
+        let keyless = DelegateError::ExecutionError("trap".into());
+        assert_eq!(choose_waiter(&keyless, &[key(1)]), Some(key(1)));
+        assert_eq!(choose_waiter(&keyless, &[]), None);
+        assert_eq!(choose_waiter(&keyless, &[key(1), key(2)]), None);
+        assert_eq!(
+            choose_waiter(&DelegateError::Missing(key(2)), &[key(1), key(2)]),
+            Some(key(2))
+        );
+        assert_eq!(
+            choose_waiter(&DelegateError::Missing(key(3)), &[key(1), key(2)]),
+            None
+        );
     }
 
     /// The error carries no key, so while a mail or token call waits it may

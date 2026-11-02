@@ -123,9 +123,11 @@ const BACKED_OFF_ONE_LOAD_IN: u8 = 10;
 const SILENT_WALKS_BEFORE_SLOWING: u32 = 6;
 const SLOWED_ONE_LOAD_IN: u8 = 4;
 
-/// Whether this load walks, given `begin`'s status and a random byte. Only
-/// a complete journal, a run of typed "not installed" answers, or rows left
-/// unresolved walk after walk reduce it. An import under way walks every load.
+/// Whether this load walks, given `begin`'s status and a random byte. A
+/// complete journal never walks. Every pending row having answered "not
+/// installed" a few walks in a row walks one load in ten; every pending row
+/// having been left unresolved for several walks walks one load in four.
+/// Anything else, an import under way included, walks every load.
 pub(crate) fn walk_this_load(status: &JournalStatus, roll: u8) -> bool {
     if status.is_complete() {
         return false;

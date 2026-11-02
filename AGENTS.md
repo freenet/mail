@@ -103,9 +103,11 @@ described further on.
 
 ### Migrating from the v0.2.x delegates
 
-`ui/src/migration/` moves a v0.2.x user's data into the mail delegate on every
-load, before the identities are listed, with the `freenet-migrate` walk and
-journal. `legacy_delegates.rs` reads each predecessor and maps its reply to
+`ui/src/migration/` moves a v0.2.x user's data into the mail delegate, with the
+`freenet-migrate` walk and journal. The walk runs after the page's first
+identity listing, so it delays nothing, and only on loads where the journal is
+not complete, at a slower cadence once rows have answered "not installed" or
+stayed silent (`walk_this_load`). `legacy_delegates.rs` reads each predecessor and maps its reply to
 items by content; `successor.rs` imports them through the mail delegate's
 normal operations, which never overwrite; `node.rs` is the real transport.
 
