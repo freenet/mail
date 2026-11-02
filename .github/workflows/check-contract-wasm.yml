@@ -197,7 +197,7 @@ jobs:
       # shards between them cover every guard exactly once, so a guard
       # cannot fall out of all of them. It runs no mutation.
       - name: The guard shards cover every guard once
-        run: bash scripts/check-guard-shards.sh 4
+        run: bash scripts/check-guard-shards.sh
 
       - name: Upload the rebuilt mail-delegate candidate
         if: failure()
@@ -273,8 +273,7 @@ jobs:
   # applies, to a staged copy, the regression each of its guards exists to
   # catch (the release guard's tests count as one guard) and requires each
   # to fail. A shard that runs no guard fails. `check-drift` below waits
-  # for every shard. The shard count must match scripts/check-guard-shards.sh's
-  # argument in drift-checks.
+  # for every shard. check-guard-shards.sh reads the count from this matrix.
   guard-shards:
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.relevant != 'false' }}

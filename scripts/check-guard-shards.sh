@@ -2,10 +2,20 @@
 # The sharded guard run must cover every guard exactly once: the union of
 # `check-guards-fail.sh --shard I/N --list` over I equals the unsharded list,
 # by count and by name, no name is in two shards, and no shard is empty.
-# Runs no mutation, so it is quick. N must match the CI matrix.
+# Runs no mutation, so it is quick. N comes from the CI matrix, and the matrix
+# must be exactly 0..N-1 with the run line saying /N: a leg dropped from it
+# would leave a share of the guards unrun with every job still green.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
-N="${1:-4}"
+WORKFLOW="$ROOT/.github/workflows/check-contract-wasm.yml"
+legs=$(sed -n 's/^ *shard: \[\(.*\)\]$/\1/p' "$WORKFLOW" | tr -d ' ')
+[ -n "$legs" ] && [ "$(wc -l <<< "$legs")" -eq 1 ] \
+    || { echo "FAIL: no single shard matrix in $WORKFLOW"; exit 1; }
+N=$(($(tr -cd ',' <<< "$legs" | wc -c) + 1))
+want=$(seq -s, 0 $((N - 1)))
+[ "$legs" = "$want" ] || { echo "FAIL: the matrix is [$legs], want [$want]"; exit 1; }
+grep -q -F -- "--shard \${{ matrix.shard }}/$N" "$WORKFLOW" \
+    || { echo "FAIL: the guard step does not run --shard I/$N"; exit 1; }
 T="$(mktemp -d)"
 trap 'rm -r -- "$T"' EXIT
 "$ROOT/scripts/check-guards-fail.sh" --list | sort > "$T/all"
