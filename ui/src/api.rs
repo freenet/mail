@@ -358,7 +358,8 @@ mod notfound_routing {
     #[test]
     fn the_unconfirmed_arm_has_no_publish_in_it() {
         let source = include_str!("api.rs");
-        let handler = &source[source.find("let route = classify_notfound(").unwrap()..];
+        // The last one: the first is this test's own text.
+        let handler = &source[source.rfind("let route = classify_notfound(").unwrap()..];
         let arm = &handler[handler.find("NotFoundRoute::OwnUnconfirmed =>").unwrap()..];
         let arm = &arm[..arm.find("NotFoundRoute::Unattributed =>").unwrap()];
         let mut bare = String::new();
