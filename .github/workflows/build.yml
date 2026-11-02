@@ -152,6 +152,10 @@ jobs:
       - name: Release freeze stops release.sh
         run: scripts/release-freeze_test.sh
 
+      # Runs apart from release.sh, so the freeze does not hide a broken check.
+      - name: A release cannot ship with scrub off
+        run: scripts/check-release-scrub_test.sh
+
   ui-playwright-tests:
     runs-on: ubicloud-standard-8
     needs: build-and-test

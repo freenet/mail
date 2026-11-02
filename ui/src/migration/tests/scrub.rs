@@ -644,7 +644,6 @@ fn the_report_says_why_and_the_snapshot_is_written_once() {
 /// sends nothing: `after_listing` can only reach `run`.
 #[test]
 fn a_default_build_cannot_reach_a_delete() {
-    assert!(!scrub::BUILT_IN, "run the tests without FREENET_MAIL_SCRUB");
     let delegate = Delegate::new();
     let node = usual_node();
     let outcome = ready(&delegate, &node);
@@ -653,7 +652,11 @@ fn a_default_build_cannot_reach_a_delete() {
     let blockers = block_on(scrub::run(&mut store, node.clone(), &outcome, || {
         panic!("no clearing starts")
     }));
-    assert_eq!(blockers, vec![Blocker::NotBuilt]);
+    assert_eq!(
+        blockers,
+        vec![Blocker::NotBuilt],
+        "this test needs a build without FREENET_MAIL_SCRUB"
+    );
     assert_nothing_deleted(&node, &blockers);
     assert_eq!(delegate.ledger(), before, "nothing is written either");
 }
@@ -754,6 +757,28 @@ fn an_edit_during_the_import_is_not_snapshotted() {
         }]
     );
     assert_nothing_deleted(&node, &blockers);
+}
+
+/// Two generations hold one draft, the older with older text. The newer copy
+/// landed and the older did not, and clearing it loses nothing: its row's
+/// snapshot records what the walk read of it.
+#[test]
+fn an_older_copy_of_a_newer_item_does_not_block() {
+    let delegate = Delegate::new();
+    let node = usual_node();
+    node.set(im(205), answer(golden("identity_state_seeded")));
+    let mut older: serde_json::Value = serde_json::from_slice(&golden("ls_state")).unwrap();
+    older["aliases"]["alice"]["drafts"]["d1"]["subject"] = json!("an earlier subject");
+    node.set(ls(205), answer(serde_json::to_vec(&older).unwrap()));
+    let outcome = walk(&delegate, &node, six_messages());
+    assert_eq!(
+        scrub_now(&delegate, &node, &outcome),
+        vec![Blocker::NoBackup(1)]
+    );
+    back_up(&delegate, alice());
+    assert_eq!(scrub_all(&delegate, &node, &outcome), Vec::new());
+    assert_eq!(delegate.ledger().scrubbed.get(&205), Some(&true));
+    assert_eq!(delegate.ledger().scrubbed.get(&206), Some(&true));
 }
 
 /// A tab that died before its first snapshot leaves no walk read to use: what

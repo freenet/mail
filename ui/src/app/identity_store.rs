@@ -1148,7 +1148,7 @@ mod tests {
     #[test]
     fn a_finished_deletion_is_recorded() {
         use crate::mail_delegate::call;
-        use freenet_mail_protocol::{Entropy, Reply};
+        use freenet_mail_protocol::{Entropy, Op, Reply};
         use futures::executor::block_on;
         let Reply::CreatedIdentity { identity: id, .. } = block_on(call(Op::CreateIdentity {
             alias: "record-deletion-test".into(),
@@ -1159,13 +1159,9 @@ mod tests {
             panic!("expected CreatedIdentity");
         };
         block_on(delete_with_progress(id.addr, id.generation, &id.alias)).unwrap();
-        let ledger = crate::migration::ledger::read_ledger(&mut crate::migration::PageStore);
-        assert!(
-            block_on(ledger)
-                .unwrap()
-                .deleted_identities
-                .contains(&id.addr)
-        );
+        let mut store = crate::migration::PageStore;
+        let ledger = block_on(crate::migration::ledger::read_ledger(&mut store)).unwrap();
+        assert!(ledger.deleted_identities.contains(&id.addr));
     }
 
     fn info(alias: &str, seed: u8) -> IdentityInfo {

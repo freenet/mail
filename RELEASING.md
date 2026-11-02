@@ -155,7 +155,9 @@ What happens, in order:
    Type `y` to proceed.
 4. **Build + sign + publish** — `cargo make publish-production` chains
    `build` → `sign-webapp` → `verify-published-contract` →
-   `publish-email`. The verify step refuses to publish unless the signing
+   `publish-email`, all with `FREENET_MAIL_SCRUB=1`. `check-webapp-scrub`
+   refuses a build without it: with the flag off scrub never runs, and nothing
+   else would say so. The verify step refuses to publish unless the signing
    key matches `published-contract/webapp.parameters` and the committed
    WASM and parameters still derive `contract-id.txt`. The publish pushes
    the signed webapp state to the live Freenet network via fdev.

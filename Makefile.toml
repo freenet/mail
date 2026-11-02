@@ -800,9 +800,16 @@ script = '''
 "${CARGO_MAKE_WORKING_DIRECTORY}/scripts/check-release-freeze.sh"
 '''
 
+[tasks.check-webapp-scrub]
+description = "Refuse a webapp build with scrub off (the production build needs FREENET_MAIL_SCRUB=1)"
+script_runner = "bash"
+script = '''
+"${CARGO_MAKE_WORKING_DIRECTORY}/scripts/check-release-scrub.sh"
+'''
+
 [tasks.publish-email]
 description = "Publish the production build of the webapp to Freenet"
-dependencies = ["check-release-freeze", "sign-webapp", "verify-published-contract"]
+dependencies = ["check-release-freeze", "sign-webapp", "check-webapp-scrub", "verify-published-contract"]
 script_runner = "bash"
 script = '''
 set -euo pipefail
@@ -825,7 +832,18 @@ dependencies = [
 ]
 
 [tasks.publish-production]
-description = "End-to-end PRODUCTION publish: build → sign with prod key → verify the committed snapshot → publish-email"
+description = "End-to-end PRODUCTION publish: build with scrub → sign with prod key → verify the committed snapshot → publish-email"
+dependencies = ["check-release-freeze"]
+script_runner = "bash"
+# The flag must reach every build in the flow: compress-webapp depends on
+# build-ui, so a flag set on one task would be undone by the next build.
+script = '''
+set -euo pipefail
+FREENET_MAIL_SCRUB=1 cargo make publish-production-flow
+'''
+
+[tasks.publish-production-flow]
+description = "The steps of publish-production. Run that task: this one does not set FREENET_MAIL_SCRUB"
 dependencies = [
     "check-release-freeze",
     "build",
@@ -1101,8 +1119,7 @@ cargo run -q --manifest-path "$ROOT/Cargo.toml" -p v1-node-seed -- "$FREENET_ISO
 '''
 
 [tasks.test-e2e-legacy-migration]
-description = "Real-node migration: wipe iso nodes, publish, fill the frozen v0.2.7 delegates, check the data arrives in the current UI and the old copy is then cleared"
-dependencies = ["build", "derive-test-contract-id"]
+description = "Real-node migration: wipe iso nodes, publish with scrub, fill the frozen v0.2.7 delegates, check the data arrives in the current UI and the old copy is then cleared"
 script_runner = "bash"
 script = '''
 set -euo pipefail
@@ -1136,7 +1153,8 @@ trap cleanup EXIT
 # walk's back-off, and the seed must be the only legacy data on the node.
 bash "$ROOT/scripts/run-isolated-nodes.sh" wipe
 bash "$ROOT/scripts/run-isolated-nodes.sh" up
-FREENET_ISO_GW_PORT="$GW_PORT" cargo make publish-email-iso
+# Builds and publishes in one flow, so the flag reaches the build.
+FREENET_MAIL_SCRUB=1 FREENET_ISO_GW_PORT="$GW_PORT" cargo make publish-email-iso
 cargo run --manifest-path "$ROOT/Cargo.toml" -p v1-node-seed -- "$GW_PORT"
 
 CONTRACT_ID="$(cat "$ROOT/target/webapp/contract-id.txt")"

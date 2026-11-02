@@ -316,8 +316,11 @@ struct Node {
     writes_ignored: Rc<RefCell<bool>>,
     /// The next read of this row answers as before, then the row becomes
     /// this: another tab's write landing just after a read.
-    change_after_read: Rc<RefCell<Option<([u8; 32], LegacyReply)>>>,
+    change_after_read: Rc<RefCell<Option<RowChange>>>,
 }
+
+/// A row's delegate key and what it becomes.
+type RowChange = ([u8; 32], LegacyReply);
 
 /// A legacy delete's name and arguments, `None` for any other message.
 fn legacy_delete(request: &[u8]) -> Option<(String, serde_json::Value)> {

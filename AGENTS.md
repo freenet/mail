@@ -129,17 +129,30 @@ normal operations, which never overwrite; `node.rs` is the real transport.
   still on its way. A user's deletion can still return on a transient retry.
 - **The journal and markers are delegate items** (`ItemKind::MigrationJournal`,
   `MigrationMarker`), per origin and never exported.
-- **Scrub (`scrub.rs`) clears the old copy, after a backup:** it runs after the
-  walk on each load and deletes only from rows that imported. The journal is
-  normally never `Complete`, so a row is clear if it is resolved, or pending
-  with no import begun, absent past the count (`Ledger::absent_answers`) and
-  answering the same way now. Every id a fresh read maps to must be stored,
-  in the one imported-ids snapshot, or a moved orphan; counts are not
-  evidence. `last_backup_at` is imported, so it is compared with
-  `migration_started_ms`. Local state goes before identities, a row is
-  journaled in the ledger, and a row is finished only once a re-read shows
-  nothing left. A blocker that never clears means scrub never runs, and the
-  status report says why. Token-generator delegates are left alone.
+- **Scrub (`scrub.rs`) clears the old copy, after a backup:** it is compiled in
+  only with `FREENET_MAIL_SCRUB=1`, because the walk's records are per origin and
+  the v0.2.x delegates are not: a test build on a node with real data must not
+  clear what production has yet to read. `publish-production` and
+  `test-e2e-legacy-migration` set it for their whole flow, since
+  `compress-webapp` rebuilds the UI, and `scripts/check-release-scrub.sh` refuses
+  to publish a production build without it. Scrub runs after the walk on each
+  load and deletes only from rows that imported. The journal is normally never
+  `Complete`, so a row is clear if it is resolved, or pending with no import
+  begun, absent past the count (`Ledger::absent_answers`) and answering the same
+  way now. Every id and value a fresh read maps to must be the current import, or
+  in the row's snapshot, or an orphan the user moved or discarded; counts are not
+  evidence. Each row's snapshot is written once, when the row first resolves, from
+  what the walk read before importing. An identity the rows name must have a
+  backup, or a ledger record that the user deleted it: not being listed is not
+  that record. `last_backup_at` is imported, so it is compared with
+  `migration_started_ms`. Local state goes before identities, a row is journaled
+  in the ledger and read again just before its first delete, and a row is
+  finished only after showing nothing left to delete on two loads, which the
+  identity rows wait for. Settings and most read marks stay: wire-v1 has no delete
+  for them. A cleared identity row keeps its alias table, so a local-state row
+  that returns later still files correctly. A blocker that never clears means
+  scrub never runs, and the status report says why. Token-generator delegates are
+  left alone.
 - **Tests** drive the crate's real walk against the real delegate's handlers,
   with old-format inputs taken only from `wire-v1/src/golden_v1.txt`. Add a
   golden sample through `wire-v1/capture` rather than building an old reply
