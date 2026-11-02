@@ -8,8 +8,11 @@ export default defineConfig({
   // offline suite does not run it at all (a skip would exit 0), and the task
   // finds no test, which Playwright reports as an error, if the variable is
   // ever dropped.
-  testIgnore:
-    process.env.FREENET_LEGACY_SEEDED === "1" ? [] : ["legacy-migration.spec.ts"],
+  testIgnore: [
+    ...(process.env.FREENET_LEGACY_SEEDED === "1" ? [] : ["legacy-migration.spec.ts"]),
+    // Likewise `cargo make test-e2e-background`, which sets this.
+    ...(process.env.FREENET_BACKGROUND_PROOF === "1" ? [] : ["background-proof.spec.ts"]),
+  ],
   timeout: 120_000,
   retries: 2,
   use: {

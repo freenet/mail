@@ -595,6 +595,14 @@ fn nonzero_entropy() -> [u8; 32] {
     }
 }
 
+/// Ask the delegate to run its background jobs for this page's namespace now.
+pub(crate) async fn run_jobs() -> Result<freenet_mail_protocol::JobsRun, CallError> {
+    match call(Op::RunJobs).await? {
+        Reply::JobsRun(run) => Ok(run),
+        other => Err(unexpected(&other)),
+    }
+}
+
 pub(crate) async fn pause_ms(ms: u32) {
     #[cfg(target_family = "wasm")]
     gloo_timers::future::TimeoutFuture::new(ms).await;
