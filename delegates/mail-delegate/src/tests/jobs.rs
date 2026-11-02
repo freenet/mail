@@ -1,0 +1,1073 @@
+//! The background jobs: the pure planner, and the v1 watch through the
+//! delegate's entry point.
+//!
+//! Offline: `MemEnv` stands in for the node's store, so these prove what the
+//! delegate does with each thing the node can hand it, not that a real node
+//! hands it over.
+
+use freenet_mail_protocol::{JobsRun, MAX_DECRYPT_BATCH};
+use freenet_mail_wire_v1::local_state::KeptMessage;
+use freenet_stdlib::prelude::{
+    Capability, ContractNotification, DelegateManifest, GetContractResponse, LifecycleEvent,
+    LifecycleKind, SubscribeContractResponse, WrappedState,
+};
+
+use super::*;
+use crate::crypto::{self, Keys, MixRng};
+use crate::env::mem::{FaultOp, Faults, Rule};
+use crate::handlers::{load_identity, v1_inbox_id};
+use crate::jobs::*;
+use crate::store::{index_marker_rel, index_rel, item_rel, seen_rel};
+use crate::watch::{self, GLOBAL, MAX_ORIGINS, message_id};
+
+const NOW: u64 = 1_800_000_000;
+
+fn env() -> MemEnv {
+    MemEnv {
+        now: Some(NOW),
+        ..MemEnv::default()
+    }
+}
+
+/// A v1 message to `to`, signed by a sender, as v0.2.x writes it.
+pub(super) fn sealed(to: &IdentityInfo, title: &str) -> Vec<u8> {
+    let sender = Keys::from_seeds(&DsaSeed([9; 32]), &KemSeed([8; 64]));
+    let plaintext = serde_json::json!({
+        "title": title,
+        "content": format!("body of {title}"),
+        "from": "bob",
+        "to": [],
+        "cc": [],
+        "time": "2026-11-02T10:00:00Z",
+    });
+    let entropy = Entropy(*blake3::hash(title.as_bytes()).as_bytes());
+    let mut rng = MixRng::new("test", &[7; 32], &entropy);
+    let ek = crypto::decode_ek(&to.ek).unwrap();
+    let content = crypto::encrypt_v1(&ek, &serde_json::to_vec(&plaintext).unwrap(), &mut rng);
+    let signature = sender.sign(&content);
+    serde_json::to_vec(&serde_json::json!({
+        "content": content,
+        "sender_vk": sender.vk_bytes(),
+        "signature": signature,
+    }))
+    .unwrap()
+}
+
+pub(super) fn inbox_of(messages: &[Vec<u8>]) -> Vec<u8> {
+    let messages: Vec<serde_json::Value> = messages
+        .iter()
+        .map(|m| serde_json::from_slice(m).unwrap())
+        .collect();
+    serde_json::to_vec(&serde_json::json!({ "messages": messages })).unwrap()
+}
+
+pub(super) fn id_of(message: &[u8]) -> [u8; 16] {
+    let v: serde_json::Value = serde_json::from_slice(message).unwrap();
+    let content: Vec<u8> = serde_json::from_value(v["content"].clone()).unwrap();
+    message_id(&content)
+}
+
+fn deliver(env: &mut MemEnv, to: &IdentityInfo, messages: &[Vec<u8>]) {
+    env.contracts
+        .insert(v1_inbox_id(&to.vk).unwrap(), inbox_of(messages));
+}
+
+fn wake(env: &mut MemEnv, tag: &str) -> Vec<OutboundDelegateMsg> {
+    process(
+        env,
+        None,
+        InboundDelegateMsg::WakeupFired {
+            tag: tag.as_bytes().to_vec(),
+        },
+    )
+    .unwrap()
+}
+
+fn node_started() -> InboundDelegateMsg<'static> {
+    InboundDelegateMsg::Lifecycle(LifecycleEvent::NodeStarted {
+        down_since_ms: None,
+    })
+}
+
+fn run_jobs(env: &mut MemEnv, origin: u8) -> JobsRun {
+    let out = send(env, app(origin), Op::RunJobs);
+    match responses(&out).pop().expect("a response").result {
+        Ok(Reply::JobsRun(run)) => run,
+        other => panic!("{other:?}"),
+    }
+}
+
+fn notification(id: [u8; 32], state: Vec<u8>) -> InboundDelegateMsg<'static> {
+    InboundDelegateMsg::ContractNotification(ContractNotification {
+        contract_id: ContractInstanceId::new(id),
+        new_state: WrappedState::new(state),
+        context: DelegateContext::default(),
+    })
+}
+
+fn get_answer(id: [u8; 32], state: Option<Vec<u8>>) -> InboundDelegateMsg<'static> {
+    InboundDelegateMsg::GetContractResponse(GetContractResponse {
+        contract_id: ContractInstanceId::new(id),
+        state: state.map(WrappedState::new),
+        context: DelegateContext::default(),
+    })
+}
+
+fn kept_ids(env: &mut MemEnv, owner: Addr) -> Vec<Vec<u8>> {
+    list_ids(env, PROD, ItemKind::Kept, Some(owner))
+}
+
+fn message_item(kind: ItemKind, owner: Addr, id: [u8; 16]) -> ItemRef {
+    ItemRef {
+        kind,
+        owner: Some(owner),
+        id: id.to_vec(),
+    }
+}
+
+fn kept_copy(env: &mut MemEnv, owner: Addr, id: [u8; 16]) -> (u64, Vec<u8>) {
+    let item = message_item(ItemKind::Kept, owner, id);
+    match call(env, PROD, Op::GetItem { item }) {
+        Ok(Reply::Item(Some(i))) => (i.generation, i.body.into_vec()),
+        other => panic!("{other:?}"),
+    }
+}
+
+fn gets(out: &[OutboundDelegateMsg]) -> usize {
+    out.iter()
+        .filter(|m| matches!(m, OutboundDelegateMsg::GetContractRequest(_)))
+        .count()
+}
+
+fn subscribes(out: &[OutboundDelegateMsg]) -> usize {
+    out.iter()
+        .filter(|m| matches!(m, OutboundDelegateMsg::SubscribeContractRequest(_)))
+        .count()
+}
+
+fn prod(env: &mut MemEnv) -> Space<'_> {
+    Space::new(env, Origin([PROD; 32]))
+}
+
+fn blind(env: &mut MemEnv, rel: &str) {
+    let key = String::from_utf8(prod(env).full_key(rel)).unwrap();
+    blind_key(env, key);
+}
+
+fn blind_key(env: &mut MemEnv, key: String) {
+    let mut faults = Faults::default();
+    faults.blind_keys.push(key);
+    env.faults = Some(faults);
+}
+
+/// The manifest the published candidate actually carries, as the node reads
+/// it. It reads the committed WASM, so a manifest that was changed and not
+/// rebuilt fails here as well as in `check-delegate-candidate.sh`.
+#[test]
+fn the_built_delegate_declares_its_lifecycle_capability_and_wake_ups() {
+    let wasm = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../published-contract/candidate/mail_delegate"
+    ))
+    .unwrap();
+    let manifest = DelegateManifest::from_wasm(&wasm)
+        .unwrap()
+        .expect("a manifest");
+    assert_eq!(manifest.lifecycle, vec![LifecycleKind::NodeStarted]);
+    assert_eq!(manifest.capabilities, vec![Capability::Background]);
+    let wakeups: Vec<(Vec<u8>, u64)> = manifest
+        .effective_wakeups()
+        .into_iter()
+        .map(|(tag, every)| (tag, every.as_secs()))
+        .collect();
+    let expected: Vec<(Vec<u8>, u64)> = [900, 3600, 21600, 86400]
+        .iter()
+        .zip(Tick::ALL)
+        .map(|(secs, (tag, _))| (tag.as_bytes().to_vec(), *secs))
+        .collect();
+    assert_eq!(wakeups, expected, "as the node reads them, none clamped");
+}
+
+#[test]
+fn a_tag_this_build_does_not_know_does_nothing() {
+    let mut env = env();
+    let me = create(&mut env, PROD, "alice");
+    deliver(&mut env, &me, &[sealed(&me, "one")]);
+    assert!(wake(&mut env, "unknown").is_empty());
+    assert!(kept_ids(&mut env, me.addr).is_empty());
+}
+
+// ── Ranking ─────────────────────────────────────────────────────────────────
+
+fn candidate(n: u32, origin: u8, tier: Tier, activity: u64) -> Candidate {
+    let mut id = [0; 32];
+    id[..4].copy_from_slice(&n.to_be_bytes());
+    Candidate {
+        id,
+        origin: Origin([origin; 32]),
+        tier,
+        activity,
+    }
+}
+
+#[test]
+fn ranking_stops_at_the_subscription_cap_exactly() {
+    for (n, expected) in [(255, 255), (256, 256), (257, 256), (1000, 256)] {
+        let all: Vec<Candidate> = (0..n)
+            .map(|i| candidate(i, 1, Tier::Contact, u64::from(i)))
+            .collect();
+        assert_eq!(rank_subscriptions(&all).len(), expected, "{n} candidates");
+    }
+}
+
+#[test]
+fn ranking_puts_own_before_v1_before_contacts_and_recent_contacts_first() {
+    let ranked = rank_subscriptions(&[
+        candidate(1, 1, Tier::Contact, 5),
+        candidate(2, 1, Tier::Contact, 9),
+        candidate(3, 1, Tier::V1Inbox, 0),
+        candidate(4, 1, Tier::Own, 0),
+    ]);
+    let n = |id: &ContractId| u32::from_be_bytes(id[..4].try_into().unwrap());
+    assert_eq!(ranked.iter().map(n).collect::<Vec<_>>(), [4, 3, 2, 1]);
+}
+
+#[test]
+fn at_the_cap_a_contact_never_displaces_an_inbox() {
+    let mut all: Vec<Candidate> = (0..256)
+        .map(|i| candidate(i, 1, Tier::Contact, 1000))
+        .collect();
+    all.push(candidate(900, 1, Tier::V1Inbox, 0));
+    all.push(candidate(901, 1, Tier::Own, 0));
+    let ranked = rank_subscriptions(&all);
+    assert_eq!(ranked.len(), 256);
+    assert_eq!(ranked[0], candidate(901, 1, Tier::Own, 0).id);
+    assert_eq!(ranked[1], candidate(900, 1, Tier::V1Inbox, 0).id);
+}
+
+#[test]
+fn origins_take_turns_so_a_large_one_cannot_push_out_a_small_one() {
+    let mut all: Vec<Candidate> = (0..300)
+        .map(|i| candidate(i, 1, Tier::V1Inbox, 0))
+        .collect();
+    all.push(candidate(1000, 2, Tier::V1Inbox, 0));
+    let ranked = rank_subscriptions(&all);
+    assert_eq!(ranked.len(), 256);
+    assert_eq!(ranked[1], candidate(1000, 2, Tier::V1Inbox, 0).id);
+}
+
+#[test]
+fn one_identity_in_two_origins_takes_one_subscription() {
+    let a = candidate(7, 1, Tier::V1Inbox, 0);
+    let b = candidate(7, 2, Tier::V1Inbox, 0);
+    assert_eq!(rank_subscriptions(&[a, b]).len(), 1);
+}
+
+// ── Budgets ─────────────────────────────────────────────────────────────────
+
+#[test]
+fn operations_stop_at_300_a_minute_and_come_back_with_the_next() {
+    let start = NOW - NOW % 60;
+    let mut b = Budget::new(start);
+    assert_eq!(b.take_ops(299), 299);
+    assert_eq!(b.take_ops(1), 1, "the 300th is allowed");
+    assert_eq!(b.take_ops(1), 0, "the 301st is not");
+    b.advance(start + 59);
+    assert_eq!(b.take_ops(1), 0, "still the same minute");
+    b.advance(start + 60);
+    assert_eq!(b.take_ops(301), 300);
+}
+
+#[test]
+fn writes_stop_at_60_a_minute_per_contract_and_count_as_operations() {
+    let start = NOW - NOW % 60;
+    let mut b = Budget::new(start);
+    for _ in 0..60 {
+        assert!(b.take_write(&[1; 32]));
+    }
+    assert!(!b.take_write(&[1; 32]), "the 61st to one contract");
+    assert!(b.take_write(&[2; 32]), "another contract has its own count");
+    assert_eq!(b.take_ops(300), 300 - 61, "each write was an operation");
+    assert!(!b.take_write(&[3; 32]), "no operations left");
+    b.advance(start + 60);
+    assert!(b.take_write(&[1; 32]));
+}
+
+#[test]
+fn duty_refills_at_one_percent_up_to_the_burst() {
+    let mut b = Budget::new(NOW);
+    assert!(b.take_duty(DUTY_BURST_MS), "the whole burst");
+    assert!(!b.take_duty(1), "and not a millisecond more");
+    b.advance(NOW + 1);
+    assert!(!b.take_duty(DUTY_REFILL_MS_PER_SEC + 1));
+    assert!(b.take_duty(DUTY_REFILL_MS_PER_SEC), "1% of one second");
+    b.advance(NOW + 1_000_000);
+    assert!(b.take_duty(DUTY_BURST_MS));
+    assert!(!b.take_duty(1), "the burst is the ceiling");
+}
+
+#[test]
+fn a_clock_stepping_back_refills_and_reopens_nothing() {
+    let mut b = Budget::new(NOW);
+    assert!(b.take_duty(DUTY_BURST_MS));
+    assert_eq!(b.take_ops(300), 300);
+    b.advance(NOW - 3600);
+    b.advance(NOW);
+    assert!(!b.take_duty(1));
+    assert_eq!(b.take_ops(1), 0);
+}
+
+#[test]
+fn a_run_decrypts_at_most_a_batch_and_a_node_run_at_most_its_duty() {
+    let mut b = Budget::new(NOW);
+    assert_eq!(b.message_slice(true), MAX_DECRYPT_BATCH);
+    assert!(b.take_duty(DUTY_BURST_MS - MESSAGE_COST_MS * 3));
+    assert_eq!(b.message_slice(true), 3);
+    assert!(b.take_duty(1));
+    assert_eq!(b.message_slice(true), 2, "a part-paid message is not taken");
+    assert_eq!(
+        b.message_slice(false),
+        MAX_DECRYPT_BATCH,
+        "a page has no duty"
+    );
+    b.charge_messages(100);
+    assert_eq!(b.message_slice(true), 0);
+}
+
+fn target(n: u8, origin: u8) -> Target {
+    Target {
+        origin: Origin([origin; 32]),
+        addr: Addr([n; 24]),
+        id: [n; 32],
+    }
+}
+
+#[test]
+fn scans_rotate_so_every_inbox_is_reached_at_the_per_run_limit() {
+    let targets: Vec<Target> = (1..=10).map(|n| target(n, 1)).collect();
+    let mut b = Budget::new(NOW);
+    let mut reached = std::collections::BTreeSet::new();
+    for _ in 0..3 {
+        let p = plan(Trigger::Tick(Tick::Rescan), &targets, &mut b);
+        assert_eq!(p.scan.len(), MAX_SCANS_PER_RUN);
+        reached.extend(p.scan.iter().map(|t| t.id[0]));
+    }
+    assert_eq!(reached.len(), 10, "{reached:?}");
+}
+
+#[test]
+fn a_node_run_with_no_duty_left_scans_nothing_and_a_page_still_does() {
+    let targets = [target(1, 1)];
+    let mut b = Budget::new(NOW);
+    assert!(b.take_duty(DUTY_BURST_MS - SCAN_COST_MS + 1));
+    let p = plan(Trigger::Tick(Tick::Rescan), &targets, &mut b);
+    assert!(p.scan.is_empty());
+    let p = plan(Trigger::RunJobs(Origin([1; 32])), &targets, &mut b);
+    assert_eq!(p.scan, targets);
+}
+
+#[test]
+fn a_refresh_past_the_operation_limit_subscribes_the_best_it_can() {
+    let targets: Vec<Target> = (1..=10).map(|n| target(n, 1)).collect();
+    let mut b = Budget::new(NOW - NOW % 60);
+    assert_eq!(b.take_ops(297), 297);
+    let p = plan(Trigger::Tick(Tick::V1Watch), &targets, &mut b);
+    assert_eq!(p.subscribe, [[1; 32], [2; 32], [3; 32]]);
+}
+
+#[test]
+fn each_trigger_does_only_its_jobs_and_a_clock_tick_drains_first() {
+    let targets = [target(1, 1)];
+    let local = |t| plan(t, &targets, &mut Budget::new(NOW));
+    let rescan = local(Trigger::Tick(Tick::Rescan));
+    assert!(rescan.subscribe.is_empty() && !rescan.fetch_missing);
+    assert_eq!(rescan.scan.len(), 1);
+    let watch = local(Trigger::Tick(Tick::V1Watch));
+    assert_eq!(watch.subscribe.len(), 1);
+    assert!(watch.fetch_missing);
+    for tick in [Tick::Renew, Tick::Clock] {
+        let p = local(Trigger::Tick(tick));
+        assert!(p.scan.is_empty() && p.subscribe.is_empty(), "{tick:?}");
+    }
+    assert_eq!(
+        jobs_for(Trigger::Tick(Tick::Clock)),
+        [Job::DrainOwn, Job::AdvanceClock]
+    );
+}
+
+#[test]
+fn a_contract_trigger_scans_only_that_contract_and_keeps_the_rotation() {
+    let targets: Vec<Target> = (1..=6).map(|n| target(n, 1)).collect();
+    let mut b = Budget::new(NOW);
+    let p = plan(Trigger::Contract([3; 32]), &targets, &mut b);
+    assert_eq!(p.scan, [target(3, 1)]);
+    assert_eq!(
+        plan(Trigger::Tick(Tick::Rescan), &targets, &mut b).scan[0],
+        target(1, 1)
+    );
+    let none = plan(Trigger::Contract([99; 32]), &targets, &mut b);
+    assert!(none.scan.is_empty());
+}
+
+// ── One path ────────────────────────────────────────────────────────────────
+
+#[test]
+fn the_page_and_the_node_store_the_same_bytes() {
+    let mut page = env();
+    let me = create(&mut page, PROD, "alice");
+    let message = sealed(&me, "one");
+    deliver(&mut page, &me, std::slice::from_ref(&message));
+    let mut node = page.clone();
+    assert_eq!(run_jobs(&mut page, PROD).imported, 1);
+    wake(&mut node, "rescan");
+    assert_eq!(ns_snapshot(&page, PROD), ns_snapshot(&node, PROD));
+    assert_eq!(kept_ids(&mut node, me.addr), [id_of(&message).to_vec()]);
+}
+
+#[test]
+fn every_trigger_imports_through_the_watch() {
+    for trigger in ["rescan", "v1watch", "started", "notified", "got", "page"] {
+        let mut env = env();
+        let me = create(&mut env, PROD, "alice");
+        let message = sealed(&me, "one");
+        deliver(&mut env, &me, std::slice::from_ref(&message));
+        let id = v1_inbox_id(&me.vk).unwrap();
+        match trigger {
+            "started" => drop(process(&mut env, None, node_started()).unwrap()),
+            "notified" => drop(process(&mut env, None, notification(id, vec![])).unwrap()),
+            "got" => drop(process(&mut env, None, get_answer(id, None)).unwrap()),
+            "page" => drop(run_jobs(&mut env, PROD)),
+            tag => drop(wake(&mut env, tag)),
+        }
+        assert_eq!(
+            kept_ids(&mut env, me.addr),
+            [id_of(&message).to_vec()],
+            "{trigger}"
+        );
+    }
+}
+
+#[test]
+fn a_run_tells_no_page_anything() {
+    let mut env = env();
+    let me = create(&mut env, PROD, "alice");
+    deliver(&mut env, &me, &[sealed(&me, "one")]);
+    for out in [wake(&mut env, "v1watch"), wake(&mut env, "rescan")] {
+        assert!(responses(&out).is_empty());
+    }
+}
+
+#[test]
+fn a_new_identity_is_watched_with_no_page_ever_asking() {
+    let mut env = env();
+    let me = create(&mut env, PROD, "alice");
+    let out = wake(&mut env, "v1watch");
+    assert_eq!(subscribes(&out), 1, "{out:?}");
+    let OutboundDelegateMsg::SubscribeContractRequest(req) = &out[0] else {
+        panic!("{out:?}");
+    };
+    assert_eq!(
+        req.contract_id.as_bytes(),
+        v1_inbox_id(&me.vk).unwrap().as_slice()
+    );
+}
+
+#[test]
+fn node_start_subscribes_again() {
+    let mut env = env();
+    create(&mut env, PROD, "alice");
+    let out = process(&mut env, None, node_started()).unwrap();
+    assert_eq!(subscribes(&out), 1);
+}
+
+#[test]
+fn a_failed_subscription_is_asked_for_again_by_the_next_refresh() {
+    let mut env = env();
+    let me = create(&mut env, PROD, "alice");
+    let answer = InboundDelegateMsg::SubscribeContractResponse(SubscribeContractResponse {
+        contract_id: ContractInstanceId::new(v1_inbox_id(&me.vk).unwrap()),
+        result: Err("refused".into()),
+        context: DelegateContext::default(),
+    });
+    assert!(process(&mut env, None, answer).unwrap().is_empty());
+    assert_eq!(subscribes(&wake(&mut env, "v1watch")), 1);
+}
+
+// ── Unknown is never absent ─────────────────────────────────────────────────
+
+#[test]
+fn a_refused_get_is_unknown_and_asked_again() {
+    let mut env = env();
+    let me = create(&mut env, PROD, "alice");
+    let id = v1_inbox_id(&me.vk).unwrap();
+    assert_eq!(gets(&wake(&mut env, "v1watch")), 1, "not held: fetch it");
+    // Core answers a refused or failed GET with `state: None`, the same as
+    // "not found". It concludes nothing and starts no loop.
+    let answered = process(&mut env, None, get_answer(id, None)).unwrap();
+    assert!(answered.is_empty(), "{answered:?}");
+    let run = run_jobs(&mut env, PROD);
+    assert_eq!((run.unknown, run.scanned), (1, 0), "not an empty inbox");
+    assert_eq!(gets(&wake(&mut env, "v1watch")), 1, "asked again");
+    // The state turns up: nothing about it was written off.
+    let message = sealed(&me, "late");
+    deliver(&mut env, &me, std::slice::from_ref(&message));
+    process(&mut env, None, get_answer(id, None)).unwrap();
+    assert_eq!(kept_ids(&mut env, me.addr), [id_of(&message).to_vec()]);
+}
+
+#[test]
+fn a_state_that_does_not_decode_is_unknown() {
+    let mut env = env();
+    let me = create(&mut env, PROD, "alice");
+    env.contracts
+        .insert(v1_inbox_id(&me.vk).unwrap(), b"not an inbox".to_vec());
+    let run = run_jobs(&mut env, PROD);
+    assert_eq!((run.unknown, run.scanned), (1, 0));
+}
+
+#[test]
+fn a_state_over_the_size_limit_is_unknown() {
+    let mut env = env();
+    let me = create(&mut env, PROD, "alice");
+    let mut state = inbox_of(&[]);
+    state.resize(watch::MAX_INBOX_BYTES, b' ');
+    env.contracts
+        .insert(v1_inbox_id(&me.vk).unwrap(), state.clone());
+    assert_eq!(run_jobs(&mut env, PROD).unknown, 0, "at the limit");
+    state.push(b' ');
+    env.contracts.insert(v1_inbox_id(&me.vk).unwrap(), state);
+    assert_eq!(run_jobs(&mut env, PROD).unknown, 1, "one byte past it");
+}
+
+#[test]
+fn a_captured_v0_2_x_inbox_state_is_read() {
+    let hex = include_str!("../../../../wire-v1/src/golden_v1.txt")
+        .lines()
+        .find_map(|l| l.strip_prefix("inbox_state "))
+        .expect("the golden inbox state");
+    let bytes: Vec<u8> = (0..hex.len() / 2)
+        .map(|i| u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).unwrap())
+        .collect();
+    let mut env = env();
+    let me = create(&mut env, PROD, "alice");
+    env.contracts.insert(v1_inbox_id(&me.vk).unwrap(), bytes);
+    let run = run_jobs(&mut env, PROD);
+    // The sample's ciphertext is eight bytes: read, and not a message.
+    assert_eq!((run.unknown, run.scanned, run.imported), (0, 1, 0));
+    let id = message_id(&[1; 8]);
+    let (_, seen) = prod(&mut env).index(&seen_rel(&me.addr, &id)).unwrap();
+    assert!(seen.contains(&id[..]), "its one message was reached");
+}
+
+#[test]
+fn an_origin_list_that_cannot_be_read_is_unknown() {
+    let mut env = env();
+    let me = create(&mut env, PROD, "alice");
+    deliver(&mut env, &me, &[sealed(&me, "one")]);
+    let key = Space::new(&mut env, GLOBAL).full_key("ix/bg/origins");
+    blind_key(&mut env, String::from_utf8(key).unwrap());
+    assert!(wake(&mut env, "rescan").is_empty());
+    env.faults = None;
+    assert!(kept_ids(&mut env, me.addr).is_empty());
+    wake(&mut env, "rescan");
+    assert_eq!(kept_ids(&mut env, me.addr).len(), 1, "and read next time");
+}
+
+// ── Notifications ───────────────────────────────────────────────────────────
+
+#[test]
+fn what_a_notification_or_a_get_answer_carries_is_not_used() {
+    let mut env = env();
+    let me = create(&mut env, PROD, "alice");
+    let id = v1_inbox_id(&me.vk).unwrap();
+    let planted = inbox_of(&[sealed(&me, "planted")]);
+    process(&mut env, None, notification(id, planted.clone())).unwrap();
+    process(&mut env, None, get_answer(id, Some(planted.clone()))).unwrap();
+    process(&mut env, app(OTHER), notification(id, planted)).unwrap();
+    assert!(kept_ids(&mut env, me.addr).is_empty());
+}
+
+#[test]
+fn a_duplicate_notification_changes_nothing() {
+    let mut env = env();
+    let me = create(&mut env, PROD, "alice");
+    deliver(&mut env, &me, &[sealed(&me, "one")]);
+    let id = v1_inbox_id(&me.vk).unwrap();
+    process(&mut env, None, notification(id, vec![])).unwrap();
+    let before = ns_snapshot(&env, PROD);
+    assert_eq!(kept_ids(&mut env, me.addr).len(), 1);
+    for _ in 0..3 {
+        process(&mut env, None, notification(id, vec![])).unwrap();
+    }
+    assert_eq!(ns_snapshot(&env, PROD), before);
+}
+
+#[test]
+fn an_out_of_order_notification_reads_the_current_state() {
+    let mut env = env();
+    let me = create(&mut env, PROD, "alice");
+    let id = v1_inbox_id(&me.vk).unwrap();
+    let (one, two) = (sealed(&me, "one"), sealed(&me, "two"));
+    deliver(&mut env, &me, &[one.clone(), two.clone()]);
+    // The node's store is at the newer state; the older state's notification
+    // arrives last.
+    process(&mut env, None, notification(id, inbox_of(&[one.clone()]))).unwrap();
+    let mut got = kept_ids(&mut env, me.addr);
+    got.sort();
+    let mut want = vec![id_of(&one).to_vec(), id_of(&two).to_vec()];
+    want.sort();
+    assert_eq!(got, want);
+}
+
+#[test]
+fn a_rescan_recovers_a_dropped_notification() {
+    let mut env = env();
+    let me = create(&mut env, PROD, "alice");
+    let message = sealed(&me, "one");
+    // It arrived, and no notification was delivered.
+    deliver(&mut env, &me, std::slice::from_ref(&message));
+    assert!(kept_ids(&mut env, me.addr).is_empty());
+    let out = wake(&mut env, "rescan");
+    assert!(out.is_empty(), "a rescan reads what is here: {out:?}");
+    assert_eq!(kept_ids(&mut env, me.addr), [id_of(&message).to_vec()]);
+}
+
+#[test]
+fn a_notification_for_a_contract_nobody_here_watches_does_nothing() {
+    let mut env = env();
+    let me = create(&mut env, PROD, "alice");
+    deliver(&mut env, &me, &[sealed(&me, "one")]);
+    process(&mut env, None, notification([77; 32], vec![])).unwrap();
+    assert!(kept_ids(&mut env, me.addr).is_empty());
+}
+
+// ── What an import writes ───────────────────────────────────────────────────
+
+#[test]
+fn an_import_is_the_page_s_kept_copy_with_a_checked_signature() {
+    let mut env = env();
+    let me = create(&mut env, PROD, "alice");
+    let message = sealed(&me, "one");
+    deliver(&mut env, &me, std::slice::from_ref(&message));
+    run_jobs(&mut env, PROD);
+    let (_, body) = kept_copy(&mut env, me.addr, id_of(&message));
+    let kept: KeptMessage = serde_json::from_slice(&body).unwrap();
+    assert_eq!(kept.title, "one");
+    assert_eq!(kept.content, "body of one");
+    assert_eq!(kept.from, "bob");
+    assert_eq!(kept.kept_at, NOW as i64 * 1000);
+    assert_eq!(kept.sent_at, Some(1_793_613_600_000));
+    assert!(kept.signature_valid);
+    assert!(!kept.sender_vk.is_empty());
+}
+
+#[test]
+fn a_forged_signature_is_recorded_as_invalid_like_the_page_records_it() {
+    let mut env = env();
+    let me = create(&mut env, PROD, "alice");
+    let mut v: serde_json::Value = serde_json::from_slice(&sealed(&me, "one")).unwrap();
+    v["signature"][0] = serde_json::json!(v["signature"][0].as_u64().unwrap() ^ 1);
+    let message = serde_json::to_vec(&v).unwrap();
+    deliver(&mut env, &me, std::slice::from_ref(&message));
+    run_jobs(&mut env, PROD);
+    let (_, body) = kept_copy(&mut env, me.addr, id_of(&message));
+    let kept: KeptMessage = serde_json::from_slice(&body).unwrap();
+    assert!(!kept.signature_valid);
+}
+
+#[test]
+fn an_import_never_overwrites_a_kept_copy() {
+    let mut env = env();
+    let me = create(&mut env, PROD, "alice");
+    let message = sealed(&me, "one");
+    deliver(&mut env, &me, std::slice::from_ref(&message));
+    let item = message_item(ItemKind::Kept, me.addr, id_of(&message));
+    ack(put(&mut env, item, b"the page's copy", None));
+    let before = ns_snapshot(&env, PROD);
+    assert_eq!(run_jobs(&mut env, PROD).imported, 0);
+    assert_eq!(ns_snapshot(&env, PROD), before);
+}
+
+/// The lists said nothing was stored, as they would have before a tab's
+/// write landed: `put_item` itself refuses, because the import is create-only.
+#[test]
+fn a_copy_written_between_the_lists_and_the_write_stands() {
+    let mut env = env();
+    let me = create(&mut env, PROD, "alice");
+    let item = message_item(ItemKind::Kept, me.addr, [5; 16]);
+    ack(put(&mut env, item.clone(), b"the page's copy", None));
+    let refused =
+        crate::handlers::put_item(&mut prod(&mut env), item, b"import".to_vec(), None).unwrap_err();
+    assert!(matches!(refused.code, FailureCode::Conflict { .. }));
+    assert_eq!(kept_copy(&mut env, me.addr, [5; 16]).1, b"the page's copy");
+}
+
+// ── Never brings back a deleted message ─────────────────────────────────────
+
+#[test]
+fn a_deleted_import_stays_deleted() {
+    let mut env = env();
+    let me = create(&mut env, PROD, "alice");
+    let message = sealed(&me, "one");
+    deliver(&mut env, &me, std::slice::from_ref(&message));
+    run_jobs(&mut env, PROD);
+    let id = id_of(&message);
+    let (expected_gen, _) = kept_copy(&mut env, me.addr, id);
+    let item = message_item(ItemKind::Kept, me.addr, id);
+    assert_eq!(
+        call(&mut env, PROD, Op::DeleteItem { item, expected_gen }),
+        Ok(Reply::Deleted)
+    );
+    // No flags at all, and the inbox still holds the message.
+    for tag in ["rescan", "v1watch"] {
+        wake(&mut env, tag);
+    }
+    assert_eq!(run_jobs(&mut env, PROD).imported, 0);
+    assert!(kept_ids(&mut env, me.addr).is_empty());
+}
+
+#[test]
+fn a_message_flagged_deleted_is_not_imported() {
+    let mut env = env();
+    let me = create(&mut env, PROD, "alice");
+    let message = sealed(&me, "one");
+    deliver(&mut env, &me, std::slice::from_ref(&message));
+    let flags = message_item(ItemKind::Flags, me.addr, id_of(&message));
+    ack(put(
+        &mut env,
+        flags,
+        br#"{"read":false,"deleted":true}"#,
+        None,
+    ));
+    let run = run_jobs(&mut env, PROD);
+    assert_eq!((run.imported, run.remaining), (0, 0));
+    assert!(kept_ids(&mut env, me.addr).is_empty());
+}
+
+#[test]
+fn a_message_flagged_read_is_imported() {
+    let mut env = env();
+    let me = create(&mut env, PROD, "alice");
+    let message = sealed(&me, "one");
+    deliver(&mut env, &me, std::slice::from_ref(&message));
+    let flags = message_item(ItemKind::Flags, me.addr, id_of(&message));
+    ack(put(
+        &mut env,
+        flags,
+        br#"{"read":true,"deleted":false}"#,
+        None,
+    ));
+    assert_eq!(run_jobs(&mut env, PROD).imported, 1);
+}
+
+/// The page drops a deleted mark once the message left the inbox
+/// (`reclaim_flags`). An older state of the inbox can come back, from a peer
+/// or a re-fetch, still holding it.
+#[test]
+fn a_reclaimed_mark_does_not_let_an_older_state_bring_a_message_back() {
+    let mut env = env();
+    let me = create(&mut env, PROD, "alice");
+    let message = sealed(&me, "one");
+    let flags = message_item(ItemKind::Flags, me.addr, id_of(&message));
+    let expected_gen = ack(put(
+        &mut env,
+        flags.clone(),
+        br#"{"read":false,"deleted":true}"#,
+        None,
+    ));
+    assert_eq!(
+        call(
+            &mut env,
+            PROD,
+            Op::DeleteItem {
+                item: flags,
+                expected_gen
+            }
+        ),
+        Ok(Reply::Deleted)
+    );
+    deliver(&mut env, &me, std::slice::from_ref(&message));
+    wake(&mut env, "rescan");
+    assert!(kept_ids(&mut env, me.addr).is_empty());
+}
+
+#[test]
+fn a_mark_that_cannot_be_read_stops_the_import() {
+    let mut env = env();
+    let me = create(&mut env, PROD, "alice");
+    let message = sealed(&me, "one");
+    deliver(&mut env, &me, std::slice::from_ref(&message));
+    let flags = message_item(ItemKind::Flags, me.addr, id_of(&message));
+    ack(put(
+        &mut env,
+        flags.clone(),
+        br#"{"read":false,"deleted":true}"#,
+        None,
+    ));
+    blind(&mut env, &item_rel(&flags));
+    let run = run_jobs(&mut env, PROD);
+    assert_eq!((run.imported, run.remaining), (0, 1));
+    env.faults = None;
+    assert!(kept_ids(&mut env, me.addr).is_empty());
+}
+
+#[test]
+fn an_unreadable_list_of_tombstones_stops_the_scan() {
+    let mut env = env();
+    let me = create(&mut env, PROD, "alice");
+    let message = sealed(&me, "one");
+    deliver(&mut env, &me, std::slice::from_ref(&message));
+    let id = id_of(&message);
+    watch::note_seen(&mut prod(&mut env), &me.addr, &id).unwrap();
+    blind(&mut env, &seen_rel(&me.addr, &id));
+    let run = run_jobs(&mut env, PROD);
+    assert_eq!((run.unknown, run.scanned, run.imported), (1, 0, 0));
+}
+
+#[test]
+fn an_unreadable_tombstone_list_does_not_block_a_delete() {
+    let mut env = env();
+    let me = create(&mut env, PROD, "alice");
+    let id = [0x50; 16];
+    let item = message_item(ItemKind::Kept, me.addr, id);
+    let expected_gen = ack(put(&mut env, item.clone(), b"copy", None));
+    watch::note_seen(&mut prod(&mut env), &me.addr, &[0x51; 16]).unwrap();
+    blind(&mut env, &seen_rel(&me.addr, &id));
+    assert_eq!(
+        call(&mut env, PROD, Op::DeleteItem { item, expected_gen }),
+        Ok(Reply::Deleted)
+    );
+}
+
+#[test]
+fn an_archived_message_is_not_imported() {
+    let mut env = env();
+    let me = create(&mut env, PROD, "alice");
+    let message = sealed(&me, "one");
+    deliver(&mut env, &me, std::slice::from_ref(&message));
+    let archived = message_item(ItemKind::Archived, me.addr, id_of(&message));
+    ack(put(&mut env, archived, b"archived", None));
+    assert_eq!(run_jobs(&mut env, PROD).imported, 0);
+    assert!(kept_ids(&mut env, me.addr).is_empty());
+}
+
+#[test]
+fn a_full_shard_of_tombstones_makes_room() {
+    let mut env = env();
+    let me = create(&mut env, PROD, "alice");
+    let mut s = prod(&mut env);
+    let rel = seen_rel(&me.addr, &[0; 16]);
+    for n in 0..=watch::SEEN_PER_SHARD {
+        let mut id = [0u8; 16];
+        id[1..3].copy_from_slice(&(n as u16).to_be_bytes());
+        watch::note_seen(&mut s, &me.addr, &id).unwrap();
+        assert!(s.index(&rel).unwrap().1.contains(&id[..]), "entry {n}");
+    }
+    assert_eq!(s.index(&rel).unwrap().1.len(), watch::SEEN_PER_SHARD);
+}
+
+#[test]
+fn a_store_at_its_budget_can_still_delete() {
+    let mut env = env();
+    let me = create(&mut env, PROD, "alice");
+    let item = message_item(ItemKind::Kept, me.addr, [5; 16]);
+    let expected_gen = ack(put(&mut env, item.clone(), b"copy", None));
+    let mut s = prod(&mut env);
+    let full = store::Usage {
+        keys: store::MAX_ORIGIN_KEYS,
+        bytes: s.usage().bytes,
+    };
+    s.confirm_usage_for_test(full);
+    assert_eq!(
+        call(&mut env, PROD, Op::DeleteItem { item, expected_gen }),
+        Ok(Reply::Deleted)
+    );
+}
+
+#[test]
+fn tombstones_travel_with_an_export_and_leave_with_the_identity() {
+    let mut env = env();
+    let me = create(&mut env, PROD, "alice");
+    let id = [0x50; 16];
+    let rel = seen_rel(&me.addr, &id);
+    let mut s = prod(&mut env);
+    watch::note_seen(&mut s, &me.addr, &id).unwrap();
+    assert!(crate::handlers::exportable_keys(&s).unwrap().contains(&rel));
+    let (generation, _) = load_identity(&s, &me.addr).unwrap().unwrap();
+    assert_eq!(
+        crate::handlers::delete_identity_now(&mut s, &me.addr, generation),
+        Ok(Reply::Deleted)
+    );
+    assert!(s.get(&rel).is_none());
+    assert!(s.get(&index_marker_rel(&rel)).is_none());
+}
+
+#[test]
+fn a_recount_counts_the_tombstones() {
+    let mut env = env();
+    let me = create(&mut env, PROD, "alice");
+    let mut s = prod(&mut env);
+    watch::note_seen(&mut s, &me.addr, &[1; 16]).unwrap();
+    let recorded = s.usage();
+    assert_eq!(s.recount().unwrap(), recorded);
+}
+
+// ── Slices ──────────────────────────────────────────────────────────────────
+
+#[test]
+fn a_backlog_is_taken_a_batch_at_a_time_and_resumes() {
+    let mut env = env();
+    let me = create(&mut env, PROD, "alice");
+    let total = MAX_DECRYPT_BATCH + 3;
+    let messages: Vec<Vec<u8>> = (0..total).map(|n| sealed(&me, &format!("m{n}"))).collect();
+    deliver(&mut env, &me, &messages);
+    let first = run_jobs(&mut env, PROD);
+    assert_eq!(
+        (first.imported as usize, first.remaining),
+        (MAX_DECRYPT_BATCH, 3)
+    );
+    let second = run_jobs(&mut env, PROD);
+    assert_eq!((second.imported, second.remaining), (3, 0));
+    assert_eq!(kept_ids(&mut env, me.addr).len(), total);
+}
+
+#[test]
+fn a_node_run_spends_its_duty_and_stops() {
+    let mut env = env();
+    let me = create(&mut env, PROD, "alice");
+    let messages: Vec<Vec<u8>> = (0..5).map(|n| sealed(&me, &format!("m{n}"))).collect();
+    deliver(&mut env, &me, &messages);
+    let mut budget = Budget::new(NOW);
+    assert!(budget.take_duty(DUTY_BURST_MS - SCAN_COST_MS - 2 * MESSAGE_COST_MS));
+    let body = to_cbor(&budget).unwrap();
+    Space::new(&mut env, GLOBAL)
+        .put("bg/budget", &body)
+        .unwrap();
+    wake(&mut env, "rescan");
+    assert_eq!(
+        kept_ids(&mut env, me.addr).len(),
+        2,
+        "what the duty paid for"
+    );
+    wake(&mut env, "rescan");
+    assert_eq!(
+        kept_ids(&mut env, me.addr).len(),
+        2,
+        "nothing left to spend"
+    );
+    env.now = Some(NOW + 3600);
+    wake(&mut env, "rescan");
+    assert_eq!(kept_ids(&mut env, me.addr).len(), 5, "it refilled");
+}
+
+#[test]
+fn a_message_that_never_decrypts_costs_one_slice() {
+    let mut env = env();
+    let me = create(&mut env, PROD, "alice");
+    let garbage = serde_json::to_vec(&serde_json::json!({"content": [1, 2, 3]})).unwrap();
+    deliver(&mut env, &me, std::slice::from_ref(&garbage));
+    let first = run_jobs(&mut env, PROD);
+    assert_eq!((first.imported, first.remaining, first.scanned), (0, 0, 1));
+    let before = ns_snapshot(&env, PROD);
+    run_jobs(&mut env, PROD);
+    assert_eq!(ns_snapshot(&env, PROD), before, "and is not tried again");
+}
+
+#[test]
+fn the_kept_cap_stops_the_import_and_counts_what_is_left() {
+    let mut env = env();
+    let me = create(&mut env, PROD, "alice");
+    deliver(&mut env, &me, &[sealed(&me, "one"), sealed(&me, "two")]);
+    // Only the list: the cap is on its length.
+    let ix = index_rel(ItemKind::Kept, Some(&me.addr));
+    let list: Vec<ByteBuf> = (0..store::MAX_MESSAGES as u32)
+        .map(|n| {
+            let mut id = [0xee; 16];
+            id[..4].copy_from_slice(&n.to_be_bytes());
+            ByteBuf::from(id.to_vec())
+        })
+        .collect();
+    let mut s = prod(&mut env);
+    s.index_add(&ix, list[0].as_ref(), store::MAX_MESSAGES)
+        .unwrap();
+    let (generation, _) = s.index(&ix).unwrap();
+    s.write_if(&ix, generation, &to_cbor(&list).unwrap())
+        .unwrap();
+    let run = run_jobs(&mut env, PROD);
+    assert_eq!((run.imported, run.remaining), (0, 2));
+}
+
+// ── Gate ────────────────────────────────────────────────────────────────────
+
+#[test]
+fn a_run_for_one_origin_says_nothing_of_another() {
+    let mut env = env();
+    let me = create(&mut env, PROD, "alice");
+    deliver(&mut env, &me, &[sealed(&me, "one")]);
+    let before = ns_snapshot(&env, PROD);
+    let run = run_jobs(&mut env, OTHER);
+    assert_eq!(run, JobsRun::default());
+    assert_eq!(ns_snapshot(&env, PROD), before);
+}
+
+#[test]
+fn an_unattested_or_delegate_caller_still_cannot_ask() {
+    let mut env = env();
+    create(&mut env, PROD, "alice");
+    assert!(process(&mut env, None, app_msg(Op::RunJobs)).is_err());
+    assert!(process(&mut env, foreign_delegate(), app_msg(Op::RunJobs)).is_err());
+}
+
+#[test]
+fn the_delegate_s_own_namespace_is_no_app_s_origin() {
+    let mut env = env();
+    let zero = Some(MessageOrigin::WebApp(ContractInstanceId::new([0; 32])));
+    assert!(process(&mut env, zero, app_msg(Op::ListIdentities)).is_err());
+}
+
+#[test]
+fn each_origin_is_reached_and_a_17th_only_by_its_own_page() {
+    let mut env = env();
+    for origin in 0..=MAX_ORIGINS as u8 {
+        create(&mut env, 100 + origin, "alice");
+    }
+    let out = wake(&mut env, "v1watch");
+    assert_eq!(subscribes(&out), MAX_ORIGINS);
+    let last = 100 + MAX_ORIGINS as u8;
+    let out = send(&mut env, app(last), Op::RunJobs);
+    assert_eq!(subscribes(&out), 1, "its own page still runs it");
+}
+
+#[test]
+fn an_identity_being_deleted_is_not_watched() {
+    let mut env = env();
+    let me = create(&mut env, PROD, "alice");
+    deliver(&mut env, &me, &[sealed(&me, "one")]);
+    let mut s = prod(&mut env);
+    let (generation, mut record) = load_identity(&s, &me.addr).unwrap().unwrap();
+    record.deleting = true;
+    let body = to_cbor(&record).unwrap();
+    s.write_if(&store::identity_rel(&me.addr), generation, &body)
+        .unwrap();
+    assert_eq!(run_jobs(&mut env, PROD), JobsRun::default());
+}
+
+/// A host fault during a scan leaves nothing a later run does not finish.
+#[test]
+fn a_refused_write_is_finished_by_the_next_run() {
+    let mut env = env();
+    let me = create(&mut env, PROD, "alice");
+    let message = sealed(&me, "one");
+    deliver(&mut env, &me, std::slice::from_ref(&message));
+    let mut faults = Faults::default();
+    faults.rules.push(Rule {
+        op: FaultOp::SetFail,
+        key_contains: store::hex(&id_of(&message)),
+        nth: 1,
+    });
+    env.faults = Some(faults);
+    let run = run_jobs(&mut env, PROD);
+    assert_eq!((run.imported, run.remaining), (0, 1));
+    env.faults = None;
+    assert_eq!(run_jobs(&mut env, PROD).imported, 1);
+}

@@ -1202,7 +1202,9 @@ fn keep_out_of_the_watch(s: &mut Space<'_>, item: &ItemRef) -> Result<(), Failur
         return Ok(());
     };
     match watch::note_seen(s, &owner, &item.id) {
-        Err(f) if f.code == FailureCode::CapReached => Ok(()),
+        // `Busy`: a shard that keeps failing to read must not make the user's
+        // mail undeletable, and while it fails no scan imports anything.
+        Err(f) if matches!(f.code, FailureCode::CapReached | FailureCode::Busy) => Ok(()),
         other => other,
     }
 }
