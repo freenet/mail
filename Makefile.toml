@@ -782,7 +782,8 @@ script = '''
 set -euo pipefail
 ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
 # Whatever the environment says, a build with scrub never goes here.
-"$ROOT/scripts/check-release-scrub.sh" --absent
+# The probe opt-in is for the harness's own nodes, and this publish is not one.
+env -u FREENET_E2E_PROBE_ISO "$ROOT/scripts/check-release-scrub.sh" --absent
 contract_id=$(cat "$ROOT/target/webapp/contract-id.txt")
 echo "publishing with test contract id $contract_id"
 # The frozen webapp contract wasm with the test key's parameters.

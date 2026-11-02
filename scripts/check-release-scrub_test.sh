@@ -139,6 +139,11 @@ if task sign-webapp-test | grep -q 'check-release-scrub.sh" --absent' \
 else
     fail "a test publish does not refuse a build with scrub in it"
 fi
+if task publish-email-test | grep -q 'env -u FREENET_E2E_PROBE_ISO '; then
+    pass "publish-email-test ignores the probe opt-in"
+else
+    fail "publish-email-test honours the probe opt-in, which is for the harness's nodes"
+fi
 # Only the legacy real-node task may bring the flag to the test build, and the
 # variable that allows it must not be set anywhere else, in any syntax.
 if [ "$(grep -r -l 'FREENET_MAIL_SCRUB_ISO' "$ROOT/Makefile.toml" "$ROOT/.cargo" "$ROOT/ui/.cargo" "$ROOT/.github" 2>/dev/null | wc -l)" -eq 1 ] \
