@@ -1065,7 +1065,8 @@ fi' \
     "not ok - a test publish does not refuse a build with scrub in it" scrub_release_tests
 guard "a test publish refuses a build with scrub" "$STAGE/Makefile.toml" \
     '# Whatever the environment says, a build with scrub never goes here.
-"$ROOT/scripts/check-release-scrub.sh" --absent' \
+# The probe opt-in is for the harness'"'"'s own nodes, and this publish is not one.
+env -u FREENET_E2E_PROBE_ISO "$ROOT/scripts/check-release-scrub.sh" --absent' \
     '' \
     "not ok - a test publish does not refuse a build with scrub in it" scrub_release_tests
 guard "the absent check reads the build" "$STAGE/scripts/check-release-scrub.sh" \
