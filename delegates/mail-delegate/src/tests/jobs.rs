@@ -18,7 +18,7 @@ use crate::env::mem::{FaultOp, Faults, Rule};
 use crate::handlers::{load_identity, v1_inbox_id};
 use crate::jobs::*;
 use crate::store::{index_marker_rel, index_rel, item_rel, seen_rel};
-use crate::watch::{self, GLOBAL, MAX_ORIGINS, message_id};
+use crate::watch::{self, GLOBAL, message_id};
 
 const NOW: u64 = 1_800_000_000;
 
@@ -265,11 +265,13 @@ fn at_the_cap_a_contact_never_displaces_an_inbox() {
         .map(|i| candidate(i, 1, Tier::Contact, 1000))
         .collect();
     all.push(candidate(900, 1, Tier::V1Inbox, 0));
-    all.push(candidate(901, 1, Tier::Own, 0));
+    all.push(candidate(901, 1, Tier::V1Inbox, 0));
+    all.push(candidate(902, 1, Tier::Own, 0));
     let ranked = rank_subscriptions(&all);
     assert_eq!(ranked.len(), 256);
-    assert_eq!(ranked[0], candidate(901, 1, Tier::Own, 0).id);
+    assert_eq!(ranked[0], candidate(902, 1, Tier::Own, 0).id);
     assert_eq!(ranked[1], candidate(900, 1, Tier::V1Inbox, 0).id);
+    assert_eq!(ranked[2], candidate(901, 1, Tier::V1Inbox, 0).id);
 }
 
 #[test]
@@ -426,11 +428,13 @@ fn each_trigger_does_only_its_jobs_and_a_clock_tick_drains_first() {
 fn a_contract_trigger_scans_only_that_contract_and_keeps_the_rotation() {
     let targets: Vec<Target> = (1..=6).map(|n| target(n, 1)).collect();
     let mut b = Budget::new(NOW);
+    plan(Trigger::Tick(Tick::Rescan), &targets, &mut b);
     let p = plan(Trigger::Contract([3; 32]), &targets, &mut b);
     assert_eq!(p.scan, [target(3, 1)]);
     assert_eq!(
         plan(Trigger::Tick(Tick::Rescan), &targets, &mut b).scan[0],
-        target(1, 1)
+        target(5, 1),
+        "the rotation goes on from where it was"
     );
     let none = plan(Trigger::Contract([99; 32]), &targets, &mut b);
     assert!(none.scan.is_empty());
@@ -968,6 +972,27 @@ fn tombstones_travel_with_an_export_and_leave_with_the_identity() {
     assert!(s.get(&index_marker_rel(&rel)).is_none());
 }
 
+/// `Busy` from a recount under way is not an unreadable shard: skipping the
+/// tombstone there would let a deleted message back.
+#[test]
+fn a_delete_with_no_tombstone_written_is_not_a_delete() {
+    let mut env = env();
+    let me = create(&mut env, PROD, "alice");
+    let id = [0x50; 16];
+    let item = message_item(ItemKind::Kept, me.addr, id);
+    let expected_gen = ack(put(&mut env, item.clone(), b"copy", None));
+    let shard = seen_rel(&me.addr, &id);
+    env.fail_keys_containing = Some(shard);
+    let got = call(&mut env, PROD, Op::DeleteItem { item, expected_gen });
+    assert!(got.is_err(), "{got:?}");
+    env.fail_keys_containing = None;
+    assert_eq!(
+        kept_ids(&mut env, me.addr).len(),
+        1,
+        "it stays until it can go"
+    );
+}
+
 #[test]
 fn a_recount_counts_the_tombstones() {
     let mut env = env();
@@ -1034,6 +1059,9 @@ fn a_message_that_never_decrypts_costs_one_slice() {
     deliver(&mut env, &me, std::slice::from_ref(&garbage));
     let first = run_jobs(&mut env, PROD);
     assert_eq!((first.imported, first.remaining, first.scanned), (0, 0, 1));
+    let id = id_of(&garbage);
+    let (_, seen) = prod(&mut env).index(&seen_rel(&me.addr, &id)).unwrap();
+    assert!(seen.contains(&id[..]));
     let before = ns_snapshot(&env, PROD);
     run_jobs(&mut env, PROD);
     assert_eq!(ns_snapshot(&env, PROD), before, "and is not tried again");
@@ -1103,12 +1131,12 @@ fn the_delegate_s_own_namespace_is_no_app_s_origin() {
 #[test]
 fn each_origin_is_reached_and_a_17th_only_by_its_own_page() {
     let mut env = env();
-    for origin in 0..=MAX_ORIGINS as u8 {
+    for origin in 0..18 {
         create(&mut env, 100 + origin, "alice");
     }
     let out = wake(&mut env, "v1watch");
-    assert_eq!(subscribes(&out), MAX_ORIGINS);
-    let last = 100 + MAX_ORIGINS as u8;
+    assert_eq!(subscribes(&out), 16);
+    let last = 117;
     let out = send(&mut env, app(last), Op::RunJobs);
     assert_eq!(subscribes(&out), 1, "its own page still runs it");
 }

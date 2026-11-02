@@ -50,7 +50,7 @@ dt "jobs: a batch is the most a run decrypts" "$J" \
     '((self.duty_ms / MESSAGE_COST_MS) as usize)' \
     a_run_decrypts_at_most_a_batch_and_a_node_run_at_most_its_duty
 dt "jobs: a run charges its messages" "$W" 'budget.charge_messages(plan.messages - left);' '' \
-    a_node_run_spends_its_duty_and_stops
+    the_kept_cap_stops_the_import_and_spends_no_more_of_the_slice
 dt "jobs: a page is not on duty" "$J" 'if unprompted && !budget.take_duty(SCAN_COST_MS) {' \
     'if !budget.take_duty(SCAN_COST_MS) {' a_node_run_with_no_duty_left_scans_nothing_and_a_page_still_does
 dt "jobs: scans stop at the duty" "$J" 'if unprompted && !budget.take_duty(SCAN_COST_MS) {' \
@@ -184,12 +184,14 @@ dt "jobs: an unreadable shard stops the scan" "$W" 'seen.extend(s.index(&rel)?.1
     'seen.extend(s.index(&rel).map(|x| x.1).unwrap_or_default());' \
     an_unreadable_list_of_tombstones_stops_the_scan
 dt "jobs: an unreadable shard does not block a delete" "$H" \
-    'Err(f) if matches!(f.code, FailureCode::CapReached | FailureCode::Busy) => Ok(()),' \
-    'Err(f) if f.code == FailureCode::CapReached => Ok(()),' \
+    'Err(_) if s.index_unreadable(&store::seen_rel(&owner, &item.id)) => Ok(()),' '' \
     an_unreadable_tombstone_list_does_not_block_a_delete
+dt "jobs: only an unreadable shard skips the tombstone" "$H" \
+    'Err(_) if s.index_unreadable(&store::seen_rel(&owner, &item.id)) => Ok(()),' \
+    'Err(_) => Ok(()),' a_delete_with_no_tombstone_written_is_not_a_delete
 dt "jobs: a full store can delete" "$H" \
-    'Err(f) if matches!(f.code, FailureCode::CapReached | FailureCode::Busy) => Ok(()),' \
-    'Err(f) if f.code == FailureCode::Busy => Ok(()),' a_store_at_its_budget_can_still_delete
+    '        Err(f) if f.code == FailureCode::CapReached => Ok(()),
+        // A shard' '        // A shard' a_store_at_its_budget_can_still_delete
 dt "jobs: an archive counts as held" "$W" 'held.extend(' 'let _ = (' \
     an_archived_message_is_not_imported
 dt "jobs: a full shard makes room" "$W" 'if ids.len() >= SEEN_PER_SHARD' 'if false' \
@@ -225,7 +227,7 @@ dt "jobs: the gate still refuses no origin" "$H" '        None => Err(DelegateEr
         )),' '        None => Ok(Origin([9; 32])),' an_unattested_or_delegate_caller_still_cannot_ask
 dt "jobs: the delegate's namespace is no app's" "$H" 'if Origin(bytes) == watch::GLOBAL {' 'if false {' \
     the_delegate_s_own_namespace_is_no_app_s_origin
-dt "jobs: the origin cap" "$W" 'pub const MAX_ORIGINS: usize = 16;' 'pub const MAX_ORIGINS: usize = 17;' \
+dt "jobs: the origin cap" "$W" 'pub const MAX_ORIGINS: usize = 16;' 'pub const MAX_ORIGINS: usize = 18;' \
     each_origin_is_reached_and_a_17th_only_by_its_own_page
 dt "jobs: a deleting identity is not watched" "$H" '            && !r.deleting
         {

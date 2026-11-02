@@ -306,7 +306,7 @@ impl Run {
         let Some(addr) = self.pick(&self.live_ids()) else {
             return;
         };
-        match self.rng.below(5) {
+        match self.rng.below(4) {
             0 => {
                 let Some((identity, messages)) = self.m.inbox.get_mut(&addr) else {
                     return;
@@ -322,9 +322,11 @@ impl Run {
                 self.m.log.push("run-jobs".into());
                 self.send(Op::RunJobs);
             }
-            2 => self.wake(b"rescan"),
-            3 => self.wake(b"v1watch"),
-            _ => self.delete_arrival(addr),
+            2 => self.wake(b"v1watch"),
+            _ => {
+                self.wake(b"rescan");
+                self.delete_arrival(addr);
+            }
         }
     }
 
@@ -475,6 +477,9 @@ impl Run {
     }
 
     fn may_delete_items_of(&mut self, addr: Addr) {
+        // Tombstones go with the identity, as its flags do: restoring it
+        // later starts over from what its inbox holds.
+        self.m.gone.retain(|(owner, _)| *owner != addr);
         for ((_, owner, _), possible) in self.m.items.iter_mut() {
             if *owner == Some(addr) {
                 possible.insert(None);
