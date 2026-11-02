@@ -129,6 +129,17 @@ normal operations, which never overwrite; `node.rs` is the real transport.
   still on its way. A user's deletion can still return on a transient retry.
 - **The journal and markers are delegate items** (`ItemKind::MigrationJournal`,
   `MigrationMarker`), per origin and never exported.
+- **Scrub (`scrub.rs`) clears the old copy, after a backup:** it runs after the
+  walk on each load and deletes only from rows that imported. The journal is
+  normally never `Complete`, so a row is clear if it is resolved, or pending
+  with no import begun, absent past the count (`Ledger::absent_answers`) and
+  answering the same way now. Every id a fresh read maps to must be stored,
+  in the one imported-ids snapshot, or a moved orphan; counts are not
+  evidence. `last_backup_at` is imported, so it is compared with
+  `migration_started_ms`. Local state goes before identities, a row is
+  journaled in the ledger, and a row is finished only once a re-read shows
+  nothing left. A blocker that never clears means scrub never runs, and the
+  status report says why. Token-generator delegates are left alone.
 - **Tests** drive the crate's real walk against the real delegate's handlers,
   with old-format inputs taken only from `wire-v1/src/golden_v1.txt`. Add a
   golden sample through `wire-v1/capture` rather than building an old reply

@@ -205,6 +205,20 @@ fn scenario_a_row_emptied_before_its_journal_entry_finishes() {
     assert_eq!(delegate.ledger().scrubbed.get(&IDENTITY_206), Some(&true));
 }
 
+/// An acknowledgement is an empty reply, which proves nothing. Only the
+/// re-read does, and a row that fails it stops the run for this load.
+#[test]
+fn a_delete_that_did_not_take_leaves_the_row_unfinished() {
+    let delegate = Delegate::new();
+    let node = usual_node();
+    let outcome = ready(&delegate, &node);
+    *node.writes_ignored.borrow_mut() = true;
+    let blockers = scrub_now(&delegate, &node, &outcome);
+    assert_eq!(blockers, vec![Blocker::RowFailed { generation: 206 }]);
+    assert_eq!(delegate.ledger().scrubbed.get(&206), Some(&false));
+    assert!(!deletes(&node).iter().any(|d| d.0 == lineage_key(im(206))));
+}
+
 // ── Each check alone ────────────────────────────────────────────────────────
 
 #[test]

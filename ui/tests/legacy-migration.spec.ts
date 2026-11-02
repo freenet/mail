@@ -6,8 +6,10 @@ import { APP_NAME } from "./app-name";
 // starts fresh nodes and fills the delegates with `tools/v1-node-seed`.
 //
 // It proves the path: that this client can reach those delegates through the
-// node and that what they hold lands. What the walk does in every other case
-// is in `ui/src/migration/tests.rs`.
+// node and that what they hold lands, and that after a backup the app clears
+// them and still holds the data. The cargo task then reads the delegates to
+// check they were cleared. What the walk and scrub do in every other case is
+// in `ui/src/migration/tests.rs`.
 
 const SEEDED = process.env.FREENET_LEGACY_SEEDED === "1";
 // Set by `cargo make test-e2e-legacy-migration`, which picks free ports. The
@@ -39,8 +41,8 @@ test("a v0.2.7 identity and its archive arrive from the frozen delegates", async
     "needs a seeded node: run `cargo make test-e2e-legacy-migration`",
   );
   // The walk's reads and the first delegate compile take a while, and the
-  // identity arrives after the walk.
-  test.setTimeout(180_000);
+  // identity arrives after the walk, and scrub takes several loads.
+  test.setTimeout(480_000);
 
   // The gateway asks before the delegates run for this page. A request that
   // fails while the node is busy registering a delegate is tried again on the
@@ -154,6 +156,30 @@ test("a v0.2.7 identity and its archive arrive from the frozen delegates", async
       app.locator('[data-testid="fm-draft-card"]').filter({ hasText: "unsent" }),
       "the seeded draft is still there",
     ).toHaveCount(1);
+
+    // Save the recovery key from the notice, then load until the other
+    // generation's rows stand as absent and the old copy is cleared.
+    await page.goto("");
+    const notice = app.locator(`[data-testid="fm-migration-backup"][data-alias="${ALIAS}"]`);
+    await expect(notice, "the notice offers the key").toBeVisible({ timeout: 120_000 });
+    await notice.click();
+    const modal = app.locator('[data-testid="fm-backup-modal"]');
+    await modal.locator('[data-testid="fm-backup-reveal"]').click();
+    await expect(modal.locator('[data-testid="fm-backup-key"]')).toBeVisible({ timeout: 30_000 });
+    await modal.locator('[data-testid="fm-backup-saved"]').click();
+    await expect(modal.locator('[data-testid="fm-backup-saved-note"]')).toBeVisible();
+
+    const report = app.locator('[data-testid="fm-migration-report"]');
+    const cleared = /"scrubbed":\{"1000206":true,"206":true\}/;
+    await expect(async () => {
+      await page.reload();
+      await expect(report).toContainText('"scrub_blockers":', { timeout: 60_000, useInnerText: false });
+      await expect(report).toContainText(cleared, { timeout: 5_000, useInnerText: false });
+    }, "the old copy is cleared").toPass({ timeout: 240_000 });
+
+    await identity.locator('[data-testid="fm-id-open"]').click();
+    await app.locator('[data-testid="fm-folder-archive"]').click();
+    await expect(card, "the new delegate still holds it").toBeVisible({ timeout: 30_000 });
     expect(pumpError, "the permission pump hit an error").toBeNull();
   } finally {
     clearInterval(pump);

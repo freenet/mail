@@ -195,9 +195,7 @@ async fn read_snapshot<S: MailStore>(
     for index in 0..chunks {
         let chunk = get_item(store, snapshot_item(index)).await?;
         let chunk = chunk.ok_or(Blocker::NoSnapshot)?;
-        for id in chunk.body.chunks_exact(ID_BYTES) {
-            ids.insert(<[u8; ID_BYTES]>::try_from(id).expect("exact chunks"));
-        }
+        ids.extend(chunk.body.as_chunks::<ID_BYTES>().0.iter().copied());
     }
     Ok(ids)
 }

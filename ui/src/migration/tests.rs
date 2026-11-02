@@ -312,6 +312,8 @@ struct Node {
     asked: Rc<RefCell<Vec<Asked>>>,
     /// How many legacy deletes are answered before the node goes silent.
     writes_left: Rc<RefCell<Option<usize>>>,
+    /// Deletes are acknowledged and change nothing.
+    writes_ignored: Rc<RefCell<bool>>,
 }
 
 /// A legacy delete's name and arguments, `None` for any other message.
@@ -380,6 +382,9 @@ impl LegacyTransport for Node {
                     return LegacyReply::NoAnswer("no reply in time".into());
                 }
                 *left -= 1;
+            }
+            if *self.writes_ignored.borrow() {
+                return LegacyReply::NoAnswer(EMPTY_REPLY.to_string());
             }
             let key = <[u8; 32]>::try_from(predecessor.bytes()).unwrap();
             if let Some(LegacyReply::Answer(bytes)) = self.replies.borrow_mut().get_mut(&key) {

@@ -8,6 +8,10 @@
 //! wrote.
 //!
 //! Usage: `v1-node-seed <ws port> [capture file]`
+//!        `v1-node-seed <ws port> --expect-cleared`
+//!
+//! `--expect-cleared` fails unless the frozen delegates no longer hold what
+//! was seeded: what the real-node test runs after the app has scrubbed them.
 //!
 //! With a capture file it also writes the delegates' own `GetIdentities` and
 //! `GetAll` replies there, as hex lines: the bytes `ui/src/migration/
@@ -130,16 +134,54 @@ fn local_state_message(message: &LocalStateMsg) -> Result<Vec<u8>, String> {
     Vec::<u8>::try_from(message).map_err(|e| e.to_string())
 }
 
-async fn seed(port: &str) -> Result<(), String> {
+/// The frozen delegates, and a client of the node on `port`.
+async fn connect(port: &str) -> Result<(Frozen, Frozen, WebApi), String> {
     let v1 = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../published-contract/wasm/v1");
     let identity = Frozen::load(&v1, "identity_management", "identity-manager-params")?;
     let local_state = Frozen::load(&v1, "mail_local_state", "mail-local-state-params")?;
-
     let url = format!("ws://127.0.0.1:{port}/v1/contract/command?encodingProtocol=native");
     let (connection, _) = tokio_tungstenite::connect_async(url)
         .await
         .map_err(|e| e.to_string())?;
-    let mut api = WebApi::start(connection);
+    Ok((identity, local_state, WebApi::start(connection)))
+}
+
+/// Fail if the delegates still hold a key or a message that was seeded. An
+/// empty reply is refused too: the delegates answer reads, so it would mean
+/// this check saw nothing.
+async fn expect_cleared(port: &str) -> Result<(), String> {
+    let (identity, local_state, mut api) = connect(port).await?;
+    let identities = identity
+        .ask(&mut api, identity_message(&IdentityMsg::GetIdentities)?)
+        .await?;
+    let state = local_state
+        .ask(&mut api, local_state_message(&LocalStateMsg::GetAll)?)
+        .await?;
+    let text = |bytes: &[u8]| String::from_utf8_lossy(bytes).into_owned();
+    let (identities, state) = (text(&identities), text(&state));
+    if identities.is_empty() || state.is_empty() {
+        return Err("a delegate gave no answer".to_string());
+    }
+    for (row, left) in [
+        (&identities, ALIAS),
+        (&identities, "bob"),
+        (&state, ARCHIVED_TITLE),
+    ] {
+        if row.contains(left) {
+            return Err(format!("`{left}` is still in a v0.2.x delegate"));
+        }
+    }
+    for left in ["read and kept", "unsent", "a sent message"] {
+        if state.contains(left) {
+            return Err(format!("`{left}` is still in a v0.2.x delegate"));
+        }
+    }
+    println!("the v0.2.x delegates no longer hold what was seeded");
+    Ok(())
+}
+
+async fn seed(port: &str) -> Result<(), String> {
+    let (identity, local_state, mut api) = connect(port).await?;
 
     identity.register(&mut api).await?;
     local_state.register(&mut api).await?;
@@ -247,7 +289,12 @@ async fn main() {
         eprintln!("usage: v1-node-seed <ws port>");
         std::process::exit(2);
     };
-    if let Err(e) = seed(&port).await {
+    let run = if std::env::args().nth(2).as_deref() == Some("--expect-cleared") {
+        expect_cleared(&port).await
+    } else {
+        seed(&port).await
+    };
+    if let Err(e) = run {
         eprintln!("v1-node-seed: {e}");
         std::process::exit(1);
     }

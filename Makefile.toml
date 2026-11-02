@@ -1101,7 +1101,7 @@ cargo run -q --manifest-path "$ROOT/Cargo.toml" -p v1-node-seed -- "$FREENET_ISO
 '''
 
 [tasks.test-e2e-legacy-migration]
-description = "Real-node migration: wipe iso nodes, publish, fill the frozen v0.2.7 delegates, check the data arrives in the current UI"
+description = "Real-node migration: wipe iso nodes, publish, fill the frozen v0.2.7 delegates, check the data arrives in the current UI and the old copy is then cleared"
 dependencies = ["build", "derive-test-contract-id"]
 script_runner = "bash"
 script = '''
@@ -1145,4 +1145,5 @@ cd "$ROOT/ui/tests" && \
     FREENET_EMAIL_BASE_URL="http://127.0.0.1:$GW_PORT/v1/contract/web/$CONTRACT_ID/" \
     FREENET_ISO_GW_PORT="$GW_PORT" \
     npx playwright test legacy-migration.spec.ts --project=chromium
+cargo run --manifest-path "$ROOT/Cargo.toml" -p v1-node-seed -- "$GW_PORT" --expect-cleared
 '''

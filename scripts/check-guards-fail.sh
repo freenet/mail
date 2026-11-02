@@ -703,6 +703,110 @@ ut "the back-off is one load in ten" "$M/mod.rs" \
     'const BACKED_OFF_ONE_LOAD_IN: u8 = 10;' \
     'const BACKED_OFF_ONE_LOAD_IN: u8 = 2;' \
     the_back_off_runs_one_load_in_ten
+
+# Scrub. Each check, removed, fails a test where it alone was holding.
+S="$M/scrub.rs"
+ut "scrub reaches a user whose journal never completes" "$S" \
+    '    if targets.is_empty() {' \
+    '    if targets.is_empty() || !status.is_complete() {' \
+    scenario_the_usual_user_is_scrubbed
+ut "scrub never takes a started row as clear" "$M/legacy_delegates.rs" \
+    '.is_some_and(|row| !row.started)' \
+    '.is_some()' \
+    a_started_row_is_never_clear
+ut "scrub wants the whole count of absent answers" "$M/legacy_delegates.rs" \
+    '.is_some_and(|answers| *answers >= HOLD_BACK_LOADS)' \
+    '.is_some_and(|answers| *answers >= 1)' \
+    an_absence_short_of_the_count_is_not_clear
+ut "a standing row must answer the same way at scrub time" "$S" \
+    '&& !(adapter.absence_stands(entry) && adapter.holds_nothing(entry).await)' \
+    '&& !adapter.absence_stands(entry)' \
+    a_standing_row_must_answer_the_same_way_now
+ut "a silent local-state row counts no absent answer" "$M/legacy_delegates.rs" \
+    '        }
+        LegacyReply::NoAnswer(_) => false,
+    }
+}
+
+pub(crate) fn lineage_key' \
+    '        }
+        LegacyReply::NoAnswer(_) => true,
+    }
+}
+
+pub(crate) fn lineage_key' \
+    a_silent_row_is_not_clear
+ut "an empty local-state row can stand as absent" "$M/legacy_delegates.rs" \
+    'LocalState::try_from(bytes.as_slice()).is_ok_and(|mut state| {' \
+    'LocalState::try_from(bytes.as_slice()).is_ok_and(|mut state| false && {' \
+    a_row_that_answers_empty_stands_as_absent
+ut "an identity row waits for its local-state row" "$S" \
+    '.chain(identities.into_iter().filter(paired))' \
+    '.chain(identities.into_iter().filter(|e| paired(e) || true))' \
+    the_order_leaves_out_an_identity_row_with_its_local_state_pending
+ut "a rejected item blocks scrub" "$S" \
+    '    if rejected > 0 {' \
+    '    if rejected > u32::MAX - 1 {' \
+    a_rejected_item_blocks
+ut "an orphan blocks scrub" "$S" \
+    '    if !orphans.is_empty() {' \
+    '    if orphans.len() == usize::MAX {' \
+    an_orphan_blocks
+ut "an unmappable entry blocks scrub" "$S" \
+    '    if refused > 0 {' \
+    '    if refused == usize::MAX {' \
+    an_undecodable_identity_blocks
+ut "an id that never landed blocks scrub" "$S" \
+    'if !stored && !moved && !snapshot.contains(&snapshot_id(key)) {' \
+    'if !stored && !moved && !snapshot.contains(&snapshot_id(key)) && ids == u32::MAX {' \
+    an_item_that_never_arrived_blocks
+ut "a user deletion passes by the snapshot" "$S" \
+    'if !stored && !moved && !snapshot.contains(&snapshot_id(key)) {' \
+    'if !stored && !moved {' \
+    a_user_deletion_after_import_does_not_block
+ut "an unreadable item is not a deletion" "$S" \
+    'let stored = present(store, key, identities).await?;' \
+    'let stored = snapshot.contains(&snapshot_id(key)) || present(store, key, identities).await?;' \
+    an_unreadable_record_is_not_a_deletion
+ut "an unreadable identity is not a deletion" "$S" \
+    'Reply::Status(status) if status.unreadable_identities == 0 => {}' \
+    'Reply::Status(status) if status.unreadable_identities < u32::MAX => {}' \
+    an_unreadable_record_is_not_a_deletion
+ut "a moved orphan is recorded" "$M/orphans.rs" \
+    '            l.moved.push(id.clone());' \
+    '            let _ = &l.moved;' \
+    an_orphan_moved_before_the_snapshot_does_not_block
+ut "an imported backup time is not a backup" "$S" \
+    'Ok(at.zip(since).is_some_and(|(at, since)| at > since))' \
+    'Ok(at.zip(since).is_some())' \
+    an_imported_backup_time_does_not_count
+ut "every identity being scrubbed is backed up" "$S" \
+    'let count = unprotected(store, scrubbed.collect(), ledger, identities).await?;' \
+    'let count = unprotected(store, scrubbed.take(0).collect(), ledger, identities).await?;' \
+    an_identity_the_ledger_does_not_list_needs_a_backup_too
+ut "local state is cleared before identities" "$S" \
+    '    local
+        .into_iter()
+        .chain(identities.into_iter().filter(paired))
+        .collect()' \
+    '    identities
+        .into_iter()
+        .filter(paired)
+        .chain(local)
+        .collect()' \
+    scenario_local_state_is_cleared_before_identities
+ut "a cleared row is not cleared again" "$S" \
+    '.filter(|e| ledger.scrubbed.get(&e.generation) != Some(&true))' \
+    '.filter(|e| ledger.scrubbed.get(&e.generation) != Some(&false) || true)' \
+    scenario_a_finished_scrub_stays_finished
+ut "a row counts as cleared only once a re-read shows it" "$S" \
+    'matches!(left, Some(Ok(requests)) if requests.is_empty())' \
+    'matches!(left, Some(Ok(_)))' \
+    a_delete_that_did_not_take_leaves_the_row_unfinished
+ut "only a row whose clearing began may read empty" "$S" \
+    'if ledger.scrubbed.contains_key(&generation)' \
+    'if generation != u32::MAX' \
+    a_row_that_imported_and_reads_empty_blocks
 ut "the slowdown is one load in four" "$M/mod.rs" \
     'const SLOWED_ONE_LOAD_IN: u8 = 4;' \
     'const SLOWED_ONE_LOAD_IN: u8 = 10;' \
