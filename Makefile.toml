@@ -947,10 +947,22 @@ else
 fi
 echo "Using dev-server port $PORT"
 
-# Start dev server in background.
-cd "$ROOT/ui" && dx serve --port "$PORT" --features example-data,no-sync --no-default-features &
+# Start the dev server in its own process group, so the run can stop all of
+# it: dx starts children, and killing only the shell that launched it left
+# `dx serve` running, with its cwd in this worktree, after the run ended.
+set -m
+( cd "$ROOT/ui" && exec dx serve --port "$PORT" --features example-data,no-sync --no-default-features ) &
 DX_PID=$!
-trap "kill $DX_PID 2>/dev/null || true" EXIT
+set +m
+stop_dx() {
+    kill -TERM -- "-$DX_PID" 2>/dev/null || true
+    for _ in $(seq 1 20); do
+        kill -0 -- "-$DX_PID" 2>/dev/null || return 0
+        sleep 0.25
+    done
+    kill -KILL -- "-$DX_PID" 2>/dev/null || true
+}
+trap stop_dx EXIT
 
 # Poll for readiness.
 echo "Waiting for dev server on port $PORT..."
