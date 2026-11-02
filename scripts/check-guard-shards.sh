@@ -16,6 +16,10 @@ want=$(seq -s, 0 $((N - 1)))
 [ "$legs" = "$want" ] || { echo "FAIL: the matrix is [$legs], want [$want]"; exit 1; }
 grep -q -F -- "--shard \${{ matrix.shard }}/$N" "$WORKFLOW" \
     || { echo "FAIL: the guard step does not run --shard I/$N"; exit 1; }
+# check-drift is the required check. Without this line the shards could run
+# and fail with nothing requiring them.
+grep -q -E '^ +needs: \[.*guard-shards.*\]$' "$WORKFLOW" \
+    || { echo "FAIL: check-drift does not need guard-shards"; exit 1; }
 T="$(mktemp -d)"
 trap 'rm -r -- "$T"' EXIT
 "$ROOT/scripts/check-guards-fail.sh" --list | sort > "$T/all"

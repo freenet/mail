@@ -156,7 +156,11 @@ included (they have been seen to change the bytes)
 run by `release.sh`, refuses a release whose UI embeds the candidate or whose
 delegate was built with the `v1-transition` feature.
 `scripts/check-guards-fail.sh` shows each of these guards failing when what
-it guards is broken.
+it guards is broken. CI runs it as the `guard-shards` matrix (`--shard I/N`);
+`check-drift`, the required check, passes only if `drift-checks` and every
+shard succeeded, and `scripts/check-guard-shards.sh` proves the shards cover
+every guard once. `--list` prints the guards. A local run with no argument
+runs them all.
 
 The `legacy_*.toml` registries are validated by `ui/build.rs`
 (`freenet-migrate-build`; an empty registry fails the build) and pinned by
