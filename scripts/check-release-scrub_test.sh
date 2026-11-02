@@ -49,6 +49,18 @@ else
     fail "the marker is not written once in the branch the flag selects"
 fi
 
+PROBE=$(sed -n 's/^PROBE_MARKER="\(.*\)"$/\1/p' "$CHECK")
+# Written once, in the branch the feature selects, and logged where the loop
+# starts under the same feature.
+if [ -n "$PROBE" ] \
+    && [ "$(grep -r -F -c -- "\"$PROBE\"" "$ROOT/ui/src" | awk -F: '{ n += $2 } END { print n }')" -eq 2 ] \
+    && grep -A1 -F 'if cfg!(feature = "e2e-probe") {' "$ROOT/ui/src/jobs.rs" | grep -q -F "\"$PROBE\"" \
+    && grep -B1 -F 'crate::log::info(PROBE_MARKER);' "$ROOT/ui/src/jobs.rs" | grep -q -F '#[cfg(feature = "e2e-probe")]'; then
+    pass "the probe marker is chosen by the feature and logged under it"
+else
+    fail "the probe marker is not chosen by the feature and logged under it"
+fi
+
 mkdir -p "$TMP/with/wasm" "$TMP/without/wasm" "$TMP/none"
 printf 'bytes %s bytes' "$MARKER" > "$TMP/with/wasm/app_bg.wasm"
 printf 'bytes only' > "$TMP/without/wasm/app_bg.wasm"
@@ -60,6 +72,15 @@ cp "$TMP/with/wasm/app_bg.wasm" "$TMP/two/new.wasm"
 cp "$TMP/without/wasm/app_bg.wasm" "$TMP/two/old.wasm"
 check "two builds side by side are refused" 1 --dir "$TMP/two"
 check "two builds side by side are refused for a test publish" 1 --absent --dir "$TMP/two"
+mkdir -p "$TMP/probe/wasm" "$TMP/probe-scrub/wasm"
+printf 'bytes %s bytes' "$PROBE" > "$TMP/probe/wasm/app_bg.wasm"
+printf 'bytes %s %s bytes' "$MARKER" "$PROBE" > "$TMP/probe-scrub/wasm/app_bg.wasm"
+check "a production build with the probe is refused" 1 --dir "$TMP/probe-scrub"
+check "a production build with the probe and no scrub is refused" 1 --dir "$TMP/probe"
+check "a test publish refuses a build with the probe" 1 --absent --dir "$TMP/probe"
+check "a test publish refuses a build with scrub and the probe" 1 --absent --dir "$TMP/probe-scrub"
+FREENET_E2E_PROBE_ISO=1 check "the background proof's test publish takes the probe" 0 --absent --dir "$TMP/probe"
+FREENET_E2E_PROBE_ISO=1 check "a production build refuses the probe whatever the variable says" 1 --dir "$TMP/probe-scrub"
 check "a test publish refuses a build with the marker" 1 --absent --dir "$TMP/with"
 check "a test publish takes a build without it" 0 --absent --dir "$TMP/without"
 check "a test publish refuses a directory with no WASM" 1 --absent --dir "$TMP/none"
@@ -94,6 +115,17 @@ if task test-e2e-legacy-migration | grep -q '^bash "$ROOT/scripts/check-release-
 else
     fail "test-e2e-legacy-migration does not check the build it published"
 fi
+if task test-e2e-background-run | grep -q '^ *\*"e2e-probe test instrumentation"\*) ;;$'; then
+    pass "test-e2e-background checks that its probe build is recognised"
+else
+    fail "test-e2e-background does not check that its probe build is recognised"
+fi
+if [ "$(grep -r -l 'FREENET_E2E_PROBE_ISO=1' "$ROOT/Makefile.toml" "$ROOT/.github" "$ROOT/scripts/release.sh" 2>/dev/null | wc -l)" -eq 1 ] \
+    && task test-e2e-background | grep -q '^FREENET_E2E_PROBE_ISO=1 FREENET_UI_FEATURES=e2e-probe exec cargo make test-e2e-background-run$'; then
+    pass "only the background proof's build allows the probe"
+else
+    fail "something besides the background proof's build allows the probe"
+fi
 real_node="$(task test-e2e-real-node)"
 if printf '%s\n' "$real_node" | grep -q 'check-release-scrub.sh' \
     && printf '%s\n' "$real_node" | grep -q '^ *\*"has scrub off"\*) ;;$'; then
@@ -106,6 +138,11 @@ if task sign-webapp-test | grep -q 'check-release-scrub.sh" --absent' \
     pass "a test publish refuses a build with scrub in it"
 else
     fail "a test publish does not refuse a build with scrub in it"
+fi
+if task publish-email-test | grep -q 'env -u FREENET_E2E_PROBE_ISO '; then
+    pass "publish-email-test ignores the probe opt-in"
+else
+    fail "publish-email-test honours the probe opt-in, which is for the harness's nodes"
 fi
 # Only the legacy real-node task may bring the flag to the test build, and the
 # variable that allows it must not be set anywhere else, in any syntax.

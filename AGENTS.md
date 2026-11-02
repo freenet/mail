@@ -82,6 +82,69 @@ recovery-key codec. Its encoding is pinned per variant in
 - **Randomness and time:** never add `getrandom` or `rand`. Randomness is the
   host's `rand_bytes` mixed with entropy the UI sends; prompt expiry uses
   the host clock.
+- **Background jobs:** the manifest in `src/lib.rs` asks for `NodeStarted`, the
+  Background capability and four wake-ups, which the node honours only with
+  the user's grant. Those runs have no origin and answer nobody: the requests
+  gate is unchanged, and `ix/bg/origins` in the delegate's own namespace (the
+  all-zero origin, which the gate refuses) lists whom they work for.
+  `jobs.rs` is the planner, pure functions only; `watch.rs` does the plan, and
+  every trigger, a page's `RunJobs` included, goes through `watch::run`, so
+  there is no second path to keep in step. Budgets (`jobs::Budget`) mirror
+  core's for runs the node starts, and a run takes a bounded slice and resumes:
+  at most `MAX_MESSAGES_PER_RUN` (12) imports, about a third of core's 5 s limit
+  at the measured 120 ms each, with the budget and the rotation saved before any
+  import so a run core stops resumes with the next inbox. Only runs the node
+  starts move the rotation and ask the network for an inbox this node does not
+  hold, and each such inbox backs off (one hour, doubling to a day, cleared when
+  a scan finds it). A page's `RunJobs` asks the network for nothing and
+  subscribes only inboxes it finds held: the page's own read of its inbox goes
+  to the network, and a delegate waiting on one holds every page call behind it.
+  Nothing a client can send writes job state beyond the duty a run spends: the
+  host messages (notification, GET answer, subscription answer) are all
+  unauthenticated, so a subscription answer is ignored and every refresh asks
+  for every subscription again.
+  `Budget::take_write` and the 60 writes a minute limit were removed with
+  nothing to use them: inbox v2's drain adds both with the writes it makes.
+- **v1 watch:** reads the inbox from the node's store, never from the message
+  that prompted the look. A notification or GET answer is only a reason to
+  look, so duplicates and reordering change nothing, and a dropped one is
+  covered by the next wake-up. No state is Unknown, never empty: core answers a
+  refused GET exactly like a missing contract. Arrivals are stored by
+  `put_item` as create-only kept copies. A deleted message stays gone: a kept
+  or archived copy, a deleted flag or a tombstone stops the import, and
+  deleting a kept copy, an archive or a flags item leaves a tombstone first
+  (`ix/sn/<addr>/<nibble>`, exported with the data). A list or flag that cannot
+  be read stops the import. An import also writes the message's flags as
+  unread, first and create-only, because the page shows a kept copy as read
+  unless its flags say otherwise (`local_state::is_unread_import`); a migrated
+  copy has no such flags and stays read.
+  Documented limits: a deleted identity's subscription stays until core has an
+  unsubscribe. A tombstone shard that stays unreadable stops that identity's
+  watch (counted in `JobsRun.unknown`), and `RepairIndex` cannot name a shard
+  (its `kind` is an item kind), so only deleting the identity clears it. A node
+  run that waits on the network for a missing inbox holds the delegate for up to
+  90 s while page calls queue behind it (8 at most) and time out at 30 s; the
+  backoff makes this rare, and a timed out call says the node is busy. Restoring a deleted identity can bring back a message deleted
+  earlier, because its tombstones leave with the identity. Forged notifications
+  can spend the duty budget but carry no data, since the inbox is read from the
+  node's store.
+- **Page fallback:** `ui/src/jobs.rs` sends `RunJobs` on load and every ten
+  minutes while a page is open, in a detached task beside the migration walk,
+  so a node without the Background grant (or too old for it) gets the same
+  planner. The page cannot tell whether the node granted Background, so it
+  asks every time, and the loop starts once per page however often the
+  identities reload. Built with the `e2e-probe` feature (only `cargo make
+  test-e2e-background` does) it publishes its last run as `data-jobs-run`,
+  including how long a call sent while the run was out waited (`probe_ms`) and
+  the titles of the kept copies. `cargo make test-e2e-background` proves the
+  node-side paths on real nodes (wake-up, notification, cost); CI workflow
+  `e2e-background.yml` runs it on a PR that touches the delegate, the protocol
+  or the jobs code, and nightly. It is not a required check.
+- **Imports:** a node refuses to instantiate a module that imports a function
+  it does not provide. `scripts/check-delegate-imports.sh` (a step of CI
+  `check-drift`, so it blocks) compares the candidate's imports to
+  `scripts/delegate-imports-allowlist.txt`, which a delegate test pins to the
+  stdlib's host set.
 
 Its WASM lives under `published-contract/candidate/` until a release
 freezes it into `published-contract/wasm/v2/`.

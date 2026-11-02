@@ -523,7 +523,7 @@ ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
 # Release only, as compress-webapp and check-release-scrub.sh read it.
 rm -rf "$ROOT/target/dx/app/release/web/public"
 cd "$ROOT/ui"
-dx build --release --features use-node
+dx build --release --features "use-node${FREENET_UI_FEATURES:+,$FREENET_UI_FEATURES}"
 '''
 
 [tasks.build]
@@ -782,7 +782,8 @@ script = '''
 set -euo pipefail
 ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
 # Whatever the environment says, a build with scrub never goes here.
-"$ROOT/scripts/check-release-scrub.sh" --absent
+# The probe opt-in is for the harness's own nodes, and this publish is not one.
+env -u FREENET_E2E_PROBE_ISO "$ROOT/scripts/check-release-scrub.sh" --absent
 contract_id=$(cat "$ROOT/target/webapp/contract-id.txt")
 echo "publishing with test contract id $contract_id"
 # The frozen webapp contract wasm with the test key's parameters.
@@ -1126,6 +1127,73 @@ cd "$ROOT/ui/tests" && \
     FREENET_ISO_GW_LOG_DIR="$ISO_ROOT/gw/logs" \
     FREENET_ISO_PEER_LOG_DIR="$ISO_ROOT/peer/logs" \
     npx playwright test live-node.spec.ts --project=chromium ${extra_args[@]+"${extra_args[@]}"}
+'''
+
+[tasks.test-e2e-background]
+description = "Real-node proof of the delegate's background jobs: wake-up, import with the tab closed, cost, page stall (about 20 minutes: it waits for the rescan wake-up)"
+script_runner = "bash"
+# The build carries the test instrumentation (`e2e-probe`); build-ui reads this.
+script = '''
+set -euo pipefail
+FREENET_E2E_PROBE_ISO=1 FREENET_UI_FEATURES=e2e-probe exec cargo make test-e2e-background-run
+'''
+
+[tasks.test-e2e-background-run]
+description = "The steps of test-e2e-background. Run that task: this one builds without the test instrumentation"
+dependencies = ["build", "derive-test-contract-id"]
+script_runner = "bash"
+script = '''
+set -euo pipefail
+ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
+if [ -z "${CI:-}" ]; then export FREENET_E2E_ROOT="${FREENET_E2E_ROOT:-$ROOT/target/iso}"; fi
+ISO_ROOT="${FREENET_E2E_ROOT:-$HOME/freenet-mail-iso}"
+free_port() {
+    python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])'
+}
+export FREENET_ISO_GW_PORT="${FREENET_ISO_GW_PORT:-$(free_port)}"
+export FREENET_ISO_PEER_PORT="${FREENET_ISO_PEER_PORT:-$(free_port)}"
+export FREENET_ISO_GW_NET_PORT="${FREENET_ISO_GW_NET_PORT:-$(free_port)}"
+export FREENET_ISO_PEER_NET_PORT="${FREENET_ISO_PEER_NET_PORT:-$(free_port)}"
+GW_PORT="$FREENET_ISO_GW_PORT"
+KEEP="${FREENET_E2E_KEEP:-0}"
+
+cleanup() {
+    if [ "$KEEP" = "1" ]; then
+        echo "FREENET_E2E_KEEP=1 - leaving iso nodes up at $ISO_ROOT"
+    else
+        bash "$ROOT/scripts/run-isolated-nodes.sh" down
+    fi
+}
+trap cleanup EXIT
+
+# Fresh nodes: the proof counts what one delegate store holds.
+bash "$ROOT/scripts/run-isolated-nodes.sh" wipe
+bash "$ROOT/scripts/run-isolated-nodes.sh" up
+FREENET_ISO_GW_PORT="$GW_PORT" cargo make publish-email-iso
+# This build carries the probe: the release check must see its marker in the
+# built WASM, or it could not refuse a shipped build that has it.
+refused="$(bash "$ROOT/scripts/check-release-scrub.sh" 2>&1 || true)"
+case "$refused" in
+    *"e2e-probe test instrumentation"*) ;;
+    *)
+        echo "error: the release check did not find the probe in the build that has it: $refused" >&2
+        exit 1
+        ;;
+esac
+
+CONTRACT_ID="$(cat "$ROOT/target/webapp/contract-id.txt")"
+BASE_URL="http://127.0.0.1:$GW_PORT/v1/contract/web/$CONTRACT_ID/"
+# BACKGROUND_PLAYWRIGHT_ARGS passes extra Playwright options through, split on
+# whitespace, e.g. BACKGROUND_PLAYWRIGHT_ARGS='--repeat-each=2'.
+read -r -a extra_args <<< "${BACKGROUND_PLAYWRIGHT_ARGS:-}"
+cd "$ROOT/ui/tests" && \
+    FREENET_BACKGROUND_PROOF=1 \
+    FREENET_EMAIL_BASE_URL="$BASE_URL" \
+    FREENET_ISO_GW_PORT="$GW_PORT" \
+    FREENET_ISO_GW_LOG_DIR="$ISO_ROOT/gw/logs" \
+    FREENET_ISO_PEER_LOG_DIR="$ISO_ROOT/peer/logs" \
+    BACKGROUND_PROOF_OUT="${BACKGROUND_PROOF_OUT:-$ROOT/target/background-proof.json}" \
+    npx playwright test background-proof.spec.ts --project=chromium ${extra_args[@]+"${extra_args[@]}"}
 '''
 
 [tasks.capture-v0-2-7-replies]

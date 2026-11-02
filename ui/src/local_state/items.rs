@@ -567,20 +567,40 @@ pub(crate) async fn unarchive_message(alias: String, msg_id: MessageId) -> Resul
 /// survive the deletion beside a mark saying it is deleted, holding the
 /// message's content the user asked to remove, and pinning that mark
 /// against reclamation (a kept copy keeps its mark). This way a failure
-/// leaves the message visible and the deletion retryable.
+/// before the mark leaves the message visible and the deletion retryable. A
+/// failure of the last step, which takes back a copy an import made in
+/// between, comes after the mark: the message is deleted though the error is
+/// reported, and a retry is idempotent.
 pub(crate) async fn delete_message(alias: String, msg_id: MessageId) -> Result<(), DynError> {
+    delete_message_after_copies(alias, msg_id, async || {}).await
+}
+
+/// [`delete_message`], with `between` run after the copies are removed and
+/// before the mark is set: where a background import can land. A test seam.
+async fn delete_message_after_copies(
+    alias: String,
+    msg_id: MessageId,
+    between: impl AsyncFnOnce(),
+) -> Result<(), DynError> {
     delete(message_item(ItemKind::Kept, &alias, msg_id)?)
         .await
         .map_err(boxed)?;
     delete(message_item(ItemKind::Archived, &alias, msg_id)?)
         .await
         .map_err(boxed)?;
+    between().await;
     set_flags(message_item(ItemKind::Flags, &alias, msg_id)?, |f| {
         f.deleted = true;
         f.read = false;
     })
     .await
-    .map_err(boxed)
+    .map_err(boxed)?;
+    // A background import between the first delete and the flags (the
+    // message had no kept copy yet) makes a copy beside the mark. The flags
+    // now stop any further import, so one more delete takes it back.
+    delete(message_item(ItemKind::Kept, &alias, msg_id)?)
+        .await
+        .map_err(boxed)
 }
 
 /// Set in `stored` every leaf field that differs between `before` and
@@ -858,6 +878,7 @@ pub(crate) async fn load(identities: &[(String, Addr)]) -> Result<LocalState, Ca
                 entry.archived.insert(id.to_string(), a);
             }
         }
+        let mut unread = std::collections::HashSet::new();
         for i in list_owned(*addr, ItemKind::Flags).await? {
             if let (Some(id), Some(f)) = (
                 message_id(&i.item.id),
@@ -869,8 +890,12 @@ pub(crate) async fn load(identities: &[(String, Addr)]) -> Result<LocalState, Ca
                 if f.deleted {
                     entry.deleted.push(id);
                 }
+                if !f.read && !f.deleted {
+                    unread.insert(id);
+                }
             }
         }
+        super::set_unread_imports(alias, unread);
         let settings = item(ItemKind::IdentitySettings, owner, Vec::new());
         if let Some(i) = readable_or_default(ops::get_item(settings).await)?
             && let Some(s) = decode("identity settings", &i.body)
@@ -1666,6 +1691,28 @@ mod delegate_tests {
         );
     }
 
+    /// A background import that lands between the copies' removal and the
+    /// mark leaves a kept copy beside a deleted mark: the deletion takes it
+    /// back.
+    #[test]
+    fn an_import_between_the_copies_and_the_mark_is_taken_back() {
+        let alias = "items-delete-race";
+        let addr = identity(alias);
+        let id = message_id_for(b"imported mid-delete");
+        let item = message_item(ItemKind::Kept, alias, id).unwrap();
+        let planted = item.clone();
+        block_on(delete_message_after_copies(
+            alias.into(),
+            id,
+            async move || {
+                put(planted, json(&kept("planted".into()))).await.unwrap();
+            },
+        ))
+        .unwrap();
+        assert!(block_on(ops::get_item(item)).unwrap().is_none());
+        assert!(loaded(alias, addr).is_deleted(alias, id));
+    }
+
     /// The recipient address a draft was addressed to survives a reload,
     /// and a draft stored without one (older data) loads with none.
     #[test]
@@ -1724,6 +1771,41 @@ mod delegate_tests {
             "no kept copy of a deleted message"
         );
         assert!(!state.is_read("items-read-del", id));
+    }
+
+    /// Flags that say unread (what the background jobs write for an import)
+    /// are known to the page as an unread import; flags that say read, or no
+    /// flags at all (a migrated copy), are not.
+    #[test]
+    fn unread_flags_mark_an_import_and_nothing_else_does() {
+        let addr = identity("items-unread");
+        let unread = message_id_for(b"imported by the background jobs");
+        let read = message_id_for(b"read by the user");
+        let bare = message_id_for(b"has no flags");
+        let deleted = message_id_for(b"deleted before it was read");
+        for (id, body) in [
+            (unread, r#"{"read":false,"deleted":false}"#),
+            (read, r#"{"read":true,"deleted":false}"#),
+            (deleted, r#"{"read":false,"deleted":true}"#),
+        ] {
+            let full = full_id(id).unwrap();
+            block_on(ops::put_item(
+                ItemRef {
+                    kind: ItemKind::Flags,
+                    owner: Some(addr),
+                    id: full.to_vec(),
+                },
+                body.as_bytes().to_vec(),
+                None,
+            ))
+            .unwrap();
+        }
+        let key = super::super::addr_key(&addr);
+        let _ = loaded(&key, addr);
+        assert!(super::super::is_unread_import(&key, unread));
+        assert!(!super::super::is_unread_import(&key, read));
+        assert!(!super::super::is_unread_import(&key, bare));
+        assert!(!super::super::is_unread_import(&key, deleted));
     }
 
     /// Two tabs change different settings fields from the same starting

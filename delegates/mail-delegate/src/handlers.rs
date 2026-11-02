@@ -8,8 +8,8 @@ use freenet_mail_protocol::{
     recovery_key, to_cbor,
 };
 use freenet_stdlib::prelude::{
-    ApplicationMessage, ContractKey, DelegateError, InboundDelegateMsg, MessageOrigin,
-    OutboundDelegateMsg, Parameters,
+    ApplicationMessage, ContractInstanceId, ContractKey, DelegateError, InboundDelegateMsg,
+    LifecycleEvent, MessageOrigin, OutboundDelegateMsg, Parameters,
 };
 use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
@@ -17,10 +17,12 @@ use serde_bytes::ByteBuf;
 use crate::consent;
 use crate::crypto::{self, Keys, MixRng};
 use crate::env::Env;
+use crate::jobs::{Tick, Trigger};
 use crate::store::{
     self, ALL_KINDS, IDENTITY_INDEX, MAX_IDENTITIES, Origin, Space, fail, identity_rel, index_rel,
     item_rel,
 };
+use crate::watch;
 
 pub type OpResult = Result<Reply, Failure>;
 
@@ -51,10 +53,43 @@ pub fn process(
             let origin = check_origin(origin.as_ref())?;
             consent::answer(&mut Space::new(env, origin), &answer)
         }
+        // The host's own messages. None is a request: they carry no origin,
+        // are answered to nobody and say only which job to look at, so the
+        // gate above has nothing to decide. A client can send a notification
+        // or a GET answer, so nothing durable depends on one beyond the duty
+        // a run spends; what they carry is never read.
+        InboundDelegateMsg::Lifecycle(LifecycleEvent::NodeStarted { .. }) => {
+            Ok(background(env, Trigger::NodeStarted))
+        }
+        InboundDelegateMsg::WakeupFired { tag } => Ok(match Tick::from_tag(&tag) {
+            Some(tick) => background(env, Trigger::Tick(tick)),
+            None => Vec::new(),
+        }),
+        InboundDelegateMsg::ContractNotification(n) => {
+            Ok(background(env, contract_trigger(&n.contract_id)?))
+        }
+        InboundDelegateMsg::GetContractResponse(r) => {
+            Ok(background(env, contract_trigger(&r.contract_id)?))
+        }
+        // Every refresh asks again for every subscription, so the answer is
+        // not recorded: a client can send this message, and a belief written
+        // from it would let one switch off another's watch.
+        InboundDelegateMsg::SubscribeContractResponse(_) => Ok(Vec::new()),
         _ => Err(DelegateError::Other(
             "the mail delegate accepts only application messages and prompt answers".into(),
         )),
     }
+}
+
+fn background(env: &mut dyn Env, trigger: Trigger) -> Vec<OutboundDelegateMsg> {
+    watch::run(env, trigger).1
+}
+
+fn contract_trigger(id: &ContractInstanceId) -> Result<Trigger, DelegateError> {
+    id.as_bytes()
+        .try_into()
+        .map(Trigger::Contract)
+        .map_err(|_| DelegateError::Other("contract id is not 32 bytes".into()))
 }
 
 /// The origin gate, run before ANY request or answer is looked at (River's
@@ -67,6 +102,11 @@ pub fn check_origin(origin: Option<&MessageOrigin>) -> Result<Origin, DelegateEr
             let bytes: [u8; 32] = id.as_bytes().try_into().map_err(|_| {
                 DelegateError::Other("web-app origin is not a 32-byte contract id".into())
             })?;
+            if Origin(bytes) == watch::GLOBAL {
+                return Err(DelegateError::Other(
+                    "this origin names the delegate's own records".into(),
+                ));
+            }
             Ok(Origin(bytes))
         }
         Some(MessageOrigin::Delegate(_)) => Err(DelegateError::Other(
@@ -187,12 +227,25 @@ fn handle_request(
             assignment_hashes,
         } => sign_v1_removal(s, &addr, &assignment_hashes),
         Op::V1AftParams { addr } => v1_aft_params(s, &addr),
+        Op::RunJobs => return Ok(run_jobs(s, id)),
         Op::RevokeExportGrant => s
             .del(store::EXPORT_GRANT)
             .and_then(|()| s.del(store::EXPORT_SESSION))
             .map(|()| Reply::Deleted),
     };
     Ok(respond(id, result))
+}
+
+/// The page's way to run the jobs: the path a run the node starts takes,
+/// for this origin's own namespace.
+fn run_jobs(s: &mut Space<'_>, id: RequestId) -> Vec<OutboundDelegateMsg> {
+    let origin = s.origin;
+    if matches!(s.index(IDENTITY_INDEX), Ok((_, ids)) if !ids.is_empty()) {
+        watch::note_origin(&mut *s.env, origin);
+    }
+    let (done, mut out) = watch::run(&mut *s.env, Trigger::RunJobs(origin));
+    out.insert(0, response_msg(id, Ok(Reply::JobsRun(done))));
+    out
 }
 
 // ── Identities ──────────────────────────────────────────────────────────────
@@ -282,7 +335,7 @@ pub fn require_identity(s: &Space<'_>, addr: &Addr) -> Result<(u64, IdentityReco
 }
 
 /// Every identity, from the identity index (never from a host listing).
-fn all_identities(s: &Space<'_>) -> Result<Vec<(Addr, u64, IdentityRecord)>, Failure> {
+pub fn all_identities(s: &Space<'_>) -> Result<Vec<(Addr, u64, IdentityRecord)>, Failure> {
     let (_, ids) = s.index(IDENTITY_INDEX)?;
     let mut out = Vec::with_capacity(ids.len());
     for id in ids {
@@ -513,6 +566,8 @@ fn store_new_identity(
                     "the identity was stored but its bookkeeping failed; reload",
                 ));
             }
+            let origin = s.origin;
+            watch::note_origin(&mut *s.env, origin);
             Ok(info(addr, generation, &record))
         }
         Err(e) => {
@@ -891,6 +946,10 @@ fn delete_step(s: &mut Space<'_>, addr: &Addr) -> OpResult {
             remaining: u32::try_from(remaining).unwrap_or(u32::MAX),
         });
     }
+    for rel in store::seen_rels(addr) {
+        s.del(&rel)?;
+        s.del(&store::index_marker_rel(&rel))?;
+    }
     // Every index the identity owned is empty and removed; its existence
     // marker (which names the address) goes too, before the record, so a
     // failure here is retried by the next step.
@@ -1007,7 +1066,7 @@ fn get_item(s: &Space<'_>, item: ItemRef) -> OpResult {
     })))
 }
 
-fn put_item(
+pub fn put_item(
     s: &mut Space<'_>,
     item: ItemRef,
     body: Vec<u8>,
@@ -1108,6 +1167,7 @@ fn delete_item(s: &mut Space<'_>, item: ItemRef, expected_gen: u64) -> OpResult 
         // same). Remove it either way, then finish the index: `Deleted`
         // must mean it is gone, and an index entry must never be dropped
         // while its record may remain.
+        keep_out_of_the_watch(s, &item)?;
         s.put_for_delete(&marker, store::MARKER_DELETING)?;
         s.del(&rel).map_err(partial)?;
         s.index_remove(&ix, &item.id).map_err(partial)?;
@@ -1122,6 +1182,7 @@ fn delete_item(s: &mut Space<'_>, item: ItemRef, expected_gen: u64) -> OpResult 
             "stale generation",
         ));
     }
+    keep_out_of_the_watch(s, &item)?;
     // Record first, index entry last: a failure in between leaves an index
     // entry with no record, which readers skip, and which the marker lets a
     // listing (or a retry) remove.
@@ -1132,6 +1193,26 @@ fn delete_item(s: &mut Space<'_>, item: ItemRef, expected_gen: u64) -> OpResult 
     // its record is absent, which it is.
     let _ = s.del(&marker);
     Ok(Reply::Deleted)
+}
+
+/// Before a message's kept copy, archive or flags go: leave the tombstone that
+/// stops the v1 watch importing it again. An origin at its storage budget
+/// must still be able to delete, and that same budget refuses its imports,
+/// so a full store skips the tombstone.
+fn keep_out_of_the_watch(s: &mut Space<'_>, item: &ItemRef) -> Result<(), Failure> {
+    let (ItemKind::Kept | ItemKind::Archived | ItemKind::Flags, Some(owner)) =
+        (item.kind, item.owner)
+    else {
+        return Ok(());
+    };
+    match watch::note_seen(s, &owner, &item.id) {
+        Err(f) if f.code == FailureCode::CapReached => Ok(()),
+        // A shard that keeps failing to read must not make the user's mail
+        // undeletable, and while it fails no scan imports anything. Any other
+        // `Busy` (a recount under way) passes soon: the delete is retried.
+        Err(_) if s.index_unreadable(&store::seen_rel(&owner, &item.id)) => Ok(()),
+        other => other,
+    }
 }
 
 const MAX_PAGE: usize = 256;
@@ -1479,6 +1560,11 @@ pub fn exportable_keys(s: &Space<'_>) -> Result<Vec<String>, Failure> {
         for kind in ALL_KINDS.into_iter().filter(|k| store::shape(*k).0) {
             add_kind(s, &mut rels, kind, Some(addr))?;
         }
+        // Not user data, so one that cannot be read does not stop the export.
+        rels.extend(
+            store::seen_rels(&addr)
+                .filter(|rel| matches!(s.index(rel), Ok((_, ids)) if !ids.is_empty())),
+        );
     }
     for kind in ALL_KINDS.into_iter().filter(|k| !store::shape(*k).0) {
         add_kind(s, &mut rels, kind, None)?;

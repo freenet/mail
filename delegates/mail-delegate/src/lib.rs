@@ -9,6 +9,9 @@
 //! is looked at, a namespace per web-app origin, one stored item per secret
 //! with a compare-and-swap generation, and exactly one response per request.
 //! The protocol is in `freenet-mail-protocol`.
+//!
+//! With the user's Background grant the node also runs it with no page open:
+//! [`jobs`] plans those runs, [`watch`] carries them out.
 
 // The `#[delegate]` macro emits `cfg(feature = "trace")` checks.
 #![allow(unexpected_cfgs)]
@@ -17,7 +20,9 @@ pub mod consent;
 pub mod crypto;
 pub mod env;
 pub mod handlers;
+pub mod jobs;
 pub mod store;
+pub mod watch;
 
 #[cfg(test)]
 mod tests;
@@ -29,7 +34,12 @@ use freenet_stdlib::prelude::{
 
 pub struct MailDelegate;
 
-#[delegate]
+// `crate::jobs::Tick::ALL` names these tags.
+#[delegate(manifest(
+    lifecycle = [NodeStarted],
+    capabilities = [Background],
+    wakeups = [rescan = 900, v1watch = 3600, renew = 21600, clock = 86400]
+))]
 impl DelegateInterface for MailDelegate {
     fn process(
         ctx: &mut DelegateCtx,

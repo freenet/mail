@@ -22,7 +22,7 @@ use freenet_stdlib::prelude::DelegateError;
 
 use super::*;
 use crate::env::mem::{FaultOp, Faults};
-use crate::handlers::DELETE_STEP;
+use crate::handlers::{DELETE_STEP, v1_inbox_id};
 
 /// Seeds that once broke an invariant, kept as regression cases.
 const PINNED_SEEDS: &[u64] = &[1, 2, 3, 4, 5, 10, 29, 43, 129, 162, 203];
@@ -97,6 +97,11 @@ struct Model {
     /// Index entries left naming no record after healing: a leaked slot.
     /// Always an invariant failure; counted so the test reports it.
     leaks: u64,
+    /// What each identity's v1 inbox holds, for the watch to import.
+    inbox: BTreeMap<Addr, (IdentityInfo, Vec<Vec<u8>>)>,
+    /// Messages whose kept copy a reply confirmed deleted: never imported
+    /// again, whatever the host did.
+    gone: BTreeSet<(Addr, [u8; 16])>,
     /// The first reply that brought back an identity whose approved
     /// deletion had started.
     undone: Option<String>,
@@ -258,7 +263,8 @@ impl Run {
             6..=9 => self.rename(),
             10..=13 => self.delete_identity(),
             14..=17 => self.import(),
-            18..=59 => self.put_item(),
+            18..=49 => self.put_item(),
+            50..=59 => self.watch_step(),
             60..=74 => self.delete_item(),
             75..=89 => self.read_items(),
             _ => self.list_identities(),
@@ -290,6 +296,66 @@ impl Run {
                     ..IdModel::default()
                 },
             );
+            self.m.inbox.insert(identity.addr, (identity, Vec::new()));
+        }
+    }
+
+    /// Something the watch does: a message arrives, a run starts, or the user
+    /// deletes an imported copy.
+    fn watch_step(&mut self) {
+        let Some(addr) = self.pick(&self.live_ids()) else {
+            return;
+        };
+        match self.rng.below(4) {
+            0 => {
+                let Some((identity, messages)) = self.m.inbox.get_mut(&addr) else {
+                    return;
+                };
+                let title = format!("m{}", messages.len());
+                messages.push(jobs::sealed(identity, &title));
+                let state = jobs::inbox_of(messages);
+                let id = v1_inbox_id(&identity.vk).unwrap();
+                self.env.contracts.insert(id, state);
+                self.m.log.push("arrival".into());
+            }
+            1 => {
+                self.m.log.push("run-jobs".into());
+                self.send(Op::RunJobs);
+            }
+            2 => self.wake(b"v1watch"),
+            _ => {
+                self.wake(b"rescan");
+                self.delete_arrival(addr);
+            }
+        }
+    }
+
+    fn wake(&mut self, tag: &[u8]) {
+        self.m.log.push("wake".into());
+        let tag = tag.to_vec();
+        let msg = InboundDelegateMsg::WakeupFired { tag };
+        process(&mut self.env, None, msg).expect("a wake-up never errors");
+    }
+
+    fn delete_arrival(&mut self, addr: Addr) {
+        let Some((_, messages)) = self.m.inbox.get(&addr) else {
+            return;
+        };
+        let Some(message) = self.pick(&messages.clone()) else {
+            return;
+        };
+        let id = jobs::id_of(&message);
+        let item = ItemRef {
+            kind: ItemKind::Kept,
+            owner: Some(addr),
+            id: id.to_vec(),
+        };
+        let Some(Some(expected_gen)) = self.current_gen(&item) else {
+            return;
+        };
+        self.m.log.push("delete-arrival".into());
+        if let Seen::Reply(Ok(Reply::Deleted)) = self.send(Op::DeleteItem { item, expected_gen }) {
+            self.m.gone.insert((addr, id));
         }
     }
 
@@ -411,6 +477,9 @@ impl Run {
     }
 
     fn may_delete_items_of(&mut self, addr: Addr) {
+        // Tombstones go with the identity, as its flags do: restoring it
+        // later starts over from what its inbox holds.
+        self.m.gone.retain(|(owner, _)| *owner != addr);
         for ((_, owner, _), possible) in self.m.items.iter_mut() {
             if *owner == Some(addr) {
                 possible.insert(None);
@@ -596,6 +665,10 @@ impl Run {
         self.blinded = self.env.faults.as_ref().and_then(|f| f.blinded());
         self.env.faults = None;
         self.lose_reply = 0;
+        // Every inbox gets its chance to bring a deleted message back.
+        for _ in 0..4 {
+            self.wake(b"rescan");
+        }
         if let Seen::Reply(Ok(Reply::Identities(deleting))) = self.send(Op::ListDeletingIdentities)
         {
             for i in deleting {
@@ -859,6 +932,17 @@ fn check(run: &mut Run) -> Result<(), String> {
                 "{rel} holds {:?}, which no reply allowed",
                 stored.map(|b| String::from_utf8_lossy(&b).into_owned())
             ));
+        }
+    }
+    // A message the user deleted stays deleted, whatever the watch saw.
+    for (owner, id) in &run.m.gone {
+        let rel = store::item_rel(&ItemRef {
+            kind: ItemKind::Kept,
+            owner: Some(*owner),
+            id: id.to_vec(),
+        });
+        if keys.contains_key(&rel) {
+            return Err(format!("{rel} came back after its deletion was confirmed"));
         }
     }
     // A generation is never handed out twice.

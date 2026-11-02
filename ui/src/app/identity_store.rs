@@ -784,11 +784,15 @@ pub(crate) async fn load_and_report() {
     crate::app::migration_view::walk_starting();
     list_then_walk(load_identities(), async {
         #[cfg(feature = "use-node")]
-        crate::app::migration_view::after_listing(
-            crate::migration::node::NodeLegacy,
-            crate::migration::node::NodeInbox,
-        )
-        .await;
+        {
+            // Beside the walk, never in front of it or the page.
+            spawn_detached(crate::jobs::fallback());
+            crate::app::migration_view::after_listing(
+                crate::migration::node::NodeLegacy,
+                crate::migration::node::NodeInbox,
+            )
+            .await;
+        }
     })
     .await;
 }

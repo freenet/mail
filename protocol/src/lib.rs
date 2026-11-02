@@ -342,6 +342,12 @@ pub enum Op {
         kind: Option<ItemKind>,
         owner: Option<Addr>,
     },
+
+    // ── Background jobs ─────────────────────────────────────────────────
+    /// Run the delegate's jobs for the caller's own namespace now: what a
+    /// node with no Background grant, or one too old for it, does not start
+    /// by itself. One bounded slice per call; answers [`Reply::JobsRun`].
+    RunJobs,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -432,6 +438,22 @@ pub enum Reply {
         identity: IdentityInfo,
         recovery_key: String,
     },
+    /// What one [`Op::RunJobs`] did.
+    JobsRun(JobsRun),
+}
+
+/// What one run of the jobs did.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JobsRun {
+    /// Inboxes read in this run.
+    pub scanned: u32,
+    /// Messages stored as kept copies.
+    pub imported: u32,
+    /// Inboxes whose state this run could not establish. Unknown, never
+    /// absent: nothing is concluded about them.
+    pub unknown: u32,
+    /// Messages left for a later run: past this run's slice, or refused.
+    pub remaining: u32,
 }
 
 /// Encode `value` as CBOR.

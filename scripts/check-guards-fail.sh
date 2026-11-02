@@ -62,6 +62,11 @@ ui_local_tests() {
     cargo test --manifest-path "$STAGE/Cargo.toml" -p freenet-email-ui --lib \
         --no-default-features --features example-data,no-sync identity_store
 }
+ui_jobs_tests() {
+    cargo test --manifest-path "$STAGE/Cargo.toml" -p freenet-email-ui --lib \
+        --no-default-features --features example-data,no-sync \
+        -- kept_import_is_unread unread_flags_mark an_import_between the_loop_starts the_probe_marker
+}
 candidate_check() { "$STAGE/scripts/check-delegate-candidate.sh"; }
 freeze_tests() { "$STAGE/scripts/release-freeze_test.sh"; }
 scrub_release_tests() { "$STAGE/scripts/check-release-scrub_test.sh"; }
@@ -86,6 +91,7 @@ baseline "delegate unreadable-key runs" blind_tests
 baseline "protocol tests" protocol_tests
 baseline "migration tests" ui_migration_tests
 baseline "local-delegate identity tests" ui_local_tests
+baseline "UI background jobs tests" ui_jobs_tests
 baseline "release freeze tests" freeze_tests
 baseline "release scrub tests" scrub_release_tests
 [ "$WASM" -eq 1 ] && baseline "candidate check" candidate_check
@@ -124,6 +130,9 @@ shows() {
 guard() { # name file old new expected command...
     local name="$1" file="$2" old="$3" new="$4" expected="$5"
     shift 5
+    if [ -n "${GUARD_ONLY:-}" ] && ! [[ "$name" =~ $GUARD_ONLY ]]; then
+        return
+    fi
     cp "$file" "$file.orig"
     if ! replace "$file" "$old" "$new"; then
         echo "not ok - $name: mutation not applied"
@@ -993,6 +1002,18 @@ ut "a keyless error goes to nobody when two requests wait" "$M/node.rs" \
 # A rename that still compiles: only the pinned bytes can catch it. (A new
 # variant is caught earlier, by the wildcard-free match in golden.rs, at
 # compile time.)
+# A regression that takes a second edit: `also file old new guard ...`.
+also() {
+    local file="$1" old="$2" new="$3" keep
+    shift 3
+    keep="$(mktemp "$STAGE/also.XXXXXX")"
+    cp "$file" "$keep"
+    replace "$file" "$old" "$new"
+    "$@"
+    mv "$keep" "$file"
+}
+source "$ROOT/scripts/check-guards-fail-jobs.sh"
+
 guard "protocol encoding is pinned" "$STAGE/protocol/src/lib.rs" \
     'pub enum FailureCode {
     NotFound,' 'pub enum FailureCode {
@@ -1044,7 +1065,8 @@ fi' \
     "not ok - a test publish does not refuse a build with scrub in it" scrub_release_tests
 guard "a test publish refuses a build with scrub" "$STAGE/Makefile.toml" \
     '# Whatever the environment says, a build with scrub never goes here.
-"$ROOT/scripts/check-release-scrub.sh" --absent' \
+# The probe opt-in is for the harness'"'"'s own nodes, and this publish is not one.
+env -u FREENET_E2E_PROBE_ISO "$ROOT/scripts/check-release-scrub.sh" --absent' \
     '' \
     "not ok - a test publish does not refuse a build with scrub in it" scrub_release_tests
 guard "the absent check reads the build" "$STAGE/scripts/check-release-scrub.sh" \
@@ -1055,6 +1077,25 @@ guard "the marker is written once" "$STAGE/ui/src/migration/scrub.rs" \
     '    crate::log::info(BUILD_MARKER);' \
     '    crate::log::info("freenet-mail:scrub-built-in");' \
     "not ok - the marker is not written once in the branch the flag selects" scrub_release_tests
+guard "the probe marker is written once" "$STAGE/ui/src/jobs.rs" \
+    '    crate::log::info(PROBE_MARKER);' \
+    '    crate::log::info("freenet-mail:e2e-probe-built-in");' \
+    "not ok - the probe marker is not chosen by the feature and logged under it" scrub_release_tests
+guard "the probe marker is logged only under the feature" "$STAGE/ui/src/jobs.rs" \
+    '    #[cfg(feature = "e2e-probe")]
+    crate::log::info(PROBE_MARKER);' \
+    '    crate::log::info(PROBE_MARKER);' \
+    "not ok - the probe marker is not chosen by the feature and logged under it" scrub_release_tests
+guard "the probe marker is chosen by the feature" "$STAGE/ui/src/jobs.rs" \
+    'pub(crate) const PROBE_MARKER: &str = if cfg!(feature = "e2e-probe") {' \
+    'pub(crate) const PROBE_MARKER: &str = if true {' \
+    "tests:the_probe_marker_is_there_only_with_the_feature" ui_jobs_tests
+guard "a publish refuses the probe" "$STAGE/scripts/check-release-scrub.sh" \
+    '    if grep -a -q -F -- "$PROBE_MARKER" "$file" \' '    if false \' \
+    "not ok - a production build with the probe is refused" scrub_release_tests
+guard "the probe is allowed only where the background proof says so" "$STAGE/scripts/check-release-scrub.sh" \
+    '[ "$ABSENT" -eq 1 ] && [ "${FREENET_E2E_PROBE_ISO:-}" = "1" ]' '[ "$ABSENT" -eq 1 ]' \
+    "not ok - a test publish refuses a build with the probe" scrub_release_tests
 guard "the freeze override needs the test flag" "$STAGE/scripts/check-release-freeze.sh" \
     'if [ "${RELEASE_FREEZE_TEST:-}" = "1" ]; then' 'if true; then' \
     "not ok - RELEASE_FREEZE_FILE without the test flag does not lift the freeze" freeze_tests

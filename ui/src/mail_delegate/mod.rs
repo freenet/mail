@@ -276,6 +276,7 @@ fn reply_name(reply: &Reply) -> &'static str {
         Reply::ExportedSecrets { .. } => "ExportedSecrets",
         Reply::Continue { .. } => "Continue",
         Reply::CreatedIdentity { .. } => "CreatedIdentity",
+        Reply::JobsRun(_) => "JobsRun",
     }
 }
 
@@ -290,7 +291,11 @@ async fn wait(
         let mut timer = gloo_timers::future::TimeoutFuture::new(timeout_ms).fuse();
         futures::select! {
             answer = rx => answer.map_err(|_| NODE_DELEGATE_ERROR),
-            _ = timer => Err("timed out"),
+            // The node serves a delegate one request at a time, and a run that
+            // waits on the network can hold it for a minute or more. The
+            // request is queued, not lost: say so, since this is shown beside
+            // "failed" for a send.
+            _ = timer => Err("the node is busy and did not answer in time; try again in a minute"),
         }
     }
     #[cfg(not(target_family = "wasm"))]
