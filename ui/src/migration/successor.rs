@@ -8,7 +8,7 @@
 //! returns only once the delegate acknowledged it, so markers and the journal
 //! are durable when the crate is told they are, and there is nothing to flush.
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::HashSet;
 use std::rc::Rc;
 
@@ -136,7 +136,6 @@ struct Arrived {
     /// The row being imported has a newer one that may still hold its
     /// identities, so what it says about contracts waits.
     hold_markers: bool,
-    any_held: bool,
 }
 
 impl ArrivedIdentities {
@@ -474,7 +473,8 @@ impl<S: MailStore, I: V1InboxReader> MailSuccessor<S, I> {
     /// Bring the ledger up to date, with `mapping` counted and `also` applied.
     /// A change to the totals brings a dismissed notice back. A ledger that
     /// cannot be written costs the notice, never the walk: what was not
-    /// recorded goes with the next write.
+    /// recorded goes with the next write. The ledger holds counts and the
+    /// notice's state only; nothing the walk decides rests on it.
     pub(crate) async fn update_ledger(
         &mut self,
         mapping: MappingCounts,
@@ -494,7 +494,6 @@ impl<S: MailStore, I: V1InboxReader> MailSuccessor<S, I> {
                     l.migrated.push(*addr);
                 }
             }
-            l.markers_held |= arrived.any_held;
             drop(arrived);
             also(l);
         })
@@ -627,7 +626,6 @@ impl<S: MailStore, I: V1InboxReader> MailSuccessor<S, I> {
     ) -> Result<(), CallError> {
         let item = settings_item(info.addr);
         let hold = self.arrived.0.borrow().hold_markers;
-        let held = Cell::new(false);
         self.merged_put(item, |stored| {
             let markers = markers_from_body(stored);
             let mut adopted = adopt_legacy_markers(
@@ -640,11 +638,9 @@ impl<S: MailStore, I: V1InboxReader> MailSuccessor<S, I> {
             if adopted.imported_generation == Some(generation) {
                 adopted.pending_held = hold && adopted.has_pending();
             }
-            held.set(adopted.pending_held);
             (adopted != markers).then(|| body_with_markers(stored, &adopted))
         })
         .await?;
-        self.arrived.0.borrow_mut().any_held |= held.get();
         Ok(())
     }
 

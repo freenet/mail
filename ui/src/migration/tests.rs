@@ -1109,20 +1109,30 @@ fn scenario_silence_past_the_hold_starts_no_contract_migration() {
         assert!(held.pending_held && held.pending_migration_from.is_some());
         assert_eq!(plan_load(Some(held)), (None, None, None));
 
-        node.set(im(206), later);
-        walk(&delegate, &node, no_inbox());
+        node.set(im(206), later.clone());
+        if later == LegacyReply::NotInstalled {
+            // One typed "not installed" can be transient: the marker waits
+            // until the absence has stood for the hold-back count.
+            walk(&delegate, &node, no_inbox());
+            assert!(alice_markers(&delegate).pending_held);
+            for _ in 0..HOLD_BACK_LOADS {
+                walk(&delegate, &node, no_inbox());
+            }
+        } else {
+            walk(&delegate, &node, no_inbox());
+        }
         let markers = alice_markers(&delegate);
         assert!(!markers.pending_held);
         assert_eq!(markers.pending_migration_from.as_deref(), pending);
         let (inbox, _, _) = plan_load(Some(markers));
         assert_eq!(inbox.as_deref(), pending);
-        assert!(!delegate.ledger().markers_held);
     }
 }
 
-/// With nothing newer unsettled, an older row's marker runs at once.
+/// With a newer row that is typed absent, an older row's marker runs once the
+/// absence has stood, and not on the first answer.
 #[test]
-fn a_row_with_nothing_newer_unsettled_holds_no_marker() {
+fn a_row_whose_newer_row_stays_absent_is_released_after_the_count() {
     let delegate = Delegate::new();
     let node = Node::default();
     node.set(
@@ -1135,6 +1145,10 @@ fn a_row_with_nothing_newer_unsettled_holds_no_marker() {
         )),
     );
     walk(&delegate, &node, no_inbox());
+    assert!(alice_markers(&delegate).pending_held);
+    for _ in 0..HOLD_BACK_LOADS {
+        walk(&delegate, &node, no_inbox());
+    }
     let markers = alice_markers(&delegate);
     assert!(!markers.pending_held);
     assert_eq!(markers.pending_migration_from.as_deref(), Some("older"));
@@ -1157,6 +1171,59 @@ fn function_code(source: &str, signature: &str) -> String {
     let code = code_only(source);
     let from = &code[code.find(signature).expect(signature)..];
     from[..from.find("\n}\n").expect("the function ends")].to_string()
+}
+
+fn old_marker_row() -> Vec<u8> {
+    identity_with_markers(
+        r#""inbox_wasm_hash":"older""#,
+        r#""pending_migration_from":null"#,
+        r#""aft_record_wasm_hash":"older-aft""#,
+        r#""pending_aft_migration_from":null"#,
+    )
+}
+
+/// The newer row answers with data but its write fails, so the row stays
+/// pending. Decoding the reply settles nothing: the older row's held marker
+/// must stay held, or the old inbox goes back over the current one.
+#[test]
+fn scenario_a_newer_row_that_failed_to_write_keeps_the_marker_held() {
+    let delegate = Delegate::new();
+    let node = Node::default();
+    node.set(im(206), LegacyReply::NoAnswer("timed out".into()));
+    node.set(im(205), answer(old_marker_row()));
+    for _ in 0..=HOLD_BACK_LOADS {
+        walk(&delegate, &node, no_inbox());
+    }
+    assert!(alice_markers(&delegate).pending_held);
+
+    node.set(im(206), answer(golden("identity_state_seeded")));
+    delegate.faults.borrow_mut().import_fails = Some(FailureCode::Busy);
+    let outcome = walk(&delegate, &node, no_inbox());
+    assert!(!outcome.released_markers);
+    assert!(alice_markers(&delegate).pending_held);
+}
+
+/// A row whose import began held data. However often it then reads as not
+/// installed, its absence never stands, so it never releases a held marker.
+#[test]
+fn scenario_a_started_row_never_stands_as_absent() {
+    let delegate = Delegate::new();
+    delegate.faults.borrow_mut().import_fails = Some(FailureCode::Busy);
+    let node = Node::default();
+    node.set(im(206), answer(golden("identity_state_seeded")));
+    node.set(im(205), answer(old_marker_row()));
+    assert!(
+        walk(&delegate, &node, no_inbox())
+            .status
+            .unwrap()
+            .interrupted_import()
+    );
+    delegate.faults.borrow_mut().import_fails = None;
+    node.set(im(206), LegacyReply::NotInstalled);
+    for _ in 0..=HOLD_BACK_LOADS + 2 {
+        walk(&delegate, &node, no_inbox());
+    }
+    assert!(alice_markers(&delegate).pending_held);
 }
 
 /// A marker the walk wrote after `prepare` read stands: only what the plan

@@ -30,9 +30,6 @@ pub(crate) struct Ledger {
     /// The identities the walk brought in: the notice offers each one's
     /// recovery key.
     pub migrated: Vec<Addr>,
-    /// Some identity's pending contract migration waits on a newer identity
-    /// row ([`crate::app::identity_store::MigrationMarkers::pending_held`]).
-    pub markers_held: bool,
 }
 
 fn reserved_item(name: &[u8], index: u32) -> ItemRef {
@@ -62,22 +59,34 @@ pub(crate) async fn read_ledger<S: MailStore>(store: &mut S) -> Result<Ledger, C
 }
 
 /// Change the ledger, merged with what is stored so another tab's change
-/// survives. A body that does not decode is left alone.
+/// survives. A body that does not decode is an error, and is left alone.
 pub(crate) async fn update_ledger<S: MailStore>(
     store: &mut S,
     change: impl Fn(&mut Ledger),
 ) -> Result<(), CallError> {
-    merged_put(store, ledger_item(), |stored| {
+    let undecodable = std::cell::Cell::new(false);
+    let written = merged_put(store, ledger_item(), |stored| {
         let mut ledger: Ledger = match stored {
-            Some(body) => serde_json::from_slice(body).ok()?,
+            Some(body) => match serde_json::from_slice(body) {
+                Ok(ledger) => ledger,
+                Err(_) => {
+                    undecodable.set(true);
+                    return None;
+                }
+            },
             None => Ledger::default(),
         };
         let before = ledger.clone();
         change(&mut ledger);
         (ledger != before).then(|| serde_json::to_vec(&ledger).expect("a ledger always encodes"))
     })
-    .await
-    .map(|_| ())
+    .await;
+    if undecodable.get() {
+        return Err(CallError::Unknown(
+            "the migration record cannot be read, so it was left as it is".into(),
+        ));
+    }
+    written.map(|_| ())
 }
 
 pub(crate) async fn list_items<S: MailStore>(

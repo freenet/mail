@@ -26,8 +26,8 @@ use freenet_migrate::{DelegateLineageEntry, PredecessorSecretsIo, ProbeVerdict, 
 use freenet_stdlib::prelude::{DelegateKey, blake3};
 use serde::{Deserialize, Serialize};
 
-use super::IDENTITY_GENERATION_OFFSET;
 use super::successor::ArrivedIdentities;
+use super::{IDENTITY_GENERATION_OFFSET, PendingRow};
 use crate::app::address_book::StoredContactKeys;
 use crate::app::contact_store;
 use crate::app::identity_store::MigrationMarkers;
@@ -606,8 +606,8 @@ pub(crate) struct LegacyAdapter<T> {
     lineage: Vec<DelegateLineageEntry>,
     replies: HashMap<Vec<u8>, LegacyReply>,
     counts: MappingCounts,
-    /// The rows the journal has pending, with the walks each has been through.
-    pending_walks: HashMap<Vec<u8>, u32>,
+    /// The rows the journal has pending, with what it holds of each.
+    pending_walks: HashMap<Vec<u8>, PendingRow>,
     /// Rows whose read established nothing this run though they answered.
     unusable: HashSet<Vec<u8>>,
     arrived: ArrivedIdentities,
@@ -623,7 +623,7 @@ impl<T: LegacyTransport> LegacyAdapter<T> {
     pub(crate) fn new(
         transport: T,
         lineage: Vec<DelegateLineageEntry>,
-        pending_walks: HashMap<Vec<u8>, u32>,
+        pending_walks: HashMap<Vec<u8>, PendingRow>,
         arrived: ArrivedIdentities,
         absent_answers: BTreeMap<u32, u32>,
         on_identities: Box<dyn FnOnce()>,
@@ -683,11 +683,13 @@ impl<T: LegacyTransport> LegacyAdapter<T> {
     }
 
     /// Whether `entry`'s absence has stood for long enough to act on. A row
-    /// the journal holds as resolved had data, so an absent answer from it
-    /// can only be a failed read, however often it comes.
+    /// the journal holds as resolved, or whose import began, had data, so an
+    /// absent answer from it can only be a failed read, however often it
+    /// comes.
     fn absence_stands(&self, entry: &DelegateLineageEntry) -> bool {
         self.pending_walks
-            .contains_key(entry.delegate_key.as_slice())
+            .get(entry.delegate_key.as_slice())
+            .is_some_and(|row| !row.started)
             && self
                 .absent_answers
                 .get(&entry.generation)
@@ -695,21 +697,24 @@ impl<T: LegacyTransport> LegacyAdapter<T> {
     }
 
     /// The newest identity row, by release, that may still hold what an older
-    /// row holds: pending, and neither typed "not installed" nor absent long
-    /// enough to stand, nor answering with data, which the walk has dealt
-    /// with by now.
-    pub(crate) fn newest_unsettled_row(&self) -> Option<u32> {
+    /// row holds. A row is settled only if it is resolved, or its absence
+    /// stands: typed "not installed" or empty on this load and on
+    /// [`HOLD_BACK_LOADS`] loads in a row before it. A single typed "not
+    /// installed" settles nothing, and neither does an answer that decodes:
+    /// the write it led to can fail. `pending_after` is the journal's pending
+    /// set once the walk has run; `None` reads it as before.
+    pub(crate) fn newest_unsettled_row(
+        &self,
+        pending_after: Option<&HashMap<Vec<u8>, PendingRow>>,
+    ) -> Option<u32> {
+        let pending = pending_after.unwrap_or(&self.pending_walks);
         let settled = |e: &DelegateLineageEntry| {
             let key = e.delegate_key.as_slice();
-            !self.pending_walks.contains_key(key)
-                || match self.replies.get(key) {
-                    Some(LegacyReply::NotInstalled) => true,
-                    Some(reply @ LegacyReply::Answer(_)) if row_holds_nothing(reply) => {
-                        self.absence_stands(e)
-                    }
-                    Some(LegacyReply::Answer(bytes)) => self.decodes(key, bytes),
-                    _ => false,
-                }
+            !pending.contains_key(key)
+                || self
+                    .replies
+                    .get(key)
+                    .is_some_and(|reply| row_holds_nothing(reply) && self.absence_stands(e))
         };
         self.lineage
             .iter()
@@ -813,7 +818,7 @@ impl<T: LegacyTransport> LegacyAdapter<T> {
                     && self
                         .pending_walks
                         .get(key)
-                        .is_some_and(|walks| *walks < HOLD_BACK_LOADS)
+                        .is_some_and(|row| row.attempts < HOLD_BACK_LOADS)
             })
             .map(|e| e.generation)
     }
@@ -831,7 +836,9 @@ impl<T: LegacyTransport> LegacyAdapter<T> {
         };
         if entry.generation >= IDENTITY_GENERATION_OFFSET {
             let release = entry.generation - IDENTITY_GENERATION_OFFSET;
-            let held = self.newest_unsettled_row().is_some_and(|row| row > release);
+            let held = self
+                .newest_unsettled_row(None)
+                .is_some_and(|row| row > release);
             self.arrived.hold_markers(held);
             return map_identities(&bytes, &mut self.counts).map(|(pairs, _)| pairs);
         }

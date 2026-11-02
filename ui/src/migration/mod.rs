@@ -37,7 +37,7 @@
 //!   the identity rows are done and when it ends, if they brought anything.
 //! - **A row that stays unresolved does not hold the rest back for good, and
 //!   only a standing absence orphans.** An alias that cannot be resolved keeps
-//!   its local-state row pending. Once every identity row that could hold it
+//!   its local-state row pending. Once the identity row of its own release
 //!   has answered absent or empty more than
 //!   [`legacy_delegates::HOLD_BACK_LOADS`] loads in a row, its items go to the
 //!   orphans, which the user can move to an identity ([`orphans`]). A row the
@@ -205,35 +205,56 @@ thread_local! {
     static ONE_WALK: Rc<futures::lock::Mutex<()>> = Rc::new(futures::lock::Mutex::new(()));
 }
 
-/// The walks each pending predecessor has been through, by delegate key. A row
-/// missing here counts as resolved, so a status that does not list them (the
-/// enum is `#[non_exhaustive]`) reads as every row pending.
+/// What the journal holds of a pending predecessor.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PendingRow {
+    /// The walks it has been through.
+    pub attempts: u32,
+    /// Its import began and has not finished, so it held data.
+    pub started: bool,
+}
+
+/// The pending predecessors, by delegate key. A row missing here counts as
+/// resolved, so a status that does not list them (the enum is
+/// `#[non_exhaustive]`) reads as every row pending, unless it is `Complete`.
 fn pending_walks(
     status: &JournalStatus,
     lineage: &[DelegateLineageEntry],
-) -> HashMap<Vec<u8>, u32> {
+) -> HashMap<Vec<u8>, PendingRow> {
     match status {
         JournalStatus::Incomplete { pending, .. } => pending
             .iter()
-            .map(|p| (p.key.bytes().to_vec(), p.attempts))
+            .map(|p| {
+                let row = PendingRow {
+                    attempts: p.attempts,
+                    started: p.import == ImportFlag::Started,
+                };
+                (p.key.bytes().to_vec(), row)
+            })
             .collect(),
+        JournalStatus::Complete { .. } => HashMap::new(),
         _ => lineage
             .iter()
-            .map(|e| (e.delegate_key.to_vec(), 0))
+            .map(|e| {
+                let row = PendingRow {
+                    attempts: 0,
+                    started: false,
+                };
+                (e.delegate_key.to_vec(), row)
+            })
             .collect(),
     }
 }
 
 /// Let go of the pending contract migrations no identity row can still
 /// supersede: those imported from `newest_unsettled` or newer, or all of them
-/// if no row is unsettled. Returns whether any was. The ledger's flag clears
-/// only when nothing can be left.
+/// if no row is unsettled. Returns whether any was. The decision reads each
+/// identity's own marker, so nothing else has to survive for it to run.
 async fn release_held_markers<S: MailStore>(store: &mut S, newest_unsettled: Option<u32>) -> bool {
     let Ok(Reply::Identities(identities)) = store.call(Op::ListIdentities).await else {
         return false;
     };
     let mut released = false;
-    let mut all_read = true;
     for identity in identities {
         let written =
             successor::merged_put(store, successor::settings_item(identity.addr), |stored| {
@@ -248,13 +269,6 @@ async fn release_held_markers<S: MailStore>(store: &mut S, newest_unsettled: Opt
             })
             .await;
         released |= written.as_ref().is_ok_and(|w| *w);
-        all_read &= written.is_ok();
-    }
-    if all_read
-        && newest_unsettled.is_none()
-        && let Err(e) = ledger::update_ledger(store, |l| l.markers_held = false).await
-    {
-        crate::log::error(format!("recording the released markers failed: {e}"), None);
     }
     released
 }
@@ -301,9 +315,8 @@ where
     let stored = ledger::read_ledger(successor.store()).await.ok();
     if !walk_this_load(&status, roll) {
         // A walk that resolved the last row can die before it lets go.
-        let held = stored.as_ref().is_some_and(|l| l.markers_held);
         let released_markers =
-            held && status.is_complete() && release_held_markers(successor.store(), None).await;
+            status.is_complete() && release_held_markers(successor.store(), None).await;
         return WalkOutcome {
             silent_rows: stored.map_or(0, |l| usize::from(l.silent)),
             status: Some(status),
@@ -349,11 +362,12 @@ where
             }
         })
         .await;
-    let held = ledger::read_ledger(successor.store())
-        .await
-        .is_ok_and(|l| l.markers_held);
-    let newest_unsettled = predecessors.newest_unsettled_row();
-    let released_markers = held && release_held_markers(successor.store(), newest_unsettled).await;
+    let still_pending = pending_walks(
+        report.status.as_ref().unwrap_or(&JournalStatus::NotStarted),
+        &lineage,
+    );
+    let newest_unsettled = predecessors.newest_unsettled_row(Some(&still_pending));
+    let released_markers = release_held_markers(successor.store(), newest_unsettled).await;
     let mut counts = successor.into_counts();
     counts.merge_mapping(predecessors.counts());
     WalkOutcome {
