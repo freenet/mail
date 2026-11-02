@@ -314,13 +314,19 @@ mod notfound_routing {
         );
     }
 
-    /// Confirming sends the GETs again, which is what runs the self-heal.
+    /// Confirming sends the GETs again, which is what runs the self-heal. The
+    /// text is read without its comments, so one cannot satisfy it.
     #[test]
     fn confirming_an_identity_runs_what_was_held() {
         let source = include_str!("app/identity_store.rs");
-        let confirm = &source[source.find("fn confirm_identity").unwrap()..];
+        let code: String = source
+            .lines()
+            .map(|l| l.split("//").next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let confirm = &code[code.find("fn confirm_identity").unwrap()..];
         let confirm = &confirm[..confirm.find("\n}\n").unwrap()];
-        let confirmed = confirm.find("Identity::set_confirmed").unwrap();
+        let confirmed = confirm.find("Identity::set_confirmed(").unwrap();
         let reloaded = confirm.find("spawn_detached(load_identities())").unwrap();
         assert!(confirmed < reloaded);
     }

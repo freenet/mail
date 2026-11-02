@@ -680,6 +680,47 @@ guard "an unconfirmed identity's arm publishes nothing" "$STAGE/ui/src/api.rs" \
                         crate::app::identity_store::spawn_detached(async {});' \
     "tests:the_unconfirmed_arm_has_no_publish_in_it" ui_notfound_tests
 
+ut "a silent predecessor does not delay the list" "$STAGE/ui/src/app/identity_store.rs" \
+    '    listing.await;
+    walk.await;' \
+    '    walk.await;
+    listing.await;' \
+    a_silent_predecessor_does_not_delay_the_list
+ut "the hold-back is three loads" "$M/legacy_delegates.rs" \
+    'pub(crate) const HOLD_BACK_LOADS: u32 = 3;' \
+    'pub(crate) const HOLD_BACK_LOADS: u32 = 1;' \
+    the_limits_are_the_documented_numbers,scenario_three_empty_loads_hold_back_and_the_fourth_releases
+ut "the back-off is one load in ten" "$M/mod.rs" \
+    'const BACKED_OFF_ONE_LOAD_IN: u8 = 10;' \
+    'const BACKED_OFF_ONE_LOAD_IN: u8 = 2;' \
+    the_back_off_runs_one_load_in_ten
+ut "the slowdown is one load in four" "$M/mod.rs" \
+    'const SLOWED_ONE_LOAD_IN: u8 = 4;' \
+    'const SLOWED_ONE_LOAD_IN: u8 = 10;' \
+    the_slowdown_runs_one_load_in_four
+ut "one young row keeps the walk going" "$M/mod.rs" \
+    '    let slowed = pending.iter().all(|p| {' \
+    '    let slowed = pending.iter().any(|p| {' \
+    one_young_row_keeps_the_walk_going_and_either_cause_slows_it
+ut "either cause slows the walk" "$M/mod.rs" \
+    '            && (p.absent_streak >= ABSENT_WALKS_BEFORE_BACKING_OFF
+                || p.attempts >= SILENT_WALKS_BEFORE_SLOWING)' \
+    '            && (p.absent_streak >= ABSENT_WALKS_BEFORE_BACKING_OFF
+                && p.attempts >= SILENT_WALKS_BEFORE_SLOWING)' \
+    one_young_row_keeps_the_walk_going_and_either_cause_slows_it
+ut "a lost swap is retried" "$M/successor.rs" \
+    'is_conflict(&e) && attempt + 1 < CAS_ATTEMPTS => attempt += 1,' \
+    'is_conflict(&e) && false => attempt += 1,' \
+    a_merged_write_retries_a_lost_swap_three_times
+ut "a conflict on a create is not a stored item" "$M/successor.rs" \
+    '            Ok(None) => ItemWrite::retryable(format!("not stored after {conflict}")),' \
+    '            Ok(None) => ItemWrite::written(),' \
+    scenario_a_false_conflict_is_not_a_stored_item_for_any_kind
+ut "NotFound asks the identity list" "$M/successor.rs" \
+    '                Ok(Reply::Identities(list)) if list.iter().all(|i| i.addr != owner)' \
+    '                Ok(Reply::Identities(_))' \
+    scenario_not_found_for_a_listed_identity_is_retried
+
 # A rename that still compiles: only the pinned bytes can catch it. (A new
 # variant is caught earlier, by the wildcard-free match in golden.rs, at
 # compile time.)

@@ -120,6 +120,12 @@ struct Faults {
     import_fails: Option<FailureCode>,
     /// Every write of an identity's items answers `Refused`.
     owned_writes_refused: bool,
+    /// Every create of an identity's items answers `NotFound`, which is also
+    /// what the delegate says about a record that failed to read.
+    owned_creates_not_found: bool,
+    /// The next this many writes that carry a generation answer `Conflict`
+    /// and store nothing: a compare-and-swap lost to another tab.
+    lost_swaps: u32,
 }
 
 impl Delegate {
@@ -179,6 +185,20 @@ impl Delegate {
                 ..
             } if faults.false_conflict == Some(item.kind) => {
                 faults.false_conflict = None;
+                Some(FailureCode::Conflict { current_gen: 0 })
+            }
+            Op::PutItem {
+                item,
+                expected_gen: None,
+                ..
+            } if faults.owned_creates_not_found && item.owner.is_some() => {
+                Some(FailureCode::NotFound)
+            }
+            Op::PutItem {
+                expected_gen: Some(_),
+                ..
+            } if faults.lost_swaps > 0 => {
+                faults.lost_swaps -= 1;
                 Some(FailureCode::Conflict { current_gen: 0 })
             }
             _ => None,
@@ -1120,14 +1140,35 @@ fn a_row_with_nothing_newer_unsettled_holds_no_marker() {
     assert_eq!(markers.pending_migration_from.as_deref(), Some("older"));
 }
 
+/// Source with its `//` comments removed, so a comment cannot satisfy or
+/// break a check on what the code does. (A `//` inside a string literal cuts
+/// that line short: the checks anchor on call expressions, not on strings.)
+fn code_only(source: &str) -> String {
+    source
+        .lines()
+        .map(|l| l.split("//").next().unwrap_or(""))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The code of the function that starts at `signature`, to its closing brace
+/// at column 0.
+fn function_code(source: &str, signature: &str) -> String {
+    let code = code_only(source);
+    let from = &code[code.find(signature).expect(signature)..];
+    from[..from.find("\n}\n").expect("the function ends")].to_string()
+}
+
 /// A marker the walk wrote after `prepare` read stands: only what the plan
-/// changed is applied.
+/// changed is applied, and the plan's result never replaces the stored one.
 #[test]
 fn preparing_applies_only_what_the_plan_changed() {
-    let source = include_str!("../app/identity_store.rs");
-    let prepare = &source[source.find("pub(crate) async fn prepare").unwrap()..];
+    let prepare = function_code(
+        include_str!("../app/identity_store.rs"),
+        "pub(crate) async fn prepare",
+    );
     assert!(prepare.contains("m.apply_changes(&before, &new)"));
-    assert!(!prepare[..prepare.find("LoadedIdentity {").unwrap()].contains("*m = new"));
+    assert!(!prepare.contains("*m = new"), "{prepare}");
 }
 
 /// The list is read again once the identities are in, while the mail is still
@@ -1234,11 +1275,14 @@ fn scenario_new_totals_or_rejections_bring_a_dismissed_notice_back() {
     assert!(!delegate.ledger().notice_dismissed, "mail arrived");
 }
 
+/// The counts reach the ledger before the row's marker is written, so a walk
+/// killed between the two has still recorded what it moved.
 #[test]
 fn the_notices_counts_are_recorded_as_rows_resolve() {
-    let source = include_str!("successor.rs");
-    let record = &source[source.find("async fn record_marker").unwrap()..];
-    let flush = record.find("self.update_ledger(").unwrap();
+    let record = function_code(include_str!("successor.rs"), "async fn record_marker");
+    let flush = record
+        .find("self.update_ledger(")
+        .expect("it records counts");
     assert!(flush < record.find("let item = marker_item(predecessor)").unwrap());
 }
 
@@ -2319,14 +2363,50 @@ fn moving_an_orphan_never_overwrites_an_item_already_there() {
 }
 
 /// The page lists the identities before it walks, so a slow or silent
-/// predecessor never delays the list.
+/// predecessor never delays the list: with the walk held at a gate that never
+/// opens, the listing has still completed.
 #[test]
-fn the_page_lists_identities_before_it_walks() {
-    let source = include_str!("../app/identity_store.rs");
-    let body = &source[source.find("pub(crate) async fn load_and_report").unwrap()..];
-    let listed = body.find("load_identities().await").unwrap();
-    let walked = body.find("after_listing(").unwrap();
-    assert!(listed < walked);
+fn a_silent_predecessor_does_not_delay_the_list() {
+    use crate::app::identity_store::list_then_walk;
+    use futures::FutureExt;
+    use futures::channel::oneshot;
+    let listed = Rc::new(RefCell::new(false));
+    let walked = Rc::new(RefCell::new(false));
+    let (_never_opens, gate) = oneshot::channel::<()>();
+    let (l, w) = (listed.clone(), walked.clone());
+    let mut page = Box::pin(list_then_walk(
+        async move { *l.borrow_mut() = true },
+        async move {
+            let _ = gate.await;
+            *w.borrow_mut() = true;
+        },
+    ));
+    assert!(page.as_mut().now_or_never().is_none(), "held at the walk");
+    assert!(*listed.borrow(), "the list was drawn while the walk waited");
+    assert!(!*walked.borrow());
+}
+
+/// The walk is not started first and the listing second.
+#[test]
+fn the_walk_does_not_run_before_the_list() {
+    use crate::app::identity_store::list_then_walk;
+    use futures::FutureExt;
+    use futures::channel::oneshot;
+    let listed = Rc::new(RefCell::new(false));
+    let (_never_opens, gate) = oneshot::channel::<()>();
+    let l = listed.clone();
+    let seen_at_walk = Rc::new(RefCell::new(None));
+    let s = seen_at_walk.clone();
+    let l2 = listed.clone();
+    let mut page = Box::pin(list_then_walk(
+        async move {
+            let _ = gate.await;
+            *l.borrow_mut() = true;
+        },
+        async move { *s.borrow_mut() = Some(*l2.borrow()) },
+    ));
+    assert!(page.as_mut().now_or_never().is_none(), "held at the list");
+    assert_eq!(*seen_at_walk.borrow(), None, "the walk waits for the list");
 }
 
 /// The "we couldn't open your previous data" alarm comes from this count. A
@@ -2402,4 +2482,205 @@ fn share_and_send_go_through_the_gate() {
             "{name}: a new card site needs the check"
         );
     }
+}
+
+// ---- The numbers the behaviour rests on ----
+
+/// The limits are promised in the notice and the docs ("three loads"), and the
+/// tests below loop over the constants, so a changed value would move the loops
+/// with it. They are pinned here by value: change one only on purpose, and
+/// change what users are told with it.
+#[test]
+fn the_limits_are_the_documented_numbers() {
+    assert_eq!(
+        HOLD_BACK_LOADS, 3,
+        "loads a silent newer row holds older ones"
+    );
+    assert_eq!(ABSENT_WALKS_BEFORE_BACKING_OFF, 3);
+    assert_eq!(BACKED_OFF_ONE_LOAD_IN, 10);
+    assert_eq!(SILENT_WALKS_BEFORE_SLOWING, 6);
+    assert_eq!(SLOWED_ONE_LOAD_IN, 4);
+}
+
+/// Three loads of an empty newer row hold the older rows and the fourth lets
+/// them through, in literal numbers.
+#[test]
+fn scenario_three_empty_loads_hold_back_and_the_fourth_releases() {
+    let delegate = Delegate::new();
+    let node = Node::default();
+    node.set(im(206), answer(br#"{"identities":{}}"#.to_vec()));
+    node.set(ls(206), answer(br#"{"aliases":{}}"#.to_vec()));
+    node.set(im(205), answer(golden("identity_state_seeded")));
+    node.set(ls(205), answer(golden("ls_state")));
+    for load in 1..=3 {
+        walk(&delegate, &node, no_inbox());
+        assert!(delegate.identities().is_empty(), "held on load {load}");
+    }
+    walk(&delegate, &node, no_inbox());
+    assert_eq!(delegate.identities().len(), 1, "released on load 4");
+}
+
+/// Typed "not installed" rows back off to one load in ten, from the third walk.
+#[test]
+fn the_back_off_runs_one_load_in_ten() {
+    let delegate = Delegate::new();
+    let mut status = None;
+    for _ in 0..3 {
+        status = walk(&delegate, &Node::default(), no_inbox()).status;
+    }
+    let status = status.unwrap();
+    for roll in 1..=9 {
+        assert!(!walk_this_load(&status, roll), "roll {roll}");
+    }
+    for roll in [0, 10, 20, 250] {
+        assert!(walk_this_load(&status, roll), "roll {roll}");
+    }
+}
+
+fn silent_for(walks: u32) -> JournalStatus {
+    let delegate = Delegate::new();
+    let node = Node::default();
+    node.set(im(206), LegacyReply::NoAnswer("timed out".into()));
+    let mut last = None;
+    for _ in 0..walks {
+        last = walk(&delegate, &node, no_inbox()).status;
+    }
+    last.unwrap()
+}
+
+/// Unresolved rows slow to one load in four from the sixth walk.
+#[test]
+fn the_slowdown_runs_one_load_in_four() {
+    let slowed = silent_for(6);
+    for roll in 1..=3 {
+        assert!(!walk_this_load(&slowed, roll), "roll {roll}");
+    }
+    for roll in [0, 4, 8, 252] {
+        assert!(walk_this_load(&slowed, roll), "roll {roll}");
+    }
+    let young = silent_for(5);
+    for roll in 0..8 {
+        assert!(
+            walk_this_load(&young, roll),
+            "five walks is still every load"
+        );
+    }
+}
+
+/// One row still young keeps the whole walk running: every pending row must be
+/// slowed to slow it. Each side of the "or" counts: a row can be slowed by
+/// walks left unresolved or by a run of "not installed".
+#[test]
+fn one_young_row_keeps_the_walk_going_and_either_cause_slows_it() {
+    let JournalStatus::Incomplete {
+        pending,
+        rejected_items,
+    } = silent_for(6)
+    else {
+        panic!("incomplete");
+    };
+    assert!(pending.len() >= 2, "{pending:?}");
+
+    let mut mixed = pending.clone();
+    mixed[0].attempts = 0;
+    mixed[0].absent_streak = 0;
+    let mixed = JournalStatus::Incomplete {
+        pending: mixed,
+        rejected_items,
+    };
+    assert!(walk_this_load(&mixed, 1), "a young row keeps it every load");
+
+    // Half slowed by silence alone, half by "not installed" alone.
+    let mut either = pending;
+    for (i, row) in either.iter_mut().enumerate() {
+        let (attempts, streak) = if i % 2 == 0 { (6, 0) } else { (0, 3) };
+        row.attempts = attempts;
+        row.absent_streak = streak;
+    }
+    let either = JournalStatus::Incomplete {
+        pending: either,
+        rejected_items,
+    };
+    assert!(!walk_this_load(&either, 1));
+    assert!(walk_this_load(&either, 4));
+}
+
+// ---- Retries and confirmations ----
+
+/// A compare-and-swap lost to another tab is retried, three times over, and
+/// a fourth loss is reported as a conflict.
+#[test]
+fn a_merged_write_retries_a_lost_swap_three_times() {
+    let item = ItemRef {
+        kind: ItemKind::GlobalSettings,
+        owner: None,
+        id: Vec::new(),
+    };
+    for (lost, stored) in [(0, true), (3, true), (4, false)] {
+        let delegate = Delegate::new();
+        delegate.faults.borrow_mut().lost_swaps = lost;
+        let result = block_on(successor::merged_put(
+            &mut delegate.clone(),
+            item.clone(),
+            |_| Some(b"x".to_vec()),
+        ));
+        assert_eq!(result.is_ok(), stored, "{lost} lost");
+        assert_eq!(
+            block_on(successor::get_item(&mut delegate.clone(), item.clone()))
+                .unwrap()
+                .is_some(),
+            stored,
+            "{lost} lost"
+        );
+        if !stored {
+            let e = result.unwrap_err();
+            assert!(
+                matches!(e.code(), Some(FailureCode::Conflict { .. })),
+                "{e}"
+            );
+        }
+    }
+}
+
+/// A `Conflict` on a create does not pass for a stored item, whatever the
+/// kind of item it was.
+#[test]
+fn scenario_a_false_conflict_is_not_a_stored_item_for_any_kind() {
+    for kind in [ItemKind::Draft, ItemKind::Sent, ItemKind::Kept] {
+        let delegate = Delegate::new();
+        delegate.faults.borrow_mut().false_conflict = Some(kind);
+        let outcome = walk(&delegate, &populated_node(), six_messages());
+        assert!(
+            delegate.list(kind, Some(alice())).is_empty(),
+            "{kind:?} is not stored"
+        );
+        assert_eq!(pending_count(&outcome.status), 2, "{kind:?}: 206 waits");
+
+        let outcome = walk(&delegate, &populated_node(), six_messages());
+        assert_eq!(delegate.list(kind, Some(alice())).len(), 1, "{kind:?}");
+        assert_eq!(pending_count(&outcome.status), 1, "{kind:?}");
+    }
+}
+
+/// `NotFound` for an identity the delegate lists, with its record readable, is
+/// not "gone": the list is asked, and the items wait.
+#[test]
+fn scenario_not_found_for_a_listed_identity_is_retried() {
+    let delegate = Delegate::new();
+    let node = populated_node();
+    node.set(ls(206), LegacyReply::NoAnswer("timed out".into()));
+    walk(&delegate, &node, no_inbox());
+    node.set(ls(206), answer(golden("ls_state")));
+    assert_eq!(delegate.identities().len(), 1);
+
+    delegate.faults.borrow_mut().owned_creates_not_found = true;
+    for _ in 0..3 {
+        let outcome = walk(&delegate, &node, no_inbox());
+        assert_eq!(outcome.counts.identity_gone, 0);
+        assert_eq!(pending_count(&outcome.status), 2, "206's local state waits");
+    }
+    delegate.faults.borrow_mut().owned_creates_not_found = false;
+    let outcome = walk(&delegate, &node, no_inbox());
+    assert_eq!(pending_count(&outcome.status), 1);
+    assert_eq!(delegate.list(ItemKind::Archived, Some(alice())).len(), 1);
 }

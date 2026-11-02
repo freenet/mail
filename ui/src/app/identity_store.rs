@@ -741,13 +741,25 @@ pub(crate) async fn confirm_identity(
 pub(crate) async fn load_and_report() {
     #[cfg(feature = "use-node")]
     crate::app::migration_view::walk_starting();
-    load_identities().await;
-    #[cfg(feature = "use-node")]
-    crate::app::migration_view::after_listing(
-        crate::migration::node::NodeLegacy,
-        crate::migration::node::NodeInbox,
-    )
+    list_then_walk(load_identities(), async {
+        #[cfg(feature = "use-node")]
+        crate::app::migration_view::after_listing(
+            crate::migration::node::NodeLegacy,
+            crate::migration::node::NodeInbox,
+        )
+        .await;
+    })
     .await;
+}
+
+/// The listing finishes before the walk is polled, so a predecessor that never
+/// answers cannot delay it. Both are futures so a test can hold the walk.
+pub(crate) async fn list_then_walk(
+    listing: impl std::future::Future<Output = ()>,
+    walk: impl std::future::Future<Output = ()>,
+) {
+    listing.await;
+    walk.await;
 }
 
 /// Read the identities and their local state, and hand them to the node loop.
