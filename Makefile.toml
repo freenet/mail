@@ -985,7 +985,7 @@ if [ "$SERVER_READY" != "true" ]; then
 fi
 
 # Run Playwright. Pass PORT through so the config picks the same one.
-cd "$ROOT/ui/tests" && FREENET_EMAIL_BASE_URL="http://127.0.0.1:$PORT" npx playwright test
+cd "$ROOT/ui/tests" && FREENET_EMAIL_BASE_URL="http://127.0.0.1:$PORT" npx playwright test ${PLAYWRIGHT_ARGS:-}
 '''
 
 # ─── Real-node integration helpers ───────────────────────────────────────────
