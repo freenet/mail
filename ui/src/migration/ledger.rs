@@ -27,6 +27,12 @@ pub(crate) struct Ledger {
     pub silent: bool,
     /// The rejected count the notice last showed.
     pub rejected: u32,
+    /// The identities the walk brought in: the notice offers each one's
+    /// recovery key.
+    pub migrated: Vec<Addr>,
+    /// Some identity's pending contract migration waits on a newer identity
+    /// row ([`crate::app::identity_store::MigrationMarkers::pending_held`]).
+    pub markers_held: bool,
 }
 
 fn reserved_item(name: &[u8], index: u32) -> ItemRef {

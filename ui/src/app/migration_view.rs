@@ -27,6 +27,8 @@ pub(crate) struct MigrationView {
     /// installed", which is what every new user's node says.
     pub unreachable: bool,
     pub totals: MigrationCounts,
+    /// The identities the walk brought in.
+    pub migrated: Vec<Addr>,
     pub rejected: u32,
     /// The move may be part done ([`crate::migration::WalkOutcome::unfinished`]).
     pub in_progress: bool,
@@ -70,7 +72,10 @@ pub(crate) fn walk_starting() {
 
 async fn refresh(status: Option<&JournalStatus>) {
     let mut store = PageStore;
-    let ledger = ledger::read_ledger(&mut store).await.unwrap_or_default();
+    let ledger = ledger::read_ledger(&mut store).await;
+    if let Err(e) = &ledger {
+        crate::log::error(format!("reading the migration's record failed: {e}"), None);
+    }
     let orphans = match orphans::stored(&mut store).await {
         Ok(items) => orphans::groups(&items),
         Err(e) => {
@@ -78,11 +83,19 @@ async fn refresh(status: Option<&JournalStatus>) {
             MIGRATION.read().orphans.clone()
         }
     };
-    let report = migration::status_report(status, &ledger);
-    crate::log::info(format!("migration status: {report}"));
     let mut view = MIGRATION.write();
-    view.totals = ledger.totals;
-    view.notice_dismissed = ledger.notice_dismissed;
+    // A failed read says nothing about the record: what is showing stays.
+    let shown = ledger::Ledger {
+        totals: view.totals,
+        ..Default::default()
+    };
+    let report = migration::status_report(status, ledger.as_ref().unwrap_or(&shown));
+    crate::log::info(format!("migration status: {report}"));
+    if let Ok(ledger) = ledger {
+        view.totals = ledger.totals;
+        view.migrated = ledger.migrated;
+        view.notice_dismissed = ledger.notice_dismissed;
+    }
     view.rejected = status.map_or(0, JournalStatus::rejected_items);
     view.orphans = orphans;
     view.report = report;
@@ -99,11 +112,14 @@ where
     use crate::app::identity_store::load_identities;
     use crate::mail_delegate::ops;
     let roll = crate::rng::random_bytes::<1>()[0];
-    let outcome = migration::run(PageStore, transport.clone(), inbox.clone(), roll).await;
+    let outcome = migration::run(PageStore, transport.clone(), inbox.clone(), roll, || {
+        crate::app::identity_store::spawn_detached(load_identities());
+    })
+    .await;
     if let Some(line) = migration::status_line(&outcome) {
         crate::log::info(line);
     }
-    if !outcome.counts.is_empty() {
+    if !outcome.counts.is_empty() || outcome.released_markers {
         load_identities().await;
     }
     {
@@ -123,14 +139,18 @@ where
 }
 
 async fn move_orphans(alias: String, owner: Addr) {
-    let (moved, failure) = orphans::move_alias(&mut PageStore, &alias, owner).await;
-    let (text, level) = match failure {
+    let result = orphans::move_alias(&mut PageStore, &alias, owner).await;
+    let moved = result.moved;
+    let (text, level) = match result.failure {
         None => (
             format!("Moved {moved} item(s) from `{alias}`."),
             crate::toast::ToastLevel::Success,
         ),
         Some(why) => (
-            format!("Moved {moved} item(s) from `{alias}`, then stopped: {why}"),
+            format!(
+                "Moved {moved} item(s) from `{alias}`. {} stayed: {why}",
+                result.stayed
+            ),
             crate::toast::ToastLevel::Error,
         ),
     };
@@ -197,7 +217,11 @@ pub(crate) fn MigrationPanel(identities: Vec<(String, Addr)>) -> Element {
     let view = MIGRATION.read().clone();
     let mut import_backup = use_context::<Signal<ImportBackup>>();
     let line = view.walking.then_some(CHECKING_TEXT);
-    let backup_target = identities.first().map(|(_, addr)| *addr);
+    let to_back_up: Vec<(String, Addr)> = identities
+        .iter()
+        .filter(|(_, addr)| view.migrated.contains(addr))
+        .cloned()
+        .collect();
     let show_notice = !view.notice_dismissed && (view.in_progress || !view.totals.is_empty());
     rsx! {
         if let Some(line) = line {
@@ -224,11 +248,15 @@ pub(crate) fn MigrationPanel(identities: Vec<(String, Addr)>) -> Element {
                 style: "margin-bottom:10px;",
                 p { "{notice_summary(&view.totals, view.rejected, view.in_progress)}" }
                 p { "{RETRY_DISCLOSURE}" }
-                button {
-                    class: "btn btn-secondary",
-                    "data-testid": testid::FM_MIGRATION_BACKUP,
-                    onclick: move |_| *BACKUP_REQUEST.write() = backup_target,
-                    "Save your recovery key"
+                for (alias, addr) in to_back_up {
+                    button {
+                        key: "{alias}",
+                        class: "btn btn-secondary",
+                        "data-testid": testid::FM_MIGRATION_BACKUP,
+                        "data-alias": "{alias}",
+                        onclick: move |_| *BACKUP_REQUEST.write() = Some(addr),
+                        "Save the recovery key for {alias}"
+                    }
                 }
                 button {
                     class: "btn btn-ghost",

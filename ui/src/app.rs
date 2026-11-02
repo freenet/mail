@@ -5798,10 +5798,9 @@ fn ComposeSheet() -> Element {
     });
     let mut confirm_sender = use_signal(|| false);
     let sender = user.read().logged_id().cloned();
-    let sender_for_send = user_alias.clone();
     let send_now = use_callback(move |()| {
         // A migrated identity is confirmed by its owner before it first sends.
-        if login::Identity::get_alias(&sender_for_send).is_some_and(|i| !i.confirmed) {
+        if user.read().logged_id().is_some_and(|i| !i.confirmed) {
             confirm_sender.set(true);
             return;
         }

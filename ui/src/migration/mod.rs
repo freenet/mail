@@ -33,8 +33,8 @@
 //!   installed keeps the journal incomplete for good. That is expected. It
 //!   costs a round trip on the loads that walk. The walk runs after the first
 //!   identity listing and blocks nothing: while it runs, an empty list shows
-//!   "Checking for your previous Mail data", and the list is read again when
-//!   it ends if it imported anything.
+//!   "Checking for your previous Mail data", and the list is read again once
+//!   the identity rows are done and when it ends, if they brought anything.
 //! - **A row that stays unresolved does not hold the rest back for good, and
 //!   only a standing absence orphans.** An alias that cannot be resolved keeps
 //!   its local-state row pending. Once every identity row that could hold it
@@ -67,6 +67,7 @@ pub(crate) mod successor;
 #[cfg(test)]
 mod tests;
 
+use crate::app::identity_store::{body_with_markers, markers_from_body};
 use legacy_delegates::{LegacyAdapter, LegacyTransport};
 use successor::{ArrivedIdentities, MailStore, MailSuccessor, MigrationCounts, V1InboxReader};
 
@@ -191,6 +192,8 @@ pub(crate) struct WalkOutcome {
     /// Rows that went silent or answered with bytes that do not decode. A
     /// typed "not installed" is not among them.
     pub silent_rows: usize,
+    /// Held contract migrations were let go, so the next listing plans them.
+    pub released_markers: bool,
 }
 
 thread_local! {
@@ -219,11 +222,56 @@ fn pending_walks(
     }
 }
 
+/// Let go of the pending contract migrations no identity row can still
+/// supersede: those imported from `newest_unsettled` or newer, or all of them
+/// if no row is unsettled. Returns whether any was. The ledger's flag clears
+/// only when nothing can be left.
+async fn release_held_markers<S: MailStore>(store: &mut S, newest_unsettled: Option<u32>) -> bool {
+    let Ok(Reply::Identities(identities)) = store.call(Op::ListIdentities).await else {
+        return false;
+    };
+    let mut released = false;
+    let mut all_read = true;
+    for identity in identities {
+        let written =
+            successor::merged_put(store, successor::settings_item(identity.addr), |stored| {
+                let mut markers = markers_from_body(stored);
+                let superseded = newest_unsettled
+                    .is_some_and(|row| markers.imported_generation.is_none_or(|from| from < row));
+                if !markers.pending_held || superseded {
+                    return None;
+                }
+                markers.pending_held = false;
+                Some(body_with_markers(stored, &markers))
+            })
+            .await;
+        released |= written.as_ref().is_ok_and(|w| *w);
+        all_read &= written.is_ok();
+    }
+    if all_read
+        && newest_unsettled.is_none()
+        && let Err(e) = ledger::update_ledger(store, |l| l.markers_held = false).await
+    {
+        crate::log::error(format!("recording the released markers failed: {e}"), None);
+    }
+    released
+}
+
 /// Run this load's migration: start the journal, and walk unless the journal
 /// says there is no need. Writes nothing migrated unless the journal stored
 /// its start first. The ledger is written here, as rows resolve and at the
 /// end, so a walk that dies is counted as far as it got.
-pub(crate) async fn run<S, T, I>(store: S, transport: T, inbox: I, roll: u8) -> WalkOutcome
+///
+/// `on_identities` runs once, if the walk brought an identity in, as soon as
+/// the identity rows are done: the mail can take far longer, and the list need
+/// not wait for it.
+pub(crate) async fn run<S, T, I>(
+    store: S,
+    transport: T,
+    inbox: I,
+    roll: u8,
+    on_identities: impl FnOnce() + 'static,
+) -> WalkOutcome
 where
     S: MailStore,
     T: LegacyTransport,
@@ -244,22 +292,34 @@ where
                 report: None,
                 counts: successor.into_counts(),
                 silent_rows: 0,
+                released_markers: false,
             };
         }
     };
     let stored = ledger::read_ledger(successor.store()).await.ok();
     if !walk_this_load(&status, roll) {
+        // A walk that resolved the last row can die before it lets go.
+        let held = stored.as_ref().is_some_and(|l| l.markers_held);
+        let released_markers =
+            held && status.is_complete() && release_held_markers(successor.store(), None).await;
         return WalkOutcome {
             silent_rows: stored.map_or(0, |l| usize::from(l.silent)),
             status: Some(status),
             report: None,
             counts: successor.into_counts(),
+            released_markers,
         };
     }
     let walks = pending_walks(&status, &lineage);
     let absent_answers = stored.map(|l| l.absent_answers).unwrap_or_default();
-    let mut predecessors =
-        LegacyAdapter::new(transport, lineage.clone(), walks, arrived, absent_answers);
+    let mut predecessors = LegacyAdapter::new(
+        transport,
+        lineage.clone(),
+        walks,
+        arrived,
+        absent_answers,
+        Box::new(on_identities),
+    );
     let report = migrate_delegate_secrets_journaled(
         &mut successor,
         &mut predecessors,
@@ -287,6 +347,11 @@ where
             }
         })
         .await;
+    let held = ledger::read_ledger(successor.store())
+        .await
+        .is_ok_and(|l| l.markers_held);
+    let newest_unsettled = predecessors.newest_unsettled_row();
+    let released_markers = held && release_held_markers(successor.store(), newest_unsettled).await;
     let mut counts = successor.into_counts();
     counts.merge_mapping(predecessors.counts());
     WalkOutcome {
@@ -294,6 +359,7 @@ where
         report: Some(report),
         counts,
         silent_rows,
+        released_markers,
     }
 }
 

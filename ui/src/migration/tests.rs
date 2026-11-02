@@ -358,7 +358,7 @@ fn answer(bytes: Vec<u8>) -> LegacyReply {
 }
 
 fn walk(delegate: &Delegate, node: &Node, inbox: Inbox) -> WalkOutcome {
-    block_on(run(delegate.clone(), node.clone(), inbox, 0))
+    block_on(run(delegate.clone(), node.clone(), inbox, 0, || {}))
 }
 
 /// The address the golden `identity_state_seeded` seeds derive.
@@ -680,6 +680,7 @@ fn the_notice_says_a_move_under_way_is_still_in_progress() {
         report: None,
         counts,
         silent_rows: 0,
+        released_markers: false,
     };
     assert!(no_journal.unfinished());
 }
@@ -1039,6 +1040,200 @@ fn scenario_only_the_newest_row_holding_an_identity_sets_its_markers() {
     assert_eq!(markers.imported_generation, Some(206));
 }
 
+/// The markers of the golden identity as stored.
+fn alice_markers(delegate: &Delegate) -> MigrationMarkers {
+    let settings = delegate.item(ItemKind::IdentitySettings, Some(alice()));
+    markers_from_body(settings.as_ref().map(|i| i.body.as_slice()))
+}
+
+/// The newest row went silent past its hold, so an older one landed. What it
+/// says about contracts must not run yet: if the newer row holds the identity,
+/// that would put an old inbox back over the current one, for good.
+#[test]
+fn scenario_silence_past_the_hold_starts_no_contract_migration() {
+    use crate::app::identity_store::plan_load;
+    let old_row = identity_with_markers(
+        r#""inbox_wasm_hash":"older""#,
+        r#""pending_migration_from":null"#,
+        r#""aft_record_wasm_hash":"older-aft""#,
+        r#""pending_aft_migration_from":null"#,
+    );
+    for (later, pending) in [
+        // The newer row turns out to hold nothing: the marker takes effect.
+        (LegacyReply::NotInstalled, Some("older")),
+        // It holds the identity, at the current hash: the marker never did.
+        (
+            answer(identity_with_markers(
+                &format!(
+                    r#""inbox_wasm_hash":"{}""#,
+                    crate::inbox::INBOX_CODE_HASH.trim()
+                ),
+                r#""pending_migration_from":null"#,
+                &format!(
+                    r#""aft_record_wasm_hash":"{}""#,
+                    crate::aft::TOKEN_RECORD_CODE_HASH.trim()
+                ),
+                r#""pending_aft_migration_from":null"#,
+            )),
+            None,
+        ),
+    ] {
+        let delegate = Delegate::new();
+        let node = Node::default();
+        node.set(im(206), LegacyReply::NoAnswer("timed out".into()));
+        node.set(im(205), answer(old_row.clone()));
+        for _ in 0..=HOLD_BACK_LOADS {
+            walk(&delegate, &node, no_inbox());
+        }
+        let held = alice_markers(&delegate);
+        assert!(held.pending_held && held.pending_migration_from.is_some());
+        assert_eq!(plan_load(Some(held)), (None, None, None));
+
+        node.set(im(206), later);
+        walk(&delegate, &node, no_inbox());
+        let markers = alice_markers(&delegate);
+        assert!(!markers.pending_held);
+        assert_eq!(markers.pending_migration_from.as_deref(), pending);
+        let (inbox, _, _) = plan_load(Some(markers));
+        assert_eq!(inbox.as_deref(), pending);
+        assert!(!delegate.ledger().markers_held);
+    }
+}
+
+/// With nothing newer unsettled, an older row's marker runs at once.
+#[test]
+fn a_row_with_nothing_newer_unsettled_holds_no_marker() {
+    let delegate = Delegate::new();
+    let node = Node::default();
+    node.set(
+        im(205),
+        answer(identity_with_markers(
+            r#""inbox_wasm_hash":"older""#,
+            r#""pending_migration_from":null"#,
+            r#""aft_record_wasm_hash":"older-aft""#,
+            r#""pending_aft_migration_from":null"#,
+        )),
+    );
+    walk(&delegate, &node, no_inbox());
+    let markers = alice_markers(&delegate);
+    assert!(!markers.pending_held);
+    assert_eq!(markers.pending_migration_from.as_deref(), Some("older"));
+}
+
+/// A marker the walk wrote after `prepare` read stands: only what the plan
+/// changed is applied.
+#[test]
+fn preparing_applies_only_what_the_plan_changed() {
+    let source = include_str!("../app/identity_store.rs");
+    let prepare = &source[source.find("pub(crate) async fn prepare").unwrap()..];
+    assert!(prepare.contains("m.apply_changes(&before, &new)"));
+    assert!(!prepare[..prepare.find("LoadedIdentity {").unwrap()].contains("*m = new"));
+}
+
+/// The list is read again once the identities are in, while the mail is still
+/// to come, and only if the walk brought one in.
+#[test]
+fn scenario_identities_are_announced_before_the_mail() {
+    let delegate = Delegate::new();
+    let seen = Rc::new(RefCell::new(None));
+    let (at, observer) = (seen.clone(), delegate.clone());
+    block_on(run(
+        delegate.clone(),
+        populated_node(),
+        no_inbox(),
+        0,
+        move || {
+            *at.borrow_mut() = Some((
+                observer.identities().len(),
+                observer.list(ItemKind::Archived, Some(alice())).len(),
+            ));
+        },
+    ));
+    assert_eq!(*seen.borrow(), Some((1, 0)));
+    assert_eq!(delegate.list(ItemKind::Archived, Some(alice())).len(), 1);
+
+    let seen = Rc::new(RefCell::new(false));
+    let at = seen.clone();
+    block_on(run(
+        delegate.clone(),
+        populated_node(),
+        no_inbox(),
+        0,
+        move || {
+            *at.borrow_mut() = true;
+        },
+    ));
+    assert!(!*seen.borrow(), "nothing new to list");
+}
+
+/// A row held back maps again next load: its marks are not news, and a walk
+/// that did nothing must not raise a notice.
+#[test]
+fn scenario_a_row_held_back_counts_nothing() {
+    let delegate = Delegate::new();
+    let node = Node::default();
+    node.set(im(206), LegacyReply::NoAnswer("timed out".into()));
+    node.set(ls(206), answer(golden("ls_state")));
+    let outcome = walk(&delegate, &node, no_inbox());
+    assert!(outcome.counts.is_empty());
+    assert!(delegate.ledger().totals.is_empty());
+}
+
+/// The silence alarm stays up on a load that does not walk, and goes when a
+/// walk finds the row answering.
+#[test]
+fn scenario_the_silent_alarm_survives_loads_that_do_not_walk() {
+    let delegate = Delegate::new();
+    let node = Node::default();
+    node.set(im(206), LegacyReply::NoAnswer("timed out".into()));
+    for _ in 0..=SILENT_WALKS_BEFORE_SLOWING {
+        assert_eq!(walk(&delegate, &node, no_inbox()).silent_rows, 1);
+    }
+    let skipped = block_on(run(delegate.clone(), node.clone(), no_inbox(), 1, || {}));
+    assert!(skipped.report.is_none(), "this load does not walk");
+    assert_eq!(skipped.silent_rows, 1);
+
+    node.set(im(206), LegacyReply::NotInstalled);
+    assert_eq!(walk(&delegate, &node, no_inbox()).silent_rows, 0);
+    let skipped = block_on(run(delegate.clone(), node.clone(), no_inbox(), 1, || {}));
+    assert_eq!(skipped.silent_rows, 0);
+}
+
+/// A dismissed notice comes back when there is something new to say. A tab
+/// closed mid-walk still has what resolved on record.
+#[test]
+fn scenario_new_totals_or_rejections_bring_a_dismissed_notice_back() {
+    let delegate = Delegate::new();
+    let node = populated_node();
+    node.set(ls(206), LegacyReply::NoAnswer("timed out".into()));
+    walk(&delegate, &node, no_inbox());
+    assert_eq!(
+        delegate.ledger().totals.identities,
+        1,
+        "resolved rows count"
+    );
+
+    let mut store = delegate.clone();
+    block_on(ledger::update_ledger(&mut store, |l| {
+        l.notice_dismissed = true
+    }))
+    .unwrap();
+    walk(&delegate, &node, no_inbox());
+    assert!(delegate.ledger().notice_dismissed, "nothing new");
+
+    node.set(ls(206), answer(golden("ls_state")));
+    walk(&delegate, &node, no_inbox());
+    assert!(!delegate.ledger().notice_dismissed, "mail arrived");
+}
+
+#[test]
+fn the_notices_counts_are_recorded_as_rows_resolve() {
+    let source = include_str!("successor.rs");
+    let record = &source[source.find("async fn record_marker").unwrap()..];
+    let flush = record.find("self.update_ledger(").unwrap();
+    assert!(flush < record.find("let item = marker_item(predecessor)").unwrap());
+}
+
 /// A position means something only in the inbox of the generation that wrote
 /// it, so an older row's marks would land on the wrong messages.
 #[test]
@@ -1251,10 +1446,11 @@ fn scenario_walks_in_one_tab_run_one_at_a_time() {
     let delegate = Delegate::new();
     let (open, gate) = oneshot::channel();
     let gated = Gated(Some(gate), populated_node());
-    let mut first = run(delegate.clone(), gated, six_messages(), 0).boxed_local();
+    let mut first = run(delegate.clone(), gated, six_messages(), 0, || {}).boxed_local();
     assert!((&mut first).now_or_never().is_none(), "stopped at the gate");
 
-    let mut second = run(delegate.clone(), populated_node(), six_messages(), 0).boxed_local();
+    let mut second =
+        run(delegate.clone(), populated_node(), six_messages(), 0, || {}).boxed_local();
     assert!(
         (&mut second).now_or_never().is_none(),
         "the first is walking"
@@ -2035,7 +2231,8 @@ fn moving_orphans_files_them_under_the_identity_and_removes_the_orphans() {
     let delegate = orphan_node();
     assert_eq!(orphan_count(&delegate), 5);
     let owner = delegate.identities()[0].addr;
-    let (moved, failure) = block_on(orphans::move_alias(&mut delegate.clone(), "alice", owner));
+    let result = block_on(orphans::move_alias(&mut delegate.clone(), "alice", owner));
+    let (moved, failure) = (result.moved, result.failure);
     assert_eq!((moved, failure), (5, None));
     assert_eq!(orphan_count(&delegate), 0);
     assert_eq!(delegate.list(ItemKind::Draft, Some(owner)).len(), 1);
@@ -2043,6 +2240,41 @@ fn moving_orphans_files_them_under_the_identity_and_removes_the_orphans() {
 }
 
 /// An item already under the id wins: the orphan stays, with the reason.
+/// One item that cannot move does not block the others, and is reported.
+#[test]
+fn a_refused_orphan_stays_and_the_rest_move() {
+    let delegate = orphan_node();
+    let owner = delegate.identities()[0].addr;
+    delegate.faults.borrow_mut().capped = Some(ItemKind::Sent);
+    let result = block_on(orphans::move_alias(&mut delegate.clone(), "alice", owner));
+    assert_eq!((result.moved, result.stayed), (4, 1));
+    assert!(result.failure.is_some());
+    assert_eq!(orphan_count(&delegate), 1);
+}
+
+/// An orphan that does not decode is listed under the empty alias, and moving
+/// that group reports it stayed rather than "moved 0".
+#[test]
+fn an_unreadable_orphan_is_reported_as_staying() {
+    let delegate = orphan_node();
+    let owner = delegate.identities()[0].addr;
+    let item = delegate.list(ItemKind::LegacyOrphan, None)[0].item.clone();
+    let mut store = delegate.clone();
+    let stored = block_on(super::successor::get_item(&mut store, item.clone()))
+        .unwrap()
+        .unwrap();
+    block_on(super::successor::put_item(
+        &mut store,
+        item,
+        b"not an orphan".to_vec(),
+        Some(stored.generation),
+    ))
+    .unwrap();
+    let result = block_on(orphans::move_alias(&mut store, "", owner));
+    assert_eq!((result.moved, result.stayed), (0, 1));
+    assert!(result.failure.is_some());
+}
+
 #[test]
 fn moving_an_orphan_never_overwrites_an_item_already_there() {
     let delegate = orphan_node();
@@ -2148,6 +2380,6 @@ fn sending_asks_an_unconfirmed_identity_to_confirm_first() {
         asks < reads_recipient,
         "the check precedes everything the send does"
     );
-    let check = "if login::Identity::get_alias(&sender_for_send).is_some_and(|i| !i.confirmed) {";
+    let check = "if user.read().logged_id().is_some_and(|i| !i.confirmed) {";
     assert!(send[..asks].trim_end().ends_with(check) || send[..asks].contains(check));
 }

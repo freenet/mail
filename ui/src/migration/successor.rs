@@ -8,7 +8,7 @@
 //! returns only once the delegate acknowledged it, so markers and the journal
 //! are durable when the crate is told they are, and there is nothing to flush.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::rc::Rc;
 
@@ -101,9 +101,10 @@ impl MigrationCounts {
     }
 
     /// Add a later run. Items counted as written add up: a retry reads before
-    /// it writes, so an item is not written twice, and a later generation's
-    /// copy of a stored item counts only if it differs. The rest are found
-    /// again on every retry, so the highest count stands.
+    /// it writes, so it does not count what an earlier attempt brought. The
+    /// same bytes in two generations do count once each, so these can run
+    /// high by that much. The rest are found again on every retry, so the
+    /// highest count stands.
     pub(crate) fn absorb(&mut self, run: &Self) {
         self.identities += run.identities;
         self.contacts += run.contacts;
@@ -125,15 +126,38 @@ impl MigrationCounts {
 /// owner was deleted from one whose owner has not arrived yet. The delegate
 /// answers `NotFound` for both, and only the first may end the walk.
 #[derive(Clone, Default)]
-pub(crate) struct ArrivedIdentities(Rc<RefCell<HashSet<Addr>>>);
+pub(crate) struct ArrivedIdentities(Rc<RefCell<Arrived>>);
+
+#[derive(Default)]
+struct Arrived {
+    known: HashSet<Addr>,
+    /// Brought in by this walk.
+    imported: Vec<Addr>,
+    /// The row being imported has a newer one that may still hold its
+    /// identities, so what it says about contracts waits.
+    hold_markers: bool,
+    any_held: bool,
+}
 
 impl ArrivedIdentities {
     pub(crate) fn note(&self, addr: Addr) {
-        self.0.borrow_mut().insert(addr);
+        self.0.borrow_mut().known.insert(addr);
     }
 
     fn holds(&self, addr: &Addr) -> bool {
-        self.0.borrow().contains(addr)
+        self.0.borrow().known.contains(addr)
+    }
+
+    fn note_imported(&self, addr: Addr) {
+        self.0.borrow_mut().imported.push(addr);
+    }
+
+    pub(crate) fn any_imported(&self) -> bool {
+        !self.0.borrow().imported.is_empty()
+    }
+
+    pub(crate) fn hold_markers(&self, held: bool) {
+        self.0.borrow_mut().hold_markers = held;
     }
 }
 
@@ -242,6 +266,7 @@ pub(crate) fn adopt_legacy_markers(
             current_aft,
         ),
         imported_generation: Some(generation),
+        pending_held: false,
     }
 }
 
@@ -458,10 +483,19 @@ impl<S: MailStore, I: V1InboxReader> MailSuccessor<S, I> {
         let mut now = self.counts;
         now.merge_mapping(mapping);
         let new = now.since(&self.recorded);
+        let arrived = self.arrived.clone();
         let updated = ledger::update_ledger(&mut self.store, |l| {
             let before = l.totals;
             l.totals.absorb(&new);
             l.notice_dismissed &= l.totals == before;
+            let arrived = arrived.0.borrow();
+            for addr in &arrived.imported {
+                if !l.migrated.contains(addr) {
+                    l.migrated.push(*addr);
+                }
+            }
+            l.markers_held |= arrived.any_held;
+            drop(arrived);
             also(l);
         })
         .await;
@@ -580,6 +614,7 @@ impl<S: MailStore, I: V1InboxReader> MailSuccessor<S, I> {
         if already_present {
             return ItemWrite::already_authoritative();
         }
+        self.arrived.note_imported(addr);
         self.counts.identities += 1;
         ItemWrite::written()
     }
@@ -591,19 +626,26 @@ impl<S: MailStore, I: V1InboxReader> MailSuccessor<S, I> {
         generation: u32,
     ) -> Result<(), CallError> {
         let item = settings_item(info.addr);
+        let hold = self.arrived.0.borrow().hold_markers;
+        let held = Cell::new(false);
         self.merged_put(item, |stored| {
             let markers = markers_from_body(stored);
-            let adopted = adopt_legacy_markers(
+            let mut adopted = adopt_legacy_markers(
                 &markers,
                 legacy,
                 generation,
                 crate::inbox::INBOX_CODE_HASH.trim(),
                 crate::aft::TOKEN_RECORD_CODE_HASH.trim(),
             );
+            if adopted.imported_generation == Some(generation) {
+                adopted.pending_held = hold && adopted.has_pending();
+            }
+            held.set(adopted.pending_held);
             (adopted != markers).then(|| body_with_markers(stored, &adopted))
         })
-        .await
-        .map(|_| ())
+        .await?;
+        self.arrived.0.borrow_mut().any_held |= held.get();
+        Ok(())
     }
 
     async fn merge_settings(&mut self, item: ItemRef, value: &[u8]) -> ItemWrite<String> {

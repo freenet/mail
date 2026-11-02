@@ -297,6 +297,15 @@ pub(crate) struct MappingCounts {
     pub deleted_marks: u32,
 }
 
+impl MappingCounts {
+    fn add(&mut self, other: Self) {
+        self.oversized += other.oversized;
+        self.undecodable += other.undecodable;
+        self.orphan_flags += other.orphan_flags;
+        self.deleted_marks += other.deleted_marks;
+    }
+}
+
 /// A pair for an entry that can never be imported.
 fn refused(what: &[u8]) -> SecretPair {
     let id = id16(&[b"refused", what]);
@@ -403,6 +412,7 @@ pub(crate) fn map_identities(
                         aft_record_wasm_hash: info.aft_record_wasm_hash,
                         pending_aft_migration_from: info.pending_aft_migration_from,
                         imported_generation: None,
+                        pending_held: false,
                     },
                 };
                 aliases.insert(alias, addr);
@@ -604,6 +614,9 @@ pub(crate) struct LegacyAdapter<T> {
     /// Each identity row's absent-or-empty answers in a row before this load,
     /// by lineage generation ([`super::ledger::Ledger::absent_answers`]).
     absent_answers: BTreeMap<u32, u32>,
+    /// Called once when the walk first reaches local state, which is after
+    /// every identity row, if it brought an identity in.
+    on_identities: Option<Box<dyn FnOnce()>>,
 }
 
 impl<T: LegacyTransport> LegacyAdapter<T> {
@@ -613,6 +626,7 @@ impl<T: LegacyTransport> LegacyAdapter<T> {
         pending_walks: HashMap<Vec<u8>, u32>,
         arrived: ArrivedIdentities,
         absent_answers: BTreeMap<u32, u32>,
+        on_identities: Box<dyn FnOnce()>,
     ) -> Self {
         LegacyAdapter {
             transport,
@@ -623,6 +637,7 @@ impl<T: LegacyTransport> LegacyAdapter<T> {
             unusable: HashSet::new(),
             arrived,
             absent_answers,
+            on_identities: Some(on_identities),
         }
     }
 
@@ -648,6 +663,11 @@ impl<T: LegacyTransport> LegacyAdapter<T> {
             let msg = Vec::<u8>::try_from(&IdentityMsg::GetIdentities);
             (IDENTITY_PARAMS, msg.map_err(|e| e.to_string())?)
         } else {
+            if let Some(announce) = self.on_identities.take()
+                && self.arrived.any_imported()
+            {
+                announce();
+            }
             let msg = Vec::<u8>::try_from(&LocalStateMsg::GetAll);
             (LOCAL_STATE_PARAMS, msg.map_err(|e| e.to_string())?)
         };
@@ -672,6 +692,30 @@ impl<T: LegacyTransport> LegacyAdapter<T> {
                 .absent_answers
                 .get(&entry.generation)
                 .is_some_and(|answers| *answers >= HOLD_BACK_LOADS)
+    }
+
+    /// The newest identity row, by release, that may still hold what an older
+    /// row holds: pending, and neither typed "not installed" nor absent long
+    /// enough to stand, nor answering with data, which the walk has dealt
+    /// with by now.
+    pub(crate) fn newest_unsettled_row(&self) -> Option<u32> {
+        let settled = |e: &DelegateLineageEntry| {
+            let key = e.delegate_key.as_slice();
+            !self.pending_walks.contains_key(key)
+                || match self.replies.get(key) {
+                    Some(LegacyReply::NotInstalled) => true,
+                    Some(reply @ LegacyReply::Answer(_)) if row_holds_nothing(reply) => {
+                        self.absence_stands(e)
+                    }
+                    Some(LegacyReply::Answer(bytes)) => self.decodes(key, bytes),
+                    _ => false,
+                }
+        };
+        self.lineage
+            .iter()
+            .filter(|e| e.generation >= IDENTITY_GENERATION_OFFSET && !settled(e))
+            .map(|e| e.generation - IDENTITY_GENERATION_OFFSET)
+            .max()
     }
 
     /// Every identity generation's aliases. A generation that is typed "not
@@ -786,11 +830,19 @@ impl<T: LegacyTransport> LegacyAdapter<T> {
             return Err("no answer to read".into());
         };
         if entry.generation >= IDENTITY_GENERATION_OFFSET {
+            let release = entry.generation - IDENTITY_GENERATION_OFFSET;
+            let held = self.newest_unsettled_row().is_some_and(|row| row > release);
+            self.arrived.hold_markers(held);
             return map_identities(&bytes, &mut self.counts).map(|(pairs, _)| pairs);
         }
         let tables = self.alias_tables().await;
         let newer = self.newer_aliases(entry.generation).await;
-        map_local_state(&bytes, entry.generation, &tables, &newer, &mut self.counts)
+        // A row held back maps again on the next load, so only one that goes
+        // through is counted.
+        let mut mapped = MappingCounts::default();
+        let pairs = map_local_state(&bytes, entry.generation, &tables, &newer, &mut mapped)?;
+        self.counts.add(mapped);
+        Ok(pairs)
     }
 
     /// How many pending rows went silent or answered with bytes that do not

@@ -620,6 +620,27 @@ ut "another generation's transient empty does not orphan" "$M/legacy_delegates.r
         }
         tables' \
     scenario_a_transient_empty_in_another_generation_orphans_nothing
+ut "silence past the hold starts no contract migration" "$M/successor.rs" \
+    '                adopted.pending_held = hold && adopted.has_pending();' \
+    '                adopted.pending_held = false;' \
+    scenario_silence_past_the_hold_starts_no_contract_migration
+guard "held markers are not acted on" "$STAGE/ui/src/app/identity_store.rs" \
+    '    let Some(mut markers) = read.filter(|m| !m.pending_held) else {' \
+    '    let Some(mut markers) = read else {' \
+    "tests:scenario_silence_past_the_hold_starts_no_contract_migration" ui_migration_tests
+ut "held markers are released when the newer row settles" "$M/mod.rs" \
+    '    let released_markers =
+        held && release_held_markers(successor.store(), newest_unsettled).await;' \
+    '    let released_markers = false && held && newest_unsettled.is_none();' \
+    scenario_silence_past_the_hold_starts_no_contract_migration
+ut "a held-back row counts nothing" "$M/legacy_delegates.rs" \
+    '        let mut mapped = MappingCounts::default();
+        let pairs = map_local_state(&bytes, entry.generation, &tables, &newer, &mut mapped)?;
+        self.counts.add(mapped);' \
+    '        let mut mapped = MappingCounts::default();
+        let pairs = map_local_state(&bytes, entry.generation, &tables, &newer, &mut self.counts)?;
+        self.counts.add(mapped);' \
+    scenario_a_row_held_back_counts_nothing
 guard "share asks an unconfirmed identity to confirm" "$STAGE/ui/src/app/settings.rs" \
     '        if user.read().logged_id().is_some_and(|i| !i.confirmed) {
             confirm_share.set(true);
@@ -645,8 +666,8 @@ ut "a retry reads before it writes" "$M/successor.rs" \
     '                Err(e) if !is_unreadable(&e)' \
     scenario_a_retry_does_not_count_what_already_arrived
 guard "send asks an unconfirmed identity to confirm" "$STAGE/ui/src/app.rs" \
-    '        if login::Identity::get_alias(&sender_for_send).is_some_and(|i| !i.confirmed) {' \
-    '        if false && login::Identity::get_alias(&sender_for_send).is_some_and(|i| !i.confirmed) {' \
+    '        if user.read().logged_id().is_some_and(|i| !i.confirmed) {' \
+    '        if false && user.read().logged_id().is_some_and(|i| !i.confirmed) {' \
     "tests:sending_asks_an_unconfirmed_identity_to_confirm_first" ui_migration_tests
 
 # A rename that still compiles: only the pinned bytes can catch it. (A new

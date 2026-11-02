@@ -107,25 +107,45 @@ pub(crate) async fn move_one<S: MailStore>(
     }
 }
 
-/// Move every orphan of `alias` to `owner`, stopping at the first failure.
-/// Returns how many moved, and the failure if there was one.
+/// How moving an alias's orphans went.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct MoveResult {
+    pub moved: u32,
+    /// How many stayed where they are.
+    pub stayed: u32,
+    /// Why the last of them did.
+    pub failure: Option<String>,
+}
+
+/// Move every orphan of `alias` to `owner`. One that cannot move stays, and
+/// the rest still go: ids are hashes, so which one blocks is arbitrary, and
+/// it would block the same ones on every try. One that cannot be read is
+/// listed under the empty alias ([`groups`]) and stays there.
 pub(crate) async fn move_alias<S: MailStore>(
     store: &mut S,
     alias: &str,
     owner: Addr,
-) -> (u32, Option<String>) {
+) -> MoveResult {
     let items = match stored(store).await {
         Ok(items) => items,
-        Err(e) => return (0, Some(e.to_string())),
+        Err(e) => {
+            return MoveResult {
+                failure: Some(e.to_string()),
+                ..Default::default()
+            };
+        }
     };
-    let mut moved = 0;
+    let mut result = MoveResult::default();
     for orphan in &items {
-        if decoded(orphan).is_some_and(|o| o.alias == alias) {
-            if let Err(e) = move_one(store, orphan, owner).await {
-                return (moved, Some(e));
+        if decoded(orphan).map_or(alias.is_empty(), |o| o.alias == alias) {
+            match move_one(store, orphan, owner).await {
+                Ok(()) => result.moved += 1,
+                Err(e) => {
+                    result.stayed += 1;
+                    result.failure = Some(e);
+                }
             }
-            moved += 1;
         }
     }
-    (moved, None)
+    result
 }

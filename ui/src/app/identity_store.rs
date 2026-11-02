@@ -544,6 +544,48 @@ pub(crate) struct MigrationMarkers {
     /// newest one holding the identity speaks for its contracts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub imported_generation: Option<u32>,
+    /// These pending migrations came from a row with a newer one that may
+    /// still hold this identity, which went silent. They wait for that row:
+    /// an old inbox put back over a newer one cannot be taken back.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pending_held: bool,
+}
+
+impl MigrationMarkers {
+    pub(crate) fn has_pending(&self) -> bool {
+        self.pending_migration_from.is_some() || self.pending_aft_migration_from.is_some()
+    }
+
+    /// Make the changes between `before` and `after`, leaving anything else
+    /// as it is: a walk may have written these markers since `before` was
+    /// read.
+    fn apply_changes(&mut self, before: &Self, after: &Self) {
+        fn apply(field: &mut Option<String>, before: &Option<String>, after: &Option<String>) {
+            if before != after {
+                field.clone_from(after);
+            }
+        }
+        apply(
+            &mut self.inbox_wasm_hash,
+            &before.inbox_wasm_hash,
+            &after.inbox_wasm_hash,
+        );
+        apply(
+            &mut self.pending_migration_from,
+            &before.pending_migration_from,
+            &after.pending_migration_from,
+        );
+        apply(
+            &mut self.aft_record_wasm_hash,
+            &before.aft_record_wasm_hash,
+            &after.aft_record_wasm_hash,
+        );
+        apply(
+            &mut self.pending_aft_migration_from,
+            &before.pending_aft_migration_from,
+            &after.pending_aft_migration_from,
+        );
+    }
 }
 
 const MARKERS_FIELD: &str = "migration";
@@ -839,11 +881,11 @@ where
 /// the markers to write back, if they changed. Markers that could not be
 /// read (`None`) are unknown, never absent: nothing is planned and nothing
 /// is written, since writing defaults would wipe a pending migration marker.
-/// The next session tries again.
+/// The next session tries again. Held markers are not acted on at all.
 pub(crate) fn plan_load(
     read: Option<MigrationMarkers>,
 ) -> (Option<String>, Option<String>, Option<MigrationMarkers>) {
-    let Some(mut markers) = read else {
+    let Some(mut markers) = read.filter(|m| !m.pending_held) else {
         return (None, None, None);
     };
     let before = markers.clone();
@@ -878,9 +920,9 @@ pub(crate) async fn prepare(info: IdentityInfo) -> LoadedIdentity {
             None
         }
     };
-    let (inbox_migrate_from, aft_migrate_from, write) = plan_load(read);
-    if let Some(new) = write
-        && let Err(e) = update_markers(info.addr, move |m| *m = new.clone()).await
+    let (inbox_migrate_from, aft_migrate_from, write) = plan_load(read.clone());
+    if let (Some(new), Some(before)) = (write, read)
+        && let Err(e) = update_markers(info.addr, move |m| m.apply_changes(&before, &new)).await
     {
         crate::log::error(
             format!(
@@ -1651,6 +1693,7 @@ mod tests {
             aft_record_wasm_hash: Some("def".into()),
             pending_aft_migration_from: Some("old".into()),
             imported_generation: Some(206),
+            pending_held: false,
         };
         let body = body_with_markers(Some(stored), &markers);
         assert_eq!(markers_from_body(Some(&body)), markers);
@@ -1712,6 +1755,7 @@ mod tests {
             aft_record_wasm_hash: Some(crate::aft::TOKEN_RECORD_CODE_HASH.to_string()),
             pending_aft_migration_from: None,
             imported_generation: None,
+            pending_held: false,
         };
         let (inbox, aft, write) = plan_load(Some(read));
         assert_eq!(inbox.as_deref(), Some("old-inbox"));
@@ -1732,6 +1776,7 @@ mod tests {
             aft_record_wasm_hash: Some(crate::aft::TOKEN_RECORD_CODE_HASH.to_string()),
             pending_aft_migration_from: None,
             imported_generation: None,
+            pending_held: false,
         };
         assert_eq!(plan_load(Some(read)), (None, None, None));
     }
