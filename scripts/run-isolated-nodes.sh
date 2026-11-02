@@ -129,10 +129,49 @@ derive_pubkey() {
         xxd -p -c 64 | tail -1 | sed 's/^.*032100//'
 }
 
+# True when anything accepts connections on the port. Connecting sees every
+# user's listener; lsof run as this user does not, so on a machine that also
+# runs a real gateway (nova: 7510 and 31338) it reported the port as free and
+# the harness went on to publish test data to the real gateway.
+port_open() {
+    (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null
+}
+
+# True when the pidfile names a live node of this harness, under this root.
+ours() {
+    [ -f "$1" ] || return 1
+    local pid
+    pid="$(cat "$1")"
+    [ -n "$pid" ] && is_ours "$pid"
+}
+
+# A listener this harness did not start is never used: refuse, and name it.
+refuse_foreign_port() {
+    local port="$1" pidfile="$2"
+    if port_open "$port" && ! ours "$pidfile"; then
+        echo "error: something this harness did not start is listening on :$port." >&2
+        echo "       Refusing to use it: it may be a real node. Choose other ports" >&2
+        echo "       (FREENET_ISO_GW_PORT and friends)." >&2
+        exit 1
+    fi
+}
+
+# Exit 0 only when the gateway on the WS port is this harness's own. Run this
+# before anything that writes to that port.
+check_ours() {
+    refuse_foreign_port "$GW_PORT_WS" "$GW_PIDFILE"
+    if ! ours "$GW_PIDFILE"; then
+        echo "error: no gateway of this harness is running under $ROOT." >&2
+        exit 1
+    fi
+}
+
 up() {
     setup_dirs
 
-    if lsof -i :$GW_PORT_WS -P -sTCP:LISTEN > /dev/null 2>&1; then
+    refuse_foreign_port "$GW_PORT_WS" "$GW_PIDFILE"
+    refuse_foreign_port "$PEER_PORT_WS" "$PEER_PIDFILE"
+    if port_open "$GW_PORT_WS"; then
         echo "gateway already listening on :$GW_PORT_WS"
     else
         echo "starting gateway on ws://127.0.0.1:$GW_PORT_WS (net :$GW_PORT_NET)"
@@ -172,10 +211,7 @@ up() {
     fi
 
     if [ ! -f "$GW_DATA/secrets/transport_keypair" ]; then
-        # Only reachable when :$GW_PORT_WS was already taken above.
-        echo "error: something is already listening on :$GW_PORT_WS, but $GW_DATA has no transport keypair," >&2
-        echo "       so it is not this harness's gateway. Stop it, or choose other ports" >&2
-        echo "       (FREENET_ISO_GW_PORT and friends)." >&2
+        echo "error: $GW_DATA has no transport keypair, so the gateway did not start here." >&2
         exit 1
     fi
     GW_PUBKEY=$(derive_pubkey)
@@ -190,7 +226,7 @@ up() {
         echo "gw transport_keypair head: $(head -c 32 "$GW_DATA/secrets/transport_keypair")"
     fi
 
-    if lsof -i :$PEER_PORT_WS -P -sTCP:LISTEN > /dev/null 2>&1; then
+    if port_open "$PEER_PORT_WS"; then
         echo "peer already listening on :$PEER_PORT_WS"
     else
         echo "starting peer on ws://127.0.0.1:$PEER_PORT_WS (net :$PEER_PORT_NET) → gateway 127.0.0.1:$GW_PORT_NET"
@@ -318,7 +354,7 @@ down() {
     # Nothing is killed by port, by open file or by command line: those reach
     # processes that are not ours. If something else still holds a port, say
     # so, and let `up` fail on the bind.
-    if lsof -i :$GW_PORT_WS -i :$PEER_PORT_WS -P -sTCP:LISTEN >/dev/null 2>&1; then
+    if port_open "$GW_PORT_WS" || port_open "$PEER_PORT_WS"; then
         echo "warning: something not started by this script still listens on $GW_PORT_WS or $PEER_PORT_WS; not touching it" >&2
     fi
     echo "stopped"
@@ -342,5 +378,6 @@ case "${1:-}" in
     down)   down ;;
     wipe)   wipe ;;
     status) status ;;
-    *)      echo "usage: $0 {up|down|wipe|status}"; exit 1 ;;
+    check-ours) check_ours ;;
+    *)      echo "usage: $0 {up|down|wipe|status|check-ours}"; exit 1 ;;
 esac
