@@ -97,6 +97,10 @@ no-sync = ["local-delegate"]
 # Run the mail delegate in the page instead of on a node (offline builds).
 local-delegate = ["dep:mail-delegate"]
 use-node = []
+# The real-node tests' instrumentation: the page publishes its last background
+# run as `data-jobs-run` and lists every kept copy to count them. Off in every
+# build that ships; `cargo make test-e2e-background` turns it on.
+e2e-probe = []
 
 [dev-dependencies]
 # The walk's tests run against the real delegate's handlers in every feature

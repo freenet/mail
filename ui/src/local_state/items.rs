@@ -569,18 +569,35 @@ pub(crate) async fn unarchive_message(alias: String, msg_id: MessageId) -> Resul
 /// against reclamation (a kept copy keeps its mark). This way a failure
 /// leaves the message visible and the deletion retryable.
 pub(crate) async fn delete_message(alias: String, msg_id: MessageId) -> Result<(), DynError> {
+    delete_message_after_copies(alias, msg_id, async || {}).await
+}
+
+/// [`delete_message`], with `between` run after the copies are removed and
+/// before the mark is set: where a background import can land. A test seam.
+async fn delete_message_after_copies(
+    alias: String,
+    msg_id: MessageId,
+    between: impl AsyncFnOnce(),
+) -> Result<(), DynError> {
     delete(message_item(ItemKind::Kept, &alias, msg_id)?)
         .await
         .map_err(boxed)?;
     delete(message_item(ItemKind::Archived, &alias, msg_id)?)
         .await
         .map_err(boxed)?;
+    between().await;
     set_flags(message_item(ItemKind::Flags, &alias, msg_id)?, |f| {
         f.deleted = true;
         f.read = false;
     })
     .await
-    .map_err(boxed)
+    .map_err(boxed)?;
+    // A background import between the first delete and the flags (the
+    // message had no kept copy yet) makes a copy beside the mark. The flags
+    // now stop any further import, so one more delete takes it back.
+    delete(message_item(ItemKind::Kept, &alias, msg_id)?)
+        .await
+        .map_err(boxed)
 }
 
 /// Set in `stored` every leaf field that differs between `before` and
@@ -1669,6 +1686,28 @@ mod delegate_tests {
             !(copy.is_some() && flags.is_some_and(|f| f.deleted)),
             "a kept copy survived beside a deleted mark"
         );
+    }
+
+    /// A background import that lands between the copies' removal and the
+    /// mark leaves a kept copy beside a deleted mark: the deletion takes it
+    /// back.
+    #[test]
+    fn an_import_between_the_copies_and_the_mark_is_taken_back() {
+        let alias = "items-delete-race";
+        let addr = identity(alias);
+        let id = message_id_for(b"imported mid-delete");
+        let item = message_item(ItemKind::Kept, alias, id).unwrap();
+        let planted = item.clone();
+        block_on(delete_message_after_copies(
+            alias.into(),
+            id,
+            async move || {
+                put(planted, json(&kept("planted".into()))).await.unwrap();
+            },
+        ))
+        .unwrap();
+        assert!(block_on(ops::get_item(item)).unwrap().is_none());
+        assert!(loaded(alias, addr).is_deleted(alias, id));
     }
 
     /// The recipient address a draft was addressed to survives a reload,

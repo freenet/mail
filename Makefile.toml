@@ -523,7 +523,7 @@ ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
 # Release only, as compress-webapp and check-release-scrub.sh read it.
 rm -rf "$ROOT/target/dx/app/release/web/public"
 cd "$ROOT/ui"
-dx build --release --features use-node
+dx build --release --features "use-node${FREENET_UI_FEATURES:+,$FREENET_UI_FEATURES}"
 '''
 
 [tasks.build]
@@ -1130,6 +1130,15 @@ cd "$ROOT/ui/tests" && \
 
 [tasks.test-e2e-background]
 description = "Real-node proof of the delegate's background jobs: wake-up, import with the tab closed, cost, page stall (about 20 minutes: it waits for the rescan wake-up)"
+script_runner = "bash"
+# The build carries the test instrumentation (`e2e-probe`); build-ui reads this.
+script = '''
+set -euo pipefail
+FREENET_UI_FEATURES=e2e-probe exec cargo make test-e2e-background-run
+'''
+
+[tasks.test-e2e-background-run]
+description = "The steps of test-e2e-background. Run that task: this one builds without the test instrumentation"
 dependencies = ["build", "derive-test-contract-id"]
 script_runner = "bash"
 script = '''
