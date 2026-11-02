@@ -39,11 +39,12 @@ pub const DUTY_BURST_MS: u64 = 10_000;
 /// 5 to 8 ms for two scans, so about 3 ms each, against the 50 ms first
 /// assumed. This is a few times that, for larger inboxes.
 pub const SCAN_COST_MS: u64 = 10;
-/// Estimated time to decrypt one message and check its signature. Measured
-/// at about 64 ms per imported message on the same node (a run importing
-/// three took 210 ms, one importing none 18 ms, both subscribing two inboxes),
-/// within twice the 40 ms first assumed, so left as it was.
-pub const MESSAGE_COST_MS: u64 = 40;
+/// Estimated time to decrypt one message, check its signature and store its
+/// flags and kept copy. Measured on the same node: a run importing three took
+/// 210 ms before the flags were written and 371 ms after, against 18 and 20 ms
+/// for one that imported nothing and subscribed the same two inboxes, so about
+/// 65 and then about 117 ms per message, against the 40 ms first assumed.
+pub const MESSAGE_COST_MS: u64 = 120;
 
 /// The periodic wake-ups, by manifest tag.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
