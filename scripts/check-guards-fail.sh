@@ -65,7 +65,7 @@ ui_local_tests() {
 ui_jobs_tests() {
     cargo test --manifest-path "$STAGE/Cargo.toml" -p freenet-email-ui --lib \
         --no-default-features --features example-data,no-sync \
-        -- kept_import_is_unread unread_flags_mark an_import_between the_loop_starts
+        -- kept_import_is_unread unread_flags_mark an_import_between the_loop_starts the_probe_marker
 }
 candidate_check() { "$STAGE/scripts/check-delegate-candidate.sh"; }
 freeze_tests() { "$STAGE/scripts/release-freeze_test.sh"; }
@@ -1076,6 +1076,22 @@ guard "the marker is written once" "$STAGE/ui/src/migration/scrub.rs" \
     '    crate::log::info(BUILD_MARKER);' \
     '    crate::log::info("freenet-mail:scrub-built-in");' \
     "not ok - the marker is not written once in the branch the flag selects" scrub_release_tests
+guard "the probe marker is written once" "$STAGE/ui/src/jobs.rs" \
+    '    crate::log::info(PROBE_MARKER);' \
+    '    crate::log::info("freenet-mail:e2e-probe-built-in");' \
+    "not ok - the probe marker is not chosen by the feature and logged under it" scrub_release_tests
+guard "the probe marker is logged only under the feature" "$STAGE/ui/src/jobs.rs" \
+    '    #[cfg(feature = "e2e-probe")]
+    crate::log::info(PROBE_MARKER);' \
+    '    crate::log::info(PROBE_MARKER);' \
+    "not ok - the probe marker is not chosen by the feature and logged under it" scrub_release_tests
+guard "the probe marker is chosen by the feature" "$STAGE/ui/src/jobs.rs" \
+    'pub(crate) const PROBE_MARKER: &str = if cfg!(feature = "e2e-probe") {' \
+    'pub(crate) const PROBE_MARKER: &str = if true {' \
+    "tests:the_probe_marker_is_there_only_with_the_feature" ui_jobs_tests
+guard "a publish refuses the probe" "$STAGE/scripts/check-release-scrub.sh" \
+    '    if grep -a -q -F -- "$PROBE_MARKER" "$file"; then' '    if false; then' \
+    "not ok - a production build with the probe is refused" scrub_release_tests
 guard "the freeze override needs the test flag" "$STAGE/scripts/check-release-freeze.sh" \
     'if [ "${RELEASE_FREEZE_TEST:-}" = "1" ]; then' 'if true; then' \
     "not ok - RELEASE_FREEZE_FILE without the test flag does not lift the freeze" freeze_tests

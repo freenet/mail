@@ -49,6 +49,18 @@ else
     fail "the marker is not written once in the branch the flag selects"
 fi
 
+PROBE=$(sed -n 's/^PROBE_MARKER="\(.*\)"$/\1/p' "$CHECK")
+# Written once, in the branch the feature selects, and logged where the loop
+# starts under the same feature.
+if [ -n "$PROBE" ] \
+    && [ "$(grep -r -F -c -- "\"$PROBE\"" "$ROOT/ui/src" | awk -F: '{ n += $2 } END { print n }')" -eq 2 ] \
+    && grep -A1 -F 'if cfg!(feature = "e2e-probe") {' "$ROOT/ui/src/jobs.rs" | grep -q -F "\"$PROBE\"" \
+    && grep -B1 -F 'crate::log::info(PROBE_MARKER);' "$ROOT/ui/src/jobs.rs" | grep -q -F '#[cfg(feature = "e2e-probe")]'; then
+    pass "the probe marker is chosen by the feature and logged under it"
+else
+    fail "the probe marker is not chosen by the feature and logged under it"
+fi
+
 mkdir -p "$TMP/with/wasm" "$TMP/without/wasm" "$TMP/none"
 printf 'bytes %s bytes' "$MARKER" > "$TMP/with/wasm/app_bg.wasm"
 printf 'bytes only' > "$TMP/without/wasm/app_bg.wasm"
@@ -60,6 +72,13 @@ cp "$TMP/with/wasm/app_bg.wasm" "$TMP/two/new.wasm"
 cp "$TMP/without/wasm/app_bg.wasm" "$TMP/two/old.wasm"
 check "two builds side by side are refused" 1 --dir "$TMP/two"
 check "two builds side by side are refused for a test publish" 1 --absent --dir "$TMP/two"
+mkdir -p "$TMP/probe/wasm" "$TMP/probe-scrub/wasm"
+printf 'bytes %s bytes' "$PROBE" > "$TMP/probe/wasm/app_bg.wasm"
+printf 'bytes %s %s bytes' "$MARKER" "$PROBE" > "$TMP/probe-scrub/wasm/app_bg.wasm"
+check "a production build with the probe is refused" 1 --dir "$TMP/probe-scrub"
+check "a production build with the probe and no scrub is refused" 1 --dir "$TMP/probe"
+check "a test publish refuses a build with the probe" 1 --absent --dir "$TMP/probe"
+check "a test publish refuses a build with scrub and the probe" 1 --absent --dir "$TMP/probe-scrub"
 check "a test publish refuses a build with the marker" 1 --absent --dir "$TMP/with"
 check "a test publish takes a build without it" 0 --absent --dir "$TMP/without"
 check "a test publish refuses a directory with no WASM" 1 --absent --dir "$TMP/none"
@@ -93,6 +112,11 @@ if task test-e2e-legacy-migration | grep -q '^bash "$ROOT/scripts/check-release-
     pass "test-e2e-legacy-migration checks the build it published has the marker"
 else
     fail "test-e2e-legacy-migration does not check the build it published"
+fi
+if task test-e2e-background-run | grep -q '^ *\*"e2e-probe test instrumentation"\*) ;;$'; then
+    pass "test-e2e-background checks that its probe build is recognised"
+else
+    fail "test-e2e-background does not check that its probe build is recognised"
 fi
 real_node="$(task test-e2e-real-node)"
 if printf '%s\n' "$real_node" | grep -q 'check-release-scrub.sh' \

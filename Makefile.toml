@@ -1169,6 +1169,16 @@ trap cleanup EXIT
 bash "$ROOT/scripts/run-isolated-nodes.sh" wipe
 bash "$ROOT/scripts/run-isolated-nodes.sh" up
 FREENET_ISO_GW_PORT="$GW_PORT" cargo make publish-email-iso
+# This build carries the probe: the release check must see its marker in the
+# built WASM, or it could not refuse a shipped build that has it.
+refused="$(bash "$ROOT/scripts/check-release-scrub.sh" 2>&1 || true)"
+case "$refused" in
+    *"e2e-probe test instrumentation"*) ;;
+    *)
+        echo "error: the release check did not find the probe in the build that has it: $refused" >&2
+        exit 1
+        ;;
+esac
 
 CONTRACT_ID="$(cat "$ROOT/target/webapp/contract-id.txt")"
 BASE_URL="http://127.0.0.1:$GW_PORT/v1/contract/web/$CONTRACT_ID/"

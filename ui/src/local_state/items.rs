@@ -567,7 +567,10 @@ pub(crate) async fn unarchive_message(alias: String, msg_id: MessageId) -> Resul
 /// survive the deletion beside a mark saying it is deleted, holding the
 /// message's content the user asked to remove, and pinning that mark
 /// against reclamation (a kept copy keeps its mark). This way a failure
-/// leaves the message visible and the deletion retryable.
+/// before the mark leaves the message visible and the deletion retryable. A
+/// failure of the last step, which takes back a copy an import made in
+/// between, comes after the mark: the message is deleted though the error is
+/// reported, and a retry is idempotent.
 pub(crate) async fn delete_message(alias: String, msg_id: MessageId) -> Result<(), DynError> {
     delete_message_after_copies(alias, msg_id, async || {}).await
 }

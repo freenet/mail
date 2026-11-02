@@ -27,6 +27,17 @@ pub(crate) const PERIOD_MS: u32 = 10 * 60 * 1000;
 #[cfg(feature = "e2e-probe")]
 const PROBE_AFTER_MS: u32 = 100;
 
+/// In a build's WASM only with the `e2e-probe` feature, which lists every kept
+/// copy of every identity on the page. `scripts/check-release-scrub.sh`
+/// refuses a build that has it. Chosen by the feature, and logged where the
+/// loop starts, so a probe build cannot fold it away.
+#[cfg(any(test, feature = "e2e-probe"))]
+pub(crate) const PROBE_MARKER: &str = if cfg!(feature = "e2e-probe") {
+    "freenet-mail:e2e-probe-built-in"
+} else {
+    ""
+};
+
 /// One run: the delegate's reply, and the time it took.
 pub(crate) async fn run_once() -> Result<(freenet_mail_protocol::JobsRun, i64), CallError> {
     let started = chrono::Utc::now().timestamp_millis();
@@ -92,6 +103,8 @@ pub(crate) async fn fallback() {
     if !claim_start() {
         return;
     }
+    #[cfg(feature = "e2e-probe")]
+    crate::log::info(PROBE_MARKER);
     #[cfg(feature = "e2e-probe")]
     let mut runs: u32 = 0;
     loop {
@@ -164,6 +177,18 @@ fn publish(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_probe_marker_is_there_only_with_the_feature() {
+        assert_eq!(
+            PROBE_MARKER,
+            if cfg!(feature = "e2e-probe") {
+                "freenet-mail:e2e-probe-built-in"
+            } else {
+                ""
+            }
+        );
+    }
 
     #[test]
     fn the_published_record_names_every_count() {

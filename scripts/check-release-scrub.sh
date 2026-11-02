@@ -30,10 +30,20 @@ elif [ $# -gt 0 ]; then
     exit 2
 fi
 MARKER="freenet-mail:scrub-built-in"
+# In the WASM only with the `e2e-probe` feature (ui/src/jobs.rs), the real-node
+# tests' build, which lists every kept copy of every identity on the page.
+# FREENET_UI_FEATURES, read by build-ui, can put it in silently. No publish
+# takes it, a test publish included.
+PROBE_MARKER="freenet-mail:e2e-probe-built-in"
 
 found=0
 while IFS= read -r -d '' file; do
     found=$((found + 1))
+    if grep -a -q -F -- "$PROBE_MARKER" "$file"; then
+        echo "error: $file has the e2e-probe test instrumentation: it was built with FREENET_UI_FEATURES=e2e-probe." >&2
+        echo "       No publish may carry it. Unset the variable and rebuild." >&2
+        exit 1
+    fi
     if [ "$ABSENT" -eq 1 ]; then
         if grep -a -q -F -- "$MARKER" "$file"; then
             echo "error: $file has scrub: it was built with FREENET_MAIL_SCRUB=1." >&2

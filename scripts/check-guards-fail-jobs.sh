@@ -72,10 +72,13 @@ dt "jobs: scans stop at the duty" "$J" 'if unprompted && !budget.take_duty(SCAN_
     'if false {' a_node_run_with_no_duty_left_scans_nothing_and_a_page_still_does
 dt "jobs: scans rotate" "$J" 'budget.cursor = ((start + scan.len()) % eligible.len().max(1)) as u32;' \
     '' scans_rotate_so_every_inbox_is_reached_at_the_per_run_limit
-dt "jobs: a contract keeps the rotation" "$J" 'if unprompted && !matches!(trigger, Trigger::Contract(_)) {' \
-    'if unprompted {' a_contract_trigger_scans_only_that_contract_and_keeps_the_rotation
-dt "jobs: a page run keeps the rotation" "$J" 'if unprompted && !matches!(trigger, Trigger::Contract(_)) {' \
-    'if !matches!(trigger, Trigger::Contract(_)) {' a_page_run_does_not_move_the_rotation_of_a_later_identity
+dt "jobs: a contract keeps the rotation" "$J" 'if !matches!(trigger, Trigger::Contract(_)) {' \
+    'if true {' a_contract_trigger_scans_only_that_contract_and_keeps_the_rotation
+dt "jobs: a page run keeps the shared rotation" "$W" '        budget.cursor = before.cursor;' '' \
+    a_page_run_does_not_move_the_rotation_of_a_later_identity
+dt "jobs: a page rotates on its own cursor" "$W" \
+    '            let _ = Space::new(&mut *env, o).put(PAGE_CURSOR, &budget.cursor.to_le_bytes());' '' \
+    a_node_with_no_wake_ups_still_reaches_every_identity_of_a_page
 dt "jobs: a refresh stops at the operations left" "$J" \
     'subscribe.truncate(budget.take_ops(subscribe.len()));' '' \
     a_refresh_past_the_operation_limit_subscribes_the_best_it_can
@@ -98,8 +101,7 @@ dt "jobs: a subscription answer writes nothing" "$H" \
     'InboundDelegateMsg::SubscribeContractResponse(_) => Ok(Vec::new()),' \
     'InboundDelegateMsg::SubscribeContractResponse(_) => { env.set(b"x", b"y"); Ok(Vec::new()) }' \
     a_forged_subscription_answer_does_not_stop_the_next_refresh_asking
-dt "jobs: a page run asks no network" "$W" '            if unprompted
-                && plan.fetch_missing' '            if plan.fetch_missing' \
+dt "jobs: a page run asks no network" "$W" '            if unprompted && plan.fetch_missing' '            if plan.fetch_missing' \
     a_page_run_never_asks_the_network_for_an_inbox_this_node_lacks
 dt "jobs: a page run subscribes only held inboxes" "$W" \
     '.filter(|id| unprompted || held.contains(id))' '.filter(|_| true)' \
@@ -312,3 +314,9 @@ uj "jobs: a delete takes back a copy imported meanwhile" "$UI/local_state/items.
 }' an_import_between_the_copies_and_the_mark_is_taken_back
 uj "jobs: the page loop starts once" "$UI/jobs.rs" '!s.replace(true)' 'true' \
     the_loop_starts_once_however_often_the_identities_load
+dt "jobs: a subscription counts as an ask" "$W" '                budget.note_missing(*id);' '' \
+    a_missing_inbox_outside_the_scan_slice_waits_out_its_backoff,a_missing_inbox_with_the_duty_out_waits_out_its_backoff
+dt "jobs: a page run spends no operations" "$J" '        if unprompted {
+            subscribe.truncate(budget.take_ops(subscribe.len()));' '        {
+            subscribe.truncate(budget.take_ops(subscribe.len()));' \
+    a_page_run_does_not_use_up_the_operations_of_a_later_refresh

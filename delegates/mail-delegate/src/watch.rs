@@ -10,7 +10,8 @@
 //!
 //! **No answer is Unknown.** A refused GET, a failed one and a contract that
 //! is not here all read the same, and none of them says the inbox is empty:
-//! nothing is concluded, and the next refresh asks again.
+//! nothing is concluded. A run the node starts asks again once the inbox's
+//! backoff is over; a page's run never asks the network.
 //!
 //! **Import never overwrites and never brings back a deleted message.** An
 //! arrival is written by [`crate::handlers::put_item`] as create-only, the
@@ -47,6 +48,8 @@ pub const GLOBAL: Origin = Origin([0; 32]);
 /// The origins with identities, for runs no origin started.
 const ORIGIN_INDEX: &str = "ix/bg/origins";
 const BUDGET: &str = "bg/budget";
+/// A page's own rotation, in its origin's namespace.
+const PAGE_CURSOR: &str = "bg/cursor";
 /// Origins a run the node starts works for. Past it a new origin's jobs run
 /// only from its own `RunJobs`.
 pub const MAX_ORIGINS: usize = 16;
@@ -88,7 +91,29 @@ pub fn run(env: &mut dyn Env, trigger: Trigger) -> (JobsRun, Vec<OutboundDelegat
     let targets = targets(env, trigger, &mut done);
     let mut budget = load_budget(env, now);
     let before = budget.clone();
+    // A page's run rotates through its own origin's inboxes with a cursor of
+    // that origin, so a node with no wake-ups still reaches them all and the
+    // shared rotation is left to the runs the node starts.
+    let page_origin = match trigger {
+        Trigger::RunJobs(origin) => Some(origin),
+        _ => None,
+    };
+    let page_cursor = page_origin.map(|o| {
+        let stored = Space::new(&mut *env, o).get(PAGE_CURSOR);
+        stored
+            .and_then(|b| Some(u32::from_le_bytes(b.try_into().ok()?)))
+            .unwrap_or(0)
+    });
+    if let Some(c) = page_cursor {
+        budget.cursor = c;
+    }
     let plan = jobs::plan(trigger, &targets, &mut budget);
+    if let (Some(o), Some(old)) = (page_origin, page_cursor) {
+        if budget.cursor != old {
+            let _ = Space::new(&mut *env, o).put(PAGE_CURSOR, &budget.cursor.to_le_bytes());
+        }
+        budget.cursor = before.cursor;
+    }
     // The budget and the rotation are saved before any message is imported:
     // core stops waiting for a run at 5 s and the guest is abandoned, and the
     // next run must not start over on the same inboxes with a full budget.
@@ -99,6 +124,7 @@ pub fn run(env: &mut dyn Env, trigger: Trigger) -> (JobsRun, Vec<OutboundDelegat
     let unprompted = trigger.is_unprompted();
     let mut out = Vec::new();
     let mut held = Vec::new();
+    let mut noted = Vec::new();
     let mut read = 0;
     let mut left = plan.messages;
     for target in &plan.scan {
@@ -111,15 +137,16 @@ pub fn run(env: &mut dyn Env, trigger: Trigger) -> (JobsRun, Vec<OutboundDelegat
             // Only a run the node starts asks the network for an inbox it does
             // not hold: a page's own read of its inbox does that a moment
             // later, and this run would stall the page's calls behind it.
-            if unprompted
-                && plan.fetch_missing
-                && budget.may_ask(&target.id)
-                && budget.take_ops(1) == 1
-            {
+            // Noted whether or not an operation is left for the ask, so the
+            // backoff covers every path that would ask.
+            if unprompted && plan.fetch_missing && budget.may_ask(&target.id) {
                 budget.note_missing(target.id);
-                out.push(OutboundDelegateMsg::GetContractRequest(
-                    GetContractRequest::new(ContractInstanceId::new(target.id)),
-                ));
+                noted.push(target.id);
+                if budget.take_ops(1) == 1 {
+                    out.push(OutboundDelegateMsg::GetContractRequest(
+                        GetContractRequest::new(ContractInstanceId::new(target.id)),
+                    ));
+                }
             }
         }
     }
@@ -134,6 +161,18 @@ pub fn run(env: &mut dyn Env, trigger: Trigger) -> (JobsRun, Vec<OutboundDelegat
             ))
         })
         .collect();
+    // A subscription for an inbox not known held (whatever slice it was in)
+    // is an ask of the network too: core fetches a contract it has no state
+    // for. It counts like a GET, so the inbox is not asked for again until
+    // its backoff is over. A held inbox that was not scanned is noted too and
+    // cleared by its next scan; the subscription it has is core's and stands.
+    if unprompted {
+        for id in &plan.subscribe {
+            if !held.contains(id) && !noted.contains(id) {
+                budget.note_missing(*id);
+            }
+        }
+    }
     requests.append(&mut out);
     let out = requests;
     if unprompted {

@@ -114,7 +114,8 @@ impl Trigger {
 /// version; the others name where inbox v2's work goes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Job {
-    /// Subscribe to the v1 inboxes and ask the network for any not held here.
+    /// Subscribe to the v1 inboxes and, in a run the node starts, ask the
+    /// network for any not held here. A page's run subscribes only what is held.
     V1Refresh,
     /// Import arrivals from the v1 inbox states this node holds. No network.
     V1Scan,
@@ -219,7 +220,7 @@ pub struct Budget {
     pub(crate) duty_ms: u64,
     duty_at: u64,
     /// Where the next run's scans start.
-    cursor: u32,
+    pub(crate) cursor: u32,
     /// Inboxes this node did not hold when last asked for: the number of asks
     /// that found them missing, and when to ask again. The delegate is parked
     /// while a request for a missing contract is out and a page's calls wait
@@ -340,7 +341,8 @@ pub struct Plan {
     /// Inboxes to read, in order.
     pub scan: Vec<Target>,
     pub subscribe: Vec<ContractId>,
-    /// Ask the network for a scanned inbox this node does not hold.
+    /// Ask the network for a scanned inbox this node does not hold. Only a run
+    /// the node starts does (`crate::watch` enforces it), whatever this says.
     pub fetch_missing: bool,
     /// Messages this run may decrypt.
     pub messages: usize,
@@ -376,10 +378,11 @@ pub fn plan(trigger: Trigger, targets: &[Target], budget: &mut Budget) -> Plan {
             }
             scan.push(*t);
         }
-        // Only runs the node starts move the rotation: a page's run for one
-        // origin counts inboxes of that origin alone, so it would reset the
-        // rotation of the rest.
-        if unprompted && !matches!(trigger, Trigger::Contract(_)) {
+        // A run for one contract moves nothing. A page's run moves the
+        // cursor it was given: the caller keeps one per origin, since a page
+        // counts only its own origin's inboxes and must not move the shared
+        // rotation.
+        if !matches!(trigger, Trigger::Contract(_)) {
             budget.cursor = ((start + scan.len()) % eligible.len().max(1)) as u32;
         }
     }
@@ -401,7 +404,10 @@ pub fn plan(trigger: Trigger, targets: &[Target], budget: &mut Budget) -> Plan {
         if unprompted {
             subscribe.retain(|id| budget.may_ask(id));
         }
-        subscribe.truncate(budget.take_ops(subscribe.len()));
+        // A page's run sends nothing to the network, so it spends no operations.
+        if unprompted {
+            subscribe.truncate(budget.take_ops(subscribe.len()));
+        }
     }
     Plan {
         scan,

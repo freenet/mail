@@ -1384,20 +1384,79 @@ fn a_run_stopped_by_the_host_resumes_without_repeating_or_losing() {
     assert_eq!(run_jobs(&mut env, PROD).imported, 0, "nothing left to take");
 }
 
+/// `n` identities of `origin`, each with one message waiting in its inbox.
+fn with_mail(env: &mut MemEnv, origin: u8, n: usize) -> Vec<IdentityInfo> {
+    (0..n)
+        .map(|i| {
+            // The alias length seeds the keys: distinct for each identity.
+            let me = create(env, origin, &"a".repeat(i + 1 + 10 * origin as usize));
+            deliver(env, &me, &[sealed(&me, "hello")]);
+            me
+        })
+        .collect()
+}
+
+fn reached(env: &mut MemEnv, ids: &[IdentityInfo]) -> usize {
+    ids.iter()
+        .filter(|me| !kept_ids(env, me.addr).is_empty())
+        .count()
+}
+
 #[test]
 fn a_page_run_does_not_move_the_rotation_of_a_later_identity() {
-    let mut targets: Vec<Target> = (1..=10).map(|n| target(n, 1)).collect();
-    targets.push(target(11, 2));
-    let mut b = Budget::new(NOW);
-    let mut reached = std::collections::BTreeSet::new();
-    for _ in 0..3 {
-        let p = plan(Trigger::Tick(Tick::Rescan), &targets, &mut b);
-        reached.extend(p.scan.iter().map(|t| t.id[0]));
-        // A page for another origin, with one identity, between node runs.
-        let page = plan(Trigger::RunJobs(Origin([2; 32])), &targets, &mut b);
-        assert_eq!(page.scan, [target(11, 2)]);
+    let mut env = env();
+    let ids = with_mail(&mut env, PROD, 6);
+    with_mail(&mut env, OTHER, 1);
+    // Node runs with a page for another origin, with one identity, between.
+    for _ in 0..2 {
+        wake(&mut env, "rescan");
+        assert_eq!(run_jobs(&mut env, OTHER).scanned, 1);
     }
-    assert_eq!(reached.len(), 11, "{reached:?}");
+    assert_eq!(reached(&mut env, &ids), 6, "the shared rotation was kept");
+}
+
+#[test]
+fn a_node_with_no_wake_ups_still_reaches_every_identity_of_a_page() {
+    let mut env = env();
+    let ids = with_mail(&mut env, PROD, 6);
+    run_jobs(&mut env, PROD);
+    assert_eq!(reached(&mut env, &ids), MAX_SCANS_PER_RUN);
+    run_jobs(&mut env, PROD);
+    assert_eq!(reached(&mut env, &ids), 6, "the next run took the rest");
+}
+
+#[test]
+fn a_missing_inbox_outside_the_scan_slice_waits_out_its_backoff() {
+    let mut env = env();
+    let n = MAX_SCANS_PER_RUN + 2;
+    for i in 0..n {
+        create(&mut env, PROD, &format!("id{i}"));
+    }
+    let out = wake(&mut env, "v1watch");
+    assert_eq!(subscribes(&out), n, "every inbox is asked for once");
+    assert_eq!(gets(&out), MAX_SCANS_PER_RUN);
+    for later in [10, MISSING_BACKOFF_FIRST_SECS - 1] {
+        env.now = Some(NOW + later);
+        let out = wake(&mut env, "v1watch");
+        assert_eq!((gets(&out), subscribes(&out)), (0, 0), "at +{later}");
+    }
+    env.now = Some(NOW + MISSING_BACKOFF_FIRST_SECS);
+    assert_eq!(subscribes(&wake(&mut env, "v1watch")), n, "asked again after");
+}
+
+#[test]
+fn a_missing_inbox_with_the_duty_out_waits_out_its_backoff() {
+    let mut env = env();
+    create(&mut env, PROD, "alice");
+    let mut budget = Budget::new(NOW);
+    assert!(budget.take_duty(DUTY_BURST_MS));
+    let body = to_cbor(&budget).unwrap();
+    Space::new(&mut env, GLOBAL).put("bg/budget", &body).unwrap();
+    let out = wake(&mut env, "v1watch");
+    assert_eq!((gets(&out), subscribes(&out)), (0, 1), "nothing scanned");
+    env.now = Some(NOW + 10);
+    let out = wake(&mut env, "v1watch");
+    assert_eq!((gets(&out), subscribes(&out)), (0, 0), "{out:?}");
 }
 
 #[test]
@@ -1461,4 +1520,15 @@ fn a_message_the_page_could_not_read_is_not_kept_by_the_watch() {
         assert_eq!((run.imported, run.remaining), (0, 0), "no {missing}");
         assert!(kept_ids(&mut env, me.addr).is_empty(), "no {missing}");
     }
+}
+
+#[test]
+fn a_page_run_does_not_use_up_the_operations_of_a_later_refresh() {
+    let targets: Vec<Target> = (1..=10).map(|n| target(n, 1)).collect();
+    let mut b = Budget::new(NOW - NOW % 60);
+    for _ in 0..40 {
+        plan(Trigger::RunJobs(Origin([1; 32])), &targets, &mut b);
+    }
+    let p = plan(Trigger::Tick(Tick::V1Watch), &targets, &mut b);
+    assert_eq!(p.subscribe.len(), 10, "all of a page's runs were free");
 }
