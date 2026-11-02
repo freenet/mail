@@ -594,8 +594,8 @@ ut "an orphan move never overwrites an item" "$M/orphans.rs" \
     '        Some(_) => Ok(()),' \
     moving_an_orphan_never_overwrites_an_item_already_there
 ut "a silent identity row never orphans its aliases" "$M/legacy_delegates.rs" \
-    'AliasOwner::Unresolved if aliases.own_row_absent(generation) => None,' \
-    'AliasOwner::Unresolved => None,' \
+    'AliasOwner::Unresolved if self.own_row_absent(generation) => Some(None),' \
+    'AliasOwner::Unresolved if false => Some(None),' \
     scenario_a_silent_identity_row_never_orphans_its_aliases
 ut "one absent answer does not stand" "$M/legacy_delegates.rs" \
     '.is_some_and(|answers| *answers >= HOLD_BACK_LOADS)' \
@@ -649,12 +649,8 @@ ut "held markers are released when the newer row settles" "$M/mod.rs" \
     '    let released_markers = false && newest_unsettled.is_none();' \
     scenario_silence_past_the_hold_starts_no_contract_migration
 ut "a held-back row counts nothing" "$M/legacy_delegates.rs" \
-    '        let mut mapped = MappingCounts::default();
-        let pairs = map_local_state(&bytes, entry.generation, &tables, &newer, &mut mapped)?;
-        self.counts.add(mapped);' \
-    '        let mut mapped = MappingCounts::default();
-        let pairs = map_local_state(&bytes, entry.generation, &tables, &newer, &mut self.counts)?;
-        self.counts.add(mapped);' \
+    '        let pairs = map_local_state(&bytes, entry.generation, &tables, &newer, &mut mapped);' \
+    '        let pairs = map_local_state(&bytes, entry.generation, &tables, &newer, &mut self.counts);' \
     scenario_a_row_held_back_counts_nothing
 guard "the gate asks an unconfirmed identity" "$STAGE/ui/src/app/migration_view.rs" \
     '    if confirmed == Some(false) {' \
@@ -893,7 +889,7 @@ ut "local state is cleared before identities" "$S" \
 ut "a cleared row is not cleared again" "$S" \
     '.filter(|e| ledger.scrubbed.get(&e.generation) != Some(&true))' \
     '.filter(|e| ledger.scrubbed.get(&e.generation) != Some(&false) || true)' \
-    scenario_a_finished_scrub_stays_finished
+    a_row_needs_two_loads_of_empty_answers
 ut "a row counts as cleared only once a re-read shows it" "$S" \
     'matches!(left, Some(Ok(requests)) if requests.is_empty())' \
     'matches!(left, Some(Ok(_)))' \
@@ -955,8 +951,8 @@ guard "release.sh runs the freeze gate" "$STAGE/scripts/release.sh" \
 ' 'true
 ' "not ok - release.sh runs the gate" freeze_tests
 guard "the production publish task runs the freeze gate" "$STAGE/Makefile.toml" \
-    'dependencies = ["check-release-freeze", "sign-webapp", "verify-published-contract"]' \
-    'dependencies = ["sign-webapp", "verify-published-contract"]' \
+    'dependencies = ["check-release-freeze", "sign-webapp", "check-webapp-scrub", "verify-published-contract"]' \
+    'dependencies = ["sign-webapp", "check-webapp-scrub", "verify-published-contract"]' \
     "not ok - publish-email does not run check-release-freeze first" freeze_tests
 guard "the release check reads the build" "$STAGE/scripts/check-release-scrub.sh" \
     'if ! grep -a -q -F -- "$MARKER" "$file"; then' 'if false; then' \
