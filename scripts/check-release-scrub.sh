@@ -6,18 +6,27 @@
 # compiled in, so this reads the build that is about to be published, and not
 # the flags that were meant to produce it.
 #
-# Usage: scripts/check-release-scrub.sh [--dir DIR]
+# With --absent it checks the other way, for a test publish: a build that has
+# scrub must not reach a node that may hold real data, whatever the
+# environment says (an exported FREENET_MAIL_SCRUB=1 builds it in silently).
+#
+# Usage: scripts/check-release-scrub.sh [--absent] [--dir DIR]
 #   DIR is the build's public directory. The option exists for the tests.
-# Exit status: 0 = the build has scrub, 1 = refused, 2 = usage error.
+# Exit status: 0 = as wanted, 1 = refused, 2 = usage error.
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 DIR="$ROOT/target/dx/app/release/web/public"
+ABSENT=0
+if [ "${1:-}" = "--absent" ]; then
+    ABSENT=1
+    shift
+fi
 if [ "${1:-}" = "--dir" ]; then
-    DIR="${2:?usage: $0 [--dir DIR]}"
+    DIR="${2:?usage: $0 [--absent] [--dir DIR]}"
 elif [ $# -gt 0 ]; then
-    echo "usage: $0 [--dir DIR]" >&2
+    echo "usage: $0 [--absent] [--dir DIR]" >&2
     exit 2
 fi
 MARKER="freenet-mail:scrub-built-in"
@@ -25,7 +34,13 @@ MARKER="freenet-mail:scrub-built-in"
 found=0
 while IFS= read -r -d '' file; do
     found=1
-    if ! grep -a -q -F -- "$MARKER" "$file"; then
+    if [ "$ABSENT" -eq 1 ]; then
+        if grep -a -q -F -- "$MARKER" "$file"; then
+            echo "error: $file has scrub: it was built with FREENET_MAIL_SCRUB=1." >&2
+            echo "       A test publish must not carry it. Unset the variable and rebuild." >&2
+            exit 1
+        fi
+    elif ! grep -a -q -F -- "$MARKER" "$file"; then
         echo "error: $file has scrub off: it was built without FREENET_MAIL_SCRUB=1." >&2
         echo "       Publish with \`cargo make publish-production\`, which sets it." >&2
         exit 1
@@ -35,4 +50,4 @@ if [ "$found" -eq 0 ]; then
     echo "error: no WASM under $DIR to check for scrub" >&2
     exit 1
 fi
-echo "ok: the build has scrub"
+if [ "$ABSENT" -eq 1 ]; then echo "ok: the build has no scrub"; else echo "ok: the build has scrub"; fi

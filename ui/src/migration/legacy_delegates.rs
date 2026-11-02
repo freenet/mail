@@ -632,8 +632,10 @@ pub(crate) struct LegacyAdapter<T> {
     read: RowHashes,
 }
 
-/// By lineage generation, the `(key, value hash)` of each pair a read gave.
-pub(crate) type RowHashes = BTreeMap<u32, Vec<(Vec<u8>, [u8; 16])>>;
+/// By lineage generation, the `(key, value hash, value)` of each pair a read
+/// gave. Only settings keep their value: they merge, so a hash cannot say
+/// whether the delegate holds them. Nothing else is kept, seeds least.
+pub(crate) type RowHashes = BTreeMap<u32, Vec<(Vec<u8>, [u8; 16], Option<Vec<u8>>)>>;
 
 impl<T: LegacyTransport> LegacyAdapter<T> {
     pub(crate) fn new(
@@ -1035,7 +1037,13 @@ impl<T: LegacyTransport> PredecessorSecretsIo for LegacyAdapter<T> {
         let read = self.read_row(&entry, predecessor).await;
         match &read {
             Ok(pairs) => {
-                let hashes = pairs.iter().map(|(k, v)| (k.clone(), id16(&[v])));
+                let hashes = pairs.iter().map(|(k, v)| {
+                    let settings = matches!(
+                        PairKey::decode(k),
+                        Some(PairKey::IdentitySettings(_) | PairKey::GlobalSettings)
+                    );
+                    (k.clone(), id16(&[v]), settings.then(|| v.clone()))
+                });
                 self.read.insert(entry.generation, hashes.collect());
             }
             Err(_) => {

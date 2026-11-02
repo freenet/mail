@@ -85,8 +85,13 @@ pub(crate) const BUILT_IN: bool = match option_env!("FREENET_MAIL_SCRUB") {
     None => false,
 };
 /// In a build's WASM only if [`BUILT_IN`]: `scripts/check-release-scrub.sh`
-/// refuses a production build without it.
-const BUILD_MARKER: &str = "freenet-mail:scrub-built-in";
+/// refuses a production build without it. The text is chosen by the flag, so
+/// it is in the binary only when the flag is, wherever it is logged.
+pub(super) const BUILD_MARKER: &str = if BUILT_IN {
+    "freenet-mail:scrub-built-in"
+} else {
+    ""
+};
 
 /// How many loads a row must show nothing left to delete to be finished.
 const EMPTY_LOADS: u32 = 2;
@@ -120,6 +125,8 @@ pub(crate) enum Blocker {
     },
     /// Identities with no backup made since the migration began.
     NoBackup(u32),
+    /// Identities whose KEM key the mail delegate holds differently from the row.
+    KeyMismatch(u32),
     /// A row's clearing failed. A later load tries again.
     RowFailed {
         generation: u32,
@@ -262,6 +269,34 @@ async fn is_import_of<S: MailStore>(
     Ok(both.is_some_and(|(stored, value)| holds_fields(&stored, &value)))
 }
 
+/// Whether the mail delegate holds `key` as the import of a value read earlier,
+/// known by its hash and, for settings, its value. An identity is present or
+/// not: its aliases can differ for one address, and its seeds are checked by
+/// [`row_blockers`].
+async fn holds_now<S: MailStore>(
+    store: &mut S,
+    key: &PairKey,
+    hash: &[u8; ID_BYTES],
+    settings: Option<&[u8]>,
+    identities: &HashMap<Addr, IdentityInfo>,
+) -> Result<bool, CallError> {
+    if matches!(key, PairKey::Identity(_)) {
+        return present(store, key, identities).await;
+    }
+    let Some(item) = stored_item(key, identities) else {
+        return Ok(false);
+    };
+    let Some(stored) = get_item(store, item).await? else {
+        return Ok(false);
+    };
+    let Some(value) = settings else {
+        return Ok(id16(&[&stored.body]) == *hash);
+    };
+    let json = |bytes: &[u8]| serde_json::from_slice::<serde_json::Value>(bytes).ok();
+    let both = json(&stored.body).zip(json(value));
+    Ok(both.is_some_and(|(stored, value)| holds_fields(&stored, &value)))
+}
+
 /// Write the snapshot of each of `rows`, once: what its read mapped to that
 /// the mail delegate holds. The chunks go first, so a tab that dies leaves no
 /// count and the next load writes them again. With no read from this load's
@@ -278,12 +313,23 @@ async fn write_snapshots<S: MailStore, T: LegacyTransport>(
         let generation = entry.generation;
         let mut entries = BTreeSet::new();
         if let Some(read) = outcome.read_rows.get(&generation) {
-            for (key, hash) in read {
-                let Some(key) = PairKey::decode(key).filter(is_compared) else {
+            for (key, hash, settings) in read {
+                let Some(decoded) = PairKey::decode(key).filter(is_compared) else {
                     continue;
                 };
-                if present(store, &key, identities).await? {
-                    entries.insert(snapshot_entry(&key, hash));
+                // A value the delegate does not hold did not land: import
+                // never overwrites, so the row may hold the only copy. A
+                // newer row holding the key supersedes this copy; if that
+                // one differs from the delegate it is not recorded either.
+                let newer = outcome.read_rows.iter().any(|(g, pairs)| {
+                    *g > generation
+                        && (*g >= IDENTITY_GENERATION_OFFSET) == is_identity_row(entry)
+                        && pairs.iter().any(|(k, _, _)| k == key)
+                });
+                if newer
+                    || holds_now(store, &decoded, hash, settings.as_deref(), identities).await?
+                {
+                    entries.insert(snapshot_entry(&decoded, hash));
                 }
             }
         } else {
@@ -398,7 +444,7 @@ async fn cheap_blockers<S: MailStore>(
 }
 
 /// A row's generation and what a fresh read of it maps to.
-type Row = (u32, Vec<(PairKey, Vec<u8>)>);
+pub(super) type Row = (u32, Vec<(PairKey, Vec<u8>)>);
 
 /// Read and map the rows to clear, as the walk maps them. A row whose clearing
 /// began can have nothing left to map.
@@ -429,9 +475,33 @@ async fn read_rows<T: LegacyTransport>(
     Ok(rows)
 }
 
+/// Whether the mail delegate lists the identity with a different ML-KEM
+/// encapsulation key than the row's seed gives. The address comes from the
+/// signing key alone, so it does not say the KEM seeds agree, and an import
+/// under a held address drops the row's. An identity the delegate does not
+/// list has no key to compare. The key covers the seed's first 32 bytes; the
+/// rest is used only for implicit rejection of invalid ciphertexts.
+fn kem_differs(key: &PairKey, value: &[u8], identities: &HashMap<Addr, IdentityInfo>) -> bool {
+    use ml_kem::kem::{KeyExport, KeyInit};
+    let PairKey::Identity(addr) = key else {
+        return false;
+    };
+    let Some(held) = identities.get(addr) else {
+        return false;
+    };
+    let derived = serde_json::from_slice::<MigratedIdentity>(value)
+        .ok()
+        .and_then(|i| ml_kem::Seed::try_from(i.kem.as_slice()).ok())
+        .map(|seed| {
+            let dk = ml_kem::DecapsulationKey::<ml_kem::MlKem768>::new(&seed);
+            dk.encapsulation_key().to_bytes().to_vec()
+        });
+    derived.is_none_or(|ek| ek.as_slice() != held.ek.as_slice())
+}
+
 /// What the rows show against the mail delegate: entries that cannot be
 /// mapped, identities with no backup, and items that did not land as they are.
-async fn row_blockers<S: MailStore>(
+pub(super) async fn row_blockers<S: MailStore>(
     store: &mut S,
     rows: &[Row],
     ledger: &Ledger,
@@ -449,6 +519,10 @@ async fn row_blockers<S: MailStore>(
     let count = unprotected(store, scrubbed.collect(), ledger, identities).await?;
     if count > 0 {
         found.push(Blocker::NoBackup(count));
+    }
+    let mismatched = all().filter(|(k, v)| kem_differs(k, v, identities)).count();
+    if mismatched > 0 {
+        found.push(Blocker::KeyMismatch(mismatched as u32));
     }
     let snapshot = read_snapshot(store, rows, ledger).await?;
     for (generation, pairs) in rows {

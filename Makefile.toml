@@ -630,6 +630,13 @@ if [ ! -f "$KEY_FILE" ]; then
     echo "       run \`cargo make generate-web-container-keys\` first" >&2
     exit 1
 fi
+# A test build may hold scrub only for the legacy real-node task, which says
+# so and publishes to the harness's own nodes. Scrub deletes the old copy of
+# real users' data, so an exported scrub flag must not reach a node
+# that may hold some.
+if [ "${FREENET_MAIL_SCRUB_ISO:-}" != "1" ]; then
+    "$ROOT/scripts/check-release-scrub.sh" --absent
+fi
 # Monotonic version: unix timestamp (seconds). The on-chain
 # web-container update check requires strictly increasing versions;
 # the prior commit-hash-to-u32 scheme was not monotonic and broke at
@@ -758,6 +765,8 @@ script_runner = "bash"
 script = '''
 set -euo pipefail
 ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
+# Whatever the environment says, a build with scrub never goes here.
+"$ROOT/scripts/check-release-scrub.sh" --absent
 contract_id=$(cat "$ROOT/target/webapp/contract-id.txt")
 echo "publishing with test contract id $contract_id"
 # The frozen webapp contract wasm with the test key's parameters.
@@ -1076,6 +1085,11 @@ bash "$ROOT/scripts/run-isolated-nodes.sh" up
 
 # Publish to the iso gateway (port-overridden fdev).
 FREENET_ISO_GW_PORT="$GW_PORT" cargo make publish-email-iso
+# This is the default build, scrub off: the release check must refuse it.
+if bash "$ROOT/scripts/check-release-scrub.sh" > /dev/null 2>&1; then
+    echo "error: the release scrub check passed a build without scrub" >&2
+    exit 1
+fi
 
 CONTRACT_ID="$(cat "$ROOT/target/webapp/contract-id.txt")"
 BASE_URL="http://127.0.0.1:$GW_PORT/v1/contract/web/$CONTRACT_ID/"
@@ -1154,7 +1168,9 @@ trap cleanup EXIT
 bash "$ROOT/scripts/run-isolated-nodes.sh" wipe
 bash "$ROOT/scripts/run-isolated-nodes.sh" up
 # Builds and publishes in one flow, so the flag reaches the build.
-FREENET_MAIL_SCRUB=1 FREENET_ISO_GW_PORT="$GW_PORT" cargo make publish-email-iso
+FREENET_MAIL_SCRUB=1 FREENET_MAIL_SCRUB_ISO=1 FREENET_ISO_GW_PORT="$GW_PORT" cargo make publish-email-iso
+# The build that was published has scrub: the marker survived dx and wasm-opt.
+bash "$ROOT/scripts/check-release-scrub.sh"
 cargo run --manifest-path "$ROOT/Cargo.toml" -p v1-node-seed -- "$GW_PORT"
 
 CONTRACT_ID="$(cat "$ROOT/target/webapp/contract-id.txt")"

@@ -640,6 +640,14 @@ fn the_report_says_why_and_the_snapshot_is_written_once() {
 
 // ── The build ───────────────────────────────────────────────────────────────
 
+/// The release check reads the marker out of the WASM, so it must be compiled
+/// in exactly when scrub is: a marker logged outside the flag's branch would
+/// pass a build with scrub off.
+#[test]
+fn the_build_marker_is_there_only_with_scrub() {
+    assert_eq!(scrub::BUILD_MARKER.is_empty(), !scrub::BUILT_IN);
+}
+
 /// Every check passes and everything is ready, and a build without the flag
 /// sends nothing: `after_listing` can only reach `run`.
 #[test]
@@ -826,6 +834,67 @@ fn the_current_import_of_an_item_passes_without_a_snapshot_entry() {
     assert_eq!(scrub_all(&delegate, &node, &outcome), Vec::new());
 }
 
+/// A newer row that answers only after the older one landed holds the same
+/// draft with newer text. Import never overwrites, so the delegate keeps the
+/// older text and the newer row holds the only copy of the other.
+#[test]
+fn a_silent_newer_row_answering_late_with_newer_text_blocks() {
+    let delegate = Delegate::new();
+    let node = Node::default();
+    node.set(im(205), answer(golden("identity_state_seeded")));
+    node.set(im(206), answer(golden("identity_state_seeded")));
+    let mut older: serde_json::Value = serde_json::from_slice(&golden("ls_state")).unwrap();
+    older["aliases"]["alice"]["drafts"]["d1"]["subject"] = json!("an earlier subject");
+    node.set(ls(205), answer(serde_json::to_vec(&older).unwrap()));
+    node.set(ls(206), LegacyReply::NoAnswer("timed out".into()));
+    let mut outcome = walk(&delegate, &node, six_messages());
+    for _ in 0..HOLD_BACK_LOADS {
+        outcome = walk(&delegate, &node, six_messages());
+    }
+    assert_eq!(delegate.list(ItemKind::Draft, Some(alice())).len(), 1);
+    scrub_now(&delegate, &node, &outcome);
+    back_up(&delegate, alice());
+
+    node.set(ls(206), answer(golden("ls_state")));
+    let outcome = walk(&delegate, &node, six_messages());
+    let blockers = scrub_now(&delegate, &node, &outcome);
+    assert_eq!(
+        blockers,
+        vec![Blocker::NotImported {
+            generation: 206,
+            ids: 1
+        }]
+    );
+    assert_nothing_deleted(&node, &blockers);
+}
+
+/// A row stopped on a retryable failure after its draft landed. An old tab
+/// then edits the draft, and the next load reads the edit: the draft in the
+/// delegate is the earlier text, so the edit must not be taken for what landed.
+#[test]
+fn a_resumed_row_that_an_old_tab_edited_blocks() {
+    let delegate = Delegate::new();
+    let node = usual_node();
+    delegate.faults.borrow_mut().false_conflict = Some(ItemKind::Archived);
+    let first = walk(&delegate, &node, six_messages());
+    assert!(first.unfinished(), "206's local state stays started");
+    assert_eq!(delegate.list(ItemKind::Draft, Some(alice())).len(), 1);
+    old_tab_edits_the_draft(&node);
+    let outcome = settle(&delegate, &node);
+    assert!(!outcome.unfinished());
+    scrub_now(&delegate, &node, &outcome);
+    back_up(&delegate, alice());
+    let blockers = scrub_now(&delegate, &node, &outcome);
+    assert_eq!(
+        blockers,
+        vec![Blocker::NotImported {
+            generation: 206,
+            ids: 1
+        }]
+    );
+    assert_nothing_deleted(&node, &blockers);
+}
+
 // ── The snapshot is per row ─────────────────────────────────────────────────
 
 /// A deletion on load 2, long before the other rows stand, does not block.
@@ -856,7 +925,9 @@ fn a_deletion_on_the_second_load_does_not_block() {
 fn a_row_that_returns_after_its_identity_row_went_is_filed() {
     let delegate = Delegate::new();
     let node = usual_node();
-    let mail = golden("ls_state");
+    // Without its old backup time: the identity was backed up while the row
+    // was away, and a stamp that differs from the delegate's blocks.
+    let mail = golden_edited("ls_state", r#","last_backup_at":9"#, "");
     node.set(ls(206), LegacyReply::NotInstalled);
     let outcome = settle(&delegate, &node);
     assert_eq!(
@@ -1013,6 +1084,55 @@ fn an_identity_the_user_deleted_does_not_block() {
         assert_eq!(scrub_unlisted(&delegate, &node, &outcome), Vec::new());
     }
     assert_eq!(delegate.ledger().scrubbed.get(&IDENTITY_206), Some(&true));
+}
+
+/// The address comes from the signing key alone, so a row with the same
+/// address and another KEM seed is imported as already present and its seed
+/// is dropped. Deleting the row would lose mail encrypted to that key.
+#[test]
+fn a_row_whose_kem_seed_differs_from_the_delegates_blocks() {
+    let delegate = Delegate::new();
+    let node = usual_node();
+    let outcome = ready(&delegate, &node);
+    old_tab_writes(&node, im(206), |state| {
+        let key = &mut state["identities"]["alice"]["key"];
+        let bytes: Vec<u8> = serde_json::from_value(key.clone()).unwrap();
+        let mut seeds: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let first = seeds["ml_kem_seed"][0].as_u64().unwrap();
+        seeds["ml_kem_seed"][0] = json!(first + 1);
+        *key = json!(serde_json::to_vec(&seeds).unwrap());
+    });
+    let blockers = scrub_now(&delegate, &node, &outcome);
+    assert!(blockers.contains(&Blocker::KeyMismatch(1)), "{blockers:?}");
+    assert_nothing_deleted(&node, &blockers);
+}
+
+/// The backup check names an owner from any pair that has one. Rows holding
+/// only a message, or only a settings pair, for an identity with no backup.
+#[test]
+fn a_message_or_settings_pair_alone_names_the_owner() {
+    use super::super::legacy_delegates::PairKey;
+    let delegate = Delegate::new();
+    let node = usual_node();
+    let outcome = settle(&delegate, &node);
+    scrub_now(&delegate, &node, &outcome);
+    let ledger = delegate.ledger();
+    let identities = delegate
+        .identities()
+        .into_iter()
+        .map(|i| (i.addr, i))
+        .collect();
+    let message = PairKey::Message {
+        kind: ItemKind::Draft,
+        owner: alice(),
+        id: [7; 16],
+    };
+    for key in [message, PairKey::IdentitySettings(alice())] {
+        let rows: Vec<scrub::Row> = vec![(206, vec![(key.clone(), Vec::new())])];
+        let mut store = delegate.clone();
+        let blockers = block_on(scrub::row_blockers(&mut store, &rows, &ledger, &identities));
+        assert!(blockers.unwrap().contains(&Blocker::NoBackup(1)), "{key:?}");
+    }
 }
 
 // ── Orphans ─────────────────────────────────────────────────────────────────

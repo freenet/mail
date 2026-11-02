@@ -39,10 +39,14 @@ task() { # <name>: the task's lines
 }
 
 MARKER=$(sed -n 's/^MARKER="\(.*\)"$/\1/p' "$CHECK")
-if grep -q -F "const BUILD_MARKER: &str = \"$MARKER\";" "$ROOT/ui/src/migration/scrub.rs"; then
-    pass "the marker is the one scrub.rs compiles in"
+# The text must be written once, in the branch the flag selects: a second copy
+# (a log line of its own) would put it into a build with scrub off.
+if [ "$(grep -r -F -c -- "\"$MARKER\"" "$ROOT/ui/src" | awk -F: '{ n += $2 } END { print n }')" -eq 1 ] \
+    && grep -q -F -B1 -A2 "if BUILT_IN {" "$ROOT/ui/src/migration/scrub.rs" \
+    && grep -A1 -F "if BUILT_IN {" "$ROOT/ui/src/migration/scrub.rs" | grep -q -F "\"$MARKER\""; then
+    pass "the marker is written once, in the branch the flag selects"
 else
-    fail "the marker is not the one scrub.rs compiles in"
+    fail "the marker is not written once in the branch the flag selects"
 fi
 
 mkdir -p "$TMP/with/wasm" "$TMP/without/wasm" "$TMP/none"
@@ -51,6 +55,9 @@ printf 'bytes only' > "$TMP/without/wasm/app_bg.wasm"
 check "a build with the marker passes" 0 --dir "$TMP/with"
 check "a build without the marker is refused" 1 --dir "$TMP/without"
 check "a directory with no WASM is refused" 1 --dir "$TMP/none"
+check "a test publish refuses a build with the marker" 1 --absent --dir "$TMP/with"
+check "a test publish takes a build without it" 0 --absent --dir "$TMP/without"
+check "a test publish refuses a directory with no WASM" 1 --absent --dir "$TMP/none"
 
 deps=$(task publish-email | tr -d '\n ' | sed -n 's/.*dependencies=\[\([^]]*\)\].*/\1/p')
 case "$deps" in
@@ -72,10 +79,34 @@ if grep -q '^cargo make publish-production$' "$ROOT/scripts/release.sh"; then
 else
     fail "release.sh does not publish through publish-production"
 fi
-if task test-e2e-legacy-migration | grep -q 'FREENET_MAIL_SCRUB=1 .*cargo make publish-email-iso'; then
-    pass "test-e2e-legacy-migration builds with the flag"
+if task test-e2e-legacy-migration | grep -q 'FREENET_MAIL_SCRUB=1 FREENET_MAIL_SCRUB_ISO=1 .*cargo make publish-email-iso'; then
+    pass "test-e2e-legacy-migration builds with the flag, for the harness's nodes"
 else
-    fail "test-e2e-legacy-migration does not build with the flag"
+    fail "test-e2e-legacy-migration does not build with the flag, for the harness's nodes"
+fi
+if task test-e2e-legacy-migration | grep -q '^bash "$ROOT/scripts/check-release-scrub.sh"$'; then
+    pass "test-e2e-legacy-migration checks the build it published has the marker"
+else
+    fail "test-e2e-legacy-migration does not check the build it published"
+fi
+if task test-e2e-real-node | grep -q 'check-release-scrub.sh'; then
+    pass "test-e2e-real-node checks that the default build is refused"
+else
+    fail "test-e2e-real-node does not check that the default build is refused"
+fi
+if task sign-webapp-test | grep -q 'check-release-scrub.sh" --absent' \
+    && task publish-email-test | grep -q 'check-release-scrub.sh" --absent'; then
+    pass "a test publish refuses a build with scrub in it"
+else
+    fail "a test publish does not refuse a build with scrub in it"
+fi
+# Only the legacy real-node task may bring the flag to the test build, and the
+# variable that allows it must not be set anywhere else, in any syntax.
+if [ "$(grep -r -l 'FREENET_MAIL_SCRUB_ISO' "$ROOT/Makefile.toml" "$ROOT/.cargo" "$ROOT/ui/.cargo" "$ROOT/.github" 2>/dev/null | wc -l)" -eq 1 ] \
+    && ! grep -q -E '^\s*FREENET_MAIL_SCRUB(_ISO)?\s*=\s*"' "$ROOT/Makefile.toml"; then
+    pass "the flag is set nowhere else in the Makefile or the cargo config"
+else
+    fail "the flag is set elsewhere in the Makefile or the cargo config"
 fi
 if [ "$(grep -c 'FREENET_MAIL_SCRUB=1 ' "$MAKEFILE")" -eq 2 ]; then
     pass "nothing else in the Makefile sets the flag"

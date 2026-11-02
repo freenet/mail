@@ -797,6 +797,32 @@ ut "a late snapshot takes only what still equals the import" "$S" \
     'if is_import_of(store, &key, value, identities).await? {' \
     'if present(store, &key, identities).await? {' \
     a_snapshot_written_late_takes_what_still_equals_the_import
+ut "the snapshot records only a value the delegate holds" "$S" \
+    '                    || holds_now(store, &decoded, hash, settings.as_deref(), identities).await?' \
+    '                    || present(store, &decoded, identities).await?' \
+    a_silent_newer_row_answering_late_with_newer_text_blocks,a_resumed_row_that_an_old_tab_edited_blocks
+ut "an older copy of a newer item is recorded" "$S" \
+    '                if newer
+' \
+    '                if false
+' \
+    an_older_copy_of_a_newer_item_does_not_block
+ut "a differing KEM key blocks" "$S" \
+    '    if mismatched > 0 {' \
+    '    if false {' \
+    a_row_whose_kem_seed_differs_from_the_delegates_blocks
+ut "a message names the identity it belongs to" "$S" \
+    '        PairKey::Message { owner, .. } => Some(*owner),' \
+    '        PairKey::Message { .. } => None,' \
+    a_message_or_settings_pair_alone_names_the_owner
+ut "identity settings name the identity they belong to" "$S" \
+    'PairKey::Identity(addr) | PairKey::Flags(addr) | PairKey::IdentitySettings(addr) => {' \
+    'PairKey::Identity(addr) | PairKey::Flags(addr) => {' \
+    a_message_or_settings_pair_alone_names_the_owner
+ut "the build marker is chosen by the flag" "$S" \
+    'const BUILD_MARKER: &str = if BUILT_IN {' \
+    'const BUILD_MARKER: &str = if true {' \
+    the_build_marker_is_there_only_with_scrub
 ut "the snapshot is written as a row resolves" "$S" \
     '    write_snapshots(store, &mut adapter, &unrecorded, outcome, &identities).await?;' \
     '    if pending.is_empty() {
@@ -972,9 +998,37 @@ PUBLISHED=1' \
 PUBLISHED=1' \
     "not ok - release.sh does not publish through publish-production" scrub_release_tests
 guard "the legacy real-node task builds with scrub" "$STAGE/Makefile.toml" \
-    'FREENET_MAIL_SCRUB=1 FREENET_ISO_GW_PORT="$GW_PORT" cargo make publish-email-iso' \
+    'FREENET_MAIL_SCRUB=1 FREENET_MAIL_SCRUB_ISO=1 FREENET_ISO_GW_PORT="$GW_PORT" cargo make publish-email-iso' \
     'FREENET_ISO_GW_PORT="$GW_PORT" cargo make publish-email-iso' \
-    "not ok - test-e2e-legacy-migration does not build with the flag" scrub_release_tests
+    "not ok - test-e2e-legacy-migration does not build with the flag, for the harness's nodes" scrub_release_tests
+guard "the legacy real-node task checks its build" "$STAGE/Makefile.toml" \
+    '# The build that was published has scrub: the marker survived dx and wasm-opt.
+bash "$ROOT/scripts/check-release-scrub.sh"' \
+    '' \
+    "not ok - test-e2e-legacy-migration does not check the build it published" scrub_release_tests
+guard "the default real-node task checks its build is refused" "$STAGE/Makefile.toml" \
+    'if bash "$ROOT/scripts/check-release-scrub.sh" > /dev/null 2>&1; then' \
+    'if false; then' \
+    "not ok - test-e2e-real-node does not check that the default build is refused" scrub_release_tests
+guard "a test signing refuses a build with scrub" "$STAGE/Makefile.toml" \
+    'if [ "${FREENET_MAIL_SCRUB_ISO:-}" != "1" ]; then
+    "$ROOT/scripts/check-release-scrub.sh" --absent
+fi' \
+    '' \
+    "not ok - a test publish does not refuse a build with scrub in it" scrub_release_tests
+guard "a test publish refuses a build with scrub" "$STAGE/Makefile.toml" \
+    '# Whatever the environment says, a build with scrub never goes here.
+"$ROOT/scripts/check-release-scrub.sh" --absent' \
+    '' \
+    "not ok - a test publish does not refuse a build with scrub in it" scrub_release_tests
+guard "the absent check reads the build" "$STAGE/scripts/check-release-scrub.sh" \
+    '        if grep -a -q -F -- "$MARKER" "$file"; then' \
+    '        if false; then' \
+    "not ok - a test publish refuses a build with the marker" scrub_release_tests
+guard "the marker is written once" "$STAGE/ui/src/migration/scrub.rs" \
+    '    crate::log::info(BUILD_MARKER);' \
+    '    crate::log::info("freenet-mail:scrub-built-in");' \
+    "not ok - the marker is not written once in the branch the flag selects" scrub_release_tests
 guard "the freeze override needs the test flag" "$STAGE/scripts/check-release-freeze.sh" \
     'if [ "${RELEASE_FREEZE_TEST:-}" = "1" ]; then' 'if true; then' \
     "not ok - RELEASE_FREEZE_FILE without the test flag does not lift the freeze" freeze_tests
