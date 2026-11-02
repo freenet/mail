@@ -227,8 +227,10 @@ impl Delegate {
     }
 
     fn markers_written(&self) -> Vec<StoredMarker> {
+        let ledger = super::ledger::ledger_item().id;
         self.list(ItemKind::MigrationMarker, None)
             .iter()
+            .filter(|i| i.item.id != ledger)
             .map(|i| serde_json::from_slice(&i.body).unwrap())
             .collect()
     }
@@ -798,9 +800,10 @@ fn scenario_two_identities_with_one_alias_both_arrive() {
     assert!(aliases[1].starts_with("alice ("), "{}", aliases[1]);
 }
 
-/// Mail for an alias with no identity is kept, and said to be unmatched. Its
-/// own generation's identities must have answered with something, or there
-/// is no telling: see the next test.
+/// Mail for an alias with no identity is kept, and said to be unmatched, once
+/// every row that could hold the alias has stood as holding nothing. Its own
+/// generation's identities must have answered with something, or there is no
+/// telling: see the next test.
 #[test]
 fn scenario_an_alias_with_no_identity_is_kept_not_lost() {
     let delegate = Delegate::new();
@@ -814,6 +817,10 @@ fn scenario_an_alias_with_no_identity_is_kept_not_lost() {
         )),
     );
     node.set(ls(206), answer(golden("ls_state")));
+    for load in 0..HOLD_BACK_LOADS {
+        walk(&delegate, &node, no_inbox());
+        assert_eq!(orphan_count(&delegate), 0, "load {load}");
+    }
     let outcome = walk(&delegate, &node, no_inbox());
     let orphans = delegate.list(ItemKind::LegacyOrphan, None);
     assert_eq!(orphans.len(), 5, "draft, sent, kept, archived, settings");
@@ -1341,17 +1348,7 @@ fn a_silent_identity_generation_makes_an_unknown_alias_an_error() {
     tables.incomplete = true;
     let mut counts = MappingCounts::default();
     let newer = NewerAliases::default();
-    assert!(
-        map_local_state(
-            &golden("ls_state"),
-            206,
-            &tables,
-            &newer,
-            false,
-            &mut counts
-        )
-        .is_err()
-    );
+    assert!(map_local_state(&golden("ls_state"), 206, &tables, &newer, &mut counts).is_err());
 }
 
 #[test]
@@ -1407,7 +1404,7 @@ fn an_item_over_its_size_cap_is_refused_and_counted() {
     tables.add(206, HashMap::from([("alice".to_string(), alice())]));
     let mut counts = MappingCounts::default();
     let newer = NewerAliases::default();
-    let pairs = map_local_state(&reply, 206, &tables, &newer, false, &mut counts).unwrap();
+    let pairs = map_local_state(&reply, 206, &tables, &newer, &mut counts).unwrap();
     // The golden draft and sent message both hold that body.
     assert_eq!(counts.oversized, 2);
     let refused = pairs
@@ -1736,6 +1733,104 @@ fn scenario_aliases_of_an_absent_identity_row_become_orphans_after_enough_loads(
     }
 }
 
+/// The identity row imported, then its local-state row was silent for three
+/// loads. One failed read of the identity row answers empty as the local
+/// state finally arrives. The journal holds the identity row as resolved with
+/// data, so the mail waits for it, however often that happens.
+#[test]
+fn scenario_a_resolved_identity_row_never_stands_as_absent() {
+    let delegate = Delegate::new();
+    let node = populated_node();
+    node.set(ls(206), LegacyReply::NoAnswer("timed out".into()));
+    for _ in 0..HOLD_BACK_LOADS {
+        walk(&delegate, &node, no_inbox());
+    }
+    node.set(ls(206), answer(golden("ls_state")));
+    for identity_row in [
+        answer(br#"{"identities":{}}"#.to_vec()),
+        LegacyReply::NotInstalled,
+    ] {
+        node.set(im(206), identity_row);
+        for load in 0..HOLD_BACK_LOADS * 2 {
+            walk(&delegate, &node, no_inbox());
+            assert_eq!(orphan_count(&delegate), 0, "load {load}");
+        }
+    }
+    node.set(im(206), answer(golden("identity_state_seeded")));
+    walk(&delegate, &node, no_inbox());
+    assert_eq!(orphan_count(&delegate), 0);
+    assert_eq!(delegate.list(ItemKind::Archived, Some(alice())).len(), 1);
+}
+
+/// The identity row is silent while its local state's attempts run up. One
+/// empty answer then is not three loads of them.
+#[test]
+fn scenario_one_empty_answer_after_a_silence_orphans_nothing() {
+    let delegate = Delegate::new();
+    let node = Node::default();
+    node.set(im(206), LegacyReply::NoAnswer("timed out".into()));
+    node.set(ls(206), answer(golden("ls_state")));
+    for _ in 0..HOLD_BACK_LOADS {
+        walk(&delegate, &node, no_inbox());
+    }
+    node.set(im(206), answer(br#"{"identities":{}}"#.to_vec()));
+    walk(&delegate, &node, no_inbox());
+    assert_eq!(orphan_count(&delegate), 0);
+    node.set(im(206), answer(golden("identity_state_seeded")));
+    walk(&delegate, &node, no_inbox());
+    assert_eq!(orphan_count(&delegate), 0);
+    assert_eq!(delegate.list(ItemKind::Archived, Some(alice())).len(), 1);
+}
+
+/// Absent answers count only in a row: anything else starts them over.
+#[test]
+fn scenario_absent_answers_count_only_in_a_row() {
+    let delegate = Delegate::new();
+    let node = Node::default();
+    node.set(ls(206), answer(golden("ls_state")));
+    for load in 0..HOLD_BACK_LOADS * 4 {
+        let reply = if load % HOLD_BACK_LOADS == HOLD_BACK_LOADS - 1 {
+            LegacyReply::NoAnswer("timed out".into())
+        } else {
+            answer(br#"{"identities":{}}"#.to_vec())
+        };
+        node.set(im(206), reply);
+        walk(&delegate, &node, no_inbox());
+        assert_eq!(orphan_count(&delegate), 0, "load {load}");
+    }
+    let empty = answer(br#"{"identities":{}}"#.to_vec());
+    node.set(im(206), empty);
+    for load in 0..HOLD_BACK_LOADS {
+        walk(&delegate, &node, no_inbox());
+        assert_eq!(orphan_count(&delegate), 0, "load {load}");
+    }
+    walk(&delegate, &node, no_inbox());
+    assert_eq!(orphan_count(&delegate), 5);
+}
+
+/// An alias only the older identity row knows, as after a v0.2.7 rename. One
+/// empty answer from that row on the first load does not orphan it: there is
+/// no first-load path around the count.
+#[test]
+fn scenario_a_transient_empty_in_another_generation_orphans_nothing() {
+    let delegate = Delegate::new();
+    let node = Node::default();
+    let own_table = golden_edited(
+        "identity_state_seeded",
+        r#"{"identities":{"alice":"#,
+        r#"{"identities":{"renamed":"#,
+    );
+    node.set(im(206), answer(own_table));
+    node.set(im(205), answer(br#"{"identities":{}}"#.to_vec()));
+    node.set(ls(206), answer(golden("ls_state")));
+    walk(&delegate, &node, no_inbox());
+    assert_eq!(orphan_count(&delegate), 0);
+    node.set(im(205), answer(golden("identity_state_seeded")));
+    walk(&delegate, &node, no_inbox());
+    assert_eq!(orphan_count(&delegate), 0);
+    assert_eq!(delegate.list(ItemKind::Archived, Some(alice())).len(), 1);
+}
+
 /// A row that gave no answer holds no decision. However long it stays silent
 /// or undecodable, nothing is orphaned and the local-state row stays pending.
 #[test]
@@ -1793,7 +1888,14 @@ impl V1InboxReader for InboxUnder {
 #[test]
 fn the_inbox_check_covers_the_current_hash_and_every_registry_row() {
     let hashes = v1_inbox_hashes();
-    assert!(hashes.contains(&crate::inbox::INBOX_CODE_HASH.trim().to_string()));
+    // An offline build embeds no inbox contract: its current hash is empty,
+    // and an empty hash derives no key to ask for.
+    assert!(!hashes.iter().any(String::is_empty));
+    let current = crate::inbox::INBOX_CODE_HASH.trim();
+    assert_eq!(cfg!(feature = "use-node"), !current.is_empty());
+    if cfg!(feature = "use-node") {
+        assert!(hashes.contains(&current.to_string()));
+    }
     for row in crate::legacy_registry::LEGACY_INBOX_CODE_HASHES.iter() {
         assert!(hashes.contains(&bs58::encode(row).into_string()));
     }
@@ -1834,7 +1936,9 @@ fn orphan_node() -> Delegate {
         )),
     );
     node.set(ls(206), answer(golden("ls_state")));
-    walk(&delegate, &node, no_inbox());
+    for _ in 0..=HOLD_BACK_LOADS {
+        walk(&delegate, &node, no_inbox());
+    }
     delegate
 }
 

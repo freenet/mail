@@ -45,15 +45,22 @@ pub(crate) fn classify_response(values: &[OutboundDelegateMsg]) -> LegacyReply {
 }
 
 /// What a node delegate error means for a legacy request to `waiting`, `None`
-/// if it is not about that request. An error naming another delegate is not;
-/// one naming none is taken to be the request in flight's.
-pub(crate) fn classify_error(error: &DelegateError, waiting: &DelegateKey) -> Option<LegacyReply> {
+/// if it is not about that request. An error naming another delegate is not.
+/// One naming none is taken to be the request in flight's, unless a mail or
+/// token call (`others_in_flight`) may own it: the walk runs beside the user,
+/// and a legacy row loses only a load to a silence, where a send would wait
+/// out its whole timeout.
+pub(crate) fn classify_error(
+    error: &DelegateError,
+    waiting: &DelegateKey,
+    others_in_flight: bool,
+) -> Option<LegacyReply> {
     match error {
         DelegateError::Missing(key) => (key == waiting).then_some(LegacyReply::NotInstalled),
         DelegateError::RegisterError(key) | DelegateError::MissingSecret { key, .. } => {
             (key == waiting).then(|| LegacyReply::NoAnswer(error.to_string()))
         }
-        _ => Some(LegacyReply::NoAnswer(error.to_string())),
+        _ => (!others_in_flight).then(|| LegacyReply::NoAnswer(error.to_string())),
     }
 }
 
@@ -70,15 +77,22 @@ pub(crate) fn offer_response(key: &DelegateKey, values: &[OutboundDelegateMsg]) 
 }
 
 /// Offer a node delegate error to the waiting legacy request. Returns whether
-/// it took it; if so the error is not a mail-delegate call's.
-pub(crate) fn offer_error(error: &DelegateError) -> bool {
+/// it took it; if so the error is not a mail-delegate call's. A row that is
+/// simply not installed is an expected answer, not an error.
+pub(crate) fn offer_error(error: &DelegateError, others_in_flight: bool) -> bool {
     let waiting = LEGACY_WAITER.with(|w| w.borrow().keys().next().cloned());
     let Some(key) = waiting else {
         return false;
     };
-    let Some(reply) = classify_error(error, &key) else {
+    let Some(reply) = classify_error(error, &key, others_in_flight) else {
         return false;
     };
+    match &reply {
+        LegacyReply::NotInstalled => {
+            crate::log::info(format!("migration: {key} is not installed on this node"))
+        }
+        _ => crate::log::error(format!("migration: reading {key} failed: {error}"), None),
+    }
     if let Some(waiter) = LEGACY_WAITER.with(|w| w.borrow_mut().remove(&key)) {
         let _ = waiter.send(reply);
     }
@@ -268,16 +282,35 @@ mod tests {
     fn only_a_typed_missing_for_this_delegate_is_not_installed() {
         let waiting = key(1);
         assert_eq!(
-            classify_error(&DelegateError::Missing(waiting.clone()), &waiting),
+            classify_error(&DelegateError::Missing(waiting.clone()), &waiting, false),
             Some(LegacyReply::NotInstalled)
         );
         assert_eq!(
-            classify_error(&DelegateError::Missing(key(2)), &waiting),
+            classify_error(&DelegateError::Missing(key(2)), &waiting, false),
             None
         );
         assert!(matches!(
-            classify_error(&DelegateError::ExecutionError("trap".into()), &waiting),
+            classify_error(
+                &DelegateError::ExecutionError("trap".into()),
+                &waiting,
+                false
+            ),
             Some(LegacyReply::NoAnswer(_))
         ));
+    }
+
+    /// The error carries no key, so while a mail or token call waits it may
+    /// be theirs, and it goes to them: a send must not wait out its timeout
+    /// for a legacy row's sake.
+    #[test]
+    fn a_keyless_error_is_taken_only_with_no_other_call_waiting() {
+        let waiting = key(1);
+        let keyless = DelegateError::ExecutionError("trap".into());
+        assert_eq!(classify_error(&keyless, &waiting, true), None);
+        assert_eq!(
+            classify_error(&DelegateError::Missing(waiting.clone()), &waiting, true),
+            Some(LegacyReply::NotInstalled),
+            "a keyed answer is still this request's"
+        );
     }
 }

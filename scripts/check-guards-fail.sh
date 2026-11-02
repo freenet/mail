@@ -584,9 +584,42 @@ ut "an orphan move never overwrites an item" "$M/orphans.rs" \
     '        Some(_) => Ok(()),' \
     moving_an_orphan_never_overwrites_an_item_already_there
 ut "a silent identity row never orphans its aliases" "$M/legacy_delegates.rs" \
-    'AliasOwner::Unresolved if orphan_unresolved && aliases.own_row_absent(generation) => {' \
-    'AliasOwner::Unresolved if orphan_unresolved => {' \
+    'AliasOwner::Unresolved if aliases.own_row_absent(generation) => None,' \
+    'AliasOwner::Unresolved => None,' \
     scenario_a_silent_identity_row_never_orphans_its_aliases
+ut "one absent answer does not stand" "$M/legacy_delegates.rs" \
+    '.is_some_and(|answers| *answers >= HOLD_BACK_LOADS)
+    }
+
+    /// Every identity generation' \
+    '.is_none_or(|answers| *answers < u32::MAX)
+    }
+
+    /// Every identity generation' \
+    scenario_one_empty_answer_after_a_silence_orphans_nothing
+ut "a resolved identity row never stands as absent" "$M/legacy_delegates.rs" \
+    '        self.pending_walks
+            .contains_key(entry.delegate_key.as_slice())
+            && self
+                .absent_answers' \
+    '        self.absent_answers' \
+    scenario_a_resolved_identity_row_never_stands_as_absent
+ut "absent answers count only in a row" "$M/mod.rs" \
+    '                    l.absent_answers.remove(generation);' \
+    '' \
+    scenario_absent_answers_count_only_in_a_row
+ut "another generation's transient empty does not orphan" "$M/legacy_delegates.rs" \
+    '            } else {
+                tables.incomplete = true;
+            }
+        }
+        tables' \
+    '            } else {
+                tables.incomplete |= !matches!(&reply, Ok(r) if row_holds_nothing(r));
+            }
+        }
+        tables' \
+    scenario_a_transient_empty_in_another_generation_orphans_nothing
 guard "send asks an unconfirmed identity to confirm" "$STAGE/ui/src/app.rs" \
     '        if login::Identity::get_alias(&sender_for_send).is_some_and(|i| !i.confirmed) {' \
     '        if false && login::Identity::get_alias(&sender_for_send).is_some_and(|i| !i.confirmed) {' \

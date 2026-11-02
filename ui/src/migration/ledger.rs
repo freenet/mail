@@ -3,6 +3,8 @@
 //! equal. That kind is per origin and never exported, and the walk never reads
 //! it.
 
+use std::collections::BTreeMap;
+
 use freenet_mail_protocol::{Addr, Item, ItemKind, ItemRef, Op, Reply};
 use freenet_stdlib::prelude::blake3;
 use serde::{Deserialize, Serialize};
@@ -16,6 +18,15 @@ use crate::mail_delegate::CallError;
 pub(crate) struct Ledger {
     pub totals: MigrationCounts,
     pub notice_dismissed: bool,
+    /// Each identity row's absent-or-empty answers in a row, by lineage
+    /// generation. Any other answer ends the run. The journal cannot give
+    /// this: its streak counts typed "not installed" only.
+    pub absent_answers: BTreeMap<u32, u32>,
+    /// The last walk found a row silent or unreadable. Loads that do not walk
+    /// show this.
+    pub silent: bool,
+    /// The rejected count the notice last showed.
+    pub rejected: u32,
 }
 
 fn reserved_item(name: &[u8], index: u32) -> ItemRef {
@@ -30,12 +41,12 @@ fn reserved_item(name: &[u8], index: u32) -> ItemRef {
     }
 }
 
-fn ledger_item() -> ItemRef {
+pub(crate) fn ledger_item() -> ItemRef {
     reserved_item(b"ledger", 0)
 }
 
 /// The stored ledger. One that cannot be decoded is an error, never an empty
-/// ledger: scrub's journal is in it.
+/// ledger: the counts in it are the only record of what moved.
 pub(crate) async fn read_ledger<S: MailStore>(store: &mut S) -> Result<Ledger, CallError> {
     match get_item(store, ledger_item()).await? {
         Some(item) => serde_json::from_slice(&item.body)
@@ -51,12 +62,13 @@ pub(crate) async fn update_ledger<S: MailStore>(
     change: impl Fn(&mut Ledger),
 ) -> Result<(), CallError> {
     merged_put(store, ledger_item(), |stored| {
-        let mut ledger = match stored {
+        let mut ledger: Ledger = match stored {
             Some(body) => serde_json::from_slice(body).ok()?,
             None => Ledger::default(),
         };
+        let before = ledger.clone();
         change(&mut ledger);
-        Some(serde_json::to_vec(&ledger).expect("a ledger always encodes"))
+        (ledger != before).then(|| serde_json::to_vec(&ledger).expect("a ledger always encodes"))
     })
     .await
     .map(|_| ())

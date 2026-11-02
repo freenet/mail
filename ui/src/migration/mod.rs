@@ -35,10 +35,13 @@
 //!   identity listing and blocks nothing: while it runs, an empty list shows
 //!   "Checking for your previous Mail data", and the list is read again when
 //!   it ends if it imported anything.
-//! - **A row that stays unresolved does not hold the rest back for good.** An
-//!   alias that cannot be resolved keeps its local-state row pending for
-//!   [`legacy_delegates::HOLD_BACK_LOADS`] walks, then its items go to the
-//!   orphans, which the user can move to an identity ([`orphans`]).
+//! - **A row that stays unresolved does not hold the rest back for good, and
+//!   only a standing absence orphans.** An alias that cannot be resolved keeps
+//!   its local-state row pending. Once every identity row that could hold it
+//!   has answered absent or empty more than
+//!   [`legacy_delegates::HOLD_BACK_LOADS`] loads in a row, its items go to the
+//!   orphans, which the user can move to an identity ([`orphans`]). A row the
+//!   journal holds as resolved had data, so it never stands as absent.
 //! - **The predecessors are never modified.** Nothing here deletes from them.
 //!
 //! The journal and the markers live in the mail delegate under the caller's
@@ -203,7 +206,8 @@ fn pending_walks(
 
 /// Run this load's migration: start the journal, and walk unless the journal
 /// says there is no need. Writes nothing migrated unless the journal stored
-/// its start first.
+/// its start first. The ledger is written here, as rows resolve and at the
+/// end, so a walk that dies is counted as far as it got.
 pub(crate) async fn run<S, T, I>(store: S, transport: T, inbox: I, roll: u8) -> WalkOutcome
 where
     S: MailStore,
@@ -228,16 +232,19 @@ where
             };
         }
     };
+    let stored = ledger::read_ledger(successor.store()).await.ok();
     if !walk_this_load(&status, roll) {
         return WalkOutcome {
+            silent_rows: stored.map_or(0, |l| usize::from(l.silent)),
             status: Some(status),
             report: None,
             counts: successor.into_counts(),
-            silent_rows: 0,
         };
     }
     let walks = pending_walks(&status, &lineage);
-    let mut predecessors = LegacyAdapter::new(transport, lineage.clone(), walks, arrived);
+    let absent_answers = stored.map(|l| l.absent_answers).unwrap_or_default();
+    let mut predecessors =
+        LegacyAdapter::new(transport, lineage.clone(), walks, arrived, absent_answers);
     let report = migrate_delegate_secrets_journaled(
         &mut successor,
         &mut predecessors,
@@ -246,13 +253,32 @@ where
         policy(),
     )
     .await;
+    let silent_rows = predecessors.silent_rows();
+    let answers = predecessors.identity_answers();
+    let rejected = report.status.as_ref().map(JournalStatus::rejected_items);
+    successor
+        .update_ledger(predecessors.counts(), |l| {
+            for (generation, absent) in &answers {
+                if *absent {
+                    *l.absent_answers.entry(*generation).or_default() += 1;
+                } else {
+                    l.absent_answers.remove(generation);
+                }
+            }
+            l.silent = silent_rows > 0;
+            if let Some(rejected) = rejected.filter(|r| *r != l.rejected) {
+                l.rejected = rejected;
+                l.notice_dismissed = false;
+            }
+        })
+        .await;
     let mut counts = successor.into_counts();
     counts.merge_mapping(predecessors.counts());
     WalkOutcome {
         status: report.status.clone(),
         report: Some(report),
         counts,
-        silent_rows: predecessors.silent_rows(),
+        silent_rows,
     }
 }
 

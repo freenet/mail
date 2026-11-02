@@ -96,13 +96,6 @@ where
         crate::log::info(line);
     }
     if !outcome.counts.is_empty() {
-        let counts = outcome.counts;
-        if let Err(e) = ledger::update_ledger(&mut PageStore, |l| l.totals.absorb(&counts)).await {
-            crate::log::error(
-                format!("recording the migration's counts failed: {e}"),
-                None,
-            );
-        }
         load_identities().await;
     }
     {

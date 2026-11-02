@@ -2492,18 +2492,19 @@ pub(crate) async fn node_comms(
                                 crate::log::error(format!("FIXME: {err}"), None)
                             }
                             RequestError::DelegateError(error) => {
+                                let token_call = crate::aft::token_request_in_flight();
+                                let others = token_call || crate::mail_delegate::calls_in_flight();
+                                if crate::migration::node::offer_error(error, others) {
+                                    return;
+                                }
                                 crate::log::error(
                                     format!("received delegate request error: {error}"),
                                     None,
                                 );
-                                if crate::migration::node::offer_error(error) {
-                                    return;
-                                }
                                 // It carries no request id: end the mail
                                 // calls it may belong to now, as unknown,
                                 // rather than let them wait out their whole
                                 // timeout.
-                                let token_call = crate::aft::token_request_in_flight();
                                 if crate::mail_delegate::may_be_mail_delegate_error(
                                     error,
                                     crate::mail_delegate::node::key(),

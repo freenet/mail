@@ -24,6 +24,7 @@ use freenet_stdlib::prelude::DelegateKey;
 use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
 
+use super::ledger::{self, Ledger};
 use super::legacy_delegates::{
     LegacyFlags, MappingCounts, MigratedIdentity, PairKey, distinct_alias,
 };
@@ -84,8 +85,25 @@ impl MigrationCounts {
         self.deleted_marks += mapping.deleted_marks;
     }
 
-    /// Add a later run. Items are counted when written, so they add up. The
-    /// rest are found again on every retry, so the highest count stands.
+    /// What is new since `earlier`: items written in between, and the highest
+    /// of everything else, which is found again rather than added.
+    pub(crate) fn since(&self, earlier: &Self) -> Self {
+        MigrationCounts {
+            identities: self.identities - earlier.identities,
+            contacts: self.contacts - earlier.contacts,
+            drafts: self.drafts - earlier.drafts,
+            sent: self.sent - earlier.sent,
+            kept: self.kept - earlier.kept,
+            archived: self.archived - earlier.archived,
+            orphaned: self.orphaned - earlier.orphaned,
+            ..*self
+        }
+    }
+
+    /// Add a later run. Items counted as written add up: a retry reads before
+    /// it writes, so an item is not written twice, and a later generation's
+    /// copy of a stored item counts only if it differs. The rest are found
+    /// again on every retry, so the highest count stands.
     pub(crate) fn absorb(&mut self, run: &Self) {
         self.identities += run.identities;
         self.contacts += run.contacts;
@@ -354,6 +372,8 @@ pub(crate) struct MailSuccessor<S, I> {
     /// The journal's generation at the last load, `None` if it was unreadable.
     journal_generation: Option<u64>,
     counts: MigrationCounts,
+    /// What the ledger holds of `counts`.
+    recorded: MigrationCounts,
     arrived: ArrivedIdentities,
 }
 
@@ -364,6 +384,7 @@ impl<S: MailStore, I: V1InboxReader> MailSuccessor<S, I> {
             inbox,
             journal_generation: Some(0),
             counts: MigrationCounts::default(),
+            recorded: MigrationCounts::default(),
             arrived,
         }
     }
@@ -396,6 +417,38 @@ impl<S: MailStore, I: V1InboxReader> MailSuccessor<S, I> {
 
     pub(crate) fn into_counts(self) -> MigrationCounts {
         self.counts
+    }
+
+    pub(crate) fn store(&mut self) -> &mut S {
+        &mut self.store
+    }
+
+    /// Bring the ledger up to date, with `mapping` counted and `also` applied.
+    /// A change to the totals brings a dismissed notice back. A ledger that
+    /// cannot be written costs the notice, never the walk: what was not
+    /// recorded goes with the next write.
+    pub(crate) async fn update_ledger(
+        &mut self,
+        mapping: MappingCounts,
+        also: impl Fn(&mut Ledger),
+    ) {
+        let mut now = self.counts;
+        now.merge_mapping(mapping);
+        let new = now.since(&self.recorded);
+        let updated = ledger::update_ledger(&mut self.store, |l| {
+            let before = l.totals;
+            l.totals.absorb(&new);
+            l.notice_dismissed &= l.totals == before;
+            also(l);
+        })
+        .await;
+        match updated {
+            Ok(()) => self.recorded = now,
+            Err(e) => crate::log::error(
+                format!("recording the migration's counts failed: {e}"),
+                None,
+            ),
+        }
     }
 
     async fn get(&mut self, item: ItemRef) -> Result<Option<Item>, CallError> {
@@ -692,6 +745,11 @@ impl<S: MailStore, I: V1InboxReader> SuccessorSecretsIo for MailSuccessor<S, I> 
         predecessor: &DelegateKey,
         marker: MigrationMarker,
     ) -> Result<(), String> {
+        // A resolved row's counts are recorded now, so a tab closed during
+        // the walk loses only the row under way.
+        if matches!(marker, MigrationMarker::Done { .. }) {
+            self.update_ledger(MappingCounts::default(), |_| {}).await;
+        }
         // A record that does not decode is an error, not an empty marker:
         // writing over it could lower a data flag.
         let item = marker_item(predecessor);
