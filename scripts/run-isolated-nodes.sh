@@ -240,49 +240,73 @@ up() {
     status
 }
 
+# Whether process `$1` was started under the iso root. The nodes' command
+# lines carry `--data-dir <root>/...`, so a pid reused by anything else does
+# not match.
+is_ours() {
+    local cmd
+    cmd=$(tr '\0' ' ' < "/proc/$1/cmdline" 2>/dev/null || true)
+    [ -n "$cmd" ] || cmd=$(ps -o command= -p "$1" 2>/dev/null || true)
+    case "$cmd" in *"$ROOT/"*) return 0 ;; esac
+    return 1
+}
+
+# Whether the recorded id still names a process group of ours. The group is
+# tested, not only its leader: a child can outlive the leader. A live leader
+# must also be ours, or the id was reused. A group with no leader cannot be a
+# reuse, since a pid is not handed out while it still names a group.
+still_running() {
+    local id="$1"
+    if kill -0 -- "-$id" 2>/dev/null; then
+        if kill -0 "$id" 2>/dev/null && ! is_ours "$id"; then
+            return 1
+        fi
+        return 0
+    fi
+    kill -0 "$id" 2>/dev/null && is_ours "$id"
+}
+
+# Signal the group, and the leader, of a recorded id that is still ours.
+signal_recorded() {
+    local sig="$1" id="$2"
+    still_running "$id" || return 0
+    kill "-$sig" -- "-$id" 2>/dev/null || true
+    kill "-$sig" "$id" 2>/dev/null || true
+}
+
 down() {
-    # Kill by the PIDs recorded at startup, never by matching a command line:
-    # a prefix match on the iso root once killed a sibling test run. Kill the
-    # entire process group (negative pgid). spawn_setsid puts each freenet
-    # under its own session, so this takes any daemonized re-exec, child, or
-    # grandchild with it. Then check that what we recorded is gone.
+    # Kill by the PIDs recorded at startup, never by matching a command line
+    # across the machine: a prefix match on the iso root once killed a sibling
+    # test run. Each recorded id is checked against the iso root first, so a
+    # pid reused since is left alone, and the whole process group is signalled
+    # (spawn_setsid puts each freenet under its own session, so this takes any
+    # daemonized re-exec, child, or grandchild with it). Then check that what
+    # we recorded is gone.
     local recorded=()
-    for pgidfile in "$GW_PGIDFILE" "$PEER_PGIDFILE"; do
-        if [ -f "$pgidfile" ]; then
-            local pgid
-            pgid=$(cat "$pgidfile")
-            if [ -n "$pgid" ]; then
-                kill -TERM -- "-$pgid" 2>/dev/null || true
-                recorded+=("$pgid")
+    for idfile in "$GW_PGIDFILE" "$PEER_PGIDFILE" "$GW_PIDFILE" "$PEER_PIDFILE"; do
+        if [ -f "$idfile" ]; then
+            local id
+            id=$(cat "$idfile")
+            if [ -n "$id" ]; then
+                signal_recorded TERM "$id"
+                recorded+=("$id")
             fi
-            rm -f "$pgidfile"
+            rm -f "$idfile"
         fi
     done
-    for pidfile in "$GW_PIDFILE" "$PEER_PIDFILE"; do
-        if [ -f "$pidfile" ]; then
-            local pid
-            pid=$(cat "$pidfile")
-            if [ -n "$pid" ]; then
-                kill "$pid" 2>/dev/null || true
-                recorded+=("$pid")
-            fi
-            rm -f "$pidfile"
-        fi
-    done
-    # Verify the recorded processes died. A group that survives the grace
-    # period gets SIGKILL, and one that survives that is an error, not a
-    # quiet success: the next `up` would race it for the ports.
+    # Verify the recorded groups died. One that survives the grace period gets
+    # SIGKILL, and one that survives that is an error, not a quiet success:
+    # the next `up` would race it for the ports.
     local alive=()
     for id in ${recorded[@]+"${recorded[@]}"}; do
         for _ in $(seq 1 20); do
-            kill -0 "$id" 2>/dev/null || break
+            still_running "$id" || break
             sleep 0.25
         done
-        if kill -0 "$id" 2>/dev/null; then
-            kill -KILL -- "-$id" 2>/dev/null || true
-            kill -KILL "$id" 2>/dev/null || true
+        if still_running "$id"; then
+            signal_recorded KILL "$id"
             sleep 0.5
-            if kill -0 "$id" 2>/dev/null; then
+            if still_running "$id"; then
                 alive+=("$id")
             fi
         fi
