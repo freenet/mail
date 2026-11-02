@@ -73,6 +73,28 @@ test("mail of an alias no identity has can be moved to one, and the notice can b
   await expect(testid(page, TID.fmMigrationNotice)).toHaveCount(0);
 });
 
+test("orphans can be discarded, after a confirmation naming them", async ({ page }) => {
+  await open(page, "data");
+  const group = testid(page, TID.fmOrphanGroup).filter({ hasText: "old-alias" });
+  await expect(group).toBeVisible();
+  await expect(group.locator(`[data-testid="${TID.fmOrphanMove}"]`)).toBeVisible();
+
+  await group.locator(`[data-testid="${TID.fmOrphanDiscard}"]`).click();
+  const confirm = testid(page, TID.fmOrphanDiscardConfirm);
+  await expect(confirm).toContainText("Discard 5 item(s) from `old-alias`?");
+  await expect(confirm.locator("li")).toHaveCount(5);
+  await expect(confirm).toContainText("draft: ");
+
+  await testid(page, TID.fmOrphanDiscardCancel).click();
+  await expect(confirm).toHaveCount(0);
+  await expect(group).toBeVisible();
+
+  await group.locator(`[data-testid="${TID.fmOrphanDiscard}"]`).click();
+  await testid(page, TID.fmOrphanDiscardSubmit).click();
+  await expect(group).toHaveCount(0);
+  await expect(confirm).toHaveCount(0);
+});
+
 test("a migrated identity is confirmed before it is shared", async ({ page }) => {
   await open(page, "data");
   const row = page.locator(`[data-testid="${TID.fmIdRow}"][data-alias="alice"]`);

@@ -42,13 +42,14 @@
 //!   [`legacy_delegates::HOLD_BACK_LOADS`] loads in a row, its items go to the
 //!   orphans, which the user can move to an identity ([`orphans`]). A row the
 //!   journal holds as resolved had data, so it never stands as absent.
-//! - **The predecessors are never modified.** Nothing here deletes from them.
+//! - **The walk never modifies a predecessor.** Only [`scrub`] deletes from
+//!   them, and it has rules of its own.
 //!
 //! The journal and the markers live in the mail delegate under the caller's
 //! origin, not in the crate's reserved `\0` keys, so a staging app walks its
 //! own migration and never reads production's.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;
 
 use freenet_mail_protocol::{Addr, IdentityInfo, Op, Reply};
@@ -63,6 +64,7 @@ pub(crate) mod legacy_delegates;
 #[cfg(feature = "use-node")]
 pub(crate) mod node;
 pub(crate) mod orphans;
+pub(crate) mod scrub;
 pub(crate) mod successor;
 #[cfg(test)]
 mod tests;
@@ -198,6 +200,10 @@ pub(crate) struct WalkOutcome {
     pub silent_rows: usize,
     /// Held contract migrations were let go, so the next listing plans them.
     pub released_markers: bool,
+    /// What this walk read from each row, before importing it.
+    pub read_rows: legacy_delegates::RowHashes,
+    /// The `(generation, key)` of each item this walk wrote verbatim.
+    pub landed: BTreeSet<(u32, Vec<u8>, [u8; 16])>,
 }
 
 thread_local! {
@@ -311,10 +317,24 @@ where
                 counts: successor.into_counts(),
                 silent_rows: 0,
                 released_markers: false,
+                read_rows: Default::default(),
+                landed: Default::default(),
             };
         }
     };
     let stored = ledger::read_ledger(successor.store()).await.ok();
+    if stored
+        .as_ref()
+        .is_some_and(|l| l.migration_started_ms.is_none())
+    {
+        let now = chrono::Utc::now().timestamp_millis();
+        let stamp = |l: &mut ledger::Ledger| {
+            l.migration_started_ms.get_or_insert(now);
+        };
+        if let Err(e) = ledger::update_ledger(successor.store(), stamp).await {
+            crate::log::error(format!("recording the migration's start failed: {e}"), None);
+        }
+    }
     if !walk_this_load(&status, roll) {
         // A walk that resolved the last row can die before it lets go.
         let released_markers =
@@ -325,18 +345,22 @@ where
             report: None,
             counts: successor.into_counts(),
             released_markers,
+            read_rows: Default::default(),
+            landed: Default::default(),
         };
     }
     let walks = pending_walks(&status, &lineage);
-    let absent_answers = stored.map(|l| l.absent_answers).unwrap_or_default();
+    let stored = stored.unwrap_or_default();
+    let kept_tables = ledger::kept_alias_tables(successor.store(), &stored).await;
     let mut predecessors = LegacyAdapter::new(
         transport,
         lineage.clone(),
         walks,
         arrived,
-        absent_answers,
+        stored.absent_answers,
         Box::new(on_identities),
-    );
+    )
+    .with_kept_tables(kept_tables);
     let report = migrate_delegate_secrets_journaled(
         &mut successor,
         &mut predecessors,
@@ -346,7 +370,7 @@ where
     )
     .await;
     let silent_rows = predecessors.silent_rows();
-    let answers = predecessors.identity_answers();
+    let answers = predecessors.row_answers();
     let rejected = report.status.as_ref().map(JournalStatus::rejected_items);
     successor
         .update_ledger(predecessors.counts(), |l| {
@@ -370,6 +394,7 @@ where
     );
     let newest_unsettled = predecessors.newest_unsettled_row(Some(&still_pending));
     let released_markers = release_held_markers(successor.store(), newest_unsettled).await;
+    let landed = successor.take_landed();
     let mut counts = successor.into_counts();
     counts.merge_mapping(predecessors.counts());
     WalkOutcome {
@@ -378,6 +403,8 @@ where
         counts,
         silent_rows,
         released_markers,
+        read_rows: predecessors.into_read(),
+        landed,
     }
 }
 
@@ -461,6 +488,9 @@ pub(crate) fn status_report(status: Option<&JournalStatus>, ledger: &ledger::Led
         "rejected_items": status.map(JournalStatus::rejected_items),
         "rows": rows,
         "counts": ledger.totals,
+        "scrub_built": scrub::BUILT_IN,
+        "scrubbed": ledger.scrubbed,
+        "scrub_blockers": ledger.scrub_blockers,
     })
     .to_string()
 }

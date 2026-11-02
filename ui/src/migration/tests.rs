@@ -28,8 +28,8 @@ use futures::executor::block_on;
 use mail_delegate::env::Env;
 
 use super::legacy_delegates::{
-    AliasOwner, AliasTables, HOLD_BACK_LOADS, LegacyReply, LegacyTransport, MAX_LEGACY_REPLY_BYTES,
-    MappingCounts, NewerAliases, PairKey, lineage_key, map_local_state,
+    AliasOwner, AliasTables, EMPTY_REPLY, HOLD_BACK_LOADS, LegacyReply, LegacyTransport,
+    MAX_LEGACY_REPLY_BYTES, MappingCounts, NewerAliases, PairKey, lineage_key, map_local_state,
 };
 use super::successor::{
     MailStore, MergedFlags, StoredMarker, V1InboxReader, adopt_legacy_markers, merge_fields,
@@ -310,6 +310,52 @@ impl MailStore for Delegate {
 struct Node {
     replies: Rc<RefCell<HashMap<[u8; 32], LegacyReply>>>,
     asked: Rc<RefCell<Vec<Asked>>>,
+    /// How many legacy deletes are answered before the node goes silent.
+    writes_left: Rc<RefCell<Option<usize>>>,
+    /// Deletes are acknowledged and change nothing.
+    writes_ignored: Rc<RefCell<bool>>,
+    /// The next read of this row answers as before, then the row becomes
+    /// this: another tab's write landing just after a read.
+    change_after_read: Rc<RefCell<Option<RowChange>>>,
+}
+
+/// A row's delegate key and what it becomes.
+type RowChange = ([u8; 32], LegacyReply);
+
+/// A legacy delete's name and arguments, `None` for any other message.
+fn legacy_delete(request: &[u8]) -> Option<(String, serde_json::Value)> {
+    let message: serde_json::Value = serde_json::from_slice(request).ok()?;
+    let (op, args) = message.as_object()?.iter().next()?;
+    op.starts_with("Delete").then(|| (op.clone(), args.clone()))
+}
+
+/// What the v0.2.x delegates do with a delete (`modules/identity-management`,
+/// `modules/mail-local-state`), on their state as JSON.
+fn apply_legacy_delete(state: &mut serde_json::Value, op: &str, args: &serde_json::Value) {
+    use serde_json::{Value, json};
+    let alias = args["alias"].as_str().unwrap();
+    let remove = |map: &mut Value, key: &str| {
+        map.as_object_mut().unwrap().remove(key);
+    };
+    if op == "DeleteIdentity" {
+        return remove(&mut state["identities"], alias);
+    }
+    let held = &mut state["aliases"][alias];
+    match op {
+        "DeleteDraft" => remove(&mut held["drafts"], args["id"].as_str().unwrap()),
+        "DeleteSent" => remove(&mut held["sent"], args["id"].as_str().unwrap()),
+        "DeleteMessage" => {
+            let id = args["msg_id"].as_u64().unwrap();
+            remove(&mut held["kept"], &id.to_string());
+            remove(&mut held["archived"], &id.to_string());
+            held["read"]
+                .as_array_mut()
+                .unwrap()
+                .retain(|r| r.as_u64() != Some(id));
+            held["deleted"].as_array_mut().unwrap().push(json!(id));
+        }
+        other => panic!("no such delete: {other}"),
+    }
 }
 
 /// One request: the delegate, the parameters and the message.
@@ -331,14 +377,38 @@ impl LegacyTransport for Node {
         params: &'static [u8],
         request: Vec<u8>,
     ) -> LegacyReply {
+        let write = legacy_delete(&request);
         self.asked
             .borrow_mut()
             .push((predecessor.clone(), params.to_vec(), request));
-        self.replies
-            .borrow()
-            .get(&<[u8; 32]>::try_from(predecessor.bytes()).unwrap())
-            .cloned()
-            .unwrap_or(LegacyReply::NotInstalled)
+        if let Some((op, args)) = write {
+            let mut writes_left = self.writes_left.borrow_mut();
+            if let Some(left) = writes_left.as_mut() {
+                if *left == 0 {
+                    return LegacyReply::NoAnswer("no reply in time".into());
+                }
+                *left -= 1;
+            }
+            if *self.writes_ignored.borrow() {
+                return LegacyReply::NoAnswer(EMPTY_REPLY.to_string());
+            }
+            let key = <[u8; 32]>::try_from(predecessor.bytes()).unwrap();
+            if let Some(LegacyReply::Answer(bytes)) = self.replies.borrow_mut().get_mut(&key) {
+                let mut state = serde_json::from_slice(bytes).unwrap();
+                apply_legacy_delete(&mut state, &op, &args);
+                *bytes = serde_json::to_vec(&state).unwrap();
+            }
+            return LegacyReply::NoAnswer(EMPTY_REPLY.to_string());
+        }
+        let key = <[u8; 32]>::try_from(predecessor.bytes()).unwrap();
+        let reply = self.replies.borrow().get(&key).cloned();
+        let mut change = self.change_after_read.borrow_mut();
+        if change.as_ref().is_some_and(|(row, _)| *row == key)
+            && let Some((row, next)) = change.take()
+        {
+            self.replies.borrow_mut().insert(row, next);
+        }
+        reply.unwrap_or(LegacyReply::NotInstalled)
     }
 }
 
@@ -701,6 +771,8 @@ fn the_notice_says_a_move_under_way_is_still_in_progress() {
         counts,
         silent_rows: 0,
         released_markers: false,
+        read_rows: Default::default(),
+        landed: Default::default(),
     };
     assert!(no_journal.unfinished());
 }
@@ -2843,3 +2915,5 @@ fn scenario_walking_the_captured_replies_again_adds_nothing() {
     assert_eq!(delegate.identities().len(), 1);
     assert_eq!(delegate.list(ItemKind::Archived, Some(alice())).len(), 1);
 }
+
+mod scrub;

@@ -25,6 +25,10 @@ pub(crate) const FM_MIGRATION_REPORT: &str = "fm-migration-report";
 pub(crate) const FM_ORPHAN_GROUP: &str = "fm-orphan-group";
 pub(crate) const FM_ORPHAN_TARGET: &str = "fm-orphan-target";
 pub(crate) const FM_ORPHAN_MOVE: &str = "fm-orphan-move";
+pub(crate) const FM_ORPHAN_DISCARD: &str = "fm-orphan-discard";
+pub(crate) const FM_ORPHAN_DISCARD_CONFIRM: &str = "fm-orphan-discard-confirm";
+pub(crate) const FM_ORPHAN_DISCARD_SUBMIT: &str = "fm-orphan-discard-submit";
+pub(crate) const FM_ORPHAN_DISCARD_CANCEL: &str = "fm-orphan-discard-cancel";
 pub(crate) const FM_CONFIRM_IDENTITY: &str = "fm-confirm-identity";
 pub(crate) const FM_CONFIRM_IDENTITY_SUBMIT: &str = "fm-confirm-identity-submit";
 pub(crate) const FM_CONFIRM_IDENTITY_CANCEL: &str = "fm-confirm-identity-cancel";
@@ -216,6 +220,10 @@ mod tests {
             ("fmOrphanGroup", super::FM_ORPHAN_GROUP),
             ("fmOrphanTarget", super::FM_ORPHAN_TARGET),
             ("fmOrphanMove", super::FM_ORPHAN_MOVE),
+            ("fmOrphanDiscard", super::FM_ORPHAN_DISCARD),
+            ("fmOrphanDiscardConfirm", super::FM_ORPHAN_DISCARD_CONFIRM),
+            ("fmOrphanDiscardSubmit", super::FM_ORPHAN_DISCARD_SUBMIT),
+            ("fmOrphanDiscardCancel", super::FM_ORPHAN_DISCARD_CANCEL),
             ("fmConfirmIdentity", super::FM_CONFIRM_IDENTITY),
             ("fmConfirmIdentitySubmit", super::FM_CONFIRM_IDENTITY_SUBMIT),
             ("fmConfirmIdentityCancel", super::FM_CONFIRM_IDENTITY_CANCEL),

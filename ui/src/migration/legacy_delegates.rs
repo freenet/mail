@@ -271,6 +271,17 @@ impl AliasTables {
             .find_map(|(_, t)| t.get(alias))
             .map_or(AliasOwner::NoIdentity, |addr| AliasOwner::Identity(*addr))
     }
+
+    /// Who mapping files `alias` under, `None` while it must wait; an inner
+    /// `None` is no identity, so the alias's items go to the orphans.
+    fn filed_under(&self, generation: u32, alias: &str) -> Option<Option<Addr>> {
+        match self.resolve(generation, alias) {
+            AliasOwner::Identity(addr) => Some(Some(addr)),
+            AliasOwner::NoIdentity => Some(None),
+            AliasOwner::Unresolved if self.own_row_absent(generation) => Some(None),
+            AliasOwner::Unresolved => None,
+        }
+    }
 }
 
 /// The aliases newer local-state rows hold. A list position means something
@@ -580,13 +591,8 @@ pub(crate) fn map_local_state(
     let by_alias: BTreeMap<String, AliasState> = state.aliases_mut().drain().collect();
     let mut pairs = Vec::new();
     for (alias, alias_state) in by_alias {
-        let owner = match aliases.resolve(generation, &alias) {
-            AliasOwner::Identity(addr) => Some(addr),
-            AliasOwner::NoIdentity => None,
-            AliasOwner::Unresolved if aliases.own_row_absent(generation) => None,
-            AliasOwner::Unresolved => {
-                return Err(format!("the identities that own `{alias}` did not answer"));
-            }
+        let Some(owner) = aliases.filed_under(generation, &alias) else {
+            return Err(format!("the identities that own `{alias}` did not answer"));
         };
         pairs.extend(map_alias(&alias, alias_state, owner, newer, counts)?);
     }
@@ -617,7 +623,19 @@ pub(crate) struct LegacyAdapter<T> {
     /// Called once when the walk first reaches local state, which is after
     /// every identity row, if it brought an identity in.
     on_identities: Option<Box<dyn FnOnce()>>,
+    /// The alias tables kept for identity rows whose clearing began, by
+    /// lineage generation. They stand for what those rows no longer hold.
+    kept_tables: BTreeMap<u32, HashMap<String, Addr>>,
+    /// The tables the last local-state read used.
+    tables: Option<AliasTables>,
+    /// What each row's read this run mapped to.
+    read: RowHashes,
 }
+
+/// By lineage generation, the `(key, value hash, value)` of each pair a read
+/// gave. Only settings keep their value: they merge, so a hash cannot say
+/// whether the delegate holds them. Nothing else is kept, seeds least.
+pub(crate) type RowHashes = BTreeMap<u32, Vec<(Vec<u8>, [u8; 16], Option<Vec<u8>>)>>;
 
 impl<T: LegacyTransport> LegacyAdapter<T> {
     pub(crate) fn new(
@@ -638,7 +656,19 @@ impl<T: LegacyTransport> LegacyAdapter<T> {
             arrived,
             absent_answers,
             on_identities: Some(on_identities),
+            kept_tables: BTreeMap::new(),
+            tables: None,
+            read: RowHashes::new(),
         }
+    }
+
+    pub(crate) fn with_kept_tables(mut self, tables: BTreeMap<u32, HashMap<String, Addr>>) -> Self {
+        self.kept_tables = tables;
+        self
+    }
+
+    pub(crate) fn into_read(self) -> RowHashes {
+        self.read
     }
 
     pub(crate) fn counts(&self) -> MappingCounts {
@@ -686,7 +716,7 @@ impl<T: LegacyTransport> LegacyAdapter<T> {
     /// the journal holds as resolved, or whose import began, had data, so an
     /// absent answer from it can only be a failed read, however often it
     /// comes.
-    fn absence_stands(&self, entry: &DelegateLineageEntry) -> bool {
+    pub(crate) fn absence_stands(&self, entry: &DelegateLineageEntry) -> bool {
         self.pending_walks
             .get(entry.delegate_key.as_slice())
             .is_some_and(|row| !row.started)
@@ -749,6 +779,7 @@ impl<T: LegacyTransport> LegacyAdapter<T> {
                 }
                 _ => None,
             };
+            let table = self.kept_tables.get(&entry.generation).cloned().or(table);
             if let Some(table) = table {
                 if resolved {
                     table.values().for_each(|a| self.arrived.note(*a));
@@ -764,18 +795,61 @@ impl<T: LegacyTransport> LegacyAdapter<T> {
         tables
     }
 
-    /// What this load's answer from each identity row it asked was: whether
-    /// it was absent or empty, by lineage generation. Anything else, a
-    /// silence included, ends a run of them.
-    pub(crate) fn identity_answers(&self) -> Vec<(u32, bool)> {
+    /// What this load's answer from each row it asked was: whether it was
+    /// absent or empty, by lineage generation. Anything else, a silence
+    /// included, ends a run of them.
+    pub(crate) fn row_answers(&self) -> Vec<(u32, bool)> {
         self.lineage
             .iter()
-            .filter(|e| e.generation >= IDENTITY_GENERATION_OFFSET)
             .filter_map(|e| {
                 let reply = self.replies.get(e.delegate_key.as_slice())?;
-                Some((e.generation, row_holds_nothing(reply)))
+                let tables = self.tables.as_ref();
+                Some((e.generation, entry_holds_nothing(e, reply, tables)))
             })
             .collect()
+    }
+
+    /// Whether `entry` answers now that it holds nothing.
+    pub(crate) async fn holds_nothing(&mut self, entry: &DelegateLineageEntry) -> bool {
+        let local_state = entry.generation < IDENTITY_GENERATION_OFFSET;
+        let tables = if local_state {
+            Some(self.alias_tables().await)
+        } else {
+            None
+        };
+        let reply = self.reply(&lineage_key(entry)).await;
+        reply.is_ok_and(|reply| entry_holds_nothing(entry, &reply, tables.as_ref()))
+    }
+
+    /// The bytes `entry` answered with on this adapter's last read of it.
+    pub(crate) fn answer(&self, entry: &DelegateLineageEntry) -> Option<&[u8]> {
+        match self.replies.get(entry.delegate_key.as_slice())? {
+            LegacyReply::Answer(bytes) => Some(bytes),
+            _ => None,
+        }
+    }
+
+    /// What `entry` holds now, from a new read.
+    pub(crate) async fn reread(&mut self, entry: &DelegateLineageEntry) -> Option<&[u8]> {
+        self.replies.remove(entry.delegate_key.as_slice());
+        self.reply(&lineage_key(entry)).await.ok()?;
+        self.answer(entry)
+    }
+
+    /// Send `entry` one message that changes it.
+    pub(crate) async fn send(
+        &mut self,
+        entry: &DelegateLineageEntry,
+        request: Vec<u8>,
+    ) -> LegacyReply {
+        let params = if entry.generation >= IDENTITY_GENERATION_OFFSET {
+            IDENTITY_PARAMS
+        } else {
+            LOCAL_STATE_PARAMS
+        };
+        self.transport
+            .ask(&lineage_key(entry), params, request)
+            .await
     }
 
     /// The aliases held by the local-state rows newer than `generation`.
@@ -847,7 +921,9 @@ impl<T: LegacyTransport> LegacyAdapter<T> {
         // A row held back maps again on the next load, so only one that goes
         // through is counted.
         let mut mapped = MappingCounts::default();
-        let pairs = map_local_state(&bytes, entry.generation, &tables, &newer, &mut mapped)?;
+        let pairs = map_local_state(&bytes, entry.generation, &tables, &newer, &mut mapped);
+        self.tables = Some(tables);
+        let pairs = pairs?;
         self.counts.add(mapped);
         Ok(pairs)
     }
@@ -893,6 +969,39 @@ fn row_holds_nothing(reply: &LegacyReply) -> bool {
     }
 }
 
+/// [`row_holds_nothing`], for a row of either family. A local-state row holds
+/// nothing if mapping it gives no pair: `deleted` marks alone are never
+/// imported, and neither are read marks with no identity to go to. Without
+/// `tables` read marks count as held.
+fn entry_holds_nothing(
+    entry: &DelegateLineageEntry,
+    reply: &LegacyReply,
+    tables: Option<&AliasTables>,
+) -> bool {
+    if entry.generation >= IDENTITY_GENERATION_OFFSET {
+        return row_holds_nothing(reply);
+    }
+    match reply {
+        LegacyReply::NotInstalled => true,
+        LegacyReply::Answer(bytes) => {
+            LocalState::try_from(bytes.as_slice()).is_ok_and(|mut state| {
+                *state.global_settings() == GlobalSettings::default()
+                    && state.aliases_mut().iter().all(|(name, alias)| {
+                        let ownerless = tables
+                            .is_some_and(|t| t.filed_under(entry.generation, name) == Some(None));
+                        alias.drafts.is_empty()
+                            && alias.sent.is_empty()
+                            && alias.kept.is_empty()
+                            && alias.archived.is_empty()
+                            && (alias.read.is_empty() || ownerless)
+                            && alias.settings == Default::default()
+                    })
+            })
+        }
+        LegacyReply::NoAnswer(_) => false,
+    }
+}
+
 pub(crate) fn lineage_key(entry: &DelegateLineageEntry) -> DelegateKey {
     DelegateKey::new(
         entry.delegate_key,
@@ -926,8 +1035,20 @@ impl<T: LegacyTransport> PredecessorSecretsIo for LegacyAdapter<T> {
             .entry(predecessor)
             .ok_or("a predecessor outside the lineage")?;
         let read = self.read_row(&entry, predecessor).await;
-        if read.is_err() {
-            self.unusable.insert(predecessor.bytes().to_vec());
+        match &read {
+            Ok(pairs) => {
+                let hashes = pairs.iter().map(|(k, v)| {
+                    let settings = matches!(
+                        PairKey::decode(k),
+                        Some(PairKey::IdentitySettings(_) | PairKey::GlobalSettings)
+                    );
+                    (k.clone(), id16(&[v]), settings.then(|| v.clone()))
+                });
+                self.read.insert(entry.generation, hashes.collect());
+            }
+            Err(_) => {
+                self.unusable.insert(predecessor.bytes().to_vec());
+            }
         }
         read
     }

@@ -9,7 +9,7 @@
 //! are durable when the crate is told they are, and there is nothing to flush.
 
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::rc::Rc;
 
 use freenet_mail_protocol::{
@@ -399,9 +399,16 @@ pub(crate) struct MailSuccessor<S, I> {
     /// What the ledger holds of `counts`.
     recorded: MigrationCounts,
     arrived: ArrivedIdentities,
+    /// The `(generation, key)` of each pair this walk wrote verbatim. Settings
+    /// merge, so they are not here.
+    landed: BTreeSet<(u32, Vec<u8>, [u8; 16])>,
 }
 
 impl<S: MailStore, I: V1InboxReader> MailSuccessor<S, I> {
+    pub(crate) fn take_landed(&mut self) -> BTreeSet<(u32, Vec<u8>, [u8; 16])> {
+        std::mem::take(&mut self.landed)
+    }
+
     pub(crate) fn new(store: S, inbox: I, arrived: ArrivedIdentities) -> Self {
         MailSuccessor {
             store,
@@ -409,6 +416,7 @@ impl<S: MailStore, I: V1InboxReader> MailSuccessor<S, I> {
             journal_generation: Some(0),
             counts: MigrationCounts::default(),
             recorded: MigrationCounts::default(),
+            landed: BTreeSet::new(),
             arrived,
         }
     }
@@ -473,8 +481,7 @@ impl<S: MailStore, I: V1InboxReader> MailSuccessor<S, I> {
     /// Bring the ledger up to date, with `mapping` counted and `also` applied.
     /// A change to the totals brings a dismissed notice back. A ledger that
     /// cannot be written costs the notice, never the walk: what was not
-    /// recorded goes with the next write. The ledger holds counts and the
-    /// notice's state only; nothing the walk decides rests on it.
+    /// recorded goes with the next write.
     pub(crate) async fn update_ledger(
         &mut self,
         mapping: MappingCounts,
@@ -864,6 +871,13 @@ impl<S: MailStore, I: V1InboxReader> SuccessorSecretsIo for MailSuccessor<S, I> 
         let outcome = self.apply(key.clone(), item).await;
         if matches!(outcome, ItemWrite::Written) {
             self.count(&key);
+            if !matches!(key, PairKey::IdentitySettings(_) | PairKey::GlobalSettings) {
+                // The value too: one row can hold a key twice (a contact under
+                // two labels), and only the one written landed.
+                let value = super::legacy_delegates::id16(&[item.value]);
+                self.landed
+                    .insert((item.generation, item.key.to_vec(), value));
+            }
         }
         outcome
     }

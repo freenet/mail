@@ -14,6 +14,7 @@ use crate::migration::{self, PageStore};
 use crate::testid;
 
 pub(crate) const CHECKING_TEXT: &str = "Checking for your previous Mail data";
+const CLEARING_TEXT: &str = "Clearing superseded local stores";
 const UNREACHABLE_TEXT: &str = "We couldn't open your previous Mail data on this node. If you \
      have a recovery key, restore it now.";
 const RETRY_DISCLOSURE: &str = "Something you delete while this migration is still retrying can \
@@ -23,6 +24,8 @@ const RETRY_DISCLOSURE: &str = "Something you delete while this migration is sti
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct MigrationView {
     pub walking: bool,
+    /// Scrub has passed its checks and is deleting.
+    pub clearing: bool,
     /// A row went silent or gave an unreadable answer. Never a typed "not
     /// installed", which is what every new user's node says.
     pub unreachable: bool,
@@ -149,6 +152,15 @@ where
         view.in_progress = outcome.unfinished();
     }
     refresh(outcome.status.as_ref()).await;
+    let mut store = PageStore;
+    let blockers = migration::scrub::run(&mut store, transport, &outcome, || {
+        MIGRATION.write().clearing = true;
+    })
+    .await;
+    MIGRATION.write().clearing = false;
+    if !blockers.is_empty() {
+        crate::log::info(format!("migration: not clearing yet: {blockers:?}"));
+    }
     if let Ok(listed) = ops::list_identities().await {
         let confirmed = migration::confirm_by_inbox(&mut PageStore, &mut inbox, &listed).await;
         if !confirmed.is_empty() {
@@ -182,6 +194,25 @@ async fn move_orphans(alias: String, owner: Addr) {
     }
 }
 
+async fn discard_orphans(group: OrphanGroup) {
+    let (discarded, failure) = orphans::discard(&mut PageStore, &group).await;
+    let alias = &group.alias;
+    let (text, level) = match failure {
+        None => (
+            format!("Discarded {discarded} item(s) from `{alias}`."),
+            crate::toast::ToastLevel::Success,
+        ),
+        Some(why) => (
+            format!("Discarded {discarded} item(s) from `{alias}`. The rest stayed: {why}"),
+            crate::toast::ToastLevel::Error,
+        ),
+    };
+    crate::toast::push_toast_detached(text, level);
+    if let Ok(items) = orphans::stored(&mut PageStore).await {
+        MIGRATION.write().orphans = orphans::groups(&items);
+    }
+}
+
 async fn dismiss_notice() {
     MIGRATION.write().notice_dismissed = true;
     if let Err(e) = ledger::update_ledger(&mut PageStore, |l| l.notice_dismissed = true).await {
@@ -192,6 +223,9 @@ async fn dismiss_notice() {
 #[component]
 fn OrphanRow(group: OrphanGroup, identities: Vec<(String, Addr)>) -> Element {
     let mut target = use_signal(|| 0usize);
+    let mut confirming = use_signal(|| false);
+    let count = group.items.len();
+    let shown = group.clone();
     let what = group
         .kinds
         .iter()
@@ -227,6 +261,40 @@ fn OrphanRow(group: OrphanGroup, identities: Vec<(String, Addr)>) -> Element {
                 },
                 "Move here"
             }
+            button {
+                class: "btn btn-ghost",
+                "data-testid": testid::FM_ORPHAN_DISCARD,
+                onclick: move |_| confirming.set(true),
+                "Discard"
+            }
+        }
+        if confirming() {
+            div {
+                class: "field-help",
+                "data-testid": testid::FM_ORPHAN_DISCARD_CONFIRM,
+                style: "margin-bottom:10px;",
+                p { "Discard {count} item(s) from `{group.alias}`? They are deleted for good." }
+                ul {
+                    for (_, line) in group.items.iter() {
+                        li { "{line}" }
+                    }
+                }
+                button {
+                    class: "btn btn-secondary",
+                    "data-testid": testid::FM_ORPHAN_DISCARD_CANCEL,
+                    onclick: move |_| confirming.set(false),
+                    "Keep them"
+                }
+                button {
+                    class: "btn btn-ghost",
+                    "data-testid": testid::FM_ORPHAN_DISCARD_SUBMIT,
+                    onclick: move |_| {
+                        confirming.set(false);
+                        crate::app::identity_store::spawn_detached(discard_orphans(shown.clone()));
+                    },
+                    "Discard {count} item(s)"
+                }
+            }
         }
     }
 }
@@ -236,7 +304,11 @@ fn OrphanRow(group: OrphanGroup, identities: Vec<(String, Addr)>) -> Element {
 pub(crate) fn MigrationPanel(identities: Vec<(String, Addr)>) -> Element {
     let view = MIGRATION.read().clone();
     let mut import_backup = use_context::<Signal<ImportBackup>>();
-    let line = view.walking.then_some(CHECKING_TEXT);
+    let line = if view.clearing {
+        Some(CLEARING_TEXT)
+    } else {
+        view.walking.then_some(CHECKING_TEXT)
+    };
     let to_back_up: Vec<(String, Addr)> = identities
         .iter()
         .filter(|(_, addr)| view.migrated.contains(addr))

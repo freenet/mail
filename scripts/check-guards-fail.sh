@@ -58,8 +58,13 @@ ui_migration_tests() {
 ui_notfound_tests() {
     cargo test --manifest-path "$STAGE/Cargo.toml" -p freenet-email-ui --lib notfound_routing
 }
+ui_local_tests() {
+    cargo test --manifest-path "$STAGE/Cargo.toml" -p freenet-email-ui --lib \
+        --no-default-features --features example-data,no-sync identity_store
+}
 candidate_check() { "$STAGE/scripts/check-delegate-candidate.sh"; }
 freeze_tests() { "$STAGE/scripts/release-freeze_test.sh"; }
+scrub_release_tests() { "$STAGE/scripts/check-release-scrub_test.sh"; }
 
 failures=0
 
@@ -80,7 +85,9 @@ baseline "delegate fault-injection runs" fault_tests
 baseline "delegate unreadable-key runs" blind_tests
 baseline "protocol tests" protocol_tests
 baseline "migration tests" ui_migration_tests
+baseline "local-delegate identity tests" ui_local_tests
 baseline "release freeze tests" freeze_tests
+baseline "release scrub tests" scrub_release_tests
 [ "$WASM" -eq 1 ] && baseline "candidate check" candidate_check
 if [ "$failures" -ne 0 ]; then
     echo "the guards fail without any regression applied; nothing below would mean anything"
@@ -587,8 +594,8 @@ ut "an orphan move never overwrites an item" "$M/orphans.rs" \
     '        Some(_) => Ok(()),' \
     moving_an_orphan_never_overwrites_an_item_already_there
 ut "a silent identity row never orphans its aliases" "$M/legacy_delegates.rs" \
-    'AliasOwner::Unresolved if aliases.own_row_absent(generation) => None,' \
-    'AliasOwner::Unresolved => None,' \
+    'AliasOwner::Unresolved if self.own_row_absent(generation) => Some(None),' \
+    'AliasOwner::Unresolved if true => Some(None),' \
     scenario_a_silent_identity_row_never_orphans_its_aliases
 ut "one absent answer does not stand" "$M/legacy_delegates.rs" \
     '.is_some_and(|answers| *answers >= HOLD_BACK_LOADS)' \
@@ -642,12 +649,8 @@ ut "held markers are released when the newer row settles" "$M/mod.rs" \
     '    let released_markers = false && newest_unsettled.is_none();' \
     scenario_silence_past_the_hold_starts_no_contract_migration
 ut "a held-back row counts nothing" "$M/legacy_delegates.rs" \
-    '        let mut mapped = MappingCounts::default();
-        let pairs = map_local_state(&bytes, entry.generation, &tables, &newer, &mut mapped)?;
-        self.counts.add(mapped);' \
-    '        let mut mapped = MappingCounts::default();
-        let pairs = map_local_state(&bytes, entry.generation, &tables, &newer, &mut self.counts)?;
-        self.counts.add(mapped);' \
+    '        let pairs = map_local_state(&bytes, entry.generation, &tables, &newer, &mut mapped);' \
+    '        let pairs = map_local_state(&bytes, entry.generation, &tables, &newer, &mut self.counts);' \
     scenario_a_row_held_back_counts_nothing
 guard "the gate asks an unconfirmed identity" "$STAGE/ui/src/app/migration_view.rs" \
     '    if confirmed == Some(false) {' \
@@ -703,6 +706,250 @@ ut "the back-off is one load in ten" "$M/mod.rs" \
     'const BACKED_OFF_ONE_LOAD_IN: u8 = 10;' \
     'const BACKED_OFF_ONE_LOAD_IN: u8 = 2;' \
     the_back_off_runs_one_load_in_ten
+
+# Scrub. Each check, removed, fails a test where it alone was holding.
+S="$M/scrub.rs"
+ut "scrub reaches a user whose journal never completes" "$S" \
+    '    if targets.is_empty() {' \
+    '    if targets.is_empty() || !status.is_complete() {' \
+    scenario_the_usual_user_is_scrubbed
+ut "scrub never takes a started row as clear" "$M/legacy_delegates.rs" \
+    '.is_some_and(|row| !row.started)' \
+    '.is_some()' \
+    a_started_row_is_never_clear
+ut "scrub wants the whole count of absent answers" "$M/legacy_delegates.rs" \
+    '.is_some_and(|answers| *answers >= HOLD_BACK_LOADS)' \
+    '.is_some_and(|answers| *answers >= 1)' \
+    an_absence_short_of_the_count_is_not_clear
+ut "a standing row must answer the same way at scrub time" "$S" \
+    '&& !(adapter.absence_stands(entry) && adapter.holds_nothing(entry).await)' \
+    '&& !adapter.absence_stands(entry)' \
+    a_standing_row_must_answer_the_same_way_now
+ut "a silent local-state row counts no absent answer" "$M/legacy_delegates.rs" \
+    '        }
+        LegacyReply::NoAnswer(_) => false,
+    }
+}
+
+pub(crate) fn lineage_key' \
+    '        }
+        LegacyReply::NoAnswer(_) => true,
+    }
+}
+
+pub(crate) fn lineage_key' \
+    a_silent_row_is_not_clear
+ut "an empty local-state row can stand as absent" "$M/legacy_delegates.rs" \
+    'LocalState::try_from(bytes.as_slice()).is_ok_and(|mut state| {' \
+    'LocalState::try_from(bytes.as_slice()).is_ok_and(|mut state| false && {' \
+    a_row_that_answers_empty_stands_as_absent
+ut "an identity row waits for its local-state row" "$S" \
+    '    if !not_clear.is_empty() {' \
+    '    if false && !not_clear.is_empty() {' \
+    an_identity_row_waits_for_its_local_state_row
+ut "a rejected item blocks scrub" "$S" \
+    '    if rejected > 0 {' \
+    '    if rejected > u32::MAX - 1 {' \
+    a_rejected_item_blocks
+ut "an orphan blocks scrub" "$S" \
+    '    if !orphans.is_empty() {' \
+    '    if orphans.len() == usize::MAX {' \
+    an_orphan_blocks
+ut "an unmappable entry blocks scrub" "$S" \
+    '    if refused > 0 {' \
+    '    if refused == usize::MAX {' \
+    an_undecodable_identity_blocks
+ut "an id that never landed blocks scrub" "$S" \
+    'if !imported && !moved && !snapshot.contains(&snapshot_entry(key, &id16(&[value]))) {' \
+    'if !imported && !moved && !snapshot.contains(&snapshot_entry(key, &id16(&[value]))) && ids == u32::MAX {' \
+    an_item_that_never_arrived_blocks
+ut "a user deletion passes by the snapshot" "$S" \
+    'if !imported && !moved && !snapshot.contains(&snapshot_entry(key, &id16(&[value]))) {' \
+    'if !imported && !moved {' \
+    a_user_deletion_after_import_does_not_block
+ut "an unreadable item is not a deletion" "$S" \
+    'let imported = is_import_of(store, key, value, identities).await?;' \
+    'let imported = snapshot.contains(&snapshot_entry(key, &id16(&[value]))) || is_import_of(store, key, value, identities).await?;' \
+    an_unreadable_record_is_not_a_deletion
+ut "a default build has scrub off" "$S" \
+    '    None => false,
+};' \
+    '    None => true,
+};' \
+    a_default_build_cannot_reach_a_delete
+ut "a build without the flag stops before anything" "$S" \
+    '    if !BUILT_IN {' \
+    '    if false {' \
+    a_default_build_cannot_reach_a_delete
+ut "the snapshot holds the value as well as the id" "$S" \
+    '    entry[ID_BYTES..].copy_from_slice(value_hash);' \
+    '    let _ = value_hash;' \
+    an_item_changed_since_the_import_blocks,a_contact_changed_since_the_import_blocks,a_deleted_item_whose_row_then_changed_blocks
+ut "an id alone is not the current import" "$S" \
+    'return Ok(stored.body.as_slice() == value);' \
+    'return Ok(true);' \
+    an_item_changed_since_the_import_blocks,a_contact_changed_since_the_import_blocks
+ut "the snapshot takes what the walk read" "$S" \
+    'if let Some(read) = outcome.read_rows.get(&generation) {' \
+    'if let Some(read) = outcome.read_rows.get(&u32::MAX) {' \
+    an_older_copy_of_a_newer_item_does_not_block
+ut "a late snapshot takes only what still equals the import" "$S" \
+    'if is_import_of(store, &key, value, identities).await? {' \
+    'if present(store, &key, identities).await? {' \
+    a_late_snapshot_does_not_take_a_changed_setting
+ut "the snapshot records only a value the delegate holds" "$S" \
+    '                    || holds_now(store, &decoded, hash, settings.as_deref(), identities).await?' \
+    '                    || present(store, &decoded, identities).await?' \
+    a_silent_newer_row_answering_late_with_newer_text_blocks,a_resumed_row_that_an_old_tab_edited_blocks
+ut "what the walk wrote is recorded as landed" "$S" \
+    '                    || landed
+' \
+    '' \
+    an_item_the_page_changed_after_the_walk_wrote_it_does_not_block
+ut "landed means this value, not this key" "$S" \
+    'let landed = outcome.landed.contains(&(generation, key.clone(), *hash));' \
+    'let landed = outcome.landed.iter().any(|(g, k, _)| *g == generation && k == key);' \
+    a_second_value_of_one_key_did_not_land
+ut "an older copy of a newer item is recorded" "$S" \
+    '                if newer
+' \
+    '                if false
+' \
+    an_older_copy_of_a_newer_item_does_not_block
+ut "a differing KEM key blocks" "$S" \
+    '    if mismatched > 0 {' \
+    '    if false {' \
+    a_row_whose_kem_seed_differs_from_the_delegates_blocks
+ut "a message names the identity it belongs to" "$S" \
+    '        PairKey::Message { owner, .. } => Some(*owner),' \
+    '        PairKey::Message { .. } => None,' \
+    a_message_or_settings_pair_alone_names_the_owner
+ut "identity settings name the identity they belong to" "$S" \
+    'PairKey::Identity(addr) | PairKey::Flags(addr) | PairKey::IdentitySettings(addr) => {' \
+    'PairKey::Identity(addr) | PairKey::Flags(addr) => {' \
+    a_message_or_settings_pair_alone_names_the_owner
+ut "the build marker is chosen by the flag" "$S" \
+    'const BUILD_MARKER: &str = if BUILT_IN {' \
+    'const BUILD_MARKER: &str = if true {' \
+    the_build_marker_is_there_only_with_scrub
+ut "the snapshot is written as a row resolves" "$S" \
+    '    write_snapshots(store, &mut adapter, &unrecorded, outcome, &identities).await?;' \
+    '    if pending.is_empty() {
+        write_snapshots(store, &mut adapter, &unrecorded, outcome, &identities).await?;
+    }' \
+    a_deletion_on_the_second_load_does_not_block
+ut "a cleared identity row keeps its alias table" "$S" \
+    '                keep_alias_table(store, adapter, entry).await?;' \
+    '                let _ = keep_alias_table::<S, T>;' \
+    a_row_that_returns_after_its_identity_row_went_is_filed
+ut "the walk uses a kept alias table" "$M/legacy_delegates.rs" \
+    'let table = self.kept_tables.get(&entry.generation).cloned().or(table);' \
+    'let table = table.or(None);' \
+    a_row_that_returns_after_its_identity_row_went_is_filed
+ut "one empty load does not finish a row" "$S" \
+    '            if answers >= EMPTY_LOADS {' \
+    '            if answers >= 1 {' \
+    a_row_needs_two_loads_of_empty_answers
+ut "a row with something in it starts the count again" "$S" \
+    'let answers = if deleted { 1 } else { before + 1 };' \
+    'let answers = before + 1;' \
+    a_resumed_row_is_finished_only_by_two_empty_loads_in_a_row
+ut "identity rows wait for local state to be finished" "$S" \
+    '            if mail_left {' \
+    '            if mail_left && false {' \
+    a_row_needs_two_loads_of_empty_answers
+ut "a row is read again before its first delete" "$S" \
+    'if adapter.reread(entry).await != Some(passed.as_slice()) {' \
+    'if adapter.reread(entry).await.is_none() {' \
+    a_row_changed_just_before_its_first_delete_is_left
+ut "not being listed is not a deletion" "$S" \
+    '            ledger.deleted_identities.contains(&addr)' \
+    '            true' \
+    an_identity_that_is_only_unlisted_blocks
+ut "a deletion on record needs no backup" "$S" \
+    '            ledger.deleted_identities.contains(&addr)' \
+    '            false' \
+    an_identity_the_user_deleted_does_not_block
+ut "read marks with no identity hold nothing" "$M/legacy_delegates.rs" \
+    '(alias.read.is_empty() || ownerless)' \
+    'alias.read.is_empty()' \
+    read_marks_with_no_identity_hold_nothing
+ut "a discard takes only what was shown" "$M/orphans.rs" \
+    'if group.items.iter().any(|(id, _)| *id == orphan.item.id) {' \
+    'if !group.items.is_empty() {' \
+    a_discard_takes_only_what_was_shown
+ut "a discard is recorded" "$M/orphans.rs" \
+    '            l.moved.push(id.clone());' \
+    '            let _ = &l.moved;' \
+    discarded_orphans_do_not_block
+ut "a journal that failed to store blocks scrub" "$S" \
+    '.is_some_and(|r| r.journal_error.is_some());' \
+    '.is_some_and(|_| false);' \
+    a_journal_that_was_not_stored_blocks
+ut "a kept key that is no position stops the row" "$S" \
+    'positions.map(|k| k.parse()).collect();' \
+    'positions.filter_map(|k| k.parse().ok()).map(Ok).collect();' \
+    a_kept_key_that_is_not_a_position_stops_the_row
+guard "a finished deletion is recorded" "$STAGE/ui/src/app/identity_store.rs" \
+    '        record_deletion(&mut crate::migration::PageStore, addr).await;' \
+    '        let _ = record_deletion::<crate::migration::PageStore>;' \
+    "tests:a_finished_deletion_is_recorded" ui_local_tests
+ut "an unreadable identity is not a deletion" "$S" \
+    'Reply::Status(status) if status.unreadable_identities == 0 => {}' \
+    'Reply::Status(status) if status.unreadable_identities < u32::MAX => {}' \
+    an_unreadable_record_is_not_a_deletion
+ut "a moved orphan is recorded" "$M/orphans.rs" \
+    '            l.moved.push(id.clone());' \
+    '            let _ = &l.moved;' \
+    an_orphan_moved_before_the_snapshot_does_not_block
+ut "an imported backup time is not a backup" "$S" \
+    'Ok(at.zip(since).is_some_and(|(at, since)| at > since))' \
+    'Ok(at.zip(since).is_some())' \
+    an_imported_backup_time_does_not_count
+ut "every identity being scrubbed is backed up" "$S" \
+    'let count = unprotected(store, scrubbed.collect(), ledger, identities).await?;' \
+    'let count = unprotected(store, scrubbed.take(0).collect(), ledger, identities).await?;' \
+    an_identity_the_ledger_does_not_list_needs_a_backup_too
+ut "local state is cleared before identities" "$S" \
+    '    local.into_iter().chain(identities).collect()' \
+    '    identities.into_iter().chain(local).collect()' \
+    scenario_local_state_is_cleared_before_identities
+ut "a failed row forgets the empty loads it had counted" "$S" \
+    '        let Some(deleted) = clear_row(adapter, entry).await else {
+            update_ledger(store, |l| {
+                l.scrub_empty.remove(&generation);
+            })
+            .await?;' \
+    '        let Some(deleted) = clear_row(adapter, entry).await else {' \
+    a_failed_row_starts_its_empty_loads_again
+ut "a backup at the migration start is not after it" "$S" \
+    'is_some_and(|(at, since)| at > since)' \
+    'is_some_and(|(at, since)| at >= since)' \
+    a_backup_stamped_at_the_migration_start_does_not_count
+ut "a missing snapshot chunk blocks" "$S" \
+    '            let chunk = chunk.ok_or(Blocker::NoSnapshot)?;' \
+    '            let Some(chunk) = chunk else { continue };' \
+    a_missing_snapshot_chunk_blocks
+ut "a backup made before a late snapshot does not block" "$S" \
+    '            fields.remove("last_backup_at");' \
+    '            let _ = fields;' \
+    a_snapshot_written_late_takes_what_still_equals_the_import
+ut "only last_backup_at is left out of a settings comparison" "$S" \
+    '            fields.remove("last_backup_at");' \
+    '            fields.clear();' \
+    a_late_snapshot_does_not_take_a_changed_setting
+ut "a cleared row is not cleared again" "$S" \
+    '.filter(|e| ledger.scrubbed.get(&e.generation) != Some(&true))' \
+    '.filter(|e| ledger.scrubbed.get(&e.generation) != Some(&false) || true)' \
+    a_row_needs_two_loads_of_empty_answers
+ut "a row counts as cleared only once a re-read shows it" "$S" \
+    'matches!(left, Some(Ok(requests)) if requests.is_empty())' \
+    'matches!(left, Some(Ok(_)))' \
+    a_delete_that_did_not_take_leaves_the_row_unfinished
+ut "only a row whose clearing began may read empty" "$S" \
+    'if ledger.scrubbed.contains_key(&generation)' \
+    'if generation != u32::MAX' \
+    a_row_that_imported_and_reads_empty_blocks
 ut "the slowdown is one load in four" "$M/mod.rs" \
     'const SLOWED_ONE_LOAD_IN: u8 = 4;' \
     'const SLOWED_ONE_LOAD_IN: u8 = 10;' \
@@ -756,9 +1003,58 @@ guard "release.sh runs the freeze gate" "$STAGE/scripts/release.sh" \
 ' 'true
 ' "not ok - release.sh runs the gate" freeze_tests
 guard "the production publish task runs the freeze gate" "$STAGE/Makefile.toml" \
-    'dependencies = ["check-release-freeze", "sign-webapp", "verify-published-contract"]' \
-    'dependencies = ["sign-webapp", "verify-published-contract"]' \
+    'dependencies = ["check-release-freeze", "sign-webapp", "check-webapp-scrub", "verify-published-contract"]' \
+    'dependencies = ["sign-webapp", "check-webapp-scrub", "verify-published-contract"]' \
     "not ok - publish-email does not run check-release-freeze first" freeze_tests
+guard "the release check reads the build" "$STAGE/scripts/check-release-scrub.sh" \
+    'if ! grep -a -q -F -- "$MARKER" "$file"; then' 'if false; then' \
+    "not ok - a build without the marker is refused" scrub_release_tests
+guard "a production publish checks the build for scrub" "$STAGE/Makefile.toml" \
+    '"sign-webapp", "check-webapp-scrub", "verify-published-contract"' \
+    '"sign-webapp", "verify-published-contract"' \
+    "not ok - publish-email does not check the build after building it" scrub_release_tests
+guard "the production publish sets the flag" "$STAGE/Makefile.toml" \
+    'FREENET_MAIL_SCRUB=1 cargo make publish-production-flow' \
+    'cargo make publish-production-flow' \
+    "not ok - publish-production does not set the flag" scrub_release_tests
+guard "release.sh goes through that publish" "$STAGE/scripts/release.sh" \
+    'cargo make publish-production
+PUBLISHED=1' \
+    'cargo make publish-production-flow
+PUBLISHED=1' \
+    "not ok - release.sh does not publish through publish-production" scrub_release_tests
+guard "the legacy real-node task builds with scrub" "$STAGE/Makefile.toml" \
+    'FREENET_MAIL_SCRUB=1 FREENET_MAIL_SCRUB_ISO=1 FREENET_ISO_GW_PORT="$GW_PORT" cargo make publish-email-iso' \
+    'FREENET_ISO_GW_PORT="$GW_PORT" cargo make publish-email-iso' \
+    "not ok - test-e2e-legacy-migration does not build with the flag, for the harness's nodes" scrub_release_tests
+guard "the legacy real-node task checks its build" "$STAGE/Makefile.toml" \
+    '# The build that was published has scrub: the marker survived dx and wasm-opt.
+bash "$ROOT/scripts/check-release-scrub.sh"' \
+    '' \
+    "not ok - test-e2e-legacy-migration does not check the build it published" scrub_release_tests
+guard "the default real-node task checks its build is refused" "$STAGE/Makefile.toml" \
+    '    *"has scrub off"*) ;;' \
+    '    *) ;;' \
+    "not ok - test-e2e-real-node does not check that the default build is refused" scrub_release_tests
+guard "a test signing refuses a build with scrub" "$STAGE/Makefile.toml" \
+    'if [ "${FREENET_MAIL_SCRUB_ISO:-}" != "1" ]; then
+    "$ROOT/scripts/check-release-scrub.sh" --absent
+fi' \
+    '' \
+    "not ok - a test publish does not refuse a build with scrub in it" scrub_release_tests
+guard "a test publish refuses a build with scrub" "$STAGE/Makefile.toml" \
+    '# Whatever the environment says, a build with scrub never goes here.
+"$ROOT/scripts/check-release-scrub.sh" --absent' \
+    '' \
+    "not ok - a test publish does not refuse a build with scrub in it" scrub_release_tests
+guard "the absent check reads the build" "$STAGE/scripts/check-release-scrub.sh" \
+    '        if grep -a -q -F -- "$MARKER" "$file"; then' \
+    '        if false; then' \
+    "not ok - a test publish refuses a build with the marker" scrub_release_tests
+guard "the marker is written once" "$STAGE/ui/src/migration/scrub.rs" \
+    '    crate::log::info(BUILD_MARKER);' \
+    '    crate::log::info("freenet-mail:scrub-built-in");' \
+    "not ok - the marker is not written once in the branch the flag selects" scrub_release_tests
 guard "the freeze override needs the test flag" "$STAGE/scripts/check-release-freeze.sh" \
     'if [ "${RELEASE_FREEZE_TEST:-}" = "1" ]; then' 'if true; then' \
     "not ok - RELEASE_FREEZE_FILE without the test flag does not lift the freeze" freeze_tests
