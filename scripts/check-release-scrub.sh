@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Refuse a webapp build with scrub off. A build has scrub only if it was made
 # with FREENET_MAIL_SCRUB=1 (ui/src/migration/scrub.rs), and off is silent: the
-# release would work, and the old copy of every user's keys would stay in the
-# v0.2.x delegates for good. The WASM holds the marker only if scrub is
+# release would work, and superseded local stores would never be cleared. The
+# WASM holds the marker only if scrub is
 # compiled in, so this reads the build that is about to be published, and not
 # the flags that were meant to produce it.
 #
