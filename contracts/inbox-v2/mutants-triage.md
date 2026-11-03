@@ -8,12 +8,12 @@ pass, so each has a line below. `scripts/check-mutants-triage.sh` fails on a
 survivor with no line, and, on a run of every shard, on a line with no
 survivor. A line is the mutant as cargo-mutants names it, without its position.
 
-Last full run, after fix round 2 (review r2): 241 mutants, 207 caught, 26
+Last full run, after fix round 3 (review r3): 245 mutants, 211 caught, 26
 unviable (they do not compile, so no test could be run), 6 survived, 2 timed
 out. The 6 survivors and the 2 timeouts below are the whole list. Each was
 applied by hand at the position cargo-mutants gave, built, and run against every
 test: the survivors passed all of them, and the two timeouts did not finish in
-240 seconds. (After fix round 1: 204 mutants, 176 caught, 6 survived of which 2
+240 seconds. (After fix round 2: 241 mutants, 207 caught, the same 6 and 2. After fix round 1: 204 mutants, 176 caught, 6 survived of which 2
 were test gaps, now tested. The run that added this file: 168 mutants, the
 first five below.)
 
