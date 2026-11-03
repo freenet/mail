@@ -558,7 +558,12 @@ fn drain_run(
 ) -> Result<u64, String> {
     let mut world = base.clone();
     world.env.faults = Some(faults);
-    for _ in 0..8 {
+    let mut injected = 0;
+    // Eight calls over the faulty host, then up to four over a healed one.
+    for call in 0..12 {
+        if call == 8 {
+            injected = world.env.faults.take().map_or(0, |f| f.injected.get());
+        }
         let Ok(u) = world.update(a, OwnerChange::Drain) else {
             continue;
         };
@@ -571,17 +576,42 @@ fn drain_run(
         }
         world.publish(a, &update);
     }
-    let injected = world.env.faults.take().map_or(0, |f| f.injected.get());
-    world.change(a, OwnerChange::Drain);
     if !world.state(a).messages.is_empty() {
         return Err("mail left in the inbox after healing".into());
+    }
+    for (id, text) in mail {
+        if !inbound_stored(&world, a, id) {
+            return Err(format!("{text}: no stored record"));
+        }
     }
     let got = texts(&world.inbound(a));
     let mut want: Vec<String> = mail.values().cloned().collect();
     want.push("first".into());
     want.sort();
     if got != want {
-        return Err(format!("stored {got:?}, sent {want:?}"));
+        let mut probe = MemEnv::default();
+        let space = Space::new(&mut probe, Origin([PROD; 32]));
+        let raw = |rel: &str| world.env.secrets.get(&space.full_key(rel)).cloned();
+        let index = raw(&crate::store::index_rel(ItemKind::Inbound, Some(a)));
+        let unlisted: Vec<_> = mail
+            .iter()
+            .filter(|(id, _)| {
+                !index
+                    .as_ref()
+                    .is_some_and(|i| i.windows(32).any(|w| w == &id[..]))
+            })
+            .map(|(id, text)| {
+                let item = ItemRef {
+                    kind: ItemKind::Inbound,
+                    owner: Some(*a),
+                    id: id.to_vec(),
+                };
+                (text.clone(), raw(&crate::store::pending_item_rel(&item)))
+            })
+            .collect();
+        return Err(format!(
+            "stored {got:?}, sent {want:?}; unlisted (marker): {unlisted:?}"
+        ));
     }
     Ok(injected)
 }
@@ -597,7 +627,8 @@ fn a_drain_over_a_faulty_host_never_tombstones_what_it_did_not_store() {
     let blind = env_or("DRAIN_BLIND", 0) as u32;
     let mut injected = 0;
     let mut failures = Vec::new();
-    for seed in 1..=seeds {
+    let from = env_or("DRAIN_FROM", 1);
+    for seed in from..from + seeds {
         let faults = Faults::seeded_with_blindness(seed, rate, blind);
         match drain_run(&base, &a, &mail, faults) {
             Ok(n) => injected += n,
@@ -826,4 +857,70 @@ fn a_bad_reply_pass_does_not_hold_mail_in_the_inbox() {
     world.change(&a, OwnerChange::Drain);
     assert!(world.state(&a).messages.is_empty());
     assert_eq!(texts(&world.inbound(&a)), ["odd pass"]);
+}
+
+/// Seed 596 of the drain sweep at 20% (found on 1b9dfbb), as a script of the
+/// faults that mattered: a create stores its record but cannot clear its
+/// marker; a retry finds the record unreadable, creates again, and its write
+/// is refused. Its undo used to remove the index entry the first create
+/// added, leaving a stored message (already drained) that no listing shows.
+#[test]
+fn a_failed_retry_of_a_create_keeps_the_earlier_entry() {
+    use crate::env::mem::{FaultOp, Rule};
+    let mut env = MemEnv::default();
+    let owner = create(&mut env, PROD, "alice").addr;
+    let item = ItemRef {
+        kind: ItemKind::Kept,
+        owner: Some(owner),
+        id: vec![7; 16],
+    };
+    let mut probe = MemEnv::default();
+    let space = Space::new(&mut probe, Origin([PROD; 32]));
+    let full = |rel: &str| String::from_utf8(space.full_key(rel)).unwrap();
+    let record = full(&item_rel(&item));
+    let marker = full(&crate::store::pending_item_rel(&item));
+    let rule = |op, key: &String, nth| Rule {
+        op,
+        key_contains: key.clone(),
+        nth,
+    };
+    let mut faults = Faults::default();
+    faults.rules = vec![
+        rule(FaultOp::RemoveFail, &marker, 1),
+        rule(FaultOp::SetFail, &marker, 2),
+        rule(FaultOp::GetBlindFrom, &record, 1),
+        rule(FaultOp::SetFail, &record, 2),
+    ];
+    env.faults = Some(faults);
+    let put = |env: &mut MemEnv| {
+        call(
+            env,
+            PROD,
+            Op::PutItem {
+                item: item.clone(),
+                body: ByteBuf::from(b"kept".to_vec()),
+                expected_gen: None,
+            },
+        )
+    };
+    assert_eq!(
+        put(&mut env),
+        Err(FailureCode::Internal),
+        "the marker is left"
+    );
+    assert!(put(&mut env).is_err(), "the retry's write is refused");
+    env.faults = None;
+    let Ok(Reply::Items { items, .. }) = call(
+        &mut env,
+        PROD,
+        Op::ListItems {
+            kind: ItemKind::Kept,
+            owner: Some(owner),
+            after: None,
+            limit: 10,
+        },
+    ) else {
+        panic!("list");
+    };
+    assert_eq!(items.len(), 1, "the stored item is no longer listed");
 }

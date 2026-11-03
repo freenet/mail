@@ -248,6 +248,9 @@ dt "inbox v2: the sender's binding names the message" "$D/sealing.rs" \
     'if !crypto::verify_v1(&binding, &envelope.sender_vk, &envelope.sender_sig) {' \
     'if false && !crypto::verify_v1(&binding, &envelope.sender_vk, &envelope.sender_sig) {' \
     a_restamped_copy_does_not_open
+dt "a failed retry of a create keeps the earlier entry" "$D/handlers.rs" \
+    'if listed_before {' 'if false && listed_before {' \
+    a_failed_retry_of_a_create_keeps_the_earlier_entry
 dt "inbox v2: a pass that cannot be kept does not hold mail back" "$D/inbox_v2.rs" \
     'Err(f) if !matches!(f.code, FailureCode::BadInput | FailureCode::CapReached) => {' \
     'Err(f) => {' \

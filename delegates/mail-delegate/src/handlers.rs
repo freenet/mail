@@ -1161,6 +1161,9 @@ pub fn put_item(
         ));
     }
     let marker = pending_rel(&item);
+    // An entry already listed belongs to an earlier create, whose record may
+    // be stored and only unreadable now: a failure here must not unlist it.
+    let listed_before = current.is_none() && s.index(&ix)?.1.contains(&item.id);
     if current.is_none() {
         // Claim the index slot first; it enforces the per-kind cap. The
         // marker lets a listing free the slot if the write below fails and
@@ -1191,6 +1194,10 @@ pub fn put_item(
             Ok(Reply::Ack { generation })
         }
         Err(e) => {
+            if listed_before {
+                // The create marker stays: the entry may have no record.
+                return Err(partial(e));
+            }
             if current.is_none() {
                 if retried(|| s.index_remove(&ix, &item.id)).is_ok() {
                     let _ = s.del(&marker);
