@@ -8,7 +8,9 @@ pass, so each has a line below. `scripts/check-mutants-triage.sh` fails on a
 survivor with no line, and, on a run of every shard, on a line with no
 survivor. A line is the mutant as cargo-mutants names it, without its position.
 
-Last full run, after fix round 3 (review r3): 245 mutants, 211 caught, 26
+Last full run, after fix round 4 (review r4, which added the nothing-lost
+oracle to the fuzzer and changed no rule): the same 245, 211 caught, 6
+survived, 2 timed out. After fix round 3 (review r3): 245 mutants, 211 caught, 26
 unviable (they do not compile, so no test could be run), 6 survived, 2 timed
 out. The 6 survivors and the 2 timeouts below are the whole list. Each was
 applied by hand at the position cargo-mutants gave, built, and run against every
