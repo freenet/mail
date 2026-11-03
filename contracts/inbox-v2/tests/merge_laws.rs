@@ -93,7 +93,7 @@ fn modes(rng: &mut Rng) -> QuarantineMode {
 
 /// The base time of the universe that runs at the revocation cap: its fillers
 /// are signed once and shared, so their expiries are fixed against it.
-const AT_CAP_T0: u64 = 1_800_000_000 / HOUR * HOUR;
+const AT_CAP_T0: u64 = 1_800_000_000 / DAY * DAY;
 
 /// Revocations that fill V1's set to within a few of its cap: most live past
 /// every time the universe draws, a third run out at its 31st day.
@@ -117,7 +117,7 @@ fn cap_fillers() -> &'static [Revocation] {
 }
 
 fn universe(seed: u64, rng: &mut Rng, big: bool) -> Universe {
-    let t0 = 1_800_000_000 / HOUR * HOUR + rng.below(1000) * DAY;
+    let t0 = 1_800_000_000 / DAY * DAY + rng.below(1000) * DAY;
     universe_at(seed, rng, big, t0)
 }
 
@@ -627,7 +627,7 @@ fn the_merge_laws_hold_over_crafted_states() {
 fn a_dead_revocation_redelivered_does_not_move_the_state() {
     let (w, rules) = (world(), Rules::V1);
     let params = w.params;
-    let t = 1_800_000_000 / HOUR * HOUR;
+    let t = 1_800_000_000 / DAY * DAY;
     let old = w.owner(1, 3, QuarantineMode::Open, BTreeMap::new());
     let new = w.owner(2, 4, QuarantineMode::Open, BTreeMap::new());
     let pass = w.pass(1, 4, t + 300 * DAY, PassClass::Contact);
@@ -652,7 +652,7 @@ fn a_dead_revocation_redelivered_does_not_move_the_state() {
 #[test]
 fn a_dead_usage_entry_never_wins_the_join() {
     let w = world();
-    let t = 1_800_000_000 / HOUR * HOUR;
+    let t = 1_800_000_000 / DAY * DAY;
     let owner = w.owner(1, 3, QuarantineMode::Open, BTreeMap::new());
     let p = id_of(7);
     let dying = w.usage(p, 3, t);
@@ -678,7 +678,7 @@ fn a_dead_usage_entry_never_wins_the_join() {
 #[test]
 fn a_dead_revocation_never_wins_the_join() {
     let w = world();
-    let t = 1_800_000_000 / HOUR * HOUR;
+    let t = 1_800_000_000 / DAY * DAY;
     let old = w.owner(1, 3, QuarantineMode::Open, BTreeMap::new());
     let new = w.owner(2, 4, QuarantineMode::Open, BTreeMap::new());
     let far = t + 300 * DAY;

@@ -15,7 +15,7 @@ use freenet_stdlib::prelude::ContractInstanceId;
 use ghostkey_common::{ScopedPayload, SignatureRequestor};
 use serde_bytes::{ByteArray, ByteBuf};
 
-const T: u64 = 1_800_000_000 / HOUR * HOUR;
+const T: u64 = 1_800_000_000 / DAY * DAY;
 const REQUIRE: QuarantineMode = QuarantineMode::RequireGhost { min_usd: None };
 const DOLLAR5: QuarantineMode = QuarantineMode::RequireGhost { min_usd: Some(5) };
 

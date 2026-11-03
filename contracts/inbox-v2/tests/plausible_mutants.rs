@@ -23,7 +23,7 @@ use freenet_email_inbox_v2::signed::*;
 use freenet_email_inbox_v2::sync;
 use freenet_email_inbox_v2::types::*;
 
-const T: u64 = 1_800_000_000 / HOUR * HOUR;
+const T: u64 = 1_800_000_000 / DAY * DAY;
 const FAR: u64 = T + 300 * DAY;
 const OPEN: QuarantineMode = QuarantineMode::Open;
 const REQUIRE: QuarantineMode = QuarantineMode::RequireGhost { min_usd: None };
@@ -195,10 +195,11 @@ fn quarantine_is_ranked_by_the_salted_rank() -> Broken {
 /// Pruning reads the joined time, so the order of the parts changes nothing.
 fn pruning_reads_the_merged_time() -> Broken {
     let w = world();
-    let r = w.revocation(id_of(9), T - WINDOW_BACK + 1, 3);
+    // Live at T, pruned a day later: expiries are whole days.
+    let r = w.revocation(id_of(9), T - WINDOW_BACK + DAY, 3);
     let old = state(OPEN, T, vec![r], vec![]);
     let later = InboxDelta {
-        time: Some(w.time(T + HOUR)),
+        time: Some(w.time(T + DAY)),
         ..InboxDelta::default()
     };
     let forward = run(&Rules::V1, vec![old.clone().into(), later.clone()]);

@@ -19,7 +19,7 @@ use freenet_email_inbox_v2::{apply, is_valid};
 use freenet_stdlib::prelude::UpdateData;
 use serde_bytes::{ByteArray, ByteBuf};
 
-const T: u64 = 1_800_000_000 / HOUR * HOUR;
+const T: u64 = 1_800_000_000 / DAY * DAY;
 const FAR: u64 = T + 300 * DAY;
 /// 4 MiB, the size of the largest valid state rounded up, plus a margin.
 const LIMIT: usize = 4 * 1024 * 1024 + 256 * 1024;

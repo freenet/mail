@@ -60,6 +60,10 @@ pub const WINDOW_FORWARD: u64 = 400 * 86_400;
 pub const QUARANTINE_FORWARD: u64 = 2 * 86_400;
 /// `sent_time` is a whole hour.
 pub const SENT_TIME_GRANULARITY: u64 = 3_600;
+/// A pass's expiry, and a revocation's or usage entry's, is a whole day
+/// (decision 17). To the second, an expiry minus the pass lifetime would give
+/// the moment of the grant, which the pass message in the contact's inbox shows.
+pub const EXPIRY_GRANULARITY: u64 = 86_400;
 /// Ciphertext is padded to one of these.
 pub const CIPHERTEXT_SIZES: [usize; 3] = [8 * 1024, 16 * 1024, 32 * 1024];
 const KEM_EK_LEN: usize = 1184;
@@ -267,6 +271,7 @@ impl Filter<'_> {
         if *cert.recipient != self.params.addr
             || cert.epoch != self.owner.pass_epoch
             || sent_time >= cert.expiry
+            || !cert.expiry.is_multiple_of(EXPIRY_GRANULARITY)
             || self.revocations_full
             || self.live_revoked.contains(&cert.pass_id)
             || !self.cert_is_genuine(cert)
@@ -477,6 +482,7 @@ pub fn merge(
                 |r| {
                     let bytes = revocation_bytes(&params.addr, &r.pass_id, r.expiry, r.epoch);
                     r.pass_id == key
+                        && r.expiry.is_multiple_of(EXPIRY_GRANULARITY)
                         && live_revocation(r)
                         && verify_ed25519(&issuer, &bytes, &r.sig)
                 },
@@ -491,7 +497,10 @@ pub fn merge(
                 |u| {
                     let bytes =
                         usage_bytes(&params.addr, &u.pass_id, u.used, u.expiry, u.owner_version);
-                    u.pass_id == key && live_usage(u) && verify_ed25519(&issuer, &bytes, &u.sig)
+                    u.pass_id == key
+                        && u.expiry.is_multiple_of(EXPIRY_GRANULARITY)
+                        && live_usage(u)
+                        && verify_ed25519(&issuer, &bytes, &u.sig)
                 },
             );
         }

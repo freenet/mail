@@ -12,7 +12,7 @@ use freenet_email_inbox_v2::types::*;
 use freenet_email_inbox_v2::{is_valid, sync};
 use serde_bytes::ByteArray;
 
-const T: u64 = 1_800_000_000 / HOUR * HOUR;
+const T: u64 = 1_800_000_000 / DAY * DAY;
 const FAR: u64 = T + 300 * DAY;
 const LIMIT: usize = 4 * 1024 * 1024;
 const REQUIRE: QuarantineMode = QuarantineMode::RequireGhost { min_usd: None };
@@ -99,7 +99,8 @@ fn the_widest_valid_state_fits() {
     let rules = Rules::V1;
     // Every time an 8-byte integer, every sent_time a whole hour.
     let t = (u64::MAX / 2) / HOUR * HOUR;
-    let never = u64::MAX;
+    // Expiries are whole days (decision 17).
+    let never = u64::MAX / DAY * DAY;
     let id32 = |i: u64| {
         let mut id = [0xFFu8; 32];
         id[24..].copy_from_slice(&i.to_be_bytes());

@@ -15,7 +15,7 @@ use freenet_email_inbox_v2::merge::merge;
 use freenet_email_inbox_v2::types::*;
 use freenet_email_inbox_v2::{apply, is_valid};
 
-const T: u64 = 1_800_000_000 / HOUR * HOUR;
+const T: u64 = 1_800_000_000 / DAY * DAY;
 const FAR: u64 = T + 300 * DAY;
 
 /// A small valid state with something in every collection, so every form

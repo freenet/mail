@@ -91,7 +91,7 @@ why = "Checked against the owner's current epoch."
 [[field]]
 path = "messages.*.admission.Pass.cert.expiry"
 class = "pass bookkeeping"
-why = "Checked against the send time."
+why = "Checked against the send time. A whole day, which the contract requires, and the client draws each pass lifetime from 335 to 395 days, so the expiry does not date the grant or renewal that the pass message in the contact's own inbox shows."
 
 [[field]]
 path = "messages.*.admission.Pass.cert.class"
@@ -157,7 +157,7 @@ why = "The pass the owner revoked, by its random id."
 [[field]]
 path = "revoked.*.expiry"
 class = "revocations and usage"
-why = "When the revocation can be dropped, which is the revoked pass's own expiry."
+why = "When the revocation can be dropped, which is the revoked pass's own expiry: a whole day, as a pass's is."
 
 [[field]]
 path = "revoked.*.epoch"
@@ -182,7 +182,7 @@ why = "How many of an invite's messages have been used, so the allowance is enfo
 [[field]]
 path = "usage.*.expiry"
 class = "revocations and usage"
-why = "When the entry can be dropped."
+why = "When the entry can be dropped: a whole day, as a pass's expiry is."
 
 [[field]]
 path = "usage.*.owner_version"

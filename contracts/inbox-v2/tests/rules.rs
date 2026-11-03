@@ -10,7 +10,7 @@ use freenet_email_inbox_v2::types::*;
 use freenet_email_inbox_v2::{Inbox, Params, apply, is_valid, sync};
 use freenet_stdlib::prelude::*;
 
-const T: u64 = 1_800_000_000 / HOUR * HOUR;
+const T: u64 = 1_800_000_000 / DAY * DAY;
 const FAR: u64 = T + 300 * DAY;
 const OPEN: QuarantineMode = QuarantineMode::Open;
 
@@ -128,12 +128,68 @@ fn sent_time_is_a_whole_hour_and_ciphertext_a_padded_size() {
 #[test]
 fn a_pass_is_refused_from_its_expiry() {
     let w = world();
-    let pass = w.pass(1, 3, T + HOUR, PassClass::Contact);
+    let pass = w.pass(1, 3, T + DAY, PassClass::Contact);
     let msgs = vec![
-        w.pass_msg(&pass, ct(8192, 1), T),
-        w.pass_msg(&pass, ct(8192, 2), T + HOUR),
+        w.pass_msg(&pass, ct(8192, 1), T + DAY - HOUR),
+        w.pass_msg(&pass, ct(8192, 2), T + DAY),
     ];
     assert_eq!(kept(owner(3), T, vec![], vec![], msgs), [true, false]);
+}
+
+/// Decision 17: a pass's expiry is a whole day, and so are a revocation's and a
+/// usage entry's. To the second, an expiry minus the pass lifetime gives the
+/// moment of the grant or renewal, which the pass message in the contact's own
+/// inbox also shows, and links the pair.
+#[test]
+fn expiries_are_whole_days() {
+    let w = world();
+    let off_the_day = [FAR + 1, FAR + HOUR, FAR + DAY - 1, FAR + 1234];
+    let mut msgs = vec![w.pass_msg(&w.pass(1, 3, FAR, PassClass::Contact), ct(8192, 1), T)];
+    for (i, expiry) in off_the_day.iter().enumerate() {
+        let pass = w.pass(10 + i as u64, 3, *expiry, PassClass::Contact);
+        msgs.push(w.pass_msg(&pass, ct(8192, 10 + i as u64), T));
+    }
+    assert_eq!(
+        kept(owner(3), T, vec![], vec![], msgs),
+        [true, false, false, false, false]
+    );
+
+    // Off the day, a revocation does not revoke and a usage entry does not
+    // count: each is dropped as it arrives.
+    let pass = w.pass(2, 3, FAR, PassClass::Invite { max_messages: 1 });
+    let msg = w.pass_msg(&pass, ct(8192, 2), T);
+    for expiry in off_the_day {
+        let revoked = vec![w.revocation(pass.cert.pass_id, expiry, 3)];
+        assert_eq!(
+            kept(owner(3), T, revoked, vec![], vec![msg.clone()]),
+            [true]
+        );
+        let used = vec![w.usage(pass.cert.pass_id, 1, expiry)];
+        assert_eq!(kept(owner(3), T, vec![], used, vec![msg.clone()]), [true]);
+        let merged = clean(w.raw(
+            owner(3),
+            w.time(T),
+            [
+                w.revocation(id_of(8), expiry, 3),
+                w.revocation(id_of(9), FAR, 3),
+            ],
+            [w.usage(id_of(8), 1, expiry), w.usage(id_of(9), 1, FAR)],
+            [],
+        ));
+        assert_eq!(
+            merged.revoked.keys().copied().collect::<Vec<_>>(),
+            [id_of(9)]
+        );
+        assert_eq!(merged.usage.keys().copied().collect::<Vec<_>>(), [id_of(9)]);
+    }
+    // The controls: on the day, each does.
+    let revoked = vec![w.revocation(pass.cert.pass_id, FAR, 3)];
+    assert_eq!(
+        kept(owner(3), T, revoked, vec![], vec![msg.clone()]),
+        [false]
+    );
+    let used = vec![w.usage(pass.cert.pass_id, 1, FAR)];
+    assert_eq!(kept(owner(3), T, vec![], used, vec![msg]), [false]);
 }
 
 #[test]
@@ -185,14 +241,15 @@ fn the_tombstone_count_is_capped_and_nothing_else_about_them_is() {
 #[test]
 fn a_revocation_is_pruned_exactly_at_expiry_plus_the_window() {
     let w = world();
-    let keep = w.revocation(id_of(1), T - WINDOW_BACK + 1, 3);
+    // Expiries are whole days, so the time moves to a second before the edge.
+    let keep = w.revocation(id_of(1), T - WINDOW_BACK + DAY, 3);
     let drop = w.revocation(id_of(2), T - WINDOW_BACK, 3);
     let older = w.revocation(id_of(3), FAR, 2);
     let current = w.revocation(id_of(4), FAR, 3);
     let later = w.revocation(id_of(5), FAR, 4);
     let merged = clean(w.raw(
         owner(3),
-        w.time(T),
+        w.time(T + DAY - 1),
         [keep, drop, older, current, later],
         [],
         [],
@@ -204,9 +261,9 @@ fn a_revocation_is_pruned_exactly_at_expiry_plus_the_window() {
 #[test]
 fn a_usage_entry_is_pruned_exactly_at_expiry_plus_the_window() {
     let w = world();
-    let keep = w.usage(id_of(1), 1, T - WINDOW_BACK + 1);
+    let keep = w.usage(id_of(1), 1, T - WINDOW_BACK + DAY);
     let drop = w.usage(id_of(2), 1, T - WINDOW_BACK);
-    let merged = clean(w.raw(owner(3), w.time(T), [], [keep, drop], []));
+    let merged = clean(w.raw(owner(3), w.time(T + DAY - 1), [], [keep, drop], []));
     assert_eq!(merged.usage.keys().copied().collect::<Vec<_>>(), [id_of(1)]);
 }
 

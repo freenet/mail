@@ -36,6 +36,8 @@ MASTER = b"\x88" * 32
 KEM = bytes.fromhex("aabbccdd")
 T = 0x0102030405060708
 SENT = 0x68000000 // 3600 * 3600
+# Expiries are whole days (decision 17).
+EXPIRY = 0x69000000 // 86400 * 86400
 
 
 def quarantine(mode):
@@ -54,7 +56,7 @@ def owner_layout(mode):
 
 
 def cert_layout(klass):
-    return b"fmail/pass/v1" + ADDR + PASS_ID + KEY + u32(3) + u64(T) + klass
+    return b"fmail/pass/v1" + ADDR + PASS_ID + KEY + u32(3) + u64(EXPIRY) + klass
 
 
 def stamped(domain):
@@ -80,8 +82,8 @@ vectors = [
     ("time", b"fmail/time/v1" + ADDR + u64(T)),
     ("cert_contact", cert_layout(b"\x00")),
     ("cert_invite", cert_layout(b"\x01\x03")),
-    ("revocation", b"fmail/revoke/v1" + ADDR + PASS_ID + u64(T) + u32(3)),
-    ("usage", b"fmail/usage/v1" + ADDR + PASS_ID + b"\x02" + u64(T) + u64(7)),
+    ("revocation", b"fmail/revoke/v1" + ADDR + PASS_ID + u64(EXPIRY) + u32(3)),
+    ("usage", b"fmail/usage/v1" + ADDR + PASS_ID + b"\x02" + u64(EXPIRY) + u64(7)),
     ("admit", stamped(b"fmail/admit/v1")),
     ("owner_msg", stamped(b"fmail/owner-msg/v1")),
     ("ghost_admit", stamped(b"fmail/ghost-admit/v1")),
@@ -110,14 +112,14 @@ owner = {
     "sig": b"\x99" * 4,
 }
 time = {"owner_time": T, "sig": SIG}
-revocation = {"pass_id": PASS_ID, "expiry": T, "epoch": 3, "sig": SIG}
-usage = {"pass_id": PASS_ID, "used": 2, "expiry": T, "owner_version": 7, "sig": SIG}
+revocation = {"pass_id": PASS_ID, "expiry": EXPIRY, "epoch": 3, "sig": SIG}
+usage = {"pass_id": PASS_ID, "used": 2, "expiry": EXPIRY, "owner_version": 7, "sig": SIG}
 cert = {
     "recipient": ADDR,
     "pass_id": PASS_ID,
     "pass_vk": KEY,
     "epoch": 3,
-    "expiry": T,
+    "expiry": EXPIRY,
     "class": {"Invite": {"max_messages": 3}},
     "sig": SIG,
 }

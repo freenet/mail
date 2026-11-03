@@ -15,7 +15,7 @@ use freenet_email_inbox_v2::types::*;
 use freenet_email_inbox_v2::{apply, is_valid};
 use serde_bytes::{ByteArray, ByteBuf};
 
-const T: u64 = 1_800_000_000 / HOUR * HOUR;
+const T: u64 = 1_800_000_000 / DAY * DAY;
 const EXPIRY: u64 = T + 100 * DAY;
 const OPEN: QuarantineMode = QuarantineMode::Open;
 

@@ -14,6 +14,8 @@ use serde_bytes::{ByteArray, ByteBuf};
 const ADDR: [u8; 24] = [0x11; 24];
 const T: u64 = 0x0102_0304_0506_0708;
 const SENT: u64 = 0x6800_0000 / 3600 * 3600;
+/// Expiries are whole days (decision 17).
+const EXPIRY: u64 = 0x6900_0000 / 86_400 * 86_400;
 
 fn expected(name: &str) -> Vec<u8> {
     let line = include_str!("fixtures/vectors.txt")
@@ -60,7 +62,7 @@ fn cert(class: PassClass) -> PassCert {
         pass_id: pass_id(),
         pass_vk: key(),
         epoch: 3,
-        expiry: T,
+        expiry: EXPIRY,
         class,
         sig: sig(),
     }
@@ -76,7 +78,7 @@ fn time() -> TimeAttestation {
 fn revocation() -> Revocation {
     Revocation {
         pass_id: pass_id(),
-        expiry: T,
+        expiry: EXPIRY,
         epoch: 3,
         sig: sig(),
     }
@@ -86,7 +88,7 @@ fn usage() -> PassUsage {
     PassUsage {
         pass_id: pass_id(),
         used: 2,
-        expiry: T,
+        expiry: EXPIRY,
         owner_version: 7,
         sig: sig(),
     }
@@ -133,8 +135,11 @@ fn signed_layouts() {
         "cert_invite",
         &cert_bytes(&cert(PassClass::Invite { max_messages: 3 })),
     );
-    check("revocation", &revocation_bytes(&ADDR, &pass_id(), T, 3));
-    check("usage", &usage_bytes(&ADDR, &pass_id(), 2, T, 7));
+    check(
+        "revocation",
+        &revocation_bytes(&ADDR, &pass_id(), EXPIRY, 3),
+    );
+    check("usage", &usage_bytes(&ADDR, &pass_id(), 2, EXPIRY, 7));
     check("admit", &admit_bytes(&ADDR, SENT, &HASH));
     check("owner_msg", &owner_msg_bytes(&ADDR, SENT, &HASH));
     check("ghost_admit", &ghost_admit_bytes(&ADDR, SENT, &HASH));
