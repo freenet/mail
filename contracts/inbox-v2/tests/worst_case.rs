@@ -88,6 +88,71 @@ fn the_worst_case_is_valid_and_fits() {
     }
 }
 
+/// The widest encoding a valid state can take: the worst case above, with
+/// every integer at its widest and, in an Open inbox, every quarantine message
+/// carrying a proof at the size cap (held and ignored there). It fits in
+/// 4 MiB, so `MAX_INPUT_BYTES`'s 256 KiB above that is margin no valid state
+/// or delta uses.
+#[test]
+fn the_widest_valid_state_fits() {
+    let w = world();
+    let rules = Rules::V1;
+    // Every time an 8-byte integer, every sent_time a whole hour.
+    let t = (u64::MAX / 2) / HOUR * HOUR;
+    let never = u64::MAX;
+    let id32 = |i: u64| {
+        let mut id = [0xFFu8; 32];
+        id[24..].copy_from_slice(&i.to_be_bytes());
+        ByteArray::new(id)
+    };
+    let tombstones: BTreeMap<B32, u64> = (0..rules.tombstones as u64)
+        .map(|i| (id32(i), never - i))
+        .collect();
+    let epoch = u32::MAX;
+    let owner = w.owner(never, epoch, QuarantineMode::Open, tombstones);
+    let revoked: Vec<_> = (0..rules.revoked as u64 - 1)
+        .map(|i| w.revocation(id_of(i), never, epoch))
+        .collect();
+    let usage: Vec<_> = (0..rules.usage as u64)
+        .map(|i| w.usage_at(id_of(i), u8::MAX, never, never))
+        .collect();
+    let mut messages = Vec::new();
+    // Invites take more bytes than contacts: 32 of them, two messages each.
+    for i in 0..rules.pass_pool as u64 {
+        let class = PassClass::Invite {
+            max_messages: u8::MAX,
+        };
+        let pass = w.pass((1 << 40) + i / 2, epoch, never, class);
+        messages.push(w.pass_msg(&pass, ct(32768, (1 << 41) + i), t));
+    }
+    for i in 0..rules.owner_pool as u64 {
+        messages.push(w.owner_msg(ct(32768, (1 << 42) + i), t));
+    }
+    for i in 0..rules.quarantine as u64 {
+        let proof = GhostProof {
+            cert: serde_bytes::ByteBuf::from(vec![0xFF; ghostkey_verify::MAX_CERTIFICATE_BYTES]),
+            scoped_payload: serde_bytes::ByteBuf::from(vec![
+                0xFF;
+                freenet_email_inbox_v2::merge::MAX_SCOPED_PAYLOAD
+            ]),
+            ghost_sig: ByteArray::new([0xFF; 64]),
+        };
+        let admission = Admission::Quarantine { ghost: Some(proof) };
+        messages.push(w.keyed(ct(32768, (1 << 43) + i), t, admission));
+    }
+    let state = w.raw(owner, w.time(t), revoked, usage, messages);
+    let bytes = encode(&state);
+    assert!(is_valid(&rules, &w.params, &bytes), "nothing was dropped");
+    assert_eq!(state.messages.len(), MAX_MESSAGES);
+    println!(
+        "widest valid state: {} bytes, {} under 4 MiB",
+        bytes.len(),
+        LIMIT - bytes.len()
+    );
+    assert!(bytes.len() <= LIMIT);
+    assert!(LIMIT < MAX_INPUT_BYTES);
+}
+
 /// The summary is smaller than a quarter of the state at the other extreme too.
 #[test]
 fn the_smallest_state_summarizes_small() {
