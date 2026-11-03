@@ -252,6 +252,36 @@ fn a_genuine_revocation_filed_under_another_id_is_dropped() {
     assert!(merged.revoked.is_empty());
 }
 
+/// A pass certified for a small-order key can be signed for by anyone, so the
+/// strict check is what refuses it, not the arithmetic.
+#[test]
+fn a_certificate_for_a_weak_key_is_no_use() {
+    let w = world();
+    let bytes = ct(8192, 1);
+    // The identity point as the key; as R, with S = 0, it verifies any message.
+    let mut identity = [0u8; 32];
+    identity[0] = 1;
+    let mut cert = contact().cert;
+    cert.pass_vk = ByteArray::new(identity);
+    cert.sig = sign64(&w.issuer, &cert_bytes(&cert));
+    let mut any = [0u8; 64];
+    any[..32].copy_from_slice(&identity);
+    let admission = Admission::Pass {
+        cert,
+        msg_sig: ByteArray::new(any),
+    };
+    assert!(!survives(owner(3), w.keyed(bytes, T, admission)));
+}
+
+#[test]
+fn a_genuine_usage_entry_filed_under_another_id_is_dropped() {
+    let w = world();
+    let mut raw = w.raw(owner(3), w.time(T), [], [], []);
+    raw.usage.insert(id_of(2), w.usage(id_of(1), 2, EXPIRY));
+    let merged = merge(&Rules::V1, &w.params, vec![raw.into()]).unwrap();
+    assert!(merged.usage.is_empty());
+}
+
 #[test]
 fn every_usage_field_is_signed() {
     let w = world();
@@ -442,5 +472,21 @@ fn a_malleated_signature_is_refused() {
         assert!(!is_valid(&Rules::V1, &w.params, &encode(&raw)));
     } else {
         panic!("this signature's S + L does not fit: pick another fixture");
+    }
+}
+
+/// Signed by the owner, and still no use to a sender.
+#[test]
+fn a_kem_key_of_the_wrong_size_is_refused() {
+    let w = world();
+    for len in [1183, 1185] {
+        let mut record = owner(3);
+        record.kem_ek = ByteBuf::from(vec![1; len]);
+        w.sign_owner(&mut record);
+        let raw = w.raw(record, w.time(T), [], [], []);
+        assert_eq!(
+            merge(&Rules::V1, &w.params, vec![raw.into()]),
+            Err(Malformed("owner KEM key"))
+        );
     }
 }

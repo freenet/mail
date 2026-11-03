@@ -263,13 +263,15 @@ fn an_invite_holds_two_and_counts_what_was_used() {
 #[test]
 fn the_pass_pool_is_round_robin() {
     let w = world();
-    // 20 passes with 8 each: 160 candidates, 64 places. Every pass keeps its
-    // first three, and four of the twenty a fourth, however late their senders.
+    // 20 passes with 8 each: 160 candidates, 64 places. Each pass sends all of
+    // its mail before the next begins, so ordering by time alone would give
+    // eight passes everything. Every pass keeps its first three, and four of
+    // the twenty a fourth.
     let mut msgs = Vec::new();
     for p in 0..20u64 {
         let pass = w.pass(p, 3, FAR, PassClass::Contact);
         for i in 0..8u64 {
-            msgs.push(w.pass_msg(&pass, ct(8192, p * 100 + i), T + (p + i * 30) * HOUR));
+            msgs.push(w.pass_msg(&pass, ct(8192, p * 100 + i), T + (p * 10 + i) * HOUR));
         }
     }
     let merged = clean(w.raw(owner(3), w.time(T), [], [], msgs.clone()));
@@ -285,6 +287,11 @@ fn the_pass_pool_is_round_robin() {
     assert_eq!(per_pass[&id_of(0)], 4, "the earliest sender's fourth");
     assert_eq!(per_pass[&id_of(3)], 4);
     assert_eq!(per_pass[&id_of(4)], 3, "by sent_time within k");
+    assert_eq!(
+        per_pass[&id_of(7)],
+        3,
+        "not eight, as time alone would give"
+    );
     assert_eq!(per_pass[&id_of(19)], 3);
 }
 
@@ -394,7 +401,8 @@ fn a_union_over_the_revocation_cap_keeps_the_smallest_and_recovers() {
 
     // Id 0 is the smallest and runs out first. Ids 1.. never do.
     let mut high = vec![w.revocation(id_of(0), T, 3)];
-    high.extend(revocations(cap - 2, 2));
+    // Together they name ids 0 to cap, one more than the cap.
+    high.extend(revocations(cap - 2, 3));
     let low = encode(&w.raw(
         owner(3),
         w.time(T),
@@ -434,6 +442,29 @@ fn a_union_over_the_revocation_cap_keeps_the_smallest_and_recovers() {
     assert!(is_valid(&Rules::V1, &params, &back));
     let back: InboxState = decode(&back).unwrap();
     assert_eq!(back.messages.keys().copied().collect::<Vec<_>>(), [msg.0]);
+}
+
+#[test]
+fn a_summary_cut_mid_entry_is_refused() {
+    use ciborium::Value;
+    let w = world();
+    let state = w.raw(owner(3), w.time(T), [], [], [w.owner_msg(ct(8192, 1), T)]);
+    let summary = sync::summarize(&state);
+    let mut value: Value = ciborium::from_reader(summary.as_slice()).unwrap();
+    let Value::Map(fields) = &mut value else {
+        panic!("a map")
+    };
+    let (_, Value::Bytes(entries)) = fields
+        .iter_mut()
+        .find(|(k, _)| k.as_text() == Some("messages"))
+        .unwrap()
+    else {
+        panic!("bytes")
+    };
+    entries.pop();
+    let mut cut = Vec::new();
+    ciborium::into_writer(&value, &mut cut).unwrap();
+    assert_eq!(sync::delta(&state, &cut), Err(Malformed("summary")));
 }
 
 #[test]
