@@ -23,10 +23,13 @@ CRATES=(
 )
 
 # Crates with a non-default feature whose code paths must also be checked:
-# the mail delegate's v1-transition (V1AftParams, cfg! branches).
+# the mail delegate's v1-transition (V1AftParams, cfg! branches) and the inbox
+# v2 test seam.
 extra_features() {
     case "$1" in
         delegates/mail-delegate) echo v1-transition ;;
+        # tests/plausible_mutants.rs is built only with it (src/mutant.rs).
+        contracts/inbox-v2) echo plausible-mutants ;;
     esac
 }
 

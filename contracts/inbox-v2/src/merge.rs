@@ -35,6 +35,9 @@ use ml_dsa::signature::Verifier as _;
 use serde::Deserialize;
 
 use crate::Params;
+// The test seam's call sites are all `#[cfg(feature = "plausible-mutants")]`.
+#[cfg(feature = "plausible-mutants")]
+use crate::mutant::{self, Mutant};
 use crate::signed::{
     admit_bytes, cert_bytes, ghost_admit_bytes, message_id, owner_bytes, owner_msg_bytes,
     revocation_bytes, time_bytes, usage_bytes,
@@ -270,6 +273,17 @@ impl Filter<'_> {
     /// The whole certificate, never its id, keys the memo: a pass id can have
     /// several certificates, and a forged one must not ride on a genuine one.
     fn cert_is_genuine(&mut self, cert: &PassCert) -> bool {
+        #[cfg(feature = "plausible-mutants")]
+        if mutant::on(Mutant::CertMemoByPassId) {
+            let known = self.certs.get(cert.pass_id.as_slice()).copied();
+            return known.unwrap_or_else(|| {
+                let mut bytes = cert_bytes(cert);
+                bytes.extend_from_slice(cert.sig.as_slice());
+                let genuine = verify_ed25519(&self.issuer, &bytes[..bytes.len() - 64], &cert.sig);
+                self.certs.insert(cert.pass_id.to_vec(), genuine);
+                genuine
+            });
+        }
         let mut bytes = cert_bytes(cert);
         bytes.extend_from_slice(cert.sig.as_slice());
         if let Some(known) = self.certs.get(&bytes) {
@@ -311,7 +325,10 @@ impl Filter<'_> {
         };
         let proof = proof?;
         let ghost = self.verify_proof(proof, sent_time, ct_hash)?;
-        (ghost.usd >= u64::from(min_usd.unwrap_or(0))).then_some(Slot::Quarantine {
+        let tier_met = ghost.usd >= u64::from(min_usd.unwrap_or(0));
+        #[cfg(feature = "plausible-mutants")]
+        let tier_met = tier_met || mutant::on(Mutant::TierCheckSkipped);
+        tier_met.then_some(Slot::Quarantine {
             ghost: Some(ghost.key),
         })
     }
@@ -326,6 +343,24 @@ impl Filter<'_> {
         let Requestor::WebApp(requestor) = scoped.requestor else {
             return None;
         };
+        #[cfg(feature = "plausible-mutants")]
+        if mutant::on(Mutant::RequestorPinSkipped) || mutant::on(Mutant::GhostPayloadIsCtHash) {
+            let want = if mutant::on(Mutant::GhostPayloadIsCtHash) {
+                ct_hash.to_vec()
+            } else {
+                ghost_admit_bytes(&self.params.addr, sent_time, ct_hash)
+            };
+            let pinned = mutant::on(Mutant::RequestorPinSkipped)
+                || *requestor.as_bytes() == WEBAPP_REQUESTOR;
+            if !pinned || scoped.payload != want {
+                return None;
+            }
+        } else if *requestor.as_bytes() != WEBAPP_REQUESTOR
+            || scoped.payload != ghost_admit_bytes(&self.params.addr, sent_time, ct_hash)
+        {
+            return None;
+        }
+        #[cfg(not(feature = "plausible-mutants"))]
         if *requestor.as_bytes() != WEBAPP_REQUESTOR
             || scoped.payload != ghost_admit_bytes(&self.params.addr, sent_time, ct_hash)
         {
@@ -393,7 +428,16 @@ pub fn merge(
     let mut revoked = BTreeMap::new();
     let mut usage = BTreeMap::new();
     let mut candidates: BTreeMap<B32, Vec<Message>> = BTreeMap::new();
+    #[cfg(feature = "plausible-mutants")]
+    let unmerged_time = parts
+        .first()
+        .and_then(|p| p.time.as_ref())
+        .map(|t| t.owner_time);
+    #[cfg(feature = "plausible-mutants")]
+    mutant::begin();
     for part in parts {
+        #[cfg(feature = "plausible-mutants")]
+        mutant::next_part();
         for (key, entry) in part.revoked {
             join_entry(
                 &mut revoked,
@@ -419,6 +463,8 @@ pub fn merge(
             );
         }
         for (id, message) in part.messages {
+            #[cfg(feature = "plausible-mutants")]
+            mutant::note(&id);
             let at_id = candidates.entry(id).or_default();
             if !at_id.contains(&message) {
                 at_id.push(message);
@@ -427,10 +473,31 @@ pub fn merge(
     }
 
     // Step 4.
-    let expired = |expiry: u64| expiry.saturating_add(WINDOW_BACK) <= time.owner_time;
+    let prune_time = time.owner_time;
+    #[cfg(feature = "plausible-mutants")]
+    let prune_time = unmerged_time
+        .filter(|_| mutant::on(Mutant::PruneUnmergedTime))
+        .unwrap_or(prune_time);
+    let expired = |expiry: u64| expiry.saturating_add(WINDOW_BACK) <= prune_time;
+    #[cfg(feature = "plausible-mutants")]
+    let union_len = revoked.len();
+    #[cfg(feature = "plausible-mutants")]
+    let unpruned: BTreeSet<B16> = revoked.keys().copied().collect();
+    #[cfg(feature = "plausible-mutants")]
+    if mutant::on(Mutant::CapBeforeCleanup) {
+        while revoked.len() > rules.revoked {
+            revoked.pop_last();
+        }
+    }
     revoked.retain(|_, r: &mut Revocation| !expired(r.expiry) && r.epoch >= owner.pass_epoch);
     usage.retain(|_, u: &mut PassUsage| !expired(u.expiry));
     let live_revoked: BTreeSet<B16> = revoked.keys().copied().collect();
+    #[cfg(feature = "plausible-mutants")]
+    let live_revoked = if mutant::on(Mutant::FilterUnprunedRevocations) {
+        unpruned
+    } else {
+        live_revoked
+    };
     // Keeping the smallest ids absorbs redelivery: order does not matter.
     while revoked.len() > rules.revoked {
         revoked.pop_last();
@@ -440,6 +507,13 @@ pub fn merge(
     }
 
     // Step 5.
+    let revocations_full = revoked.len() >= rules.revoked;
+    #[cfg(feature = "plausible-mutants")]
+    let revocations_full = if mutant::on(Mutant::OverflowReadsUnion) {
+        union_len >= rules.revoked
+    } else {
+        revocations_full
+    };
     let mut filter = Filter {
         rules,
         params,
@@ -448,7 +522,7 @@ pub fn merge(
         owner_time: time.owner_time,
         live_revoked,
         usage: &usage,
-        revocations_full: revoked.len() >= rules.revoked,
+        revocations_full,
         certs: BTreeMap::new(),
         ghosts: BTreeMap::new(),
     };
@@ -459,11 +533,23 @@ pub fn merge(
             let Some(slot) = filter.admit(&id, &message) else {
                 continue;
             };
+            #[cfg(feature = "plausible-mutants")]
+            if mutant::on(Mutant::NoOnePerId) {
+                admitted.push((id, message, slot));
+                continue;
+            }
             let encoding = encode(&message);
             let smaller = |held: &(Vec<u8>, Message, Slot)| {
                 (encoding.len(), &encoding) < (held.0.len(), &held.0)
             };
-            if best.as_ref().is_none_or(smaller) {
+            let take = best.as_ref().is_none_or(smaller);
+            #[cfg(feature = "plausible-mutants")]
+            let take = if mutant::on(Mutant::FirstAdmitted) {
+                best.is_none()
+            } else {
+                take
+            };
+            if take {
                 best = Some((encoding, message, slot));
             }
         }
@@ -498,6 +584,14 @@ fn cap_messages(
     for (id, message, slot) in admitted {
         match slot {
             Slot::Pass { pass_id, limit } => {
+                #[cfg(feature = "plausible-mutants")]
+                let pass_id = if mutant::on(Mutant::PassRankPerDelta) {
+                    let mut raw = *pass_id;
+                    raw[0] = mutant::origin(&id) as u8 + 1;
+                    B16::new(raw)
+                } else {
+                    pass_id
+                };
                 by_pass
                     .entry(pass_id)
                     .or_default()
@@ -508,7 +602,23 @@ fn cap_messages(
                 let mut ranked = blake3::Hasher::new();
                 ranked.update(salt);
                 ranked.update(id.as_slice());
-                quarantine.push((*ranked.finalize().as_bytes(), id, ghost));
+                let rank = *ranked.finalize().as_bytes();
+                #[cfg(feature = "plausible-mutants")]
+                let rank = if mutant::on(Mutant::QuarantineBySentTime) {
+                    let mut by_time = [0u8; 32];
+                    by_time[..8].copy_from_slice(&message.sent_time.to_be_bytes());
+                    by_time
+                } else {
+                    rank
+                };
+                #[cfg(feature = "plausible-mutants")]
+                let ghost = ghost.map(|mut key| {
+                    if mutant::on(Mutant::GhostCapPerDelta) {
+                        key[0] = key[0].wrapping_add(mutant::origin(&id) as u8 + 1);
+                    }
+                    key
+                });
+                quarantine.push((rank, id, ghost));
             }
         }
         messages.insert(id, message);

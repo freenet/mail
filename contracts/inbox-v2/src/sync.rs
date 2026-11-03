@@ -38,6 +38,10 @@ fn entries(state: &InboxState) -> impl Iterator<Item = [u8; ENTRY_LEN]> + '_ {
     state.messages.iter().map(|(id, message)| {
         let mut entry = [0u8; ENTRY_LEN];
         entry[..16].copy_from_slice(&id[..16]);
+        #[cfg(feature = "plausible-mutants")]
+        if crate::mutant::on(crate::mutant::Mutant::DigestDropped) {
+            return entry;
+        }
         entry[16..].copy_from_slice(&blake3::hash(&encode(message)).as_bytes()[..8]);
         entry
     })

@@ -11,6 +11,8 @@
 //! a function of the inputs, and time is the owner's signed `owner_time`.
 
 pub mod merge;
+#[cfg(feature = "plausible-mutants")]
+pub mod mutant;
 pub mod signed;
 pub mod sync;
 pub mod types;

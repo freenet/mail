@@ -41,6 +41,13 @@ crate-type = ["cdylib", "rlib"]
 default = ["freenet-main-contract"]
 contract = ["freenet-stdlib/contract"]
 freenet-main-contract = []
+# Test seam for tests/plausible_mutants.rs (src/mutant.rs). Never in a build
+# of the contract.
+plausible-mutants = []
+
+[[test]]
+name = "plausible_mutants"
+required-features = ["plausible-mutants"]
 
 # Opt level 3, unlike the size-tuned crates: a call is limited to 5 s of wall
 # clock and signature checks are most of the cost. Measured in wasm: Ed25519
