@@ -2667,6 +2667,85 @@ test.describe("Live node E2E", () => {
       stopPump();
     }
   });
+
+  test("the identities hub's actions do not move while the rows and the migration report load", async ({
+    browser,
+  }) => {
+    // A press that lands while the page re-lays itself out is lost without
+    // an error, so the buttons must stay where the user first sees them.
+    // The page records every position each action button has had, in every
+    // animation frame from the first one it is visible in.
+    const stopPump = startPermissionPump();
+    const ctx = await browser.newContext();
+    const run = `${Date.now().toString(36)}${test.info().repeatEachIndex}`;
+    const alias = `layout${run}`;
+    const actions = ["fm-id-create", "fm-id-restore"];
+    try {
+      const page = await ctx.newPage();
+      await page.goto("");
+      await createIdentity(page, alias);
+      await ctx.addInitScript((ids) => {
+        type Box = { x: number; y: number; w: number; h: number };
+        const seen: Record<string, { first: Box; last: Box }> = {};
+        const sample = () => {
+          for (const id of ids) {
+            const el = document.querySelector(`[data-testid="${id}"]`);
+            if (!el) continue;
+            const r = el.getBoundingClientRect();
+            const box = { x: r.left, y: r.top, w: r.width, h: r.height };
+            const e = seen[id];
+            if (!e) seen[id] = { first: box, last: box };
+            else e.last = box;
+          }
+          requestAnimationFrame(sample);
+        };
+        requestAnimationFrame(sample);
+        (window as unknown as { __actionPositions: typeof seen }).__actionPositions = seen;
+      }, actions);
+
+      await page.reload();
+      const app = page.frameLocator("iframe#app");
+      await expect(
+        app.locator(`[data-testid="fm-id-row"][data-alias="${alias}"]`),
+        "the identity's row has loaded",
+      ).toBeVisible({ timeout: 60_000 });
+      await expect(
+        app.locator('[data-testid="fm-migration-report"]'),
+        "the migration report has loaded",
+      ).toBeAttached({ timeout: 60_000 });
+      // Let any later layout change land before reading what was recorded.
+      await page.waitForTimeout(1_000);
+
+      const frame = await (await page.locator("iframe#app").elementHandle())!.contentFrame();
+      const seen = await frame!.evaluate(
+        () =>
+          (window as unknown as {
+            __actionPositions: Record<string, { first: Box; last: Box }>;
+          }).__actionPositions,
+      );
+      // What matters to a user: a press aimed at the button where it was
+      // first visible still lands on it once the hub has loaded. (The page's
+      // own few-pixel entrance animation and the font swap move it within
+      // its own bounds; the rows and the report moved it by a whole row.)
+      const inside = (b: Box, px: number, py: number) =>
+        px >= b.x && px <= b.x + b.w && py >= b.y && py <= b.y + b.h;
+      for (const id of actions) {
+        const e = seen[id];
+        expect(e, `${id} was seen`).toBeDefined();
+        expect(
+          inside(e.last, e.first.x + e.first.w / 2, e.first.y + e.first.h / 2),
+          `${id}: a press at its first position misses it now (${JSON.stringify(e)})`,
+        ).toBe(true);
+        expect(
+          inside(e.first, e.last.x + e.last.w / 2, e.last.y + e.last.h / 2),
+          `${id}: it moved away from where it was first seen (${JSON.stringify(e)})`,
+        ).toBe(true);
+      }
+    } finally {
+      await ctx.close().catch(() => {});
+      stopPump();
+    }
+  });
 });
 
 async function composeAndSend(
@@ -2729,6 +2808,8 @@ async function createIdentity(
     ).toBeVisible({ timeout: 30_000 });
   }
 }
+
+type Box = { x: number; y: number; w: number; h: number };
 
 interface PendingPrompt {
   nonce: string;
