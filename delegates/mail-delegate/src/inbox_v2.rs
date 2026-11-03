@@ -592,13 +592,20 @@ fn store_opened(
         out.stored += 1;
     }
     let sender = address_of(&opened.sender_vk);
-    hold(s, &me.addr, &body.reply_pass)?;
-    if let Some(grant) = body
+    // The way back is kept, but a pass the sender got wrong, or one past the
+    // cap of held passes (which strangers can fill), must not hold the
+    // message in the inbox for good: only a failure a retry can clear does.
+    let grant = body
         .pass_grant
         .as_ref()
-        .filter(|g| *g.cert.recipient == sender.0)
-    {
-        hold(s, &me.addr, grant)?;
+        .filter(|g| *g.cert.recipient == sender.0);
+    for pass in std::iter::once(&body.reply_pass).chain(grant) {
+        match hold(s, &me.addr, pass) {
+            Err(f) if !matches!(f.code, FailureCode::BadInput | FailureCode::CapReached) => {
+                return Err(f);
+            }
+            _ => {}
+        }
     }
     if let Admission::Pass { cert, .. } = &m.admission
         && matches!(cert.class, PassClass::Invite { .. })

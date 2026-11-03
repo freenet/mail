@@ -764,3 +764,66 @@ fn pass_timing_is_coarse_and_spread() {
     assert!(points.iter().all(|p| *p < inbox_v2::EPOCH_GRACE));
     assert!(*points.iter().min().unwrap() < DAY && *points.iter().max().unwrap() > 13 * DAY);
 }
+
+/// A stranger's reply pass that cannot be kept (its key does not match its
+/// certificate) does not keep the mail in the inbox: it is stored and drained.
+#[test]
+fn a_bad_reply_pass_does_not_hold_mail_in_the_inbox() {
+    use crate::crypto::{Keys, MixRng};
+    use freenet_mail_protocol::{DsaSeed, KemSeed};
+    let mut world = World::new();
+    let a = world.identity("alice");
+    let sender = Keys::from_seeds(&DsaSeed([9; 32]), &KemSeed([8; 64]));
+    let from = freenet_mail_protocol::address::address_of(&sender.vk_bytes());
+    let body = w::SealedBody {
+        kind: w::EnvelopeKind::Mail(ByteBuf::from(b"odd pass".to_vec())),
+        reply_pass: w::Pass {
+            cert: w::PassCert {
+                recipient: serde_bytes::ByteArray::new(from.0),
+                pass_id: serde_bytes::ByteArray::new([1; 16]),
+                pass_vk: serde_bytes::ByteArray::new([2; 32]),
+                epoch: 1,
+                expiry: 400 * DAY,
+                class: w::PassClass::Contact,
+                sig: serde_bytes::ByteArray::new([0; 64]),
+            },
+            pass_sk: serde_bytes::ByteArray::new([3; 32]),
+        },
+        pass_grant: None,
+        ghost_vk: None,
+    };
+    let state = world.state(&a);
+    let sent_time = inbox_v2::sent_time_for(START, state.time.owner_time, w::QUARANTINE_FORWARD);
+    let mut rng = MixRng::new("t", &[3; 32], &Entropy([4; 32]));
+    let ct = crate::sealing::seal(
+        &sender,
+        &a.0,
+        &state.owner.kem_ek,
+        sent_time,
+        w::KIND_QUARANTINE,
+        &[],
+        &body,
+        &mut rng,
+    )
+    .unwrap();
+    let id = w::message_id(
+        &a.0,
+        blake3::hash(&ct).as_bytes(),
+        sent_time,
+        w::KIND_QUARANTINE,
+        &[],
+    );
+    let message = w::Message {
+        ciphertext: ByteBuf::from(ct),
+        sent_time,
+        admission: w::Admission::Quarantine { ghost: None },
+    };
+    let delta = InboxDelta {
+        messages: BTreeMap::from([(serde_bytes::ByteArray::new(id), message)]),
+        ..InboxDelta::default()
+    };
+    world.publish(&a, &w::encode(&delta));
+    world.change(&a, OwnerChange::Drain);
+    assert!(world.state(&a).messages.is_empty());
+    assert_eq!(texts(&world.inbound(&a)), ["odd pass"]);
+}

@@ -140,6 +140,23 @@ recovery-key codec. Its encoding is pinned per variant in
   node-side paths on real nodes (wake-up, notification, cost); CI workflow
   `e2e-background.yml` runs it on a PR that touches the delegate, the protocol
   or the jobs code, and nightly. It is not a required check.
+- **Inbox v2** (`src/inbox_v2.rs`, `src/sealing.rs`; wire types and signed
+  layouts in `protocol/src/inbox_v2.rs`, checked against the contract's byte
+  vectors). The issuer key is derived from the identity's seed, never stored.
+  The delegate keeps per identity an inbox record (highest owner version and
+  `owner_time` it signed, epoch, filters, contact to pass id), a ledger entry
+  per issued pass, the passes it holds and the drained mail; the page may read
+  the first two, may delete drained mail, and may never read a held pass. Each
+  version and time is recorded before the update carrying it is returned.
+  `UpdateInboxV2` drains the state it is given before signing any change, and a
+  message is tombstoned only in an update returned after it was stored.
+  `SealV2` picks the admission (held pass, owner, quarantine), clamps
+  `sent_time` into the recipient's window, and reports a lapsed pass or a full
+  queue; the caller reads the inbox back, since a filtered update is not an
+  error. `src/tests/inbox_v2.rs` runs everything it builds through the
+  contract crate's `validate_state` and merge (a dev-dependency only). Not yet
+  built: the background drain, renew and clock jobs, the Open-inbox tombstone
+  budget (decision 21) and re-sealing a queued send.
 - **Imports:** a node refuses to instantiate a module that imports a function
   it does not provide. `scripts/check-delegate-imports.sh` (a step of CI
   `check-drift`, so it blocks) compares the candidate's imports to

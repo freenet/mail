@@ -230,6 +230,32 @@ dt "creation returns the new identity's own recovery key" "$D/handlers.rs" \
     the_recovery_key_comes_back_on_creation_only
 dt "compare-and-swap refuses a stale writer" "$D/handlers.rs" \
     'Some(g) => g == current_gen,' 'Some(_) => true,' cas_refuses_a_stale_writer_and_accepts_the_current_one
+dt "inbox v2: a message is tombstoned only once stored" "$D/inbox_v2.rs" \
+    'store_opened(s, me, id, m, opened, &mut out)?;' \
+    'let _ = store_opened(s, me, id, m, opened, &mut out);' \
+    a_refused_store_stops_the_drain,a_drain_over_a_faulty_host_never_tombstones_what_it_did_not_store
+dt "inbox v2: an owner version is recorded before it leaves" "$D/inbox_v2.rs" \
+    'save(s, item(ItemKind::InboxV2, addr, &[]), &rec, rec_gen)?;' \
+    'let _ = (&rec, rec_gen);' \
+    a_lost_update_never_reuses_a_version
+dt "inbox v2: owner_time moves under the guard" "$D/inbox_v2.rs" \
+    '.saturating_add(TIME_STEP_MAX)' '.saturating_add(TIME_STEP_MAX * 100)' \
+    owner_time_moves_under_the_guard
+dt "inbox v2: pass expiries are whole days" "$D/inbox_v2.rs" \
+    'e.expiry = ceil_day(now + lifetime);' 'e.expiry = now + lifetime;' \
+    pass_timing_is_coarse_and_spread,a_full_round_runs_through_the_contract
+dt "inbox v2: the sender's binding names the message" "$D/sealing.rs" \
+    'if !crypto::verify_v1(&binding, &envelope.sender_vk, &envelope.sender_sig) {' \
+    'if false && !crypto::verify_v1(&binding, &envelope.sender_vk, &envelope.sender_sig) {' \
+    a_restamped_copy_does_not_open
+dt "inbox v2: a pass that cannot be kept does not hold mail back" "$D/inbox_v2.rs" \
+    'Err(f) if !matches!(f.code, FailureCode::BadInput | FailureCode::CapReached) => {' \
+    'Err(f) => {' \
+    a_bad_reply_pass_does_not_hold_mail_in_the_inbox
+dt "inbox v2: the page cannot write the delegate's records" "$D/store.rs" \
+    'ItemKind::InboxV2 | ItemKind::PassLedger => (true, false, false),' \
+    'ItemKind::InboxV2 | ItemKind::PassLedger => (true, true, true),' \
+    the_page_cannot_rewrite_inbox_records_or_read_held_passes
 dt "origins get separate namespaces" "$D/store.rs" \
     'format!("o/{}/", hex(&origin.0))' '{ let _ = origin; "o/shared/".to_string() }' \
     origins_and_kinds_never_share_a_key,a_foreign_origin_can_neither_read_nor_change_another_namespace
