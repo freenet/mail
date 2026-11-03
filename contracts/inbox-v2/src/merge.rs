@@ -51,8 +51,13 @@ use crate::types::{
 
 /// How far `sent_time` may trail `owner_time`.
 pub const WINDOW_BACK: u64 = 2 * 86_400;
-/// How far `sent_time` may lead `owner_time`.
+/// How far `sent_time` may lead `owner_time`, for pass and owner mail: long, so
+/// contacts can write to an owner who is offline.
 pub const WINDOW_FORWARD: u64 = 400 * 86_400;
+/// How far a quarantine message's `sent_time` may lead `owner_time` (decision
+/// 14). A stranger has no need of the long window, and with it far-future mail
+/// would need its tombstone kept for 400 days.
+pub const QUARANTINE_FORWARD: u64 = 2 * 86_400;
 /// `sent_time` is a whole hour.
 pub const SENT_TIME_GRANULARITY: u64 = 3_600;
 /// Ciphertext is padded to one of these.
@@ -221,10 +226,14 @@ struct Filter<'a> {
 
 impl Filter<'_> {
     fn admit(&mut self, id: &B32, message: &Message) -> Option<Slot> {
+        let forward = match message.admission {
+            Admission::Quarantine { .. } => QUARANTINE_FORWARD,
+            Admission::Pass { .. } | Admission::Owner { .. } => WINDOW_FORWARD,
+        };
         if !CIPHERTEXT_SIZES.contains(&message.ciphertext.len())
             || !message.sent_time.is_multiple_of(SENT_TIME_GRANULARITY)
             || message.sent_time < self.owner_time.saturating_sub(WINDOW_BACK)
-            || message.sent_time > self.owner_time.saturating_add(WINDOW_FORWARD)
+            || message.sent_time > self.owner_time.saturating_add(forward)
             || self.owner.tombstones.contains_key(id)
         {
             return None;

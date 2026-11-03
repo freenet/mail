@@ -63,6 +63,52 @@ fn the_window_at_its_edges() {
     assert_eq!(kept(owner(3), T + 1, vec![], vec![], msgs), [false, true]);
 }
 
+/// Decision 14: quarantine mail may lead `owner_time` by two days, not 400.
+/// Pass and owner mail keep the long window, for contacts writing to an
+/// owner who is offline.
+#[test]
+fn quarantine_mail_leads_by_two_days_at_most() {
+    let w = world();
+    let pass = w.pass(1, 3, FAR + 400 * DAY, PassClass::Contact);
+    let msgs = vec![
+        w.quarantine_msg(ct(8192, 1), T + 2 * DAY, None),
+        w.quarantine_msg(ct(8192, 2), T + 2 * DAY + HOUR, None),
+        w.pass_msg(&pass, ct(8192, 3), T + 2 * DAY + HOUR),
+        w.owner_msg(ct(8192, 4), T + 2 * DAY + HOUR),
+        w.pass_msg(&pass, ct(8192, 5), T + WINDOW_FORWARD),
+    ];
+    assert_eq!(
+        kept(owner(3), T, vec![], vec![], msgs),
+        [true, false, true, true, true]
+    );
+}
+
+/// Review r1 S4: a stranger's mail dated as far ahead as it may be leaves the
+/// window four days after it was drained, so its tombstone can go then, and a
+/// sender refilling quarantine with far-future mail cannot make the owner keep
+/// tombstones for 400 days.
+#[test]
+fn a_far_future_stranger_message_needs_its_tombstone_four_days() {
+    let w = world();
+    let far_ahead = w.quarantine_msg(ct(8192, 1), T + 2 * DAY, None);
+    let tomb = BTreeMap::from([(far_ahead.0, far_ahead.1.sent_time)]);
+    let drained = w.owner(2, 3, OPEN, tomb);
+    assert_eq!(
+        kept(drained, T, vec![], vec![], vec![far_ahead.clone()]),
+        [false]
+    );
+    // The tombstone pruned, four days on: redelivery does not bring it back.
+    let pruned = w.owner(3, 3, OPEN, BTreeMap::new());
+    let later = T + 4 * DAY + HOUR;
+    assert_eq!(
+        kept(pruned.clone(), later, vec![], vec![], vec![far_ahead]),
+        [false]
+    );
+    // Further ahead than that was never admitted.
+    let beyond = w.quarantine_msg(ct(8192, 2), T + 3 * DAY, None);
+    assert_eq!(kept(pruned, T, vec![], vec![], vec![beyond]), [false]);
+}
+
 #[test]
 fn sent_time_is_a_whole_hour_and_ciphertext_a_padded_size() {
     let w = world();
