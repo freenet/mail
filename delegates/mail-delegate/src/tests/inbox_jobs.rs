@@ -1257,7 +1257,8 @@ fn contact_mail_is_never_in_the_stranger_budget() {
 }
 
 /// A page's older state never signs an owner version without the
-/// tombstones a job already published.
+/// tombstones a job already published, and never brings back a message the
+/// user deleted after the job drained it.
 #[test]
 fn a_stale_page_state_keeps_what_a_job_tombstoned() {
     let mut world = World::new();
@@ -1269,7 +1270,22 @@ fn a_stale_page_state_keeps_what_a_job_tombstoned() {
     assert!(messages_to(&updates, &a) == 0 && !updates.is_empty());
     let id = ByteArray::new(sealed.id.0);
     assert!(world.state(&a).owner.tombstones.contains_key(&id));
-    // The page still holds the state from before the job's update.
+    // The user deletes it; the page still holds the state from before the
+    // job's update.
+    assert!(inbound_stored(&world, &a, &sealed.id.0));
+    let item = freenet_mail_protocol::ItemRef {
+        kind: freenet_mail_protocol::ItemKind::Inbound,
+        owner: Some(a),
+        id: sealed.id.0.to_vec(),
+    };
+    let Ok(Reply::Item(Some(stored))) = world.call_as(&a, Op::GetItem { item: item.clone() })
+    else {
+        panic!("the stored copy");
+    };
+    let expected_gen = stored.generation;
+    world
+        .call_as(&a, Op::DeleteItem { item, expected_gen })
+        .unwrap();
     world.inboxes.insert(a, stale.clone());
     let u = world
         .update(
@@ -1280,6 +1296,10 @@ fn a_stale_page_state_keeps_what_a_job_tombstoned() {
     assert_eq!(u.change, ChangeOutcome::Signed);
     let delta: InboxDelta = w::decode(&u.update.unwrap()).unwrap();
     assert!(delta.owner.unwrap().tombstones.contains_key(&id));
+    assert!(
+        !inbound_stored(&world, &a, &sealed.id.0),
+        "not brought back"
+    );
 }
 
 /// Full storage blocks only what would drop the mail it could not store:

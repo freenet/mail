@@ -1044,7 +1044,12 @@ fn drain(
     let pending: Vec<_> = state
         .messages
         .iter()
-        .filter(|(id, _)| !state.owner.tombstones.contains_key(*id))
+        // A message a version this delegate signed tombstones is drained
+        // already, even if this state is older than that version: storing
+        // it again would bring back a copy the user deleted.
+        .filter(|(id, _)| {
+            !state.owner.tombstones.contains_key(*id) && !rec.tombstones.contains_key(*id)
+        })
         .collect();
     let mut out = Drained {
         remaining: pending.len().saturating_sub(limit) as u32,
@@ -1064,7 +1069,7 @@ fn drain(
         }
         let mut stranger = matches!(m.admission, Admission::Quarantine { .. }).then_some(None);
         if let Some(opened) = sealing::open(&me.keys, &me.addr.0, id, m) {
-            match store_opened(s, me, rec, id, m, opened, claimed, &mut out) {
+            match store_opened(s, me, rec, id, m, opened, proven.contains(id), &mut out) {
                 Ok(from) => stranger = from.map(Some),
                 Err(_) => {
                     out.unstored.insert(*id);
@@ -1408,7 +1413,11 @@ pub(crate) fn owner_update(
     let left: Vec<(&B32, &w::Message)> = state
         .messages
         .iter()
-        .filter(|(id, _)| !state.owner.tombstones.contains_key(*id) && !drained_ids.contains(id))
+        .filter(|(id, _)| {
+            !state.owner.tombstones.contains_key(*id)
+                && !rec.tombstones.contains_key(*id)
+                && !drained_ids.contains(id)
+        })
         .collect();
     // Whether a change that drops what `drops` names may be signed.
     let why = |drops: &dyn Fn(&w::Message) -> bool| {
