@@ -280,6 +280,7 @@ fn ops() -> Vec<Op> {
             content: SealContent::Mail(b(b"hi")),
             ghost_vk: Some(Hash32([0x33; 32])),
             ui_entropy: Entropy([0xD4; 32]),
+            reseals: 1,
         },
     ]
 }
@@ -346,6 +347,8 @@ fn replies() -> Vec<Reply> {
             remaining: 2,
             full: 3,
             strangers_dropped: 4,
+            change: ChangeOutcome::WaitsForStorage,
+            passes_not_kept: 5,
         }),
         Reply::PassIssued(pass()),
         Reply::SealedV2(SealedV2 {

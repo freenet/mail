@@ -261,7 +261,7 @@ fn load_budget(env: &mut dyn Env, now: u64) -> Budget {
     budget
 }
 
-fn save_budget(env: &mut dyn Env, budget: &Budget) {
+pub(crate) fn save_budget(env: &mut dyn Env, budget: &Budget) {
     if let Ok(body) = freenet_mail_protocol::to_cbor(budget) {
         let _ = Space::new(env, GLOBAL).put(BUDGET, &body);
     }

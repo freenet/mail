@@ -302,6 +302,7 @@ fn an_owner_record_without_the_v2_context_is_refused() {
             content: freenet_mail_protocol::SealContent::Mail(ByteBuf::from(b"x".to_vec())),
             ghost_vk: None,
             ui_entropy: Entropy([9; 32]),
+            reseals: 0,
         },
     );
     assert_eq!(got, Err(FailureCode::BadInput));
@@ -537,8 +538,8 @@ fn node_holds(world: &mut World, addr: &Addr) {
 }
 
 /// Held passes full of contacts' (handed over by the page): a stranger's
-/// pass finds no room, and the drain says so rather than drop it. The
-/// message stays in the inbox, counted as full.
+/// pass finds no room, and the drain says so rather than drop it in
+/// silence. The mail is stored all the same.
 #[test]
 fn a_full_set_of_held_passes_is_reported() {
     let mut world = World::new();
@@ -552,9 +553,40 @@ fn a_full_set_of_held_passes_is_reported() {
     let (sealed, landed) = world.send(&d, &a, "hello");
     assert!(landed);
     let u = world.update(&a, OwnerChange::Drain).unwrap();
-    assert_eq!((u.drained, u.full), (0, 1));
-    assert!(w::delivered(&world.state(&a), &sealed.id.0));
-    assert!(world.inbound(&a).is_empty());
+    assert_eq!((u.drained, u.full, u.passes_not_kept), (1, 0, 1));
+    world.publish(&a, &u.update.unwrap());
+    assert!(
+        world
+            .state(&a)
+            .owner
+            .tombstones
+            .contains_key(&ByteArray::new(sealed.id.0))
+    );
+    assert_eq!(world.inbound(&a).len(), 1);
+}
+
+/// At the cap, held passes whose every certificate is dead give way: a new
+/// correspondent's pass is kept, and the reply goes by it.
+#[test]
+fn dead_held_passes_give_way_at_the_cap() {
+    let mut world = World::new();
+    let a = world.identity("alice");
+    let dies = world.env.now.unwrap() + 86_400;
+    for n in 0..crate::store::MAX_CONTACTS as u32 {
+        let mut addr = [0u8; 24];
+        addr[..4].copy_from_slice(&n.to_be_bytes());
+        let mut pass = junk_pass(&Addr(addr), 1);
+        pass.cert.expiry = dies;
+        hold_pass(&mut world, &a, pass).unwrap();
+    }
+    world.advance(4 * 86_400);
+    let d = world.identity("dave");
+    world.send(&d, &a, "hello");
+    let u = world.update(&a, OwnerChange::Drain).unwrap();
+    assert_eq!((u.drained, u.passes_not_kept), (1, 0));
+    world.publish(&a, &u.update.unwrap());
+    let reply = world.seal(&a, &d, "hello dave").unwrap();
+    assert_eq!(reply.admission, SendAdmission::Pass);
 }
 
 /// A certificate that is not its recipient's is refused when this node holds
@@ -706,7 +738,9 @@ fn a_page_state_admission_is_checked_before_it_counts() {
     ) else {
         panic!("update");
     };
-    assert_eq!(u.drained, 2, "both are genuine mail from their sender");
+    // The pass message is stored; the Ghost Key claim the node's copy cannot
+    // confirm waits for one that can, rather than being stored without it.
+    assert_eq!((u.drained, u.full), (1, 1), "the claim waits");
     let delta: InboxDelta = w::decode(&u.update.unwrap()).unwrap();
     assert!(delta.usage.is_empty(), "an invite use was counted");
     assert!(
@@ -733,6 +767,7 @@ fn v2_operations_refuse_zero_entropy() {
             content: freenet_mail_protocol::SealContent::Mail(ByteBuf::from(b"x".to_vec())),
             ghost_vk: None,
             ui_entropy: zero,
+            reseals: 0,
         },
         Op::IssuePass {
             addr: a,

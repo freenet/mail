@@ -38,21 +38,40 @@ use crate::store::{Origin, Space, fail};
 
 /// Own inboxes one run drains. The rest wait for a later run.
 pub const MAX_INBOXES_PER_RUN: usize = 4;
-/// A contact whose inbox is not held here is looked at again after this.
+/// A contact whose inbox is not held here, or whose renewal failed, is
+/// looked at again after this, doubling with each such look up to
+/// [`MISS_RETRY_MAX`].
 const FETCH_RETRY: u64 = 3600;
-/// What an owner update and a renewal take from a run's message slice, in
-/// messages ([`jobs::MESSAGE_COST_MS`] each), so a run stays inside the limit
-/// the slice was sized for whatever mix of work it does. Measured natively
-/// against the v1 import the slice was measured with on a real node
-/// (`tests::inbox_jobs::a_drained_message_costs_about_what_an_import_does`,
-/// release build): an import 0.45 ms and 35 host writes, a drained message
-/// 0.54 ms and 24 writes, a renewal 1.8 ms and 22 writes. On the node an
-/// import cost 65 ms with one record written and 117 ms with two, so writes
-/// dominate and the guest runs about 30 times slower than native: a renewal
-/// comes to roughly one import, and is charged two. An owner update is one
-/// ML-DSA signature and one record, charged one.
+pub const MISS_RETRY_MAX: u64 = 86_400;
+/// What an owner update takes from a run's message slice, in messages
+/// ([`jobs::MESSAGE_COST_MS`] each): one ML-DSA signature and one record.
 pub const OWNER_SLOTS: usize = 1;
-pub const RENEW_SLOTS: usize = 2;
+/// Renewals one run may send. They do not share the message slice: their
+/// throughput comes from the duty budget, at [`RENEW_COST_MS`] each, over
+/// every run that renews (the 15-minute rescan, the 6-hour renew tick, node
+/// start and a page's run). The rescan alone is 96 runs a day, so 384
+/// renewals a day: every one of `MAX_CONTACTS` (2048) contacts is reissued
+/// within 5.4 days of a bump, against the 14-day grace (2.6 times over), and
+/// a day's renewals cost under 2% of the day's duty.
+pub const RENEW_PER_RUN: usize = 4;
+/// Contacts one run may look at for renewal, whether or not it sends: a look
+/// reads and checks the contact's inbox ([`jobs::SCAN_COST_MS`]), so a run with
+/// many contacts whose inboxes are missing stays bounded.
+pub const RENEW_LOOKS_PER_RUN: usize = 16;
+/// What one renewal is charged in duty, the same as a v1 import.
+///
+/// Measured in wasm (2026-11-03, wasmtime 47.0.4, cranelift, the delegate's
+/// code built for wasm32 release behind a C ABI, with an in-memory host so
+/// only the guest's own work is timed, best of three on nova under load):
+/// draining a message (ML-KEM decapsulation, ML-DSA verify, the stores) takes
+/// about 1.8 ms, and a renewal (reading and checking the contact's inbox,
+/// ML-KEM encapsulation, the seal) about 14 ms. On the node the host's writes
+/// dominate: a v1 import (35 host writes) cost 117 ms there
+/// ([`jobs::MESSAGE_COST_MS`]), a drained message makes 24 and a renewal 22
+/// (`tests::inbox_jobs::a_drained_message_costs_about_what_an_import_does`).
+/// So a drained message is charged one slot of the message slice, and a
+/// renewal one import's duty, both at or above what they cost.
+pub const RENEW_COST_MS: u64 = 120;
 /// A page's own rotation over its origin's inboxes, in its namespace.
 const PAGE_CURSOR: &str = "bg/cursor-v2";
 
@@ -169,32 +188,25 @@ pub fn run(
         return d;
     }
     // A rotation, so every inbox is reached however many there are. A page
-    // keeps its own, as the v1 watch does, and writes it only when it moves.
+    // keeps its own, as the v1 watch does. It moves past an inbox only as
+    // that inbox's drain begins, and is saved then, with the budget: a run
+    // core abandons does not start over on the same inbox, and an inbox the
+    // slice did not reach is the next run's first.
     let page = match trigger {
         Trigger::RunJobs(origin) => Some(origin),
         _ => None,
     };
+    let rotates = !matches!(trigger, Trigger::Contract(_));
     let stored = page.and_then(|o| {
         let b = Space::new(&mut *env, o).get(PAGE_CURSOR)?;
         Some(u32::from_le_bytes(b.try_into().ok()?))
     });
     let start = stored.unwrap_or(budget.cursor_v2) as usize % list.len();
     let take = list.len().min(MAX_INBOXES_PER_RUN);
-    let next = ((start + take) % list.len()) as u32;
-    match page {
-        Some(o) if next as usize != start => {
-            let _ = Space::new(&mut *env, o).put(PAGE_CURSOR, &next.to_le_bytes());
-        }
-        Some(_) => {}
-        None if !matches!(trigger, Trigger::Contract(_)) => budget.cursor_v2 = next,
-        None => {}
-    }
-    for own in list.iter().cycle().skip(start).take(take) {
-        let mut s = Space::new(&mut *env, own.origin);
-        let Ok(me) = v2::me(&s, &own.addr) else {
-            done.unknown += 1;
-            continue;
-        };
+    let mut advancing = rotates;
+    let (mut looks, mut sends) = (RENEW_LOOKS_PER_RUN, RENEW_PER_RUN);
+    for i in 0..take {
+        let own = list[(start + i) % list.len()];
         let mine = !matches!(trigger, Trigger::Contract(id) if id != own.id);
         let drain = mine && jobs.contains(&Job::DrainOwn);
         let clock = mine && jobs.contains(&Job::AdvanceClock);
@@ -202,10 +214,27 @@ pub fn run(
             if unprompted && !budget.take_duty(jobs::SCAN_COST_MS) {
                 break;
             }
-            let what = (drain, clock, unprompted);
-            drain_own(&mut s, &me, own, what, now, left, budget, done, &mut d);
+            let mut s = Space::new(&mut *env, own.origin);
+            let cursor = advancing.then_some((page, ((start + i + 1) % list.len()) as u32));
+            let served = match v2::me(&s, &own.addr) {
+                Ok(me) => {
+                    let what = (drain, clock, unprompted);
+                    let job = (cursor, now, &mut *left, &mut *budget);
+                    drain_own(&mut s, &me, own, what, job, done, &mut d)
+                }
+                Err(_) => {
+                    done.unknown += 1;
+                    true
+                }
+            };
+            advancing &= served;
         }
         if jobs.contains(&Job::Renew) {
+            let mut s = Space::new(&mut *env, own.origin);
+            let Ok(me) = v2::me(&s, &own.addr) else {
+                done.unknown += 1;
+                continue;
+            };
             let only = match trigger {
                 Trigger::Contract(id) if id != own.id => Some(id),
                 _ => None,
@@ -216,31 +245,59 @@ pub fn run(
                 unprompted,
                 budget: &mut *budget,
                 done: &mut d,
+                failed: 0,
             };
-            if job.run(&mut s, only, left).is_err() {
+            if job.run(&mut s, only, (&mut looks, &mut sends)).is_err() {
                 done.unknown += 1;
             }
+            done.unknown += job.failed;
         }
     }
     d
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Move the rotation to `next` and save it, with the budget for a run the
+/// node started.
+fn save_cursor(env: &mut dyn Env, page: Option<Origin>, budget: &mut Budget, next: u32) {
+    match page {
+        Some(o) => {
+            let mut s = Space::new(&mut *env, o);
+            if s.get(PAGE_CURSOR).as_deref() != Some(&next.to_le_bytes()[..]) {
+                let _ = s.put(PAGE_CURSOR, &next.to_le_bytes());
+            }
+        }
+        None => {
+            budget.cursor_v2 = next;
+            crate::watch::save_budget(env, budget);
+        }
+    }
+}
+
+/// The rotation's position past an inbox, to save once it is served.
+type Cursor = Option<(Option<Origin>, u32)>;
+
+/// Drain `own`, or move its clock. Returns whether it was served: false only
+/// when the slice had no room for a drain it needed, so the rotation comes
+/// back to it first. The rotation is saved before the work.
 fn drain_own(
     s: &mut Space<'_>,
     me: &Me,
     own: &Own,
     (drain, clock, unprompted): (bool, bool, bool),
-    now: u64,
-    left: &mut usize,
-    budget: &mut Budget,
+    (cursor, now, left, budget): (Cursor, u64, &mut usize, &mut Budget),
     done: &mut JobsRun,
     d: &mut Done,
-) {
+) -> bool {
+    let serve = |s: &mut Space<'_>, budget: &mut Budget| {
+        if let Some((page, next)) = cursor {
+            save_cursor(&mut *s.env, page, budget, next);
+        }
+        true
+    };
     let Some(bytes) = s.env.contract_state(&own.id) else {
         done.unknown += 1;
         d.missing.push(own.id);
-        return;
+        return serve(s, budget);
     };
     d.held.push(own.id);
     if unprompted {
@@ -249,21 +306,29 @@ fn drain_own(
     done.scanned += 1;
     let Ok(state) = v2::own_state(me, &bytes) else {
         done.unknown += 1;
-        return;
+        return serve(s, budget);
     };
+    let pending = state
+        .messages
+        .keys()
+        .any(|id| !state.owner.tombstones.contains_key(id));
+    // The clock moves with what is left of the slice, none at all included:
+    // it then moves only as far as keeps every message still in the inbox.
     let change = if clock && now >= state.time.owner_time.saturating_add(v2::CLOCK_LAG) {
         OwnerChange::AdvanceTime
-    } else if drain {
+    } else if drain && pending && *left >= OWNER_SLOTS {
         OwnerChange::Drain
     } else {
-        return;
+        // Nothing to do here, unless only the slice stopped it.
+        return !(drain && pending) && serve(s, budget);
     };
     // The update it may sign is paid for first.
-    if !budget.may_write(&own.id) || *left < OWNER_SLOTS {
-        return;
+    if !budget.may_write(&own.id) {
+        return false;
     }
+    serve(s, budget);
     let mut rng = v2::background_rng(s, me, "drain", now, &own.id);
-    let limit = (*left - OWNER_SLOTS).min(v2::DRAIN_BATCH);
+    let limit = left.saturating_sub(OWNER_SLOTS).min(v2::DRAIN_BATCH);
     match v2::owner_update(s, me, &state, change, now, &mut rng, limit, true) {
         Ok((u, tried)) => {
             *left = left.saturating_sub(tried + OWNER_SLOTS);
@@ -276,6 +341,7 @@ fn drain_own(
         }
         Err(_) => done.unknown += 1,
     }
+    true
 }
 
 struct Renewing<'a> {
@@ -284,26 +350,33 @@ struct Renewing<'a> {
     unprompted: bool,
     budget: &'a mut Budget,
     done: &'a mut Done,
+    /// Contacts whose step failed this run.
+    failed: u32,
 }
 
 impl Renewing<'_> {
-    /// Look at every contact whose time has come, while the run's slice
-    /// lasts; `only` limits it to the contact whose inbox this is.
+    /// Look at every contact whose time has come, the longest waiting first,
+    /// while the run's renewals last; `only` limits it to the contact whose
+    /// inbox this is. Every contact looked at gets its own next time, whether
+    /// its step succeeded or failed, so one never holds up another.
     fn run(
         &mut self,
         s: &mut Space<'_>,
         only: Option<ContractId>,
-        left: &mut usize,
+        renewals: (&mut usize, &mut usize),
     ) -> Result<(), Failure> {
         let (_, rec) = v2::record(s, &self.me.addr)?;
-        let due: Vec<B24> = rec
+        let mut due: Vec<(u64, B24)> = rec
             .due
             .iter()
             .filter(|(_, at)| **at <= self.now)
-            .map(|(c, _)| *c)
+            .map(|(c, at)| (*at, *c))
             .collect();
-        for contact in due {
-            if *left < RENEW_SLOTS {
+        due.sort_unstable();
+        let (looks, sends) = renewals;
+        for (_, contact) in due {
+            let no_duty = self.unprompted && self.budget.duty_ms < RENEW_COST_MS;
+            if *looks == 0 || *sends == 0 || no_duty {
                 break;
             }
             let addr = Addr(*contact);
@@ -311,11 +384,46 @@ impl Renewing<'_> {
             if only.is_some_and(|o| o != id) {
                 continue;
             }
-            *left -= RENEW_SLOTS;
-            let next = self.one(s, &addr, id)?;
+            // A look reads and checks the contact's inbox; a renewal sent
+            // costs the rest.
+            *looks -= 1;
+            let sent = self.done.out.len();
+            if self.unprompted {
+                self.budget.take_duty(jobs::SCAN_COST_MS);
+            }
+            let next = match self.one(s, &addr, id) {
+                Ok(next) => next,
+                Err(_) => {
+                    self.failed += 1;
+                    Some(self.miss(s, &contact))
+                }
+            };
+            if self.done.out.len() > sent {
+                *sends -= 1;
+                if self.unprompted {
+                    self.budget.take_duty(RENEW_COST_MS);
+                }
+            }
             v2::set_due(s, &self.me.addr, &contact, next)?;
         }
         Ok(())
+    }
+
+    /// One more look at `contact` that found nothing to work with: the next
+    /// waits twice as long as the last, from FETCH_RETRY up to a day.
+    fn miss(&mut self, s: &mut Space<'_>, contact: &B24) -> u64 {
+        let misses = v2::record(s, &self.me.addr)
+            .ok()
+            .and_then(|(_, rec)| rec.issued.get(contact).copied())
+            .and_then(|pass_id| {
+                let at = v2::item(ItemKind::PassLedger, &self.me.addr, pass_id.as_slice());
+                let (generation, mut e) = v2::load::<LedgerEntry>(s, &at).ok()??;
+                e.misses = e.misses.saturating_add(1);
+                v2::save(s, at, &e, generation).ok()?;
+                Some(e.misses)
+            })
+            .unwrap_or(1);
+        self.now + backoff(misses)
     }
 
     /// Renew `contact`'s pass if due and deliver its certificate. Returns
@@ -347,12 +455,20 @@ impl Renewing<'_> {
             self.budget.charge_bytes(b.len());
         }
         let state = held.and_then(|b| v2::their_state(contact, &b).ok());
+        let mut changed = false;
+        if state.is_some() && e.misses != 0 {
+            e.misses = 0;
+            changed = true;
+        }
         // Read back what was sent.
         if let (Some(st), Some(p)) = (&state, &e.pending)
             && w::delivered(st, &p.id)
         {
             e.delivered = e.delivered.max(p.expiry);
             e.pending = None;
+            changed = true;
+        }
+        if changed {
             v2::save(s, at, &e, generation)?;
         }
         // A pass the contact has never been seen to get came with mail the
@@ -381,14 +497,16 @@ impl Renewing<'_> {
             return Ok(Some(p.at + v2::RESEND_AFTER));
         }
         let Some(state) = state else {
+            // Not held here: asked for, and looked at again later and later
+            // while it stays missing.
             self.done.missing.push(id);
-            return Ok(Some(now + FETCH_RETRY));
+            return Ok(Some(self.miss(s, &key)));
         };
         if !self.budget.may_write(&id) {
             return Ok(Some(now + 60));
         }
         let mut rng = v2::background_rng(s, me, "renew", now, &contact.0);
-        let (sealed, pass_id) = v2::seal_to(
+        let sealed = v2::seal_to(
             s,
             me,
             contact,
@@ -397,7 +515,12 @@ impl Renewing<'_> {
             None,
             now,
             &mut rng,
-        )?;
+        );
+        let (sealed, pass_id) = match sealed {
+            // A RequireGhost inbox with no pass of ours that admits: no pass.
+            Err(f) if f.code == FailureCode::Refused => return Ok(Some(now + v2::NO_PASS_RETRY)),
+            other => other?,
+        };
         if sealed.admission != SendAdmission::Pass {
             return Ok(Some(now + v2::NO_PASS_RETRY));
         }
@@ -412,4 +535,11 @@ impl Renewing<'_> {
         self.done.out.push(update(id, w::encode(&delta)));
         Ok(Some(now + v2::RESEND_AFTER))
     }
+}
+
+/// The wait after `misses` looks in a row found nothing to work with.
+pub fn backoff(misses: u32) -> u64 {
+    FETCH_RETRY
+        .saturating_mul(1 << misses.saturating_sub(1).min(16))
+        .min(MISS_RETRY_MAX)
 }

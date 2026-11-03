@@ -247,7 +247,17 @@ fn handle_request(
             content,
             ghost_vk,
             ui_entropy,
-        } => inbox_v2::seal_v2(s, &from, &to, &to_state, content, ghost_vk, &ui_entropy),
+            reseals,
+        } => inbox_v2::seal_v2(
+            s,
+            &from,
+            &to,
+            &to_state,
+            content,
+            ghost_vk,
+            &ui_entropy,
+            reseals,
+        ),
         Op::DecryptV1 { addr, ciphertexts } => decrypt_v1(s, &addr, ciphertexts),
         Op::SealV1Message {
             addr,

@@ -175,6 +175,7 @@ impl World {
                 content: SealContent::Mail(ByteBuf::from(text.as_bytes().to_vec())),
                 ghost_vk: None,
                 ui_entropy,
+                reseals: 0,
             },
         )? {
             Reply::SealedV2(s) => Ok(s),
@@ -457,6 +458,7 @@ fn require_ghost_needs_a_key_and_binds_it() {
             content: SealContent::Mail(ByteBuf::from(b"hi".to_vec())),
             ghost_vk: Some(Hash32([0x33; 32])),
             ui_entropy,
+            reseals: 0,
         },
     ) else {
         panic!("seal");
@@ -661,13 +663,23 @@ fn a_drain_over_a_faulty_host_never_tombstones_what_it_did_not_store() {
     assert!(injected > seeds, "only {injected} faults injected");
 }
 
-/// A refused store stops the drain before anything is tombstoned.
+/// A refused store tombstones nothing: every message stays in the inbox,
+/// counted, and the drain still answers.
 #[test]
-fn a_refused_store_stops_the_drain() {
+fn a_refused_store_tombstones_nothing() {
     let (base, a, mail) = loaded();
     let mut world = base.clone();
     world.env.fail_keys_containing = Some("it/in/".into());
-    assert!(world.update(&a, OwnerChange::Drain).is_err());
+    let u = world
+        .update(&a, OwnerChange::Drain)
+        .expect("the drain answers");
+    assert_eq!((u.drained, u.full), (0, mail.len() as u32));
+    if let Some(update) = &u.update {
+        let delta: InboxDelta = w::decode(update).unwrap();
+        let tombstoned = delta.owner.iter().flat_map(|o| o.tombstones.keys());
+        assert!(tombstoned.filter(|id| mail.contains_key(&***id)).count() == 0);
+        world.publish(&a, update);
+    }
     assert_eq!(world.state(&a).messages.len(), mail.len());
 }
 
@@ -780,6 +792,8 @@ fn pass_timing_is_coarse_and_spread() {
             drained: Default::default(),
             delivered: 0,
             pending: None,
+            revoked_epoch: 0,
+            misses: 0,
         };
         inbox_v2::start_term(&mut e, now, &mut rng);
         assert_eq!(e.expiry % DAY, 0, "expiry to the day");

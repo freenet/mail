@@ -35,9 +35,9 @@ use freenet_mail_protocol::inbox_v2::{
     QuarantineMode, SealedBody, SystemMsg,
 };
 use freenet_mail_protocol::{
-    Addr, DsaSeed, Entropy, Failure, FailureCode, Hash32, InboxV2Update, ItemKind, ItemRef,
-    OwnerChange, PassId, Reply, SealContent, SealedV2, SendAdmission, SendNotice, from_cbor,
-    to_cbor,
+    Addr, ChangeOutcome, DsaSeed, Entropy, Failure, FailureCode, Hash32, InboxV2Update, ItemKind,
+    ItemRef, OwnerChange, PassId, Reply, SealContent, SealedV2, SendAdmission, SendNotice,
+    from_cbor, to_cbor,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -76,6 +76,13 @@ pub const RESEND_AFTER: u64 = 6 * 3600;
 pub const NO_PASS_RETRY: u64 = DAY;
 /// The clock job moves `owner_time` once it trails the node's clock by this.
 pub const CLOCK_LAG: u64 = 12 * 3600;
+/// Live invites per identity. They have their own cap so they never fill the
+/// pass ledger, which contact passes need.
+pub const MAX_INVITES: usize = 1024;
+/// Ledger entries one time advance looks at for pruning.
+pub const PRUNE_PER_CALL: usize = 64;
+/// What a send's `reseal_at` keeps in hand for clock skew and propagation.
+pub const RESEAL_MARGIN: u64 = 6 * 3600;
 
 // ── Keys ────────────────────────────────────────────────────────────────────
 
@@ -189,8 +196,9 @@ pub struct InboxRecord {
     pub issued: BTreeMap<B24, B16>,
     /// When the renew job next looks at each contact's pass.
     pub due: BTreeMap<B24, u64>,
-    /// Drained stranger messages, by drain order (decision 21).
-    pub strangers: BTreeMap<u64, B32>,
+    /// Drained stranger messages, by drain order (decision 21), with their
+    /// sender when it could be read.
+    pub strangers: BTreeMap<u64, (B32, Option<B24>)>,
     pub stranger_seq: u64,
     /// Stranger messages removed to keep the newest, all told: what the
     /// quarantine view says was dropped.
@@ -202,6 +210,17 @@ pub struct InboxRecord {
     /// not stranger mail, makes it a contact.
     #[serde(default)]
     pub stranger_held: BTreeMap<B24, u64>,
+    /// The tombstones of the latest owner record this delegate signed or was
+    /// given: every owner change is built on them, so a page's older state
+    /// never signs a version without what a job tombstoned.
+    #[serde(default)]
+    pub tombstones: BTreeMap<B32, u64>,
+    /// Invites not yet pruned ([`MAX_INVITES`]).
+    #[serde(default)]
+    pub invites: BTreeSet<B16>,
+    /// The last ledger entry the prune looked at.
+    #[serde(default)]
+    pub pruned_to: Option<B16>,
 }
 
 /// A message that carries a pass's newest certificate to its contact.
@@ -236,6 +255,13 @@ pub struct LedgerEntry {
     /// The largest expiry of a certificate seen to reach the contact.
     pub delivered: u64,
     pub pending: Option<Pending>,
+    /// The epoch its revocation was signed with.
+    #[serde(default)]
+    pub revoked_epoch: u32,
+    /// Renewal looks in a row that found the contact's inbox missing or
+    /// failed: the next waits twice as long, up to a day.
+    #[serde(default)]
+    pub misses: u32,
 }
 
 pub(crate) fn item(kind: ItemKind, owner: &Addr, id: &[u8]) -> ItemRef {
@@ -402,6 +428,9 @@ pub fn create_inbox(
         stranger_seq: 0,
         strangers_dropped: 0,
         stranger_held: BTreeMap::new(),
+        tombstones: BTreeMap::new(),
+        invites: BTreeSet::new(),
+        pruned_to: None,
     };
     let mut state = match existing {
         None => None,
@@ -604,6 +633,8 @@ fn new_entry(
         drained: BTreeSet::new(),
         delivered: 0,
         pending: None,
+        revoked_epoch: 0,
+        misses: 0,
     };
     start_term(&mut e, now, rng);
     (pass_id_of(&me.dsa, &nonce), e)
@@ -620,9 +651,9 @@ fn contact_pass(
 ) -> Result<(B16, w::Pass), Failure> {
     let (mut rec_gen, mut rec) = record(s, &me.addr)?;
     let contact = ByteArray::new(contact.0);
-    // Writing to a stranger makes it a contact: its passes leave the
-    // stranger budget.
-    if rec.stranger_held.remove(&contact).is_some() {
+    // Writing to a stranger makes it a contact: its passes and its mail
+    // leave the stranger budget.
+    if promote(&mut rec, &contact) {
         save(s, item(ItemKind::InboxV2, &me.addr, &[]), &rec, rec_gen)?;
         rec_gen = record(s, &me.addr)?.0;
     }
@@ -639,16 +670,103 @@ fn contact_pass(
         }
     }
     let (pass_id, e) = new_entry(me, &rec, Some(contact), PassClass::Contact, now, rng);
-    save(
-        s,
-        item(ItemKind::PassLedger, &me.addr, pass_id.as_slice()),
-        &e,
-        0,
-    )?;
+    new_ledger_entry(s, me, &mut rec, &pass_id, &e, now)?;
     rec.issued.insert(contact, pass_id);
     rec.due.insert(contact, now);
     save(s, item(ItemKind::InboxV2, &me.addr, &[]), &rec, rec_gen)?;
     Ok((pass_id, pass_of(me, &pass_id, &e)))
+}
+
+/// `sender` is a contact now: its passes and its drained mail leave the
+/// stranger budget. Returns whether `rec` changed.
+fn promote(rec: &mut InboxRecord, sender: &B24) -> bool {
+    let before = rec.strangers.len();
+    rec.strangers.retain(|_, (_, from)| *from != Some(*sender));
+    rec.stranger_held.remove(sender).is_some() || rec.strangers.len() != before
+}
+
+/// Write a new ledger entry. A full ledger is pruned first; still full, the
+/// cap is the caller's answer.
+fn new_ledger_entry(
+    s: &mut Space<'_>,
+    me: &Me,
+    rec: &mut InboxRecord,
+    pass_id: &B16,
+    e: &LedgerEntry,
+    now: u64,
+) -> Result<(), Failure> {
+    let at = item(ItemKind::PassLedger, &me.addr, pass_id.as_slice());
+    match save(s, at.clone(), e, 0) {
+        Err(f) if f.code == FailureCode::CapReached => {
+            let owner_time = rec.max_owner_time.max(now);
+            prune_ledger(s, me, rec, owner_time, None)?;
+            save(s, at, e, 0)
+        }
+        other => other,
+    }
+}
+
+/// Whether ledger entry `e` can go: its revocation (if any) is pruned from
+/// the inbox at `owner_time`, and no certificate of it is admitted there.
+/// A contact's current pass stays until it is dead: the renew job reissues
+/// it after a bump.
+fn prunable(rec: &InboxRecord, pass_id: &B16, e: &LedgerEntry, owner_time: u64) -> bool {
+    let oldest = if owner_time < rec.prev_epoch_until {
+        rec.pass_epoch.saturating_sub(1)
+    } else {
+        rec.pass_epoch
+    };
+    let dead = e.max_expiry.saturating_add(w::WINDOW_BACK) <= owner_time;
+    let current = e
+        .issued_for
+        .is_some_and(|c| rec.issued.get(&c) == Some(pass_id));
+    if e.revoked {
+        dead || e.revoked_epoch < oldest
+    } else {
+        dead || (!current && e.epoch < oldest)
+    }
+}
+
+/// Delete the ledger entries that can go, looking at `limit` of them from
+/// where the last prune stopped (all of them with `None`).
+fn prune_ledger(
+    s: &mut Space<'_>,
+    me: &Me,
+    rec: &mut InboxRecord,
+    owner_time: u64,
+    limit: Option<usize>,
+) -> Result<(), Failure> {
+    let (_, ids) = s.index(&crate::store::index_rel(
+        ItemKind::PassLedger,
+        Some(&me.addr),
+    ))?;
+    let ids: Vec<B16> = ids
+        .iter()
+        .filter_map(|id| Some(ByteArray::new(id.as_slice().try_into().ok()?)))
+        .collect();
+    let start = rec
+        .pruned_to
+        .map_or(0, |last| ids.partition_point(|id| *id <= last));
+    let n = limit.unwrap_or(ids.len()).min(ids.len());
+    for pass_id in ids.iter().cycle().skip(start).take(n) {
+        rec.pruned_to = Some(*pass_id);
+        let at = item(ItemKind::PassLedger, &me.addr, pass_id.as_slice());
+        let Some((generation, e)) = load::<LedgerEntry>(s, &at)? else {
+            continue;
+        };
+        if !prunable(rec, pass_id, &e, owner_time) {
+            continue;
+        }
+        crate::handlers::delete_item(s, at, generation)?;
+        rec.invites.remove(pass_id);
+        if let Some(c) = e.issued_for
+            && rec.issued.get(&c) == Some(pass_id)
+        {
+            rec.issued.remove(&c);
+            rec.due.remove(&c);
+        }
+    }
+    Ok(())
 }
 
 pub fn issue_pass(
@@ -680,16 +798,23 @@ pub fn issue_pass(
             Ok(Reply::PassIssued(pass))
         }
         (_, Some(max_messages)) if max_messages > 0 => {
-            let (_, rec) = record(s, addr)?;
+            let (generation, mut rec) = record(s, addr)?;
+            if rec.invites.len() >= MAX_INVITES {
+                let owner_time = rec.max_owner_time;
+                prune_ledger(s, &me, &mut rec, owner_time.max(now), None)?;
+            }
+            if rec.invites.len() >= MAX_INVITES {
+                return Err(fail(
+                    FailureCode::CapReached,
+                    "this identity has as many live invites as it may",
+                ));
+            }
             let issued_for = contact.map(|c| ByteArray::new(c.0));
             let class = PassClass::Invite { max_messages };
             let (pass_id, e) = new_entry(&me, &rec, issued_for, class, now, &mut rng);
-            save(
-                s,
-                item(ItemKind::PassLedger, addr, pass_id.as_slice()),
-                &e,
-                0,
-            )?;
+            new_ledger_entry(s, &me, &mut rec, &pass_id, &e, now)?;
+            rec.invites.insert(pass_id);
+            save(s, item(ItemKind::InboxV2, addr, &[]), &rec, generation)?;
             Ok(Reply::PassIssued(pass_of(&me, &pass_id, &e)))
         }
         _ => Err(fail(
@@ -752,6 +877,9 @@ fn hold(
     }
     let at = item(ItemKind::HeldPass, owner, pass.cert.recipient.as_slice());
     let (generation, mut held) = load::<Vec<w::Pass>>(s, &at)?.unwrap_or_default();
+    // A certificate past its expiry and the window admits nothing anywhere.
+    let now = s.env.now_secs().unwrap_or(0);
+    held.retain(|p| p.cert.expiry.saturating_add(w::WINDOW_BACK) > now);
     match held
         .iter_mut()
         .find(|p| p.cert.pass_id == pass.cert.pass_id)
@@ -790,30 +918,56 @@ pub fn hold_pass(s: &mut Space<'_>, addr: &Addr, pass: &w::Pass) -> OpResult {
     };
     hold(s, addr, rec.as_ref().map(|(_, r)| &r.ghost_master), pass)?;
     if let Some((generation, mut rec)) = rec
-        && rec.stranger_held.remove(&pass.cert.recipient).is_some()
+        && promote(&mut rec, &pass.cert.recipient)
     {
         save(s, item(ItemKind::InboxV2, addr, &[]), &rec, generation)?;
     }
     Ok(Reply::Ack { generation: 0 })
 }
 
-/// Keep a pass a drained message carried from `sender`. A stranger's (from
-/// quarantine mail, from a sender that is not a contact) counts against the
+/// Whether `sender` is a contact: one this identity issued a pass to, or
+/// whose pass it holds from mail that was not a stranger's.
+fn is_contact(s: &Space<'_>, me: &Me, rec: &InboxRecord, sender: &B24) -> Result<bool, Failure> {
+    let at = item(ItemKind::HeldPass, &me.addr, sender.as_slice());
+    Ok(rec.issued.contains_key(sender)
+        || (!rec.stranger_held.contains_key(sender) && s.read(&item_rel(&at))?.is_some()))
+}
+
+/// Remove the held passes of every recipient whose certificates are all
+/// past expiry and the window. Looked at only when the held passes are full.
+fn prune_held(s: &mut Space<'_>, owner: &Addr) -> Result<usize, Failure> {
+    let now = s.env.now_secs().unwrap_or(0);
+    let (_, ids) = s.index(&crate::store::index_rel(ItemKind::HeldPass, Some(owner)))?;
+    let mut removed = 0;
+    for id in ids {
+        let at = item(ItemKind::HeldPass, owner, &id);
+        if let Some((generation, held)) = load::<Vec<w::Pass>>(s, &at)?
+            && held
+                .iter()
+                .all(|p| p.cert.expiry.saturating_add(w::WINDOW_BACK) <= now)
+        {
+            crate::handlers::delete_item(s, at, generation)?;
+            removed += 1;
+        }
+    }
+    Ok(removed)
+}
+
+/// Keep a pass a drained message carried. A stranger's counts against the
 /// stranger budget; when the held passes are full, the earliest stranger's
-/// go first. Full with no stranger's to remove is `CapReached`, which leaves
-/// the message in the inbox and is counted as full: never a contact's pass
-/// dropped in silence.
+/// go first, then every recipient whose passes are all dead. Still full, the
+/// pass is not kept and `Ok(false)` says so: the mail is stored all the same.
 fn keep_drained_pass(
     s: &mut Space<'_>,
     me: &Me,
     rec: &mut InboxRecord,
     pass: &w::Pass,
-    stranger: bool,
-) -> Result<(), Failure> {
+    quarantine: bool,
+    contact: bool,
+) -> Result<bool, Failure> {
     let recipient = pass.cert.recipient;
-    let at = item(ItemKind::HeldPass, &me.addr, recipient.as_slice());
-    let contact = rec.issued.contains_key(&recipient)
-        || (!rec.stranger_held.contains_key(&recipient) && s.read(&item_rel(&at))?.is_some());
+    let stranger = quarantine;
+    let mut pruned = false;
     loop {
         match hold(s, &me.addr, Some(&rec.ghost_master), pass) {
             Err(f) if f.code == FailureCode::CapReached => {
@@ -823,11 +977,14 @@ fn keep_drained_pass(
                     .filter(|(r, _)| **r != recipient)
                     .min_by_key(|(r, seq)| (**seq, **r))
                     .map(|(r, _)| *r);
-                let Some(old) = oldest else {
-                    return Err(f);
-                };
-                rec.stranger_held.remove(&old);
-                forget_held(s, &me.addr, &old);
+                if let Some(old) = oldest {
+                    rec.stranger_held.remove(&old);
+                    forget_held(s, &me.addr, &old);
+                } else if pruned || prune_held(s, &me.addr)? == 0 {
+                    return Ok(false);
+                } else {
+                    pruned = true;
+                }
             }
             other => break other?,
         }
@@ -847,7 +1004,7 @@ fn keep_drained_pass(
     } else if !stranger {
         rec.stranger_held.remove(&recipient);
     }
-    Ok(())
+    Ok(true)
 }
 
 // ── The owner's updates ─────────────────────────────────────────────────────
@@ -857,22 +1014,25 @@ struct Drained {
     tombstones: Vec<(B32, u64)>,
     /// Invites whose drained count grew: pass id, used, expiry.
     usage: BTreeMap<B16, (u8, u64)>,
-    /// Stranger messages drained, stored or not.
-    strangers: Vec<B32>,
+    /// Stranger messages drained, stored or not, with their sender.
+    strangers: Vec<(B32, Option<B24>)>,
     /// Earlier stranger messages removed to make room in storage.
     evicted: Vec<B32>,
     /// Messages tried (each a decryption).
     tried: usize,
     stored: u32,
     remaining: u32,
-    /// Left in the inbox because storage is full.
-    unstored: u32,
+    /// Tried and left in the inbox: not stored (storage full, a failed
+    /// write) or a Ghost Key proof only the node's copy can confirm.
+    unstored: BTreeSet<B32>,
+    /// Passes drained mail carried that the full held passes did not take.
+    passes_not_kept: u32,
 }
 
 /// Store what `state` holds, up to `limit` messages. Returns the tombstones
-/// for what is stored (or unreadable by anyone). A failure a retry can clear
-/// is returned before a tombstone leaves, so the inbox keeps the message; a
-/// message that full storage refuses stays in the inbox and the rest go on.
+/// for what is stored (or unreadable by anyone). A message that cannot be
+/// stored now stays in the inbox, untombstoned and counted, and the rest go
+/// on: no one message holds the drain.
 fn drain(
     s: &mut Space<'_>,
     me: &Me,
@@ -894,18 +1054,26 @@ fn drain(
     let proven = proven_ghosts(s, rec, &me.addr, &batch, from_node);
     for (id, m) in batch {
         out.tried += 1;
+        // The stored copy is a function of the message and what the contract
+        // admitted: a Ghost Key claim the node's copy cannot confirm waits
+        // for a drain that can, rather than being stored without it.
+        let claimed = matches!(m.admission, Admission::Quarantine { ghost: Some(_) });
+        if claimed && !proven.contains(id) {
+            out.unstored.insert(*id);
+            continue;
+        }
+        let mut stranger = matches!(m.admission, Admission::Quarantine { .. }).then_some(None);
         if let Some(opened) = sealing::open(&me.keys, &me.addr.0, id, m) {
-            let ghost_proven = proven.contains(id);
-            match store_opened(s, me, rec, id, m, opened, ghost_proven, &mut out) {
-                Err(f) if f.code == FailureCode::CapReached => {
-                    out.unstored += 1;
+            match store_opened(s, me, rec, id, m, opened, claimed, &mut out) {
+                Ok(from) => stranger = from.map(Some),
+                Err(_) => {
+                    out.unstored.insert(*id);
                     continue;
                 }
-                other => other?,
             }
         }
-        if matches!(m.admission, Admission::Quarantine { .. }) {
-            out.strangers.push(*id);
+        if let Some(from) = stranger {
+            out.strangers.push((*id, from));
         }
         out.tombstones.push((*id, m.sent_time));
     }
@@ -992,10 +1160,13 @@ fn store_inbound(
 ) -> Result<(), Failure> {
     // A removed copy the page had deleted already frees nothing: a few tries.
     for _ in 0..8 {
-        // Create-only; storing the same message again is acknowledged.
+        // Create-only. A copy already under this id is this message, stored
+        // by an earlier drain (the id binds the ciphertext): it counts as
+        // stored, whatever path stored it.
         match put_item(s, inbound(&me.addr, id), bytes.clone(), None) {
+            Err(f) if matches!(f.code, FailureCode::Conflict { .. }) => return Ok(()),
             Err(f) if f.code == FailureCode::CapReached && !rec.strangers.is_empty() => {
-                let (_, old) = rec.strangers.pop_first().expect("not empty");
+                let (_, (old, _)) = rec.strangers.pop_first().expect("not empty");
                 forget_inbound(s, &me.addr, &old);
                 out.evicted.push(old);
             }
@@ -1018,20 +1189,25 @@ fn store_opened(
     opened: sealing::Opened,
     ghost_proven: bool,
     out: &mut Drained,
-) -> Result<(), Failure> {
+) -> Result<Option<B24>, Failure> {
     let body = opened.body;
     let sender = address_of(&opened.sender_vk);
+    let from = ByteArray::new(sender.0);
+    // Stranger mail is decided by its sender, not its admission: a contact
+    // writes through quarantine whenever no pass of ours admits.
+    let quarantine = matches!(m.admission, Admission::Quarantine { .. });
+    let contact = is_contact(s, me, rec, &from)?;
     // The way back is kept, but a pass the sender got wrong must not hold
-    // the message in the inbox for good: only a failure a retry can clear,
-    // or held passes full with no stranger's to give way, does.
+    // the message in the inbox for good: only a failure a retry can clear
+    // does.
     let grant = body
         .pass_grant
         .as_ref()
         .filter(|g| *g.cert.recipient == sender.0);
-    let stranger = matches!(m.admission, Admission::Quarantine { .. });
     for pass in std::iter::once(&body.reply_pass).chain(grant) {
-        match keep_drained_pass(s, me, rec, pass, stranger) {
-            Ok(()) => {}
+        match keep_drained_pass(s, me, rec, pass, quarantine, contact) {
+            Ok(true) => {}
+            Ok(false) => out.passes_not_kept += 1,
             Err(f) if f.code == FailureCode::BadInput => {}
             Err(f) => return Err(f),
         }
@@ -1067,7 +1243,7 @@ fn store_opened(
             out.usage.insert(cert.pass_id, (used, e.max_expiry));
         }
     }
-    Ok(())
+    Ok((quarantine && !contact).then_some(from))
 }
 
 fn bump(rec: &mut InboxRecord, owner_time: u64, now: u64, emergency: bool, rng: &mut MixRng) {
@@ -1111,10 +1287,12 @@ fn revoke(
     } else if !state.revoked.contains_key(&key) && this_epoch + 1 >= BUMP_AT_REVOCATIONS {
         bump(rec, state.time.owner_time, now, false, rng);
     }
-    if !e.revoked {
+    if !e.revoked || e.revoked_epoch != rec.pass_epoch {
         e.revoked = true;
+        e.revoked_epoch = rec.pass_epoch;
         save(s, at, &e, generation)?;
     }
+    rec.invites.remove(&key);
     if let Some(contact) = e.issued_for
         && rec.issued.get(&contact) == Some(&key)
     {
@@ -1152,11 +1330,11 @@ pub fn update_inbox(
         .map(|(u, _)| Reply::InboxV2Update(u))
 }
 
-/// Drain up to `limit` messages of `state`, then sign `change` if nothing is
-/// left that is not stored. The operation and the jobs both come here.
-/// `from_node`: `state` is the node's stored copy, which the contract
-/// accepted, rather than a page's. Returns the update and how many messages
-/// were tried.
+/// Drain up to `limit` messages of `state`, then sign `change` unless it
+/// would drop a message still in the inbox. The operation and the jobs both
+/// come here. `from_node`: `state` is the node's stored copy, which the
+/// contract accepted, rather than a page's. Returns the update and how many
+/// messages were tried.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn owner_update(
     s: &mut Space<'_>,
@@ -1172,26 +1350,40 @@ pub(crate) fn owner_update(
     let (rec_gen, mut rec) = record(s, addr)?;
     let drained = drain(s, me, &mut rec, state, limit, from_node)?;
 
-    // A tombstone outside the window guards nothing: the filter drops the
-    // message by its time. Pruned against the joined time already held.
+    // Built on the latest owner record this delegate signed or was given:
+    // the tombstones of both, so a page's older state cannot sign a version
+    // without what a job tombstoned. A tombstone outside the window guards
+    // nothing (the filter drops the message by its time).
     let held_time = state.time.owner_time;
-    let mut tombstones: BTreeMap<B32, u64> = state
-        .owner
+    let in_window = |t: &u64| t.saturating_add(w::WINDOW_BACK) >= held_time;
+    let mut tombstones: BTreeMap<B32, u64> = rec
         .tombstones
         .iter()
-        .filter(|(_, t)| t.saturating_add(w::WINDOW_BACK) >= held_time)
+        .chain(&state.owner.tombstones)
+        .filter(|(_, t)| in_window(t))
         .map(|(id, t)| (*id, *t))
         .collect();
+    if tombstones.len() > w::MAX_TOMBSTONES {
+        let mut extra: Vec<(u64, B32)> = tombstones
+            .iter()
+            .filter(|(id, _)| !state.owner.tombstones.contains_key(*id))
+            .map(|(id, t)| (*t, *id))
+            .collect();
+        extra.sort_unstable();
+        let over = tombstones.len() - w::MAX_TOMBSTONES;
+        let cut: BTreeSet<B32> = extra.iter().take(over).map(|(_, id)| *id).collect();
+        tombstones.retain(|id, _| !cut.contains(id));
+    }
     // Decision 21: strangers keep at most STRANGERS_KEPT, the earliest
     // drained giving way (stored copy and tombstone both), so they can never
     // fill the tombstones or this identity's storage.
     let mut dropped = drained.evicted.clone();
-    for id in &drained.strangers {
+    for (id, from) in &drained.strangers {
         rec.stranger_seq += 1;
-        rec.strangers.insert(rec.stranger_seq, *id);
+        rec.strangers.insert(rec.stranger_seq, (*id, *from));
     }
     while rec.strangers.len() > STRANGERS_KEPT {
-        let (_, old) = rec.strangers.pop_first().expect("over the limit");
+        let (_, (old, _)) = rec.strangers.pop_first().expect("over the limit");
         forget_inbound(s, addr, &old);
         dropped.push(old);
     }
@@ -1210,25 +1402,87 @@ pub(crate) fn owner_update(
         }
     }
 
+    // Decision 9: nothing is signed that drops a message not yet stored.
+    // What is still in the inbox: not tried yet, or tried and not stored.
+    let drained_ids: BTreeSet<&B32> = drained.tombstones.iter().map(|(id, _)| id).collect();
+    let left: Vec<(&B32, &w::Message)> = state
+        .messages
+        .iter()
+        .filter(|(id, _)| !state.owner.tombstones.contains_key(*id) && !drained_ids.contains(id))
+        .collect();
+    // Whether a change that drops what `drops` names may be signed.
+    let why = |drops: &dyn Fn(&w::Message) -> bool| {
+        let hit: Vec<&B32> = left
+            .iter()
+            .filter(|(_, m)| drops(m))
+            .map(|(id, _)| *id)
+            .collect();
+        if hit.iter().any(|id| drained.unstored.contains(*id)) {
+            ChangeOutcome::WaitsForStorage
+        } else if hit.is_empty() {
+            ChangeOutcome::Signed
+        } else {
+            ChangeOutcome::WaitsForDrain
+        }
+    };
+    // The last `owner_time` that keeps `m` admitted: its window, and for a
+    // pass of the previous epoch the grace.
+    let keeps = |m: &w::Message| {
+        let old_epoch =
+            matches!(&m.admission, Admission::Pass { cert, .. } if cert.epoch < rec.pass_epoch);
+        let grace_end = if old_epoch {
+            rec.prev_epoch_until.saturating_sub(1)
+        } else {
+            u64::MAX
+        };
+        m.sent_time.saturating_add(w::WINDOW_BACK).min(grace_end)
+    };
+    let time_bound = left.iter().map(|(_, m)| keeps(m)).min().unwrap_or(u64::MAX);
+    let is_pass = |m: &w::Message| matches!(m.admission, Admission::Pass { .. });
+
     let mut delta = InboxDelta::default();
     let mut new_time = None;
     let epoch = rec.pass_epoch;
-    // Decision 9: nothing is signed while a message is not stored yet.
-    if drained.remaining == 0 && drained.unstored == 0 {
-        match change {
-            OwnerChange::Drain => {}
-            OwnerChange::AdvanceTime => {
-                let t = guarded_time(held_time.max(rec.max_owner_time), now);
-                if t > held_time {
-                    new_time = Some(t);
-                }
+    let mut outcome = ChangeOutcome::Signed;
+    match change {
+        OwnerChange::Drain => {}
+        // As far as keeps every message still in the inbox admitted.
+        OwnerChange::AdvanceTime => {
+            let want = guarded_time(held_time.max(rec.max_owner_time), now);
+            let t = want.min(time_bound.max(held_time));
+            if t < want {
+                outcome = why(&|m| keeps(m) < want);
             }
-            OwnerChange::SetQuarantine(mode) => rec.quarantine = mode,
-            OwnerChange::Revoke { pass_id } => {
+            if t > held_time {
+                new_time = Some(t);
+            }
+        }
+        // Any other change waits for the drain to try every message.
+        _ if drained.remaining > 0 => outcome = ChangeOutcome::WaitsForDrain,
+        OwnerChange::SetQuarantine(mode) => {
+            if mode != rec.quarantine {
+                outcome = why(&|m| matches!(m.admission, Admission::Quarantine { .. }));
+            }
+            if outcome == ChangeOutcome::Signed {
+                rec.quarantine = mode;
+            }
+        }
+        OwnerChange::Revoke { pass_id } => {
+            let emergency = state.revoked.len() >= w::MAX_REVOKED;
+            outcome = why(&|m| {
+                (emergency && is_pass(m))
+                    || matches!(&m.admission, Admission::Pass { cert, .. } if cert.pass_id.into_array() == pass_id.0)
+            });
+            if outcome == ChangeOutcome::Signed {
                 let r = revoke(s, me, &mut rec, state, &pass_id, now, rng)?;
                 delta.revoked.insert(r.pass_id, r);
             }
-            OwnerChange::BumpEpoch { emergency } => bump(&mut rec, held_time, now, emergency, rng),
+        }
+        OwnerChange::BumpEpoch { emergency } => {
+            outcome = why(&|m| emergency && is_pass(m));
+            if outcome == ChangeOutcome::Signed {
+                bump(&mut rec, held_time, now, emergency, rng);
+            }
         }
     }
     if rec.pass_epoch != epoch {
@@ -1243,14 +1497,17 @@ pub(crate) fn owner_update(
             *due = (*due).min(at);
         }
     }
-    // A time signed earlier whose update did not land goes out again.
-    if new_time.is_none() && rec.max_owner_time > held_time {
+    // A time signed earlier whose update did not land goes out again, unless
+    // it would now drop a message still in the inbox.
+    if new_time.is_none() && rec.max_owner_time > held_time && rec.max_owner_time <= time_bound {
         new_time = Some(rec.max_owner_time);
     }
-    // The time goes out with these tombstones, so what it moves out of the
-    // window needs none.
     if let Some(t) = new_time {
+        // The time goes out with these tombstones, so what it moves out of
+        // the window needs none.
         tombstones.retain(|_, sent| sent.saturating_add(w::WINDOW_BACK) >= t);
+        // Ledger entries this time leaves with nothing to sign go.
+        prune_ledger(s, me, &mut rec, t, Some(PRUNE_PER_CALL))?;
     }
     let o = &state.owner;
     let needs_owner = tombstones != o.tombstones
@@ -1267,6 +1524,7 @@ pub(crate) fn owner_update(
     if let Some(t) = new_time {
         rec.max_owner_time = rec.max_owner_time.max(t);
     }
+    rec.tombstones = tombstones.clone();
     // Recorded before anything signed leaves.
     save(s, item(ItemKind::InboxV2, addr, &[]), &rec, rec_gen)?;
     if let Some(v) = version {
@@ -1294,8 +1552,10 @@ pub(crate) fn owner_update(
             update,
             drained: drained.stored,
             remaining: drained.remaining,
-            full: drained.unstored + untombstoned,
+            full: drained.unstored.len() as u32 + untombstoned,
             strangers_dropped: dropped.len() as u32,
+            change: outcome,
+            passes_not_kept: drained.passes_not_kept,
         },
         drained.tried,
     ))
@@ -1402,7 +1662,14 @@ pub fn seal_v2(
     content: SealContent,
     ghost_vk: Option<Hash32>,
     entropy: &Entropy,
+    reseals: u8,
 ) -> OpResult {
+    if reseals > freenet_mail_protocol::MAX_RESEALS {
+        return Err(fail(
+            FailureCode::Refused,
+            "this message was sealed again and again and never landed: it could not be delivered",
+        ));
+    }
     let me = me(s, from)?;
     let state = their_state(to, to_state)?;
     let now = clock(s)?;
@@ -1539,10 +1806,18 @@ pub(crate) fn seal_to(
         sent_time,
         admission: admission_value,
     };
-    // The window trails `owner_time`, which does not run ahead of real time
-    // by much: two days after the earlier of `sent_time` and now it may have
-    // moved past this message (decision 9).
-    let reseal_at = sent_time.min(now) + w::WINDOW_BACK;
+    // Decision 9. The recipient drops this message once its `owner_time`
+    // passes `sent_time + WINDOW_BACK`. Its time never runs more than
+    // TIME_LEAD_MAX ahead of its clock, which the `owner_time` read shows to
+    // be at least `owner_time - now` ahead of ours, so that is not before the
+    // point below; RESEAL_MARGIN covers propagation and skew. A message at the
+    // edge already is looked at again after the margin, when a fresh read may
+    // allow a later `sent_time`, never at once.
+    let skew = owner_time.saturating_sub(now);
+    let reseal_at = sent_time
+        .saturating_add(w::WINDOW_BACK)
+        .saturating_sub(TIME_LEAD_MAX + skew + RESEAL_MARGIN)
+        .max(now + RESEAL_MARGIN);
     let sealed = SealedV2 {
         message: ByteBuf::from(w::encode(&message)),
         id: Hash32(id),

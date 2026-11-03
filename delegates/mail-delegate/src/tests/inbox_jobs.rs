@@ -8,8 +8,8 @@ use freenet_email_inbox_v2::apply;
 use freenet_email_inbox_v2::merge::{Rules, WEBAPP_REQUESTOR};
 use freenet_mail_protocol::inbox_v2::{self as w, InboxDelta};
 use freenet_mail_protocol::{
-    Addr, Hash32, ImportKind, ImportSource, JobsRun, Op, OwnerChange, Reply, SealContent,
-    SendAdmission, SendNotice,
+    Addr, ChangeOutcome, Hash32, ImportKind, ImportSource, JobsRun, Op, OwnerChange, Reply,
+    SealContent, SendAdmission, SendNotice,
 };
 use freenet_stdlib::prelude::{ContractInstanceId, OutboundDelegateMsg, UpdateData, WrappedState};
 use serde_bytes::{ByteArray, ByteBuf};
@@ -277,35 +277,34 @@ fn a_sealed_message_never_sent_sends_nothing() {
 }
 
 /// The clock job drains first and signs the new time in the same update; a
-/// message that cannot be stored holds the time back.
+/// message that cannot be stored holds the time back only as far as keeps it
+/// in the window.
 #[test]
 fn the_clock_advances_owner_time_after_draining() {
     let mut world = World::new();
     let a = world.identity("alice");
     let b = world.identity("bob");
-    let start = world.state(&a).time.owner_time;
     let (sealed, _) = world.send(&b, &a, "before the tick");
-    // Still inside the window after the new time, so it needs its tombstone.
-    world.advance(DAY);
-
-    // Storage refuses: nothing is signed, the message stays.
+    // Three days on, the node's time would drop it.
+    world.advance(3 * DAY);
     world.env.fail_keys_containing = Some("it/in/".into());
     let (_, updates) = run(&mut world, Trigger::Tick(Tick::Clock));
-    assert!(updates.iter().all(|(addr, _)| *addr != a));
-    assert_eq!(world.state(&a).time.owner_time, start);
-    assert!(world.state(&a).messages.len() == 1);
+    let (_, delta) = updates.iter().find(|(addr, _)| *addr == a).unwrap();
+    let edge = sealed.sent_time + w::WINDOW_BACK;
+    assert_eq!(delta.time.as_ref().unwrap().owner_time, edge);
+    assert!(delta.owner.is_none(), "nothing tombstoned");
+    assert_eq!(world.state(&a).messages.len(), 1, "the message stays");
     world.env.fail_keys_containing = None;
-
+    // Stored now, it goes with the time that drops it: no tombstone needed.
     let (_, updates) = run(&mut world, Trigger::Tick(Tick::Clock));
     let (_, delta) = updates.iter().find(|(addr, _)| *addr == a).unwrap();
-    let owner = delta.owner.as_ref().expect("the tombstone");
-    assert!(owner.tombstones.contains_key(&ByteArray::new(sealed.id.0)));
     let now = world.env.now.unwrap();
     assert_eq!(
         delta.time.as_ref().unwrap().owner_time,
         now,
         "the guard allows it"
     );
+    assert!(world.state(&a).messages.is_empty());
     assert_eq!(texts(&world.inbound(&a)), ["before the tick"]);
     // Not again while it is less than CLOCK_LAG behind.
     world.advance(v2::CLOCK_LAG - 60);
@@ -454,7 +453,8 @@ fn a_send_queued_past_two_days_is_sealed_again() {
     let a = world.identity("alice");
     let b = world.identity("bob");
     let queued = world.seal(&b, &a, "queued").unwrap();
-    assert_eq!(queued.reseal_at, queued.sent_time + w::WINDOW_BACK);
+    let lead = v2::TIME_LEAD_MAX + v2::RESEAL_MARGIN;
+    assert_eq!(queued.reseal_at, queued.sent_time + w::WINDOW_BACK - lead);
     // Alice's node keeps her clock moving.
     for _ in 0..3 {
         world.advance(DAY);
@@ -568,6 +568,7 @@ fn a_ghost_key_proof_from_the_fixtures_passes_the_contract() {
                 content: SealContent::Mail(ByteBuf::from(b"proven".to_vec())),
                 ghost_vk: Some(Hash32(ghost_vk)),
                 ui_entropy,
+                reseals: 0,
             },
         ) {
             Ok(Reply::SealedV2(s)) => s,
@@ -955,9 +956,9 @@ fn a_drained_message_costs_about_what_an_import_does() {
         "COST a renewal {:.2} ms native, {renew_writes} writes",
         renew.as_secs_f64() * 1000.0 / sent as f64
     );
-    // RENEW_SLOTS messages' worth.
+    // Two messages' worth.
     assert!(
-        renew_writes * N as u64 <= inbox_jobs::RENEW_SLOTS as u64 * v1_writes,
+        renew_writes * N as u64 <= 2 * v1_writes,
         "a renewal writes {renew_writes}, an import {} a message",
         v1_writes / N as u64
     );
@@ -1002,4 +1003,572 @@ fn the_shipped_build_links_the_contracts_ed25519_dalek() {
         .filter_map(|p| p.lines().find_map(|l| l.strip_prefix("version = ")))
         .collect();
     assert_eq!(versions, ["\"2.2.0\""]);
+}
+
+// ── Review round 2: drain, renewal and caps ─────────────────────────────────
+
+/// Renewals Alice sends to `h` while contact `p` (sorting first) has revoked
+/// her pass and turned on RequireGhost (`poison`), or not.
+fn renewals_to_healthy(poison: bool) -> (usize, World, Addr, Addr) {
+    let mut world = World::new();
+    let a = world.identity("alice");
+    let x = world.identity("xavier");
+    let y = world.identity("yolanda");
+    let (p, h) = if x.0 < y.0 { (x, y) } else { (y, x) };
+    for c in [p, h] {
+        let pass = world.issue(&a, Some(c), None);
+        hold(&mut world, &c, pass);
+        let (_, landed) = world.send(&c, &a, "hi");
+        assert!(landed);
+    }
+    settle(&mut world);
+    if poison {
+        let mine = world.record(&p).issued[&ByteArray::new(a.0)];
+        world.change(
+            &p,
+            OwnerChange::Revoke {
+                pass_id: freenet_mail_protocol::PassId(mine.into_array()),
+            },
+        );
+        world.change(
+            &p,
+            OwnerChange::SetQuarantine(w::QuarantineMode::RequireGhost { min_usd: None }),
+        );
+    }
+    let rec = world.record(&a);
+    let latest = rec
+        .issued
+        .values()
+        .map(|id| world.clone().ledger(&a, id.as_slice()).renew_at)
+        .max()
+        .unwrap();
+    world.advance(latest - world.env.now.unwrap() + 1);
+    let mut to_h = 0;
+    for _ in 0..8 {
+        let (_, updates) = run(&mut world, Trigger::Tick(Tick::Renew));
+        to_h += messages_to(&updates, &h);
+        world.advance(7 * 3600);
+    }
+    (to_h, world, a, p)
+}
+
+/// One contact whose renewal cannot be sent (it revoked our pass and asks
+/// for a Ghost Key) never stops the renewals of the contacts after it.
+#[test]
+fn a_contact_whose_renewal_fails_never_stops_the_others() {
+    let (control, ..) = renewals_to_healthy(false);
+    assert!(control >= 1, "control: the healthy contact is renewed");
+    let (poisoned, mut world, a, p) = renewals_to_healthy(true);
+    assert_eq!(
+        poisoned, control,
+        "the healthy contact is renewed all the same"
+    );
+    // The failing contact waits its own retry time past the last run, not
+    // every run.
+    let due = world.record(&a).due[&ByteArray::new(p.0)];
+    let last_run = world.env.now.unwrap() - 7 * 3600;
+    assert!(due > last_run, "backed off");
+}
+
+/// A message stored once counts as stored whatever path stored it: a page's
+/// drain the node could not confirm, whose update was lost, never holds the
+/// inbox for good. The stored copy is the same whichever drain stores it.
+#[test]
+fn a_message_stored_by_a_lost_drain_is_drained_again() {
+    let (master, ghosts) = ghost_fixture();
+    let mut world = World::with_master(master);
+    let a = world.identity("alice");
+    let b = world.identity("bob");
+    world.change(
+        &a,
+        OwnerChange::SetQuarantine(w::QuarantineMode::RequireGhost { min_usd: Some(5) }),
+    );
+    let (sk, cert) = ghosts
+        .iter()
+        .find(|g| g.0 == 5)
+        .map(|g| (&g.1, &g.2))
+        .unwrap();
+    let ui_entropy = world.entropy();
+    let Ok(Reply::SealedV2(sealed)) = call(
+        &mut world.env,
+        PROD,
+        Op::SealV2 {
+            from: b,
+            to: a,
+            to_state: ByteBuf::from(world.inboxes[&a].clone()),
+            content: SealContent::Mail(ByteBuf::from(b"proven".to_vec())),
+            ghost_vk: Some(Hash32(sk.verifying_key().to_bytes())),
+            ui_entropy,
+            reseals: 0,
+        },
+    ) else {
+        panic!()
+    };
+    let mut message: w::Message = w::decode(&sealed.message).unwrap();
+    message.admission = w::Admission::Quarantine {
+        ghost: Some(ghost_proof(
+            sk,
+            cert,
+            sealed.ghost_payload.clone().unwrap().into_vec(),
+        )),
+    };
+    let delta = InboxDelta {
+        messages: [(ByteArray::new(sealed.id.0), message)].into(),
+        ..InboxDelta::default()
+    };
+    world.publish(&a, &w::encode(&delta));
+    // The page drains before this node holds the inbox; its update is lost.
+    assert!(world.env.contracts.is_empty());
+    let _lost = world.update(&a, OwnerChange::Drain).expect("page drain");
+    // The node's drain stores it and tombstones it.
+    let (_, updates) = run(&mut world, PAGE);
+    let (_, d) = updates.iter().find(|(to, _)| *to == a).expect("an update");
+    let owner = d.owner.as_ref().expect("tombstones");
+    assert!(owner.tombstones.contains_key(&ByteArray::new(sealed.id.0)));
+    assert!(world.state(&a).messages.is_empty());
+    let got = world.inbound(&a);
+    assert_eq!(texts(&got), ["proven"]);
+    assert_eq!(
+        got[0].ghost_vk.unwrap().into_array(),
+        sk.verifying_key().to_bytes(),
+        "the proof the contract checked"
+    );
+    world.change(&a, OwnerChange::AdvanceTime);
+}
+
+/// Mail is a contact's by its sender, whatever the admission, and a contact's
+/// mail is never counted in or evicted by the stranger budget.
+#[test]
+fn a_contacts_quarantine_mail_is_never_evicted_as_a_strangers() {
+    let mut world = World::new();
+    let a = world.identity("alice");
+    let b = world.identity("bob");
+    let d = world.identity("dave");
+    // Alice wrote to Bob (he is in her `issued`), but Bob holds no pass of
+    // hers that admits: he writes by quarantine.
+    world.issue(&a, Some(b), None);
+    let (from_bob, landed) = world.send(&b, &a, "from a contact");
+    assert!(landed);
+    assert_eq!(from_bob.admission, SendAdmission::Quarantine);
+    world.change(&a, OwnerChange::Drain);
+    assert!(inbound_stored(&world, &a, &from_bob.id.0));
+    for n in 0..STRANGERS_KEPT + 16 {
+        let (_, landed) = world.send(&d, &a, &format!("s{n:05}"));
+        assert!(landed);
+        if world.state(&a).messages.len() >= w::QUARANTINE_SLOTS {
+            world.change(&a, OwnerChange::Drain);
+        }
+    }
+    world.change(&a, OwnerChange::Drain);
+    assert!(
+        inbound_stored(&world, &a, &from_bob.id.0),
+        "the contact's message"
+    );
+}
+
+/// Invites have their own cap, so they never fill the ledger: a new
+/// correspondent still gets a pass when every invite slot is taken.
+#[test]
+fn invites_never_fill_the_pass_ledger() {
+    let mut world = World::new();
+    let a = world.identity("alice");
+    let mut refused = 0;
+    for _ in 0..crate::store::MAX_MESSAGES {
+        let ui_entropy = world.entropy();
+        match world.call_as(
+            &a,
+            Op::IssuePass {
+                addr: a,
+                contact: None,
+                invite: Some(1),
+                ui_entropy,
+            },
+        ) {
+            Ok(_) => {}
+            Err(freenet_mail_protocol::FailureCode::CapReached) => refused += 1,
+            other => panic!("{other:?}"),
+        }
+    }
+    assert!(refused > 0, "the invite cap is surfaced");
+    let e = world.identity("erin");
+    world
+        .seal(&a, &e, "hello erin")
+        .expect("a new correspondent");
+}
+
+/// Whether `id` counts against Alice's stranger budget.
+fn in_stranger_budget(world: &mut World, a: &Addr, id: &[u8; 32]) -> bool {
+    world
+        .record(a)
+        .strangers
+        .values()
+        .any(|(s, _)| s.into_array() == *id)
+}
+
+/// A contact's mail through quarantine is not stranger mail: after its pass
+/// lapsed, after a revoke and re-add, and after an emergency bump. A
+/// stranger's mail leaves the budget once the user writes back.
+#[test]
+fn contact_mail_is_never_in_the_stranger_budget() {
+    let mut world = World::new();
+    let a = world.identity("alice");
+    let [b, c, d, e] = ["bob", "carol", "dave", "erin"].map(|n| world.identity(n));
+    for x in [b, c, d] {
+        let pass = world.issue(&a, Some(x), None);
+        hold(&mut world, &x, pass);
+    }
+    // Carol's pass lapses: Alice's clock stays, the sender's runs past it.
+    let mut at_carol = world.clone();
+    at_carol.advance(400 * DAY);
+    let (lapsed, landed) = at_carol.send(&c, &a, "lapsed");
+    assert!(landed);
+    assert_eq!(lapsed.admission, SendAdmission::Quarantine);
+    at_carol.change(&a, OwnerChange::Drain);
+    assert!(inbound_stored(&at_carol, &a, &lapsed.id.0));
+    assert!(
+        !in_stranger_budget(&mut at_carol, &a, &lapsed.id.0),
+        "lapsed"
+    );
+    // Dave's pass is revoked and a new one issued he does not hold yet.
+    let old = world.record(&a).issued[&ByteArray::new(d.0)];
+    world.change(
+        &a,
+        OwnerChange::Revoke {
+            pass_id: freenet_mail_protocol::PassId(old.into_array()),
+        },
+    );
+    world.issue(&a, Some(d), None);
+    let (readded, _) = world.send(&d, &a, "re-added");
+    assert_eq!(readded.admission, SendAdmission::Quarantine);
+    world.change(&a, OwnerChange::Drain);
+    assert!(!in_stranger_budget(&mut world, &a, &readded.id.0), "re-add");
+    // An emergency bump: Bob's held pass is of the old epoch.
+    world.change(&a, OwnerChange::BumpEpoch { emergency: true });
+    let (bumped, _) = world.send(&b, &a, "after the bump");
+    assert_eq!(bumped.admission, SendAdmission::Quarantine);
+    world.change(&a, OwnerChange::Drain);
+    assert!(!in_stranger_budget(&mut world, &a, &bumped.id.0), "bump");
+    // Erin is a stranger until Alice writes back.
+    let (hello, _) = world.send(&e, &a, "hello");
+    world.change(&a, OwnerChange::Drain);
+    assert!(in_stranger_budget(&mut world, &a, &hello.id.0));
+    world.seal(&a, &e, "hello erin").unwrap();
+    assert!(!in_stranger_budget(&mut world, &a, &hello.id.0), "replied");
+}
+
+/// A page's older state never signs an owner version without the
+/// tombstones a job already published.
+#[test]
+fn a_stale_page_state_keeps_what_a_job_tombstoned() {
+    let mut world = World::new();
+    let a = world.identity("alice");
+    let b = world.identity("bob");
+    let (sealed, _) = world.send(&b, &a, "drained by the node");
+    let stale = world.inboxes[&a].clone();
+    let (_, updates) = run(&mut world, Trigger::Tick(Tick::Rescan));
+    assert!(messages_to(&updates, &a) == 0 && !updates.is_empty());
+    let id = ByteArray::new(sealed.id.0);
+    assert!(world.state(&a).owner.tombstones.contains_key(&id));
+    // The page still holds the state from before the job's update.
+    world.inboxes.insert(a, stale.clone());
+    let u = world
+        .update(
+            &a,
+            OwnerChange::SetQuarantine(w::QuarantineMode::RequireGhost { min_usd: None }),
+        )
+        .unwrap();
+    assert_eq!(u.change, ChangeOutcome::Signed);
+    let delta: InboxDelta = w::decode(&u.update.unwrap()).unwrap();
+    assert!(delta.owner.unwrap().tombstones.contains_key(&id));
+}
+
+/// Full storage blocks only what would drop the mail it could not store:
+/// the message stays untombstoned, a revoke of another pass is signed, and a
+/// revoke of the pass that carried it waits, and says why.
+#[test]
+fn full_storage_blocks_only_the_changes_that_drop_unstored_mail() {
+    let mut world = World::new();
+    let a = world.identity("alice");
+    let [b, c] = ["bob", "carol"].map(|n| world.identity(n));
+    let mut passes = Vec::new();
+    for x in [b, c] {
+        let pass = world.issue(&a, Some(x), None);
+        hold(&mut world, &x, pass.clone());
+        passes.push(pass.cert.pass_id);
+    }
+    let (from_bob, _) = world.send(&b, &a, "unstored");
+    world.env.fail_keys_containing = Some("it/in/".into());
+    let revoke = |p: w::B16| OwnerChange::Revoke {
+        pass_id: freenet_mail_protocol::PassId(p.into_array()),
+    };
+    let u = world.update(&a, revoke(passes[1])).unwrap();
+    assert_eq!((u.change, u.full), (ChangeOutcome::Signed, 1));
+    let delta: InboxDelta = w::decode(u.update.as_ref().unwrap()).unwrap();
+    assert!(delta.revoked.contains_key(&passes[1]));
+    let unstored = ByteArray::new(from_bob.id.0);
+    assert!(
+        delta
+            .owner
+            .is_none_or(|o| !o.tombstones.contains_key(&unstored))
+    );
+    world.publish(&a, &u.update.unwrap());
+    let u = world.update(&a, revoke(passes[0])).unwrap();
+    assert_eq!(u.change, ChangeOutcome::WaitsForStorage);
+    assert!(u.update.is_none());
+    assert!(w::delivered(&world.state(&a), &from_bob.id.0));
+    world.env.fail_keys_containing = None;
+    world.change(&a, revoke(passes[0]));
+    assert!(inbound_stored(&world, &a, &from_bob.id.0));
+    assert!(world.state(&a).revoked.contains_key(&passes[0]));
+}
+
+/// The ledger is pruned as time moves: a revoked pass goes once its
+/// revocation is pruned (here by an emergency bump), and an invite past its
+/// expiry and the window frees its slot.
+#[test]
+fn the_ledger_is_pruned_as_time_moves() {
+    let mut world = World::new();
+    let a = world.identity("alice");
+    let b = world.identity("bob");
+    let pass = world.issue(&a, Some(b), None);
+    let invite = world.issue(&a, None, Some(1));
+    world.change(
+        &a,
+        OwnerChange::Revoke {
+            pass_id: freenet_mail_protocol::PassId(pass.cert.pass_id.into_array()),
+        },
+    );
+    world.change(&a, OwnerChange::BumpEpoch { emergency: true });
+    world.advance(20 * DAY);
+    settle(&mut world);
+    let gone = |world: &mut World, id: &w::B16| {
+        world.call_as(
+            &a,
+            Op::GetItem {
+                item: freenet_mail_protocol::ItemRef {
+                    kind: freenet_mail_protocol::ItemKind::PassLedger,
+                    owner: Some(a),
+                    id: id.to_vec(),
+                },
+            },
+        ) == Ok(Reply::Item(None))
+    };
+    assert!(
+        gone(&mut world, &pass.cert.pass_id),
+        "revoked, revocation pruned"
+    );
+    assert!(
+        gone(&mut world, &invite.cert.pass_id),
+        "invite past its window"
+    );
+    assert!(world.record(&a).invites.is_empty());
+}
+
+/// The clock moves with no message slice left and on the rescan, as far as
+/// keeps every undrained message, and the rotation moves past an inbox only
+/// once it is served.
+#[test]
+fn the_clock_runs_on_rescan_whatever_the_slice() {
+    let mut world = World::new();
+    let a = world.identity("alice");
+    let d = world.identity("dave");
+    for n in 0..w::QUARANTINE_SLOTS {
+        world.send(&d, &a, &format!("flood {n}"));
+    }
+    world.advance(DAY);
+    let before = world.state(&a).time.owner_time;
+    let (_, updates) = run(&mut world, Trigger::Tick(Tick::Rescan));
+    assert!(updates.iter().any(|(to, _)| *to == a));
+    let after = world.state(&a).time.owner_time;
+    assert!(after > before, "the clock moved with mail still pending");
+    for m in world.state(&a).messages.values() {
+        assert!(m.sent_time + w::WINDOW_BACK >= after, "nothing dropped");
+    }
+}
+
+/// A contact whose inbox is not held here is looked at again later and
+/// later, doubling to a day, rather than every hour.
+#[test]
+fn a_vanished_contact_backs_off() {
+    let mut world = World::new();
+    let a = world.identity("alice");
+    let b = world.identity("bob");
+    let pass = world.issue(&a, Some(b), None);
+    hold(&mut world, &b, pass.clone());
+    world.send(&b, &a, "hello");
+    settle(&mut world);
+    let e = world.ledger(&a, pass.cert.pass_id.as_slice());
+    world.advance(e.renew_at - world.env.now.unwrap() + 1);
+    let mut waits = Vec::new();
+    for _ in 0..8 {
+        world.inboxes.remove(&b);
+        world.env.contracts.clear();
+        sync(&mut world);
+        let now = world.env.now.unwrap();
+        let _ = watch::run(&mut world.env, Trigger::Tick(Tick::Renew));
+        let due = world.record(&a).due[&ByteArray::new(b.0)];
+        waits.push(due - now);
+        world.advance(due - now);
+    }
+    assert_eq!(
+        waits,
+        [1, 2, 4, 8, 16, 24, 24, 24].map(|h| h * 3600),
+        "doubling to a day"
+    );
+}
+
+/// Renewal throughput comes from the duty budget: after an emergency bump,
+/// every contact is reissued within a day of node runs.
+#[test]
+fn renewals_after_a_bump_keep_pace_with_the_budget() {
+    let mut world = World::new();
+    let a = world.identity("alice");
+    let n = env_or("RENEW_CONTACTS", 24) as usize;
+    let mut contacts = Vec::new();
+    for i in 0..n {
+        // Sixteen identities a store: the contacts live on other nodes.
+        let c = world.identity_in(&format!("c{i}"), 2 + (i / 15) as u8);
+        let pass = world.issue(&a, Some(c), None);
+        hold(&mut world, &c, pass);
+        world.send(&c, &a, "hi");
+        contacts.push(c);
+    }
+    settle(&mut world);
+    world.change(&a, OwnerChange::BumpEpoch { emergency: true });
+    let mut reached = BTreeSet::new();
+    // A day of rescans, the node's runs only.
+    for _ in 0..96 {
+        world.advance(900);
+        let (_, updates) = run(&mut world, Trigger::Tick(Tick::Rescan));
+        for c in &contacts {
+            if messages_to(&updates, c) > 0 {
+                reached.insert(*c);
+            }
+        }
+    }
+    assert_eq!(reached.len(), n, "every contact within a day");
+}
+
+/// `reseal_at` keeps a margin, is never at once for a recipient whose clock
+/// trails, and a message is resealed a bounded number of times.
+#[test]
+fn reseal_has_a_margin_and_a_limit() {
+    let mut world = World::new();
+    let a = world.identity("alice");
+    let b = world.identity("bob");
+    // Alice's clock trails by five days.
+    world.advance(5 * DAY);
+    let sealed = world.seal(&b, &a, "to a stale clock").unwrap();
+    let now = world.env.now.unwrap();
+    assert!(sealed.reseal_at >= now + v2::RESEAL_MARGIN);
+    let ui_entropy = world.entropy();
+    let refused = world.call_as(
+        &b,
+        Op::SealV2 {
+            from: b,
+            to: a,
+            to_state: ByteBuf::from(world.inboxes[&a].clone()),
+            content: SealContent::Mail(ByteBuf::from(b"again".to_vec())),
+            ghost_vk: None,
+            ui_entropy,
+            reseals: freenet_mail_protocol::MAX_RESEALS + 1,
+        },
+    );
+    assert_eq!(refused, Err(freenet_mail_protocol::FailureCode::Refused));
+}
+
+/// A contact whose renewal fails on a host error, not a refusal, is caught
+/// the same way: the others are renewed and it gets its own retry time.
+#[test]
+fn a_contact_whose_renewal_errors_never_stops_the_others() {
+    let (control, ..) = renewals_to_healthy(false);
+    let mut world = World::new();
+    let a = world.identity("alice");
+    let x = world.identity("xavier");
+    let y = world.identity("yolanda");
+    let (p, h) = if x.0 < y.0 { (x, y) } else { (y, x) };
+    for c in [p, h] {
+        let pass = world.issue(&a, Some(c), None);
+        hold(&mut world, &c, pass);
+        world.send(&c, &a, "hi");
+    }
+    settle(&mut world);
+    let rec = world.record(&a);
+    let latest = rec
+        .issued
+        .values()
+        .map(|id| world.clone().ledger(&a, id.as_slice()).renew_at)
+        .max()
+        .unwrap();
+    world.advance(latest - world.env.now.unwrap() + 1);
+    // Every write of Alice's pass for P fails.
+    let to_p = rec.issued[&ByteArray::new(p.0)];
+    world.env.fail_keys_containing = Some(crate::store::hex(to_p.as_slice()));
+    let mut to_h = 0;
+    let mut unknown = 0;
+    for _ in 0..8 {
+        let (done, updates) = run(&mut world, Trigger::Tick(Tick::Renew));
+        to_h += messages_to(&updates, &h);
+        unknown += done.unknown;
+        world.advance(7 * 3600);
+    }
+    assert_eq!(to_h, control, "the healthy contact is renewed all the same");
+    assert!(unknown > 0, "the failure is counted");
+}
+
+/// A stored copy already under a message's id, whatever its bytes, counts
+/// as that message stored: the drain tombstones it and goes on.
+#[test]
+fn a_copy_already_stored_under_the_id_counts_as_stored() {
+    let mut world = World::new();
+    let a = world.identity("alice");
+    let b = world.identity("bob");
+    let (sealed, _) = world.send(&b, &a, "the message");
+    world.send(&b, &a, "another");
+    let item = freenet_mail_protocol::ItemRef {
+        kind: freenet_mail_protocol::ItemKind::Inbound,
+        owner: Some(a),
+        id: sealed.id.0.to_vec(),
+    };
+    let mut s = crate::store::Space::new(&mut world.env, Origin([PROD; 32]));
+    crate::handlers::put_item(&mut s, item, b"an earlier copy".to_vec(), None).unwrap();
+    let u = world
+        .update(&a, OwnerChange::Drain)
+        .expect("the drain goes on");
+    assert_eq!((u.drained, u.full), (2, 0));
+    world.publish(&a, &u.update.unwrap());
+    assert!(world.state(&a).messages.is_empty());
+}
+
+/// The rotation moves past an inbox only once it is served: an inbox the
+/// slice did not reach is the next run's first, however busy the other.
+#[test]
+fn an_inbox_the_slice_did_not_reach_comes_first_next_run() {
+    let mut world = World::new();
+    let a = world.identity("alice");
+    let b = world.identity("bob");
+    let d = world.identity("dave");
+    for to in [a, b] {
+        for n in 0..w::QUARANTINE_SLOTS {
+            world.send(&d, &to, &format!("to {n}"));
+        }
+    }
+    let left = |world: &World, x: &Addr| world.state(x).messages.len();
+    run(&mut world, PAGE);
+    let (first, second) = if left(&world, &a) < left(&world, &b) {
+        (a, b)
+    } else {
+        (b, a)
+    };
+    assert_eq!(
+        left(&world, &second),
+        w::QUARANTINE_SLOTS,
+        "the slice ran out"
+    );
+    // The first fills up again; the second still comes first.
+    for n in 0..w::QUARANTINE_SLOTS {
+        world.send(&d, &first, &format!("again {n}"));
+    }
+    run(&mut world, PAGE);
+    assert!(left(&world, &second) < w::QUARANTINE_SLOTS, "reached");
 }

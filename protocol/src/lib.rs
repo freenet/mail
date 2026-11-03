@@ -415,8 +415,17 @@ pub enum Op {
         /// inbox: it is bound inside the envelope and names the message.
         ghost_vk: Option<Hash32>,
         ui_entropy: Entropy,
+        /// How many times this message was sealed before: 0 the first time,
+        /// one more at each `reseal_at`. Past [`MAX_RESEALS`] it is refused,
+        /// so a message that never lands is reported rather than resealed for
+        /// good.
+        #[serde(default)]
+        reseals: u8,
     },
 }
+
+/// Times one message may be sealed again ([`SealedV2::reseal_at`]).
+pub const MAX_RESEALS: u8 = 4;
 
 /// A change [`Op::UpdateInboxV2`] signs.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -450,16 +459,34 @@ pub struct InboxV2Update {
     pub update: Option<ByteBuf>,
     /// Messages stored by this call.
     pub drained: u32,
-    /// Messages left for the next call. The change itself is signed only
-    /// once nothing is left.
+    /// Messages left for the next call.
     pub remaining: u32,
-    /// Messages left in the inbox because this identity's storage is full
-    /// (the change waits for them), or because its tombstones are (they are
-    /// stored and leave the inbox once older tombstones expire).
+    /// Messages left in the inbox although they were tried: storage is full,
+    /// a Ghost Key proof only this node's copy can confirm, or the tombstones
+    /// are full (those are stored and leave once older tombstones expire).
     pub full: u32,
     /// Earlier stranger messages this call removed to make room: only the
     /// newest drained ones are kept (decision 21).
     pub strangers_dropped: u32,
+    /// Whether the change was signed. It waits only when it would drop a
+    /// message still in the inbox; the drain goes on either way.
+    pub change: ChangeOutcome,
+    /// Passes drained mail carried that were not kept because this
+    /// identity's held passes are full. The mail itself is stored.
+    pub passes_not_kept: u32,
+}
+
+/// What became of the change an [`Op::UpdateInboxV2`] asked for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ChangeOutcome {
+    /// Signed in full: it is in `update`.
+    Signed,
+    /// Not signed, or (for `AdvanceTime`) only part of the way: it would drop
+    /// a message not drained yet. Call again.
+    WaitsForDrain,
+    /// Not signed, or only part of the way: it would drop a message that
+    /// could not be stored (see `full`). It waits until that one is stored.
+    WaitsForStorage,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

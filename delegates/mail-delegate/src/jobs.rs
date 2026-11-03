@@ -136,7 +136,13 @@ pub enum Job {
 /// periodic look includes a scan.
 pub fn jobs_for(trigger: Trigger) -> &'static [Job] {
     match trigger {
-        Trigger::NodeStarted => &[Job::V1Refresh, Job::V1Scan, Job::DrainOwn, Job::Renew],
+        Trigger::NodeStarted => &[
+            Job::V1Refresh,
+            Job::V1Scan,
+            Job::DrainOwn,
+            Job::AdvanceClock,
+            Job::Renew,
+        ],
         // A page's run stands in for every wake-up on a node without them.
         Trigger::RunJobs(_) => &[
             Job::V1Refresh,
@@ -147,7 +153,9 @@ pub fn jobs_for(trigger: Trigger) -> &'static [Job] {
             Job::SendQueued,
         ],
         Trigger::Tick(Tick::V1Watch) => &[Job::V1Refresh, Job::V1Scan],
-        Trigger::Tick(Tick::Rescan) => &[Job::V1Scan, Job::DrainOwn],
+        // The clock and renewals ride on the rescan too: the clock only acts
+        // when `owner_time` lags, and renewals need the runs for throughput.
+        Trigger::Tick(Tick::Rescan) => &[Job::V1Scan, Job::DrainOwn, Job::AdvanceClock, Job::Renew],
         // A contact's inbox arriving is what a waiting renewal needs.
         Trigger::Contract(_) => &[Job::V1Scan, Job::DrainOwn, Job::Renew],
         Trigger::Tick(Tick::Renew) => &[Job::Renew],
