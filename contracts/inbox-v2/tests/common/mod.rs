@@ -155,12 +155,18 @@ impl World {
         }
     }
 
+    /// A usage entry that counts from owner version 1.
     pub fn usage(&self, pass_id: B16, used: u8, expiry: u64) -> PassUsage {
-        let bytes = usage_bytes(&self.params.addr, &pass_id, used, expiry);
+        self.usage_at(pass_id, used, expiry, 1)
+    }
+
+    pub fn usage_at(&self, pass_id: B16, used: u8, expiry: u64, owner_version: u64) -> PassUsage {
+        let bytes = usage_bytes(&self.params.addr, &pass_id, used, expiry, owner_version);
         PassUsage {
             pass_id,
             used,
             expiry,
+            owner_version,
             sig: sign64(&self.issuer, &bytes),
         }
     }

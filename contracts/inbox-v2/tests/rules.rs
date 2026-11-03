@@ -306,6 +306,61 @@ fn an_invite_holds_two_and_counts_what_was_used() {
     );
 }
 
+/// Review r1 S2. The owner drains one of an invite's two messages: owner
+/// version 2 tombstones it and a usage entry counts it. Whichever of the two
+/// reaches a peer first, the other message stays held: the usage entry counts
+/// only once the owner version it names is joined, which is when the tombstone
+/// it counts is there too.
+#[test]
+fn a_usage_entry_ahead_of_its_tombstone_drops_nothing() {
+    let w = world();
+    let params = w.params;
+    let pass = w.pass(1, 3, FAR, PassClass::Invite { max_messages: 2 });
+    let (m1, m2) = (
+        w.pass_msg(&pass, ct(8192, 1), T),
+        w.pass_msg(&pass, ct(8192, 2), T + HOUR),
+    );
+    let start = encode(&w.raw(owner(3), w.time(T), [], [], [m1.clone(), m2.clone()]));
+    let tomb = BTreeMap::from([(m1.0, m1.1.sent_time)]);
+    let drained = InboxDelta {
+        owner: Some(w.owner(2, 3, OPEN, tomb)),
+        ..InboxDelta::default()
+    };
+    let counted = InboxDelta {
+        usage: BTreeMap::from([(pass.cert.pass_id, w.usage_at(pass.cert.pass_id, 1, FAR, 2))]),
+        ..InboxDelta::default()
+    };
+    let deliver = |state: &[u8], part: &InboxDelta| {
+        let data = vec![UpdateData::Delta(encode(part).into())];
+        apply(&Rules::V1, &params, state, data).unwrap()
+    };
+    let held = |state: &[u8]| {
+        let s: InboxState = decode(state).unwrap();
+        (
+            s.messages.contains_key(&m1.0),
+            s.messages.contains_key(&m2.0),
+        )
+    };
+    for (first, second) in [(&counted, &drained), (&drained, &counted)] {
+        let one = deliver(&start, first);
+        assert!(held(&one).1, "the second message is held after one part");
+        let both = deliver(&one, second);
+        assert_eq!(held(&both), (false, true));
+        // An entry that arrived first was dropped, so its redelivery adds it.
+        let settled = deliver(&deliver(&both, first), second);
+        assert_eq!(held(&settled), (false, true));
+        let s: InboxState = decode(&settled).unwrap();
+        assert_eq!(s.usage.len(), 1, "the count stands");
+        for part in [first, second] {
+            assert_eq!(
+                deliver(&settled, part),
+                settled,
+                "redelivery changes nothing"
+            );
+        }
+    }
+}
+
 #[test]
 fn the_pass_pool_is_round_robin() {
     let w = world();

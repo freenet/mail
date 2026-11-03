@@ -441,7 +441,8 @@ pub fn merge(
         .unwrap_or(prune_time);
     let expired = |expiry: u64| expiry.saturating_add(WINDOW_BACK) <= prune_time;
     let live_revocation = |r: &Revocation| !expired(r.expiry) && r.epoch >= owner.pass_epoch;
-    let live_usage = |u: &PassUsage| !expired(u.expiry);
+    // A usage entry counts from the owner version that tombstones what it counts.
+    let live_usage = |u: &PassUsage| !expired(u.expiry) && u.owner_version <= owner.version;
     #[cfg(feature = "plausible-mutants")]
     let (real_live_revocation, real_live_usage) = (live_revocation, live_usage);
     #[cfg(feature = "plausible-mutants")]
@@ -485,7 +486,8 @@ pub fn merge(
                 entry,
                 |u: &PassUsage| (u.used, u.expiry, u.sig),
                 |u| {
-                    let bytes = usage_bytes(&params.addr, &u.pass_id, u.used, u.expiry);
+                    let bytes =
+                        usage_bytes(&params.addr, &u.pass_id, u.used, u.expiry, u.owner_version);
                     u.pass_id == key && live_usage(u) && verify_ed25519(&issuer, &bytes, &u.sig)
                 },
             );

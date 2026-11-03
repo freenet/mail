@@ -81,7 +81,7 @@ vectors = [
     ("cert_contact", cert_layout(b"\x00")),
     ("cert_invite", cert_layout(b"\x01\x03")),
     ("revocation", b"fmail/revoke/v1" + ADDR + PASS_ID + u64(T) + u32(3)),
-    ("usage", b"fmail/usage/v1" + ADDR + PASS_ID + b"\x02" + u64(T)),
+    ("usage", b"fmail/usage/v1" + ADDR + PASS_ID + b"\x02" + u64(T) + u64(7)),
     ("admit", stamped(b"fmail/admit/v1")),
     ("owner_msg", stamped(b"fmail/owner-msg/v1")),
     ("ghost_admit", stamped(b"fmail/ghost-admit/v1")),
@@ -111,7 +111,7 @@ owner = {
 }
 time = {"owner_time": T, "sig": SIG}
 revocation = {"pass_id": PASS_ID, "expiry": T, "epoch": 3, "sig": SIG}
-usage = {"pass_id": PASS_ID, "used": 2, "expiry": T, "sig": SIG}
+usage = {"pass_id": PASS_ID, "used": 2, "expiry": T, "owner_version": 7, "sig": SIG}
 cert = {
     "recipient": ADDR,
     "pass_id": PASS_ID,

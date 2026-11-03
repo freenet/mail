@@ -250,16 +250,20 @@ fn universe_at(seed: u64, rng: &mut Rng, big: bool, t0: u64) -> Universe {
             epoch - (i % 2) as u32,
         ));
     }
+    // Each counts from an owner version drawn from the five below, so some are
+    // ahead of the owner a peer holds, and count once a later owner arrives.
     let mut usage = Vec::new();
     for pass in passes
         .iter()
         .filter(|p| matches!(p.cert.class, PassClass::Invite { .. }))
     {
-        usage.push(w.usage(pass.cert.pass_id, 1 + rng.below(3) as u8, pass.cert.expiry));
-        usage.push(w.usage(pass.cert.pass_id, 1, pass.cert.expiry + DAY));
+        let id = pass.cert.pass_id;
+        let mut at = |used, expiry| w.usage_at(id, used, expiry, 1 + rng.below(5));
+        usage.push(at(1 + (id[15] % 3), pass.cert.expiry));
+        usage.push(at(1, pass.cert.expiry + DAY));
         // Crossing: the higher count runs out long before the lower one.
-        usage.push(w.usage(pass.cert.pass_id, 3, pass.cert.expiry - 20 * DAY));
-        usage.push(w.usage(pass.cert.pass_id, 2, pass.cert.expiry + 100 * DAY));
+        usage.push(at(3, pass.cert.expiry - 20 * DAY));
+        usage.push(at(2, pass.cert.expiry + 100 * DAY));
     }
     usage.push(w.usage(id_of(key(77)), 1, t0 - 10 * DAY));
 

@@ -87,6 +87,7 @@ fn usage() -> PassUsage {
         pass_id: pass_id(),
         used: 2,
         expiry: T,
+        owner_version: 7,
         sig: sig(),
     }
 }
@@ -133,7 +134,7 @@ fn signed_layouts() {
         &cert_bytes(&cert(PassClass::Invite { max_messages: 3 })),
     );
     check("revocation", &revocation_bytes(&ADDR, &pass_id(), T, 3));
-    check("usage", &usage_bytes(&ADDR, &pass_id(), 2, T));
+    check("usage", &usage_bytes(&ADDR, &pass_id(), 2, T, 7));
     check("admit", &admit_bytes(&ADDR, SENT, &HASH));
     check("owner_msg", &owner_msg_bytes(&ADDR, SENT, &HASH));
     check("ghost_admit", &ghost_admit_bytes(&ADDR, SENT, &HASH));

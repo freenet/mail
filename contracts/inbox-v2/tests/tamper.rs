@@ -299,6 +299,11 @@ fn every_usage_field_is_signed() {
             expiry: EXPIRY + DAY,
             ..good.clone()
         },
+        // Lower, so the entry would count under this owner if it were genuine.
+        PassUsage {
+            owner_version: 0,
+            ..good.clone()
+        },
         {
             let mut u = good.clone();
             u.sig[0] ^= 1;
@@ -438,7 +443,8 @@ fn the_time_and_entries_are_bound_to_the_address() {
         pass_id: id_of(1),
         used: 1,
         expiry: EXPIRY,
-        sig: wrong(usage_bytes(&[0xAB; 24], &id_of(1), 1, EXPIRY)),
+        owner_version: 1,
+        sig: wrong(usage_bytes(&[0xAB; 24], &id_of(1), 1, EXPIRY, 1)),
     };
     let raw = w.raw(owner(3), w.time(T), [revocation], [usage], []);
     let merged = merge(&Rules::V1, &w.params, vec![raw.into()]).unwrap();

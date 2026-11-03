@@ -167,6 +167,10 @@ pub struct PassUsage {
     pub pass_id: B16,
     pub used: u8,
     pub expiry: u64,
+    /// The owner version whose tombstones hold the messages `used` counts. The
+    /// entry counts only once that version is joined, so it never cuts a
+    /// message while one it counts is still held (review r1 S2).
+    pub owner_version: u64,
     pub sig: B64,
 }
 

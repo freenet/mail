@@ -185,6 +185,11 @@ class = "revocations and usage"
 why = "When the entry can be dropped."
 
 [[field]]
+path = "usage.*.owner_version"
+class = "revocations and usage"
+why = "The owner version that tombstones what the count includes; the count applies from it."
+
+[[field]]
 path = "usage.*.sig"
 class = "revocations and usage"
 why = "The issuer's signature, so only the owner can raise a count."

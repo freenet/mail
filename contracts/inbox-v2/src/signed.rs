@@ -106,13 +106,20 @@ pub fn revocation_bytes(addr: &[u8; 24], pass_id: &[u8; 16], expiry: u64, epoch:
     out
 }
 
-/// `"fmail/usage/v1" ‖ addr ‖ pass_id ‖ used ‖ expiry`
-pub fn usage_bytes(addr: &[u8; 24], pass_id: &[u8; 16], used: u8, expiry: u64) -> Vec<u8> {
-    let mut out = layout("fmail/usage/v1", 49);
+/// `"fmail/usage/v1" ‖ addr ‖ pass_id ‖ used ‖ expiry ‖ owner_version`
+pub fn usage_bytes(
+    addr: &[u8; 24],
+    pass_id: &[u8; 16],
+    used: u8,
+    expiry: u64,
+    owner_version: u64,
+) -> Vec<u8> {
+    let mut out = layout("fmail/usage/v1", 57);
     out.extend_from_slice(addr);
     out.extend_from_slice(pass_id);
     out.push(used);
     out.extend_from_slice(&expiry.to_be_bytes());
+    out.extend_from_slice(&owner_version.to_be_bytes());
     out
 }
 
