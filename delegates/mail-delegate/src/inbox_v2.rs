@@ -1152,6 +1152,16 @@ fn forget_inbound(s: &mut Space<'_>, owner: &Addr, id: &B32) {
     }
 }
 
+/// Whether the copy under message `id` reads back with exactly `bytes`. Anything
+/// else (no copy, another content, a record that will not read) is not known
+/// to be this message stored.
+pub(crate) fn counts_as_stored(s: &Space<'_>, owner: &Addr, id: &B32, bytes: &[u8]) -> bool {
+    matches!(
+        s.read(&item_rel(&inbound(owner, id))),
+        Ok(Some((_, stored))) if stored == bytes
+    )
+}
+
 /// Store `bytes` as drained message `id`, making room by removing the
 /// earliest drained stranger messages when storage is full. Contact mail is
 /// never removed for it.
@@ -1174,9 +1184,10 @@ fn store_inbound(
         // message stays in the inbox and is tried again.
         match put_item(s, inbound(&me.addr, id), bytes.clone(), None) {
             Err(f) if matches!(f.code, FailureCode::Conflict { .. }) => {
-                return match s.read(&item_rel(&inbound(&me.addr, id))) {
-                    Ok(Some((_, stored))) if stored == bytes => Ok(()),
-                    _ => Err(f),
+                return if counts_as_stored(s, &me.addr, id, &bytes) {
+                    Ok(())
+                } else {
+                    Err(f)
                 };
             }
             Err(f) if f.code == FailureCode::CapReached && !rec.strangers.is_empty() => {

@@ -368,9 +368,12 @@ dt "inbox v2: a message is resealed a bounded number of times" "$D/inbox_v2.rs" 
 dt "inbox v2: a Ghost Key claim waits for the node's copy" "$D/inbox_v2.rs" \
     'if claimed && !proven.contains(id) {' 'if false {' \
     a_message_stored_by_a_lost_drain_is_drained_again,a_page_state_admission_is_checked_before_it_counts
-dt "inbox v2: a copy already stored counts as stored" "$D/inbox_v2.rs" \
-    'Err(f) if matches!(f.code, FailureCode::Conflict { .. }) => {' \
-    'Err(f) if false => {' a_message_stored_by_a_lost_drain_is_drained_again
+dt "inbox v2: only a copy with the same content counts as stored" "$D/inbox_v2.rs" \
+    'Ok(Some((_, stored))) if stored == bytes' 'Ok(Some((_, stored))) if stored != bytes' \
+    only_a_copy_that_reads_back_with_the_same_bytes_counts_as_stored
+dt "inbox v2: any readable copy counts as stored" "$D/inbox_v2.rs" \
+    'Ok(Some((_, stored))) if stored == bytes' 'Ok(Some((_, stored))) if !stored.is_empty() || true' \
+    only_a_copy_that_reads_back_with_the_same_bytes_counts_as_stored,a_copy_under_the_id_with_other_content_is_not_taken_for_the_message
 dt "inbox v2: mail is a contact's by its sender" "$D/inbox_v2.rs" \
     'let contact = is_contact(s, me, rec, &from)?;' 'let contact = false;' \
     contact_mail_is_never_in_the_stranger_budget,a_contacts_quarantine_mail_is_never_evicted_as_a_strangers

@@ -2189,6 +2189,38 @@ fn a_copy_under_the_id_with_other_content_is_not_taken_for_the_message() {
     assert_eq!(left, [ByteArray::new(sealed.id.0)], "only that message stays");
 }
 
+/// What "already stored" means: a copy that reads back with the same bytes,
+/// and nothing else.
+#[test]
+fn only_a_copy_that_reads_back_with_the_same_bytes_counts_as_stored() {
+    let mut world = World::new();
+    let a = world.identity("alice");
+    let id = ByteArray::new([5; 32]);
+    let other = ByteArray::new([6; 32]);
+    let item = freenet_mail_protocol::ItemRef {
+        kind: freenet_mail_protocol::ItemKind::Inbound,
+        owner: Some(a),
+        id: id.to_vec(),
+    };
+    let origin = Origin([PROD; 32]);
+    {
+        let mut s = crate::store::Space::new(&mut world.env, origin);
+        crate::handlers::put_item(&mut s, item.clone(), b"copy".to_vec(), None).unwrap();
+        assert!(v2::counts_as_stored(&s, &a, &id, b"copy"));
+        assert!(!v2::counts_as_stored(&s, &a, &id, b"another"), "other content");
+        assert!(!v2::counts_as_stored(&s, &a, &other, b"copy"), "no copy");
+    }
+    // The same copy, unreadable: Unknown, so not counted.
+    let key = {
+        let mut probe = MemEnv::default();
+        let space = crate::store::Space::new(&mut probe, origin);
+        String::from_utf8(space.full_key(&crate::store::item_rel(&item))).unwrap()
+    };
+    world.env.faults = Some(Faults::blind(&key));
+    let s = crate::store::Space::new(&mut world.env, origin);
+    assert!(!v2::counts_as_stored(&s, &a, &id, b"copy"), "unreadable");
+}
+
 /// The rotation moves past an inbox only once it is served: an inbox the
 /// slice did not reach is the next run's first, however busy the other.
 #[test]
