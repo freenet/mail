@@ -994,6 +994,11 @@ pub(crate) fn owner_update(
     if new_time.is_none() && rec.max_owner_time > held_time {
         new_time = Some(rec.max_owner_time);
     }
+    // The time goes out with these tombstones, so what it moves out of the
+    // window needs none.
+    if let Some(t) = new_time {
+        tombstones.retain(|_, sent| sent.saturating_add(w::WINDOW_BACK) >= t);
+    }
     let o = &state.owner;
     let needs_owner = tombstones != o.tombstones
         || rec.pass_epoch != o.pass_epoch

@@ -732,6 +732,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ghostkey-common"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69a4c0866ae9e54506a2861618ca3428ce9770e1ca67cbf73f8224b81b5a0940"
+dependencies = [
+ "ciborium",
+ "freenet-stdlib",
+ "serde",
+]
+
+[[package]]
 name = "ghostkey-verify"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -994,6 +1005,7 @@ dependencies = [
  "freenet-mail-wire-v1",
  "freenet-migrate",
  "freenet-stdlib",
+ "ghostkey-common",
  "hkdf",
  "ml-dsa",
  "ml-kem",

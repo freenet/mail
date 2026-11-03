@@ -20,9 +20,9 @@ use crate::inbox_v2::{self, InboxRecord, LedgerEntry};
 use crate::store::{Origin, Space, item_rel};
 
 const MASTER: [u8; 32] = [0x42; 32];
-const DAY: u64 = 86_400;
+pub const DAY: u64 = 86_400;
 /// 2026-11-03, a little after midnight.
-const START: u64 = 1_793_664_123;
+pub const START: u64 = 1_793_664_123;
 
 #[derive(Clone)]
 pub struct World {
@@ -30,17 +30,19 @@ pub struct World {
     /// Each inbox's state as the network holds it.
     pub inboxes: BTreeMap<Addr, Vec<u8>>,
     entropy: u8,
-}
-
-fn params(addr: &Addr) -> Params {
-    Params {
-        addr: addr.0,
-        ghost_master: MASTER,
-    }
+    /// The Ghost Key master in every inbox's parameters.
+    pub master: [u8; 32],
+    /// Identities kept under another origin than `PROD`: a second node, in
+    /// effect, when the store is split by origin.
+    pub origins: BTreeMap<Addr, u8>,
 }
 
 impl World {
     pub fn new() -> Self {
+        Self::with_master(MASTER)
+    }
+
+    pub fn with_master(master: [u8; 32]) -> Self {
         World {
             env: MemEnv {
                 now: Some(START),
@@ -48,6 +50,15 @@ impl World {
             },
             inboxes: BTreeMap::new(),
             entropy: 0,
+            master,
+            origins: BTreeMap::new(),
+        }
+    }
+
+    pub fn params(&self, addr: &Addr) -> Params {
+        Params {
+            addr: addr.0,
+            ghost_master: self.master,
         }
     }
 
@@ -60,22 +71,37 @@ impl World {
         self.env.now = Some(self.env.now.unwrap() + secs);
     }
 
+    pub fn origin(&self, addr: &Addr) -> u8 {
+        self.origins.get(addr).copied().unwrap_or(PROD)
+    }
+
+    /// `op`, as the page of `who`'s origin sends it.
+    pub fn call_as(&mut self, who: &Addr, op: Op) -> Result<Reply, FailureCode> {
+        let origin = self.origin(who);
+        call(&mut self.env, origin, op)
+    }
+
     /// A new identity with its inbox published.
     pub fn identity(&mut self, alias: &str) -> Addr {
-        let addr = create(&mut self.env, PROD, alias).addr;
+        self.identity_in(alias, PROD)
+    }
+
+    pub fn identity_in(&mut self, alias: &str, origin: u8) -> Addr {
+        let addr = create(&mut self.env, origin, alias).addr;
+        self.origins.insert(addr, origin);
         let Ok(Reply::InboxV2State(state)) = call(
             &mut self.env,
-            PROD,
+            origin,
             Op::CreateInboxV2 {
                 addr,
-                ghost_master: Hash32(MASTER),
+                ghost_master: Hash32(self.master),
                 existing: None,
             },
         ) else {
             panic!("create inbox");
         };
         assert!(
-            is_valid(&Rules::V1, &params(&addr), &state),
+            is_valid(&Rules::V1, &self.params(&addr), &state),
             "the contract refuses the first state"
         );
         self.inboxes.insert(addr, state.into_vec());
@@ -91,13 +117,13 @@ impl World {
     pub fn publish(&mut self, addr: &Addr, delta: &[u8]) {
         let merged = apply(
             &Rules::V1,
-            &params(addr),
+            &self.params(addr),
             &self.inboxes[addr],
             vec![UpdateData::Delta(StateDelta::from(delta.to_vec()))],
         )
         .expect("the contract accepts the update");
         assert!(
-            is_valid(&Rules::V1, &params(addr), &merged),
+            is_valid(&Rules::V1, &self.params(addr), &merged),
             "merged state is invalid"
         );
         self.inboxes.insert(*addr, merged);
@@ -110,9 +136,8 @@ impl World {
     ) -> Result<InboxV2Update, FailureCode> {
         let ui_entropy = self.entropy();
         let state = ByteBuf::from(self.inboxes[addr].clone());
-        match call(
-            &mut self.env,
-            PROD,
+        match self.call_as(
+            addr,
             Op::UpdateInboxV2 {
                 addr: *addr,
                 state,
@@ -140,9 +165,8 @@ impl World {
 
     pub fn seal(&mut self, from: &Addr, to: &Addr, text: &str) -> Result<SealedV2, FailureCode> {
         let ui_entropy = self.entropy();
-        match call(
-            &mut self.env,
-            PROD,
+        match self.call_as(
+            from,
             Op::SealV2 {
                 from: *from,
                 to: *to,
@@ -171,9 +195,8 @@ impl World {
     }
 
     pub fn inbound(&mut self, owner: &Addr) -> Vec<w::InboundMessage> {
-        let Ok(Reply::Items { items, .. }) = call(
-            &mut self.env,
-            PROD,
+        let Ok(Reply::Items { items, .. }) = self.call_as(
+            owner,
             Op::ListItems {
                 kind: ItemKind::Inbound,
                 owner: Some(*owner),
@@ -188,9 +211,8 @@ impl World {
 
     pub fn issue(&mut self, addr: &Addr, contact: Option<Addr>, invite: Option<u8>) -> w::Pass {
         let ui_entropy = self.entropy();
-        match call(
-            &mut self.env,
-            PROD,
+        match self.call_as(
+            addr,
             Op::IssuePass {
                 addr: *addr,
                 contact,
@@ -204,9 +226,8 @@ impl World {
     }
 
     pub fn record(&mut self, addr: &Addr) -> InboxRecord {
-        let Ok(Reply::Item(Some(item))) = call(
-            &mut self.env,
-            PROD,
+        let Ok(Reply::Item(Some(item))) = self.call_as(
+            addr,
             Op::GetItem {
                 item: ItemRef {
                     kind: ItemKind::InboxV2,
@@ -221,9 +242,8 @@ impl World {
     }
 
     pub fn ledger(&mut self, addr: &Addr, pass_id: &[u8]) -> LedgerEntry {
-        let Ok(Reply::Item(Some(item))) = call(
-            &mut self.env,
-            PROD,
+        let Ok(Reply::Item(Some(item))) = self.call_as(
+            addr,
             Op::GetItem {
                 item: ItemRef {
                     kind: ItemKind::PassLedger,
@@ -238,7 +258,7 @@ impl World {
     }
 }
 
-fn texts(list: &[w::InboundMessage]) -> Vec<String> {
+pub fn texts(list: &[w::InboundMessage]) -> Vec<String> {
     let mut out: Vec<String> = list
         .iter()
         .map(|m| String::from_utf8(m.body.to_vec()).unwrap())
@@ -493,7 +513,7 @@ fn the_page_cannot_rewrite_inbox_records_or_read_held_passes() {
     }
 }
 
-fn env_or(name: &str, default: u64) -> u64 {
+pub fn env_or(name: &str, default: u64) -> u64 {
     std::env::var(name)
         .ok()
         .and_then(|v| v.parse().ok())
@@ -501,7 +521,7 @@ fn env_or(name: &str, default: u64) -> u64 {
 }
 
 /// Alice's inbox holding pass, invite and quarantine mail.
-fn loaded() -> (World, Addr, BTreeMap<[u8; 32], String>) {
+pub fn loaded() -> (World, Addr, BTreeMap<[u8; 32], String>) {
     let mut world = World::new();
     let a = world.identity("alice");
     let b = world.identity("bob");
@@ -537,14 +557,15 @@ fn loaded() -> (World, Addr, BTreeMap<[u8; 32], String>) {
     (world, a, mail)
 }
 
-fn inbound_stored(world: &World, owner: &Addr, id: &[u8; 32]) -> bool {
+pub fn inbound_stored(world: &World, owner: &Addr, id: &[u8; 32]) -> bool {
     let item = ItemRef {
         kind: ItemKind::Inbound,
         owner: Some(*owner),
         id: id.to_vec(),
     };
     let mut probe = MemEnv::default();
-    let key = Space::new(&mut probe, Origin([PROD; 32])).full_key(&item_rel(&item));
+    let origin = Origin([world.origin(owner); 32]);
+    let key = Space::new(&mut probe, origin).full_key(&item_rel(&item));
     world.env.secrets.contains_key(&key)
 }
 

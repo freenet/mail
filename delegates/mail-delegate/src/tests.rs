@@ -1,6 +1,7 @@
 //! Behaviour through the delegate's entry point, over an in-memory host.
 
 mod faults;
+mod inbox_jobs;
 mod inbox_v2;
 mod jobs;
 mod recovery;

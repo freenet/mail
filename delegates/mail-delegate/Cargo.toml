@@ -44,6 +44,9 @@ sha2 = { version = "=0.11.1", default-features = false }
 # The interop tests run what the delegate builds through the contract's own
 # validate_state and merge. Tests only: the delegate never links the contract.
 freenet-email-inbox-v2 = { path = "../../contracts/inbox-v2", default-features = false }
+# The type the ghostkey vault signs, to build Ghost Key proofs in tests as the
+# vault does (the contract's tests use the same).
+ghostkey-common = "=0.4.0"
 
 [lib]
 crate-type = ["cdylib", "rlib"]

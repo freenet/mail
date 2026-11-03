@@ -40,6 +40,21 @@ use crate::store::{Origin, Space, fail};
 pub const MAX_INBOXES_PER_RUN: usize = 4;
 /// A contact whose inbox is not held here is looked at again after this.
 const FETCH_RETRY: u64 = 3600;
+/// What an owner update and a renewal take from a run's message slice, in
+/// messages ([`jobs::MESSAGE_COST_MS`] each), so a run stays inside the limit
+/// the slice was sized for whatever mix of work it does. Measured natively
+/// against the v1 import the slice was measured with on a real node
+/// (`tests::inbox_jobs::a_drained_message_costs_about_what_an_import_does`,
+/// release build): an import 0.45 ms and 35 host writes, a drained message
+/// 0.54 ms and 24 writes, a renewal 1.8 ms and 22 writes. On the node an
+/// import cost 65 ms with one record written and 117 ms with two, so writes
+/// dominate and the guest runs about 30 times slower than native: a renewal
+/// comes to roughly one import, and is charged two. An owner update is one
+/// ML-DSA signature and one record, charged one.
+pub const OWNER_SLOTS: usize = 1;
+pub const RENEW_SLOTS: usize = 2;
+/// A page's own rotation over its origin's inboxes, in its namespace.
+const PAGE_CURSOR: &str = "bg/cursor-v2";
 
 /// The inbox v2 contract's code hash. Until a release freezes it, the
 /// candidate's: a test network runs the candidate.
@@ -153,18 +168,27 @@ pub fn run(
     if list.is_empty() {
         return d;
     }
-    // A rotation, so every inbox is reached however many there are. A page's
-    // run starts where the clock says, so it writes no cursor.
-    let start = if unprompted {
-        budget.cursor_v2 as usize
-    } else {
-        (now / 600) as usize
-    } % list.len();
+    // A rotation, so every inbox is reached however many there are. A page
+    // keeps its own, as the v1 watch does, and writes it only when it moves.
+    let page = match trigger {
+        Trigger::RunJobs(origin) => Some(origin),
+        _ => None,
+    };
+    let stored = page.and_then(|o| {
+        let b = Space::new(&mut *env, o).get(PAGE_CURSOR)?;
+        Some(u32::from_le_bytes(b.try_into().ok()?))
+    });
+    let start = stored.unwrap_or(budget.cursor_v2) as usize % list.len();
     let take = list.len().min(MAX_INBOXES_PER_RUN);
-    if unprompted && !matches!(trigger, Trigger::Contract(_)) {
-        budget.cursor_v2 = ((start + take) % list.len()) as u32;
+    let next = ((start + take) % list.len()) as u32;
+    match page {
+        Some(o) if next as usize != start => {
+            let _ = Space::new(&mut *env, o).put(PAGE_CURSOR, &next.to_le_bytes());
+        }
+        Some(_) => {}
+        None if !matches!(trigger, Trigger::Contract(_)) => budget.cursor_v2 = next,
+        None => {}
     }
-    let mut renewals = jobs::MAX_RENEWALS_PER_RUN;
     for own in list.iter().cycle().skip(start).take(take) {
         let mut s = Space::new(&mut *env, own.origin);
         let Ok(me) = v2::me(&s, &own.addr) else {
@@ -193,7 +217,7 @@ pub fn run(
                 budget: &mut *budget,
                 done: &mut d,
             };
-            if job.run(&mut s, only, &mut renewals).is_err() {
+            if job.run(&mut s, only, left).is_err() {
                 done.unknown += 1;
             }
         }
@@ -234,21 +258,19 @@ fn drain_own(
     } else {
         return;
     };
-    if !budget.may_write(&own.id) {
+    // The update it may sign is paid for first.
+    if !budget.may_write(&own.id) || *left < OWNER_SLOTS {
         return;
     }
     let mut rng = v2::background_rng(s, me, "drain", now, &own.id);
-    let limit = (*left).min(v2::DRAIN_BATCH);
+    let limit = (*left - OWNER_SLOTS).min(v2::DRAIN_BATCH);
     match v2::owner_update(s, me, &state, change, now, &mut rng, limit) {
         Ok((u, tried)) => {
-            *left -= tried.min(*left);
+            *left = left.saturating_sub(tried + OWNER_SLOTS);
             done.imported += u.drained;
             done.remaining += u.remaining + u.full;
             if let Some(bytes) = u.update {
                 budget.take_write(own.id);
-                if unprompted {
-                    budget.charge_ms(jobs::OWNER_SIGN_MS);
-                }
                 d.out.push(update(own.id, bytes.into_vec()));
             }
         }
@@ -265,13 +287,13 @@ struct Renewing<'a> {
 }
 
 impl Renewing<'_> {
-    /// Look at every contact whose time has come, up to `n` of them; `only`
-    /// limits it to the contact whose inbox this is.
+    /// Look at every contact whose time has come, while the run's slice
+    /// lasts; `only` limits it to the contact whose inbox this is.
     fn run(
         &mut self,
         s: &mut Space<'_>,
         only: Option<ContractId>,
-        n: &mut usize,
+        left: &mut usize,
     ) -> Result<(), Failure> {
         let (_, rec) = v2::record(s, &self.me.addr)?;
         let due: Vec<B24> = rec
@@ -281,7 +303,7 @@ impl Renewing<'_> {
             .map(|(c, _)| *c)
             .collect();
         for contact in due {
-            if *n == 0 {
+            if *left < RENEW_SLOTS {
                 break;
             }
             let addr = Addr(*contact);
@@ -289,10 +311,7 @@ impl Renewing<'_> {
             if only.is_some_and(|o| o != id) {
                 continue;
             }
-            if self.unprompted && !self.budget.take_duty(jobs::RENEW_COST_MS) {
-                break;
-            }
-            *n -= 1;
+            *left -= RENEW_SLOTS;
             let next = self.one(s, &addr, id)?;
             v2::set_due(s, &self.me.addr, &contact, next)?;
         }

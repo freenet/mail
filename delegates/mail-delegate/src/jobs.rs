@@ -68,14 +68,6 @@ const MAX_MISSING: usize = 256;
 /// Updates one contract may be sent a minute (owner records at most once per
 /// drain, renewals one per contact).
 pub const MAX_WRITES_PER_MINUTE: u32 = 60;
-/// Estimated cost of signing an owner record (ML-DSA) and time attestation.
-/// See the measurement in `tests/inbox_jobs.rs`.
-pub const OWNER_SIGN_MS: u64 = 60;
-/// Estimated cost of one renewal: reading the contact's inbox, checking its
-/// owner signature, sealing (ML-KEM and ML-DSA) and three writes.
-pub const RENEW_COST_MS: u64 = 150;
-/// Renewals one run sends.
-pub const MAX_RENEWALS_PER_RUN: usize = 4;
 
 /// The periodic wake-ups, by manifest tag.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -372,11 +364,6 @@ impl Budget {
     /// Charge reading `bytes` of inbox state beyond the flat scan cost.
     pub fn charge_bytes(&mut self, bytes: usize) {
         self.duty_ms = self.duty_ms.saturating_sub(read_cost_ms(bytes));
-    }
-
-    /// Charge `ms` of work done, whatever is left.
-    pub fn charge_ms(&mut self, ms: u64) {
-        self.duty_ms = self.duty_ms.saturating_sub(ms);
     }
 
     /// Charge the messages a run actually took.

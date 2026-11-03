@@ -73,7 +73,7 @@ pub(super) fn id_of(message: &[u8]) -> [u8; 16] {
     message_id(&content)
 }
 
-fn deliver(env: &mut MemEnv, to: &IdentityInfo, messages: &[Vec<u8>]) {
+pub(super) fn deliver(env: &mut MemEnv, to: &IdentityInfo, messages: &[Vec<u8>]) {
     env.contracts
         .insert(v1_inbox_id(&to.vk).unwrap(), inbox_of(messages));
 }
