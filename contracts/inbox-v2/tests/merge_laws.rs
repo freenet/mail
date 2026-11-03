@@ -824,40 +824,28 @@ fn the_merge_laws_hold_over_crafted_states() {
 
 /// The oracle is what sees a rule that loses a live item the same way every
 /// time: run the fuzzer under each plausible mutant that did exactly that, and
-/// it must fail through the oracle. With the oracle off, what the laws alone
-/// see is printed beside it.
+/// it must fail through the oracle. What the laws alone make of the same seed
+/// is printed beside it. Seeds run in order until one fails, so this is cheap.
 #[cfg(feature = "plausible-mutants")]
 mod the_oracle_sees_a_silent_loss {
     use super::*;
     use freenet_email_inbox_v2::mutant::{Mutant, with};
 
-    const SEEDS: u64 = 48;
-
-    fn failures(m: Mutant, oracle: bool) -> Vec<String> {
-        let seeds: Vec<u64> = (0..SEEDS).collect();
-        run_seeds(&seeds, &|seed, tally| {
-            with(m, || run_seed(seed, oracle, tally))
-        })
-        .1
-    }
-
     fn caught(m: Mutant) {
-        let laws_alone = failures(m, false);
-        let with_oracle = failures(m, true);
-        let by_oracle: Vec<&String> = with_oracle
-            .iter()
-            .filter(|f| f.contains(oracle::ORACLE))
-            .collect();
-        println!(
-            "{m:?}: the laws alone fail {} of {SEEDS} seeds; with the oracle {} fail, {} through it",
-            laws_alone.len(),
-            with_oracle.len(),
-            by_oracle.len()
-        );
-        for f in by_oracle.iter().take(3) {
-            println!("  {f}");
+        for seed in 0..48 {
+            let Err(seen) = with(m, || run_seed(seed, true, &mut Tally::default())) else {
+                continue;
+            };
+            assert!(
+                seen.contains(oracle::ORACLE),
+                "{m:?}: seed {seed} failed, but not through the oracle: {seen}"
+            );
+            let laws_alone = with(m, || run_seed(seed, false, &mut Tally::default()));
+            println!("{m:?}: {seen}");
+            println!("{m:?}, the laws alone on seed {seed}: {laws_alone:?}");
+            return;
         }
-        assert!(!by_oracle.is_empty(), "{m:?}: the oracle saw nothing");
+        panic!("{m:?}: the oracle saw nothing in 48 seeds");
     }
 
     /// Decision 22's bug.

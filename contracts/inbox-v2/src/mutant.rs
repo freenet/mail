@@ -1,11 +1,11 @@
 //! A test-only seam: the wrong-but-plausible rules `tests/plausible_mutants.rs`
 //! runs to show that the tests catch each of them.
 //!
-//! Compiled only with the `plausible-mutants` feature, which no build of the
-//! contract enables, so none of this reaches the WASM:
-//! `scripts/check-inbox-candidate.sh` proves the candidate's bytes are the same
-//! with and without these call sites. A mutant is switched on for one closure
-//! on the calling thread only, so tests running in parallel do not see it.
+//! Compiled only with the `plausible-mutants` feature. `src/lib.rs` refuses to
+//! compile it for `wasm32`, so no build of the contract can carry it, and the
+//! rules' call sites into it are `cfg`-gated on the same feature. A mutant is
+//! switched on for one closure on the calling thread only, so tests running in
+//! parallel do not see it.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};

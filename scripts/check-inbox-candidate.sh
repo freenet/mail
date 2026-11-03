@@ -20,7 +20,11 @@ mkdir -p target
 OUT="$(mktemp -d "$ROOT/target/inbox-candidate.XXXXXX")"
 trap 'rm -r -- "$OUT"' EXIT
 
-scripts/build-wasm.sh contracts/inbox-v2 contract contract "$OUT/inbox_v2" > "$OUT/build.log"
+if ! scripts/build-wasm.sh contracts/inbox-v2 contract contract "$OUT/inbox_v2" > "$OUT/build.log" 2>&1; then
+    grep -E '^error' -A3 "$OUT/build.log" >&2 || tail -20 "$OUT/build.log" >&2
+    echo "FAIL: contracts/inbox-v2 did not build." >&2
+    exit 1
+fi
 built_hash="$(sed -n 's/^code hash: *//p' "$OUT/build.log" | tr -d '[:space:]')"
 
 failed=0

@@ -1171,6 +1171,9 @@ if [ "$WASM" -eq 1 ]; then
     guard "the inbox candidate is the source's build" "$STAGE/contracts/inbox-v2/src/merge.rs" \
         'per_pass: 8,' 'per_pass: 9,' \
         'FAIL: published-contract/candidate/inbox_v2 is not what' inbox_candidate_check
+    guard "inbox v2: a contract build with the test seam does not compile" "$STAGE/contracts/inbox-v2/Cargo.toml" \
+        'default = ["freenet-main-contract"]' 'default = ["freenet-main-contract", "plausible-mutants"]' \
+        'the plausible-mutants test seam is not part of the contract' inbox_candidate_check
     # The release guard's own tests build real WASM and show each refusal,
     # including each of its two feature checks alone.
     if [ "$LIST" -eq 1 ]; then

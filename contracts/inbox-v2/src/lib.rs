@@ -13,6 +13,11 @@
 pub mod merge;
 #[cfg(feature = "plausible-mutants")]
 pub mod mutant;
+
+// The test seam swaps rules on a thread-local switch. Nothing turns it on in a
+// contract, but a WASM build with it would carry its code, so none may exist.
+#[cfg(all(feature = "plausible-mutants", target_arch = "wasm32"))]
+compile_error!("the plausible-mutants test seam is not part of the contract");
 pub mod signed;
 pub mod sync;
 pub mod types;
