@@ -1545,11 +1545,13 @@ fn a_contact_whose_renewal_fails_never_stops_the_others() {
         poisoned, control,
         "the healthy contact is renewed all the same"
     );
-    // The failing contact waits its own retry time past the last run, not
-    // every run.
+    // The failing contact is looked at on the first run, and again on the
+    // first run a full day later (the 5th, 28 hours on), each time asking
+    // again in exactly a day: not every run, and not on the shorter backoff
+    // of a contact that cannot be found.
     let due = world.record(&a).due[&ByteArray::new(p.0)];
-    let last_run = world.env.now.unwrap() - 7 * 3600;
-    assert!(due > last_run, "backed off");
+    let started = world.env.now.unwrap() - 8 * 7 * 3600;
+    assert_eq!(due, started + 4 * 7 * 3600 + DAY);
 }
 
 /// A message stored once counts as stored whatever path stored it: a page's
@@ -1917,6 +1919,48 @@ fn a_vanished_contact_backs_off() {
         [1, 2, 4, 8, 16, 24, 24, 24].map(|h| h * 3600),
         "doubling to a day"
     );
+}
+
+/// A look that finds the contact's inbox starts the backoff over: after it,
+/// the contact that vanishes again is asked about in an hour, not at the
+/// delay it had reached.
+#[test]
+fn a_contact_that_comes_back_starts_the_backoff_over() {
+    let mut world = World::new();
+    let a = world.identity("alice");
+    let b = world.identity("bob");
+    let pass = world.issue(&a, Some(b), None);
+    hold(&mut world, &b, pass.clone());
+    world.send(&b, &a, "hello");
+    settle(&mut world);
+    let id = pass.cert.pass_id;
+    let e = world.ledger(&a, id.as_slice());
+    world.advance(e.renew_at - world.env.now.unwrap() + 1);
+    let held = world.inboxes[&b].clone();
+    let key = ByteArray::new(b.0);
+    for expected in 1..=3 {
+        world.inboxes.remove(&b);
+        world.env.contracts.clear();
+        sync(&mut world);
+        let _ = watch::run(&mut world.env, Trigger::Tick(Tick::Renew));
+        assert_eq!(world.ledger(&a, id.as_slice()).misses, expected);
+        let due = world.record(&a).due[&key];
+        world.advance(due - world.env.now.unwrap());
+    }
+    // Back: found, and the count starts over.
+    world.inboxes.insert(b, held);
+    sync(&mut world);
+    let _ = watch::run(&mut world.env, Trigger::Tick(Tick::Renew));
+    assert_eq!(world.ledger(&a, id.as_slice()).misses, 0);
+    // Gone again: the first wait, not the fourth.
+    world.advance(7 * 3600);
+    world.inboxes.remove(&b);
+    world.env.contracts.clear();
+    sync(&mut world);
+    let now = world.env.now.unwrap();
+    let _ = watch::run(&mut world.env, Trigger::Tick(Tick::Renew));
+    assert_eq!(world.ledger(&a, id.as_slice()).misses, 1);
+    assert_eq!(world.record(&a).due[&key] - now, 3600);
 }
 
 /// Renewal throughput comes from the duty budget: after an emergency bump,

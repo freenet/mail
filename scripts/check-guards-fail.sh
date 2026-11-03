@@ -490,6 +490,17 @@ dt "inbox v2 jobs: a run looks at sixteen contacts" "$D/inbox_jobs.rs" \
 dt "inbox v2 jobs: due contacts are served oldest first" "$D/inbox_jobs.rs" \
     '        due.sort_unstable();
 ' '' due_contacts_are_served_oldest_first
+dt "inbox v2 jobs: finding a contact's inbox starts its backoff over" "$D/inbox_jobs.rs" \
+    '            e.misses = 0;
+            changed = true;' '            changed = true;' \
+    a_contact_that_comes_back_starts_the_backoff_over
+dt "inbox v2 jobs: a contact that admits no pass of ours is asked again in a day" "$D/inbox_v2.rs" \
+    'pub const NO_PASS_RETRY: u64 = DAY;' 'pub const NO_PASS_RETRY: u64 = DAY + 3600;' \
+    a_contact_whose_renewal_fails_never_stops_the_others
+dt "inbox v2 jobs: a refused renewal is a wait, not a failure" "$D/inbox_jobs.rs" \
+    'Err(f) if f.code == FailureCode::Refused => return Ok(Some(now + v2::NO_PASS_RETRY)),' \
+    'Err(f) if false => return Ok(Some(now + v2::NO_PASS_RETRY)),' \
+    a_contact_whose_renewal_fails_never_stops_the_others
 dt "origins get separate namespaces" "$D/store.rs" \
     'format!("o/{}/", hex(&origin.0))' '{ let _ = origin; "o/shared/".to_string() }' \
     origins_and_kinds_never_share_a_key,a_foreign_origin_can_neither_read_nor_change_another_namespace
