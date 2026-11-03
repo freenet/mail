@@ -37,7 +37,6 @@ use ed25519_dalek::{Signature, VerifyingKey};
 use freenet_stdlib::prelude::ContractInstanceId;
 use ghostkey_verify::GhostkeyCertificate;
 use ml_dsa::MlDsa65;
-use ml_dsa::signature::Verifier as _;
 use serde::Deserialize;
 
 use crate::Params;
@@ -45,8 +44,8 @@ use crate::Params;
 #[cfg(feature = "plausible-mutants")]
 use crate::mutant::{self, Mutant};
 use crate::signed::{
-    admit_bytes, cert_bytes, ghost_admit_bytes, message_id, owner_bytes, owner_msg_bytes,
-    revocation_bytes, time_bytes, usage_bytes,
+    OWNER_SIG_CONTEXT, admit_bytes, cert_bytes, ghost_admit_bytes, message_id, owner_bytes,
+    owner_msg_bytes, revocation_bytes, time_bytes, usage_bytes,
 };
 use crate::types::{
     Admission, B16, B32, GhostProof, InboxDelta, InboxState, Malformed, Message, OwnerRecord,
@@ -152,8 +151,9 @@ fn verify_owner(rules: &Rules, params: &Params, owner: &OwnerRecord) -> Result<(
         .map_err(|_| Malformed("owner key"))?;
     let sig = ml_dsa::Signature::<MlDsa65>::try_from(owner.sig.as_slice())
         .map_err(|_| Malformed("owner signature"))?;
-    vk.verify(&owner_bytes(&params.addr, owner), &sig)
-        .map_err(|_| Malformed("owner signature"))
+    vk.verify_with_context(&owner_bytes(&params.addr, owner), OWNER_SIG_CONTEXT, &sig)
+        .then_some(())
+        .ok_or(Malformed("owner signature"))
 }
 
 /// Step 1. Every candidate must be genuine: a part naming a forged owner is

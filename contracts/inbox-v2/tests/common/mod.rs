@@ -10,7 +10,7 @@ use freenet_email_inbox_v2::signed::*;
 use freenet_email_inbox_v2::types::*;
 use freenet_stdlib::prelude::{ContractInstanceId, UpdateData};
 use ghostkey_common::{ScopedPayload, SignatureRequestor};
-use ml_dsa::signature::{Keypair, Signer as _};
+use ml_dsa::signature::Keypair;
 use serde_bytes::{ByteArray, ByteBuf};
 
 pub use freenet_email_inbox_v2::merge::{Rules, WEBAPP_REQUESTOR};
@@ -147,8 +147,11 @@ impl World {
     }
 
     pub fn sign_owner(&self, owner: &mut OwnerRecord) {
-        let sig: ml_dsa::Signature<ml_dsa::MlDsa65> =
-            self.dsa.sign(&owner_bytes(&self.params.addr, owner));
+        let sig = self
+            .dsa
+            .expanded_key()
+            .sign_deterministic(&owner_bytes(&self.params.addr, owner), OWNER_SIG_CONTEXT)
+            .expect("the context is short");
         owner.sig = ByteBuf::from(sig.encode().to_vec());
     }
 

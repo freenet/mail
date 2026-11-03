@@ -288,7 +288,10 @@ fn sign_owner(
         tombstones,
         sig: ByteBuf::new(),
     };
-    owner.sig = ByteBuf::from(me.keys.sign(&w::owner_bytes(&me.addr.0, &owner)));
+    owner.sig = ByteBuf::from(
+        me.keys
+            .sign_v2(w::OWNER_SIG_CONTEXT, &w::owner_bytes(&me.addr.0, &owner)),
+    );
     owner
 }
 
@@ -1059,7 +1062,12 @@ pub(crate) fn their_state(to: &Addr, bytes: &[u8]) -> Result<InboxState, Failure
             .is_ok()
     });
     if address_of(&o.owner_vk) != *to
-        || !crypto::verify_v1(&w::owner_bytes(&to.0, o), &o.owner_vk, &o.sig)
+        || !crypto::verify_v2(
+            w::OWNER_SIG_CONTEXT,
+            &w::owner_bytes(&to.0, o),
+            &o.owner_vk,
+            &o.sig,
+        )
         || !time_ok
     {
         return Err(fail(

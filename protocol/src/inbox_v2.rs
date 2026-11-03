@@ -23,6 +23,13 @@ pub const KIND_PASS: u8 = 0;
 pub const KIND_OWNER: u8 = 1;
 pub const KIND_QUARANTINE: u8 = 2;
 
+/// The FIPS 204 context string of the owner record's ML-DSA signature
+/// (decision 24). Every v2 ML-DSA signature has its own context; v1 signs
+/// with the empty one, so nothing signed for v1 verifies as v2.
+pub const OWNER_SIG_CONTEXT: &[u8] = b"fmail/v2/owner";
+/// The context of the sender's ML-DSA signature over [`inner_binding`].
+pub const SEALED_SIG_CONTEXT: &[u8] = b"fmail/v2/sealed";
+
 /// How far `sent_time` may trail `owner_time`.
 pub const WINDOW_BACK: u64 = 2 * 86_400;
 /// How far pass and owner mail may lead `owner_time`.
@@ -470,6 +477,16 @@ mod tests {
     #[test]
     fn params_match_the_contract_vector() {
         check("params", &params_bytes(&ADDR, &[0x88; 32]));
+    }
+
+    /// Decision 24: FIPS 204 puts `0x00 ‖ len(ctx) ‖ ctx` in front of the
+    /// signed bytes; the vectors are that prefix for each context.
+    #[test]
+    fn the_ml_dsa_contexts_match_the_contract_vectors() {
+        let framed = |ctx: &[u8]| [&[0, ctx.len() as u8][..], ctx].concat();
+        check("mldsa_prefix_owner", &framed(OWNER_SIG_CONTEXT));
+        check("mldsa_prefix_sealed", &framed(SEALED_SIG_CONTEXT));
+        assert_ne!(OWNER_SIG_CONTEXT, SEALED_SIG_CONTEXT);
     }
 
     #[test]

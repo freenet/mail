@@ -50,9 +50,15 @@ fn quarantine_bytes(out: &mut Vec<u8>, mode: QuarantineMode) {
     }
 }
 
+/// The FIPS 204 context string the owner record's ML-DSA signature is made
+/// and verified with (decision 24). v1 signs with the empty context, so no
+/// v1 signature is an owner signature.
+pub const OWNER_SIG_CONTEXT: &[u8] = b"fmail/v2/owner";
+
 /// `"fmail/owner/v1" ‖ addr ‖ version ‖ pass_epoch ‖ prev_epoch_until ‖
 /// issuer_vk ‖ quarantine ‖ len‖kem_ek ‖ count‖(id ‖ sent_time)*`. The
-/// verifying key is bound through the address.
+/// verifying key is bound through the address. Signed under
+/// [`OWNER_SIG_CONTEXT`].
 pub fn owner_bytes(addr: &[u8; 24], owner: &OwnerRecord) -> Vec<u8> {
     let mut out = layout(
         "fmail/owner/v1",

@@ -3,6 +3,7 @@
 mod faults;
 mod inbox_jobs;
 mod inbox_v2;
+mod inbox_v2_r1;
 mod jobs;
 mod recovery;
 mod resilience;

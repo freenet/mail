@@ -1476,7 +1476,8 @@ struct AssignmentHash {
 ///
 /// - strictly ascending, distinct hashes (the contract accepts any order);
 /// - hashes of messages in this identity's v1 inbox as held on this node;
-/// - never a payload that could alias an authority payload.
+/// - never a payload that could alias an authority payload, or that begins
+///   with the v2 layouts' domain.
 ///
 /// A sender does choose its message's hash: v0.2.x hashes one encryption of
 /// the message and stores another, so the hash is not bound to the stored
@@ -1488,6 +1489,9 @@ struct AssignmentHash {
 /// chooses, but the ML-KEM ciphertext after it spans about 34 chunks that
 /// the attacker cannot steer (only re-roll), so they ascend with probability
 /// about 1/34!, roughly 2^-128. Raw ascending bytes decrypt to nothing.
+/// The prefix of every inbox v2 signed layout.
+const V2_DOMAIN: &[u8] = b"fmail/";
+
 fn sign_v1_removal(s: &Space<'_>, addr: &Addr, hashes: &[Hash32]) -> OpResult {
     use freenet_mail_wire_v1::inbox::{STATE_UPDATE, removal_payload};
     if hashes.is_empty() || hashes.len() > MAX_REMOVAL_BATCH {
@@ -1531,6 +1535,14 @@ fn sign_v1_removal(s: &Space<'_>, addr: &Addr, hashes: &[Hash32]) -> OpResult {
         return Err(fail(
             FailureCode::Refused,
             "payload aliases an inbox authority payload",
+        ));
+    }
+    // Every v2 signed layout begins with this domain. v2 ML-DSA signatures
+    // are domain-separated by context (decision 24); this is a second layer.
+    if payload.starts_with(V2_DOMAIN) {
+        return Err(fail(
+            FailureCode::Refused,
+            "payload aliases a v2 signed layout",
         ));
     }
     Ok(Reply::Signature(ByteBuf::from(keys.sign(&payload))))

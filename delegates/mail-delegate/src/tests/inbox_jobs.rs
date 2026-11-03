@@ -455,6 +455,10 @@ fn strangers_give_way_earliest_first_and_never_a_contact() {
     let contact_id = world.state(&a).messages.keys().next().unwrap().into_array();
     let mut dropped = 0;
     let mut ids = Vec::new();
+    // The stranger messages each drain took, as `ids` indexes. The first
+    // also holds the contact's message, so it takes one stranger fewer.
+    let mut batches = Vec::new();
+    let mut from = 0;
     for n in 0..total {
         let (sealed, landed) = world.send(&d, &a, &format!("s{n:05}"));
         assert!(landed, "s{n}");
@@ -466,6 +470,8 @@ fn strangers_give_way_earliest_first_and_never_a_contact() {
             assert_eq!(u.full, 0);
             dropped += u.strangers_dropped as usize;
             world.publish(&a, &u.update.unwrap());
+            batches.push(from..n + 1);
+            from = n + 1;
         }
     }
     assert_eq!(dropped, extra);
@@ -475,19 +481,23 @@ fn strangers_give_way_earliest_first_and_never_a_contact() {
         "the contact's message"
     );
     // The earliest drained are the ones gone. A drain takes what one call
-    // holds in id order, so the order is kept to the batch of 16.
-    let batch = w::QUARANTINE_SLOTS;
+    // holds in id order, so the order is kept to the drain: every batch
+    // drained wholly before the `extra`th message is gone, and every one
+    // drained wholly after it is kept.
     let gone = ids
         .iter()
         .filter(|id| !inbound_stored(&world, &a, id))
         .count();
     assert_eq!(gone, extra);
-    for (n, id) in ids.iter().enumerate() {
-        if n < extra / batch * batch {
-            assert!(!inbound_stored(&world, &a, id), "s{n} kept");
-        }
-        if n >= extra.div_ceil(batch) * batch {
-            assert!(inbound_stored(&world, &a, id), "s{n} dropped");
+    assert!(batches.len() > 2);
+    for batch in &batches {
+        for n in batch.clone() {
+            if batch.end <= extra {
+                assert!(!inbound_stored(&world, &a, &ids[n]), "s{n} kept");
+            }
+            if batch.start >= extra {
+                assert!(inbound_stored(&world, &a, &ids[n]), "s{n} dropped");
+            }
         }
     }
     let state = world.state(&a);

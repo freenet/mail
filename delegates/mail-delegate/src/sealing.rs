@@ -6,7 +6,8 @@
 //! inside the ciphertext, so the binding can never cover the ciphertext. It
 //! names the recipient, the `sent_time` and the admission's kind and tag, so
 //! a copy restamped with another time, another pass or another Ghost Key
-//! fails at the recipient even though the contract would hold it.
+//! fails at the recipient even though the contract would hold it. The
+//! signature is made under its own ML-DSA context (decision 24).
 
 use chacha20poly1305::aead::{Aead, Payload};
 use chacha20poly1305::{KeyInit, XChaCha20Poly1305, XNonce};
@@ -80,7 +81,7 @@ pub fn seal(
     let binding = w::inner_binding(recipient, &body_hash, sent_time, kind, tag);
     let envelope = w::encode(&SealedEnvelope {
         sender_vk: ByteBuf::from(sender.vk_bytes()),
-        sender_sig: ByteBuf::from(sender.sign(&binding)),
+        sender_sig: ByteBuf::from(sender.sign_v2(w::SEALED_SIG_CONTEXT, &binding)),
         body: ByteBuf::from(body),
     });
     let size = CIPHERTEXT_SIZES
@@ -149,7 +150,12 @@ pub fn open(keys: &Keys, recipient: &[u8; 24], id: &[u8; 32], m: &w::Message) ->
     }
     let body_hash = *blake3::hash(&envelope.body).as_bytes();
     let binding = w::inner_binding(recipient, &body_hash, m.sent_time, kind, &tag);
-    if !crypto::verify_v1(&binding, &envelope.sender_vk, &envelope.sender_sig) {
+    if !crypto::verify_v2(
+        w::SEALED_SIG_CONTEXT,
+        &binding,
+        &envelope.sender_vk,
+        &envelope.sender_sig,
+    ) {
         return None;
     }
     // The way back must lead to the sender's own inbox.
