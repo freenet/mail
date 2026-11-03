@@ -5,6 +5,7 @@ mod inbox_bump;
 mod inbox_jobs;
 mod inbox_v2;
 mod inbox_v2_r1;
+mod inbox_vectors;
 mod jobs;
 mod recovery;
 mod resilience;

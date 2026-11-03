@@ -524,6 +524,28 @@ dt "inbox v2 jobs: a renewal writes no more than an import" "$D/inbox_jobs.rs" \
     'for i in 0..40 { let _ = s.put(&format!("zz/{i}"), &[0]); }
         v2::note_sent(s, me, &pass_id, &sealed.id.0, now, true)?;' \
     a_drained_message_costs_about_what_an_import_does
+dt "inbox v2: the address is the vector's" "$STAGE/protocol/src/address.rs" \
+    'pub const ADDRESS_CONTEXT: &str = "freenet-mail address v1";' \
+    'pub const ADDRESS_CONTEXT: &str = "freenet-mail address v2";' \
+    the_vector_key_has_the_vectors_address_and_check
+dt "inbox v2: the address check is the vector's" \
+    "$STAGE/contracts/inbox-v2/src/signed.rs" \
+    'const ADDRESS_CHECK_CONTEXT: &str = "freenet-mail address check v1";' \
+    'const ADDRESS_CHECK_CONTEXT: &str = "freenet-mail address check v2";' \
+    the_vector_key_has_the_vectors_address_and_check
+dt "inbox v2: the state the delegate encodes is the vector's" \
+    "$STAGE/protocol/src/inbox_v2.rs" \
+    '    pub time: TimeAttestation,
+    pub revoked: BTreeMap<B16, Revocation>,
+    pub usage: BTreeMap<B16, PassUsage>,' \
+    '    pub time: TimeAttestation,
+    pub usage: BTreeMap<B16, PassUsage>,
+    pub revoked: BTreeMap<B16, Revocation>,' \
+    a_state_the_delegate_encodes_has_the_vectors_summary
+dt "inbox v2: a proof's tag comes from the key the sender bound" "$D/sealing.rs" \
+    'Admission::Quarantine { ghost: Some(_) } => (KIND_QUARANTINE, ghost_vk?.to_vec()),' \
+    'Admission::Quarantine { ghost: Some(_) } => (KIND_QUARANTINE, vec![0x33; 32]),' \
+    a_quarantine_message_with_an_undecodable_proof_has_the_vectors_id
 dt "origins get separate namespaces" "$D/store.rs" \
     'format!("o/{}/", hex(&origin.0))' '{ let _ = origin; "o/shared/".to_string() }' \
     origins_and_kinds_never_share_a_key,a_foreign_origin_can_neither_read_nor_change_another_namespace
