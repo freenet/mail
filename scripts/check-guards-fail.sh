@@ -66,6 +66,9 @@ D="$STAGE/delegates/mail-delegate/src"
 # it and the guards it backs run it alone.
 FAULT_RUN=invariants_hold_over_a_host_that_misses_reads_and_refuses_writes
 BLIND_RUN=invariants_hold_while_a_key_stays_unreadable
+# The inbox v2 sweep that moves time (clock, renewals, a bump) takes about 40 s
+# in a debug build, so it too runs alone, for the guards it backs.
+TIME_RUN=the_clock_renewals_and_a_bump_over_a_faulty_host_lose_and_double_nothing
 # The delegate's tests link the inbox v2 contract as a dev-dependency, over the
 # delegate's lockfile. Built in the target dir the contract's own runs use, the
 # two builds of the contract crate collide and the tests stop compiling, so the
@@ -74,7 +77,7 @@ DELEGATE_TARGET="$ROOT/target/guards-cargo-delegate"
 delegate_tests() {
     CARGO_TARGET_DIR="$DELEGATE_TARGET" \
     cargo test --manifest-path "$STAGE/delegates/mail-delegate/Cargo.toml" --features v1-transition \
-        -- --skip "$FAULT_RUN" --skip "$BLIND_RUN"
+        -- --skip "$FAULT_RUN" --skip "$BLIND_RUN" --skip "$TIME_RUN"
 }
 fault_tests() {
     CARGO_TARGET_DIR="$DELEGATE_TARGET" \
@@ -85,6 +88,11 @@ blind_tests() {
     CARGO_TARGET_DIR="$DELEGATE_TARGET" \
     cargo test --manifest-path "$STAGE/delegates/mail-delegate/Cargo.toml" --features v1-transition \
         -- --exact "tests::faults::$BLIND_RUN"
+}
+time_tests() {
+    CARGO_TARGET_DIR="$DELEGATE_TARGET" \
+    cargo test --manifest-path "$STAGE/delegates/mail-delegate/Cargo.toml" --features v1-transition \
+        -- --exact "tests::inbox_jobs::$TIME_RUN"
 }
 protocol_tests() {
     cargo test --manifest-path "$STAGE/Cargo.toml" -p freenet-mail-protocol
@@ -144,6 +152,7 @@ if [ "$LIST" -eq 0 ]; then
 baseline "delegate tests" delegate_tests
 baseline "delegate fault-injection runs" fault_tests
 baseline "delegate unreadable-key runs" blind_tests
+baseline "delegate time-driven fault run" time_tests
 baseline "protocol tests" protocol_tests
 baseline "migration tests" ui_migration_tests
 baseline "local-delegate identity tests" ui_local_tests
@@ -230,6 +239,7 @@ guard() { # name file old new expected command...
 }
 
 dt() { guard "$1" "$2" "$3" "$4" "tests:$5" delegate_tests; }
+tt() { guard "$1" "$2" "$3" "$4" "tests:$TIME_RUN" time_tests; }
 
 dt "origin gate refuses delegate callers" "$D/handlers.rs" \
     'Some(MessageOrigin::Delegate(_)) => Err(DelegateError::Other(' \
@@ -430,6 +440,29 @@ dt "inbox v2: an emergency bump keeps no previous epoch" "$D/inbox_v2.rs" \
         0' \
     '    rec.prev_epoch_until = if emergency {
         owner_time.max(now) + EPOCH_GRACE' "$FULL_SET"
+tt "inbox v2 jobs: a created record is never written over" "$D/handlers.rs" \
+    '        None => current.is_none(),
+        Some(g) => g == current_gen,' \
+    '        None => true,
+        Some(g) => g == current_gen,'
+tt "inbox v2 jobs: a bump's reissues are scheduled" "$D/inbox_v2.rs" \
+    '            let due = rec.due.entry(contact).or_insert(at);
+            *due = (*due).min(at);' \
+    '            let _ = (contact, at);'
+tt "inbox v2 jobs: a reissue moves the pass to the new epoch" "$D/inbox_v2.rs" \
+    '    e.epoch = rec.pass_epoch;
+    start_term(e, now, rng);' \
+    '    start_term(e, now, rng);'
+tt "inbox v2 jobs: the clock runs on the rescan" "$D/inbox_jobs.rs" \
+    'if clock && now >= state.time.owner_time.saturating_add(v2::CLOCK_LAG) {' \
+    'if clock && false {'
+tt "inbox v2 jobs: a drained message is tombstoned only once stored" "$D/inbox_v2.rs" \
+    '                    out.unstored.insert(*id);
+                    continue;
+                }
+            }' '                    out.unstored.insert(*id);
+                }
+            }'
 dt "origins get separate namespaces" "$D/store.rs" \
     'format!("o/{}/", hex(&origin.0))' '{ let _ = origin; "o/shared/".to_string() }' \
     origins_and_kinds_never_share_a_key,a_foreign_origin_can_neither_read_nor_change_another_namespace

@@ -389,6 +389,264 @@ fn a_job_drain_over_a_faulty_host_never_tombstones_what_it_did_not_store() {
     assert!(injected > seeds, "only {injected} faults injected");
 }
 
+/// What the sweep below sees of every update the jobs send to Alice: the
+/// owner version, the signed time and the epoch only ever move forward.
+struct Monotonic {
+    version: u64,
+    time: u64,
+    epoch: u32,
+}
+
+impl Monotonic {
+    fn of(state: &w::InboxState) -> Self {
+        Monotonic {
+            version: state.owner.version,
+            time: state.time.owner_time,
+            epoch: state.owner.pass_epoch,
+        }
+    }
+
+    fn see(&mut self, updates: &[(Addr, InboxDelta)], a: &Addr) -> Result<(), String> {
+        for (_, d) in updates.iter().filter(|(to, _)| to == a) {
+            if let Some(o) = &d.owner {
+                if o.version <= self.version {
+                    return Err(format!("owner version {} after {}", o.version, self.version));
+                }
+                if o.pass_epoch < self.epoch {
+                    return Err(format!("epoch {} after {}", o.pass_epoch, self.epoch));
+                }
+                self.version = o.version;
+                self.epoch = o.pass_epoch;
+            }
+            if let Some(t) = &d.time {
+                if t.owner_time < self.time {
+                    return Err(format!("owner_time {} after {}", t.owner_time, self.time));
+                }
+                self.time = t.owner_time;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Alice with three contacts who hold her passes, one message each already
+/// drained. Returns each contact with its pass id and the pass's first expiry.
+fn with_contacts() -> (World, Addr, Vec<(Addr, w::B16, u64)>) {
+    let mut world = World::new();
+    let a = world.identity("alice");
+    let mut contacts = Vec::new();
+    for name in ["bob", "carol", "dave"] {
+        let c = world.identity(name);
+        let pass = world.issue(&a, Some(c), None);
+        hold(&mut world, &c, pass.clone());
+        world.send(&c, &a, "hi");
+        let id = pass.cert.pass_id;
+        let expiry = world.ledger(&a, id.as_slice()).expiry;
+        contacts.push((c, id, expiry));
+    }
+    settle(&mut world);
+    (world, a, contacts)
+}
+
+/// One run of the time-driven jobs over a faulty host: the clock, every
+/// renewal and a routine bump with its reissues all happen under faults, over
+/// the better part of a year. Mail the contacts send on the way is drained
+/// under the same faults. Nothing is tombstoned before it is stored, no
+/// message is lost or stored twice, no version, time or epoch goes back, and
+/// once the host heals every contact holds a pass the node has seen arrive.
+fn job_time_run(
+    base: &World,
+    a: &Addr,
+    contacts: &[(Addr, w::B16, u64)],
+    faults: Faults,
+) -> Result<u64, String> {
+    let mut world = base.clone();
+    let mut seen = Monotonic::of(&world.state(a));
+    let latest = contacts
+        .iter()
+        .map(|(_, id, _)| world.ledger(a, id.as_slice()).renew_at)
+        .max()
+        .unwrap();
+    let mut mail: BTreeMap<[u8; 32], String> = BTreeMap::new();
+    let mut ops = 0;
+    world.env.faults = Some(faults);
+
+    let step = |world: &mut World,
+                seen: &mut Monotonic,
+                mail: &BTreeMap<[u8; 32], String>,
+                secs: u64|
+     -> Result<(), String> {
+        world.advance(secs);
+        let (_, updates) = run(world, PAGE);
+        seen.see(&updates, a)?;
+        for id in updates
+            .iter()
+            .filter(|(to, _)| to == a)
+            .flat_map(|(_, d)| d.owner.iter().flat_map(|o| o.tombstones.keys()))
+        {
+            if mail.contains_key(&**id) && !inbound_stored(world, a, id) {
+                return Err(format!("{} tombstoned before it was stored", mail[&**id]));
+            }
+        }
+        Ok(())
+    };
+    // A contact writes now and then; a refused seal is just a message not sent.
+    let write = |world: &mut World, mail: &mut BTreeMap<[u8; 32], String>, n: usize| {
+        let (c, _, _) = &contacts[n % contacts.len()];
+        if let Ok(sealed) = world.seal(c, a, &format!("mail {n}")) {
+            let message: w::Message = w::decode(&sealed.message).unwrap();
+            let delta = InboxDelta {
+                messages: [(ByteArray::new(sealed.id.0), message)].into(),
+                ..InboxDelta::default()
+            };
+            world.publish(a, &w::encode(&delta));
+            if w::delivered(&world.state(a), &sealed.id.0) {
+                mail.insert(sealed.id.0, format!("mail {n}"));
+            }
+        }
+    };
+
+    // The clock, then every renewal, a few days at a time.
+    let mut n = 0;
+    while world.env.now.unwrap() < latest + 5 * DAY {
+        step(&mut world, &mut seen, &mail, 5 * DAY)?;
+        ops += 1;
+        if ops % 8 == 0 {
+            write(&mut world, &mut mail, n);
+            n += 1;
+        }
+    }
+    // A routine bump, tried until it is signed (a host this faulty may refuse
+    // all of a few tries), then the reissues over its grace.
+    let bump = |world: &mut World, seen: &mut Monotonic, tries: usize| -> Result<bool, String> {
+        for _ in 0..tries {
+            let Ok(u) = world.update(a, OwnerChange::BumpEpoch { emergency: false }) else {
+                continue;
+            };
+            if let Some(delta) = &u.update {
+                let decoded: InboxDelta = w::decode(delta).unwrap();
+                seen.see(&[(*a, decoded)], a)?;
+                world.publish(a, delta);
+            }
+            if u.remaining == 0 && u.change == ChangeOutcome::Signed {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    };
+    let bumped = bump(&mut world, &mut seen, 20)?;
+    write(&mut world, &mut mail, n);
+    for _ in 0..28 {
+        step(&mut world, &mut seen, &mail, 12 * 3600)?;
+    }
+    // Healed: everything catches up, and a bump that never got through is
+    // signed now, with its whole grace still to run.
+    let injected = world.env.faults.take().map_or(0, |f| f.injected.get());
+    if !bumped && !bump(&mut world, &mut seen, 3)? {
+        return Err("the bump was never signed on a healed host".into());
+    }
+    for _ in 0..64 {
+        step(&mut world, &mut seen, &mail, 6 * 3600)?;
+    }
+    settle(&mut world);
+
+    if !world.state(a).messages.is_empty() {
+        return Err("mail left in the inbox after healing".into());
+    }
+    let mut origin_probe = MemEnv::default();
+    let space = crate::store::Space::new(&mut origin_probe, Origin([PROD; 32]));
+    for (id, text) in &mail {
+        let key = space.full_key(&crate::store::item_rel(&freenet_mail_protocol::ItemRef {
+            kind: freenet_mail_protocol::ItemKind::Inbound,
+            owner: Some(*a),
+            id: id.to_vec(),
+        }));
+        match world.env.writes.get(&key) {
+            Some(1) => {}
+            other => return Err(format!("{text} was written {other:?} times")),
+        }
+    }
+    let stored = world.inbound(a).len();
+    if stored != mail.len() + contacts.len() {
+        return Err(format!(
+            "{stored} messages stored, {} sent",
+            mail.len() + contacts.len()
+        ));
+    }
+    let rec = world.record(a);
+    for (c, id, first) in contacts {
+        let e = world.ledger(a, id.as_slice());
+        if e.pending.is_some() {
+            return Err(format!("{c:?}: a renewal is still pending after healing"));
+        }
+        if e.expiry <= *first || e.epoch != rec.pass_epoch {
+            return Err(format!(
+                "{c:?}: pass of epoch {} expiring {} (first {first}) in epoch {}",
+                e.epoch, e.expiry, rec.pass_epoch
+            ));
+        }
+        // What matters is what the contact holds: the current certificate.
+        let origin = Origin([world.origin(c); 32]);
+        let space = crate::store::Space::new(&mut world.env, origin);
+        let held: Vec<w::Pass> = v2::load(
+            &space,
+            &v2::item(freenet_mail_protocol::ItemKind::HeldPass, c, &a.0),
+        )
+        .ok()
+        .flatten()
+        .map(|(_, held)| held)
+        .ok_or_else(|| format!("{c:?} holds no pass of Alice's"))?;
+        if !held
+            .iter()
+            .any(|p| p.cert.pass_id == *id && p.cert.epoch == e.epoch && p.cert.expiry == e.expiry)
+        {
+            return Err(format!(
+                "{c:?} holds epoch {:?} of a pass now at epoch {} expiring {} (delivered {})",
+                held.iter().map(|p| (p.cert.epoch, p.cert.expiry)).collect::<Vec<_>>(),
+                e.epoch,
+                e.expiry,
+                e.delivered
+            ));
+        }
+    }
+    if world.state(a).owner.pass_epoch != 2 {
+        return Err("the bump never landed".into());
+    }
+    // The clock kept up through all of it.
+    let lag = world
+        .env
+        .now
+        .unwrap()
+        .saturating_sub(world.state(a).time.owner_time);
+    if lag > v2::CLOCK_LAG + 6 * 3600 {
+        return Err(format!("owner_time {lag} s behind the node's clock"));
+    }
+    Ok(injected)
+}
+
+/// The time-driven jobs over a host that misses reads and refuses writes at
+/// `JOB_TIME_RATE` per mille (default 60), over `JOB_TIME_SEEDS` seeds
+/// (default 6; a long run uses thousands).
+#[test]
+fn the_clock_renewals_and_a_bump_over_a_faulty_host_lose_and_double_nothing() {
+    let (base, a, contacts) = with_contacts();
+    let seeds = env_or("JOB_TIME_SEEDS", 6);
+    let rate = env_or("JOB_TIME_RATE", 60) as u32;
+    let blind = env_or("JOB_TIME_BLIND", 0) as u32;
+    let from = env_or("JOB_TIME_FROM", 1);
+    let mut injected = 0;
+    let mut failures = Vec::new();
+    for seed in from..from + seeds {
+        let faults = Faults::seeded_with_blindness(seed, rate, blind);
+        match job_time_run(&base, &a, &contacts, faults) {
+            Ok(n) => injected += n,
+            Err(e) => failures.push(format!("seed {seed}: {e}")),
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    assert!(injected > seeds, "only {injected} faults injected");
+}
+
 /// A routine bump: every contact pass is reissued at its own drawn point of
 /// the 14-day grace, through the contact's pass, and each contact writes
 /// with the new epoch once the old one is gone.
