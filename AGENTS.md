@@ -155,7 +155,12 @@ recovery-key codec. Its encoding is pinned per variant in
   queue; the caller reads the inbox back, since a filtered update is not an
   error. `src/tests/inbox_v2.rs` runs everything it builds through the
   contract crate's `apply` and `is_valid` (a dev-dependency only), and
-  `src/tests/inbox_jobs.rs` does the same for the jobs.
+  `src/tests/inbox_jobs.rs` does the same for the jobs. Two job sweeps run over a
+  faulty host: the drain (`JOB_DRAIN_SEEDS`, `JOB_DRAIN_RATE`, `JOB_DRAIN_BLIND`)
+  and one that moves time, so the clock, every renewal and a bump with its
+  reissues run under faults (`JOB_TIME_SEEDS`, `JOB_TIME_RATE`, `JOB_TIME_BLIND`;
+  about 0.6 s a seed in a release build). `check-guards-fail.sh` runs the time
+  sweep alone, for the guards it backs.
 - **Inbox v2 jobs** (`src/inbox_jobs.rs`, called from `watch::run`, so every
   trigger takes one path). The drain reads the identity's own inbox from the
   node's store and goes through the same owner update as `UpdateInboxV2`. The
