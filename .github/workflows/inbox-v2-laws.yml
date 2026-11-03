@@ -1,0 +1,27 @@
+name: Inbox v2 merge laws
+
+# The merge-law run at length. `scripts/check-excluded-crates.sh test` runs a
+# short version on every PR; this one runs 1000 seeds nightly. Not a required
+# check: a scheduled job cannot be one, so a failure is seen on the run.
+
+on:
+  schedule:
+    - cron: '45 4 * * *'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  merge-laws:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.99.1
+      - name: Run the merge laws over 1000 seeds
+        working-directory: contracts/inbox-v2
+        env:
+          FORK_SEEDS: '1000'
+        run: cargo test --locked --test merge_laws -- --nocapture

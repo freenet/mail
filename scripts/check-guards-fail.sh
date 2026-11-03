@@ -97,6 +97,21 @@ ui_jobs_tests() {
         -- kept_import_is_unread unread_flags_mark an_import_between the_loop_starts the_probe_marker
 }
 candidate_check() { "$STAGE/scripts/check-delegate-candidate.sh"; }
+inbox_candidate_check() { "$STAGE/scripts/check-inbox-candidate.sh"; }
+inbox_rule_tests() {
+    cargo test --manifest-path "$STAGE/contracts/inbox-v2/Cargo.toml" --test canonical --test rules
+}
+inbox_plausible_tests() {
+    cargo test --manifest-path "$STAGE/contracts/inbox-v2/Cargo.toml" \
+        --features plausible-mutants --test plausible_mutants
+}
+inbox_vectors_check() { "$STAGE/scripts/check-inbox-vectors.sh"; }
+inbox_disclosure_tests() {
+    cargo test --manifest-path "$STAGE/contracts/inbox-v2/Cargo.toml" --test metadata_disclosure
+}
+coverage_check_tests() { "$STAGE/scripts/check-branch-coverage_test.sh"; }
+triage_check_tests() { "$STAGE/scripts/check-mutants-triage_test.sh"; }
+verify_merge_check_tests() { "$STAGE/scripts/check-fdev-verify-merge_test.sh"; }
 freeze_tests() { "$STAGE/scripts/release-freeze_test.sh"; }
 scrub_release_tests() { "$STAGE/scripts/check-release-scrub_test.sh"; }
 
@@ -124,7 +139,15 @@ baseline "local-delegate identity tests" ui_local_tests
 baseline "UI background jobs tests" ui_jobs_tests
 baseline "release freeze tests" freeze_tests
 baseline "release scrub tests" scrub_release_tests
+baseline "inbox v2 rule tests" inbox_rule_tests
+baseline "inbox v2 plausible mutants" inbox_plausible_tests
+baseline "inbox v2 disclosure gate" inbox_disclosure_tests
+baseline "inbox v2 byte vectors" inbox_vectors_check
+baseline "branch coverage check" coverage_check_tests
+baseline "mutants triage check" triage_check_tests
+baseline "verify-merge check" verify_merge_check_tests
 [ "$WASM" -eq 1 ] && baseline "candidate check" candidate_check
+[ "$WASM" -eq 1 ] && baseline "inbox candidate check" inbox_candidate_check
 if [ "$failures" -ne 0 ]; then
     echo "the guards fail without any regression applied; nothing below would mean anything"
     exit 1
@@ -1056,6 +1079,7 @@ also() {
     mv "$keep" "$file"
 }
 source "$ROOT/scripts/check-guards-fail-jobs.sh"
+source "$ROOT/scripts/check-guards-fail-inbox.sh"
 
 guard "protocol encoding is pinned" "$STAGE/protocol/src/lib.rs" \
     'pub enum FailureCode {
@@ -1146,6 +1170,12 @@ if [ "$WASM" -eq 1 ]; then
     guard "the candidate is the source's build" "$D/store.rs" \
         'pub const MAX_PENDING_PROMPTS: usize = 4;' 'pub const MAX_PENDING_PROMPTS: usize = 5;' \
         'FAIL: published-contract/candidate/mail_delegate is not what' candidate_check
+    guard "the inbox candidate is the source's build" "$STAGE/contracts/inbox-v2/src/merge.rs" \
+        'per_pass: 8,' 'per_pass: 9,' \
+        'FAIL: published-contract/candidate/inbox_v2 is not what' inbox_candidate_check
+    guard "inbox v2: a contract build with the test seam does not compile" "$STAGE/contracts/inbox-v2/Cargo.toml" \
+        'default = ["freenet-main-contract"]' 'default = ["freenet-main-contract", "plausible-mutants"]' \
+        'the plausible-mutants test seam is not part of the contract' inbox_candidate_check
     # The release guard's own tests build real WASM and show each refusal,
     # including each of its two feature checks alone.
     if [ "$LIST" -eq 1 ]; then

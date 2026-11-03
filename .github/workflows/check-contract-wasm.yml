@@ -28,6 +28,8 @@ on:
       - 'wire-v1/**'
       - 'scripts/**'
       - 'contracts/inbox/**'
+      - 'contracts/inbox-v2/**'
+      - 'docs/metadata-fields.toml'
       - 'contracts/.cargo/**'
       - 'wire-v1/**'
       - 'scripts/**'
@@ -183,6 +185,40 @@ jobs:
       - name: Verify the mail-delegate candidate is the source's build
         run: bash scripts/check-delegate-candidate.sh
 
+      # Inbox v2's merge rules cannot be patched after publish, so the bytes
+      # reviewed must be the bytes shipped. Its imports are checked against
+      # the same host set: a contract importing anything else fails to
+      # instantiate on every node.
+      - name: Verify the inbox v2 candidate is the source's build
+        run: bash scripts/check-inbox-candidate.sh
+
+      - name: The inbox v2 candidate imports only the host's functions
+        run: bash scripts/check-delegate-imports.sh published-contract/candidate/inbox_v2
+
+      # vectors.py, the inbox v2 byte layouts' second implementation, needs
+      # cbor2 and b3sum. Pinned, and isolated in a venv.
+      - name: Install what vectors.py needs
+        run: |
+          python3 -m venv "$RUNNER_TEMP/vectors"
+          "$RUNNER_TEMP/vectors/bin/pip" install cbor2==5.8.0
+          cargo install b3sum --version 1.8.5 --locked
+          echo "VECTORS_PYTHON=$RUNNER_TEMP/vectors/bin/python3" >> "$GITHUB_ENV"
+
+      # tests/vectors.rs holds the contract to vectors.txt, so vectors.txt must
+      # be what the second implementation writes, not a hand edit.
+      - name: The inbox v2 byte vectors are what vectors.py writes
+        run: bash scripts/check-inbox-vectors.sh
+
+      # What a reader of the contract's state can see is the list in
+      # docs/metadata-fields.toml: a field cannot become public without a line
+      # there. The plausible mutants are wrong rules the tests must catch. Both
+      # are quick. The slow gates (branch coverage, cargo-mutants, fdev
+      # verify-merge) run in inbox-v2-gates.yml.
+      - name: Inbox v2 disclosure gate and plausible mutants
+        run: |
+          cargo test --locked --manifest-path contracts/inbox-v2/Cargo.toml \
+            --features plausible-mutants --test metadata_disclosure --test plausible_mutants
+
       # Reads the committed candidate, which the step above proves is the
       # source's build. A failure here means a node could not instantiate the
       # delegate. It is a step of this required job, not a job of its own,
@@ -205,6 +241,14 @@ jobs:
         with:
           name: mail-delegate-candidate-${{ github.sha }}
           path: target/delegate-candidate-rebuilt/
+          if-no-files-found: ignore
+
+      - name: Upload the rebuilt inbox v2 candidate
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: inbox-v2-candidate-${{ github.sha }}
+          path: target/inbox-candidate-rebuilt/
           if-no-files-found: ignore
 
       # Issue #206 (closes the Phase 1 informational gate). The container
@@ -323,6 +367,15 @@ jobs:
             | tar -xz -C "$HOME/.cargo/bin/" fdev
           chmod +x "$HOME/.cargo/bin/fdev"
           fdev --version
+
+      # vectors.py, the inbox v2 byte layouts' second implementation, needs
+      # cbor2 and b3sum. Pinned, and isolated in a venv.
+      - name: Install what vectors.py needs
+        run: |
+          python3 -m venv "$RUNNER_TEMP/vectors"
+          "$RUNNER_TEMP/vectors/bin/pip" install cbor2==5.8.0
+          cargo install b3sum --version 1.8.5 --locked
+          echo "VECTORS_PYTHON=$RUNNER_TEMP/vectors/bin/python3" >> "$GITHUB_ENV"
 
       - name: Show each mail-delegate guard failing when broken (shard ${{ matrix.shard }}/4)
         run: bash scripts/check-guards-fail.sh --shard ${{ matrix.shard }}/4

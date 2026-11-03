@@ -162,6 +162,65 @@ shard succeeded, and `scripts/check-guard-shards.sh` proves the shards cover
 every guard once. `--list` prints the guards. A local run with no argument
 runs them all.
 
+### Inbox v2
+
+`contracts/inbox-v2` is the next inbox. The UI does not use it yet, and the
+v1 source stays at `contracts/inbox` so the frozen generation stays readable.
+`merge::merge` is the one set of rules: `update_state` calls it, and
+`validate_state` asks whether a state is a fixed point of it. Its numbers are
+in `merge::Rules`, passed as an argument so tests can run the same code with
+small caps. Change any rule knowing it cannot be patched after publish.
+
+- **The law:** core's `associativity_heals`, in `tests/merge_laws.rs`. Bounded
+  retention and owner-driven removals cannot be strictly associative, so two
+  groupings that differ must heal. `FORK_SEEDS=n` sets the seeds; CI workflow
+  `inbox-v2-laws.yml` runs 1000 nightly.
+- **Nothing live is lost:** the laws compare merges with merges, so a rule that
+  drops a live item the same way every time passes them. Every merge the fuzzer
+  makes is also held to `tests/oracle/`, a model of which items are live and
+  which the caps keep, written from the owner's decisions without the merge's
+  code. A rule change that the model disagrees with is a contract decision:
+  change the model only with the decision that changes the rule.
+- **Byte layouts:** `tests/fixtures/vectors.txt` comes from a second
+  implementation in `vectors.py`. Never regenerate it to make a test pass.
+  `scripts/check-inbox-vectors.sh` (CI `check-drift`) reruns the script and
+  fails on any difference; it needs cbor2 and b3sum (`VECTORS_PYTHON` names an
+  interpreter with cbor2).
+- **What is an error:** a part that cannot be decoded canonically, or that names
+  an owner record that fails, is refused. So is a part over what a valid state
+  can hold (88 messages, 4096 revocations, 1024 usage entries, 4096 tombstones,
+  4 MiB plus a 256 KiB margin), as it is decoded and before anything in it is
+  verified, and a call whose parts hold more than those counts between them
+  (`types::MAX_*`, `types::CallCounts`, `tests/bounds.rs`). A message, revocation or usage entry
+  that fails is dropped without one, so a sender reads back after an update.
+- **Gates on the rules.** `tests/plausible_mutants.rs` runs 18 wrong-but-plausible
+  rules through `src/mutant.rs`, a seam compiled only with the
+  `plausible-mutants` feature, which `src/lib.rs` refuses to compile for
+  `wasm32`, so no build of the contract can carry it. It requires each scenario to find no broken
+  law on the real rules and exactly the listed laws under its mutant. The mutated
+  logic lives in `src/mutant.rs`; the rules hold one-line calls. A new rule that can go
+  wrong in a plausible way gets a mutant and a scenario. `docs/metadata-fields.toml`
+  lists every plaintext field and map key of a populated state and `tests/metadata_disclosure.rs`
+  fails unless the list is exact (a field cannot become public without the README
+  line; `release.sh` refusing to publish on it comes with C3). Both run in
+  `check-drift`. The slow ones run in `.github/workflows/inbox-v2-gates.yml` on a
+  PR that touches the contract, and nightly, and are not required checks: branch
+  coverage (`scripts/check-branch-coverage.sh`, an arm never visited fails unless
+  `coverage-allowlist.toml` gives a reason, and a stale entry fails too),
+  cargo-mutants over the rules (`scripts/check-mutants-triage.sh`: a survivor
+  needs a line in `mutants-triage.md`, a stale line fails, and so does a run
+  that tested fewer than 10 mutants or caught none), core's
+  `fdev verify-merge` on the candidate over generated states
+  (`scripts/check-fdev-verify-merge.sh`; inconclusive is not a pass), and the
+  cost of the worst calls (`scripts/check-inbox-cost.sh`: wasmtime fuel under a
+  budget calibrated to decision 8's 2.5 s, with the calibration in the
+  script; re-measure it when a change moves the mix of work). The
+  `check-guards-fail.sh` guards named `inbox v2: ...` show each gate failing.
+- **Candidate:** `published-contract/candidate/inbox_v2`, built only by
+  `scripts/build-wasm.sh`; `scripts/check-inbox-candidate.sh` (CI `check-drift`)
+  fails unless the committed bytes are what the source builds. Unlike the mail
+  delegate, it needs no fault sweeps: a contract has no storage of its own.
+
 The `legacy_*.toml` registries are validated by `ui/build.rs`
 (`freenet-migrate-build`; an empty registry fails the build) and pinned by
 `ui/src/legacy_registry.rs`. The delegate rows feed the walk below. The inbox

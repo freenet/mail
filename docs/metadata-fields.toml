@@ -1,0 +1,223 @@
+# What anyone who can read an inbox v2 contract's state can see, field by field.
+# The source of truth for the README's "What others can see". The path syntax is
+# in contracts/inbox-v2/tests/metadata_disclosure.rs, which fails unless this
+# file lists exactly the plaintext fields of a fully populated state.
+#
+# No field names a sender. The Ghost Key proof is for RequireGhost inboxes: the
+# contract verifies it there, an Open inbox refuses a message carrying one, and
+# the compose flow attaches one only for a RequireGhost recipient.
+#
+# A path ending in `.[key]` is the key of a map, which is as public as its
+# values. What timing gives an observer is under `messages.[key]`.
+
+# ── Recipient keys, epoch and quarantine mode ──────────────────────────────
+
+[[field]]
+path = "owner.owner_vk"
+class = "recipient keys"
+why = "Senders need the owner's signing key to check the owner record, and the inbox address is its hash."
+
+[[field]]
+path = "owner.kem_ek"
+class = "recipient keys"
+why = "Senders encrypt to this key, so it is public."
+
+[[field]]
+path = "owner.issuer_vk"
+class = "recipient keys"
+why = "The contract checks passes, usage and time against it."
+
+[[field]]
+path = "owner.pass_epoch"
+class = "recipient keys"
+why = "A pass names its epoch, so senders and the contract need the current one."
+
+[[field]]
+path = "owner.prev_epoch_until"
+class = "recipient keys"
+why = "The owner time until which passes of the previous epoch still work, so contacts can be reissued passes over days rather than all at once. It shows when the owner last bumped the epoch, and whether it was routine (a grace) or an emergency (none)."
+
+[[field]]
+path = "owner.quarantine"
+class = "recipient keys"
+why = "The Open mode, which senders need to know to choose how to write."
+
+[[field]]
+path = "owner.quarantine.RequireGhost.min_usd"
+class = "recipient keys"
+why = "The Ghost Key tier a RequireGhost inbox asks for, which a sender must meet."
+
+[[field]]
+path = "owner.sig"
+class = "recipient keys"
+why = "The owner's signature over the record, checked by every peer."
+
+# ── Owner activity ──────────────────────────────────────────────────────────
+
+[[field]]
+path = "owner.version"
+class = "owner activity"
+why = "Orders owner records, so peers can tell which is newer. It shows how often the owner changed settings."
+
+[[field]]
+path = "owner.tombstones.[key]"
+class = "owner activity"
+why = "The id of a message the owner drained, so the contract does not take it back. It is the id the message had while it was held, so anyone who saw the message can tell which one was deleted, by its pass id or ghost key whose it was, and from the owner version that added it, when."
+
+[[field]]
+path = "owner.tombstones.*"
+class = "owner activity"
+why = "The send time of each drained message, so the owner's client can drop the tombstone once the message is outside the window."
+
+[[field]]
+path = "time.owner_time"
+class = "owner activity"
+why = "The contract has no clock; the owner's signed time decides expiry and the send window. It shows when the owner was last active."
+
+[[field]]
+path = "time.sig"
+class = "owner activity"
+why = "The issuer's signature over the owner time."
+
+# ── Passes ──────────────────────────────────────────────────────────────────
+
+[[field]]
+path = "messages.*.admission.Pass.cert.recipient"
+class = "pass bookkeeping"
+why = "The inbox address the pass was issued for."
+
+[[field]]
+path = "messages.*.admission.Pass.cert.pass_id"
+class = "pass bookkeeping"
+why = "A random id, stable across renewals, so the contract can limit and revoke by pass. It is not derived from the holder, but every message under one pass carries it, so an observer can group an inbox's pass mail by contact and count the contacts over time."
+
+[[field]]
+path = "messages.*.admission.Pass.cert.pass_vk"
+class = "pass bookkeeping"
+why = "A random key per pass, so the contract can check the message signature."
+
+[[field]]
+path = "messages.*.admission.Pass.cert.epoch"
+class = "pass bookkeeping"
+why = "Checked against the owner's current epoch. A change of cert (a new expiry or a new epoch) under one pass id marks when a renewal or reissue arrived, so it is public in the next message."
+
+[[field]]
+path = "messages.*.admission.Pass.cert.expiry"
+class = "pass bookkeeping"
+why = "Checked against the send time. A whole day, which the contract requires, and the client draws each pass lifetime from 335 to 395 days, so the expiry does not date the grant or renewal that the pass message in the contact's own inbox shows."
+
+[[field]]
+path = "messages.*.admission.Pass.cert.class"
+class = "pass bookkeeping"
+why = "A contact pass, which the contract limits to eight messages."
+
+[[field]]
+path = "messages.*.admission.Pass.cert.class.Invite.max_messages"
+class = "pass bookkeeping"
+why = "An invite's total allowance, which the contract counts down."
+
+[[field]]
+path = "messages.*.admission.Pass.cert.sig"
+class = "pass bookkeeping"
+why = "The issuer's signature over the pass."
+
+[[field]]
+path = "messages.*.admission.Pass.msg_sig"
+class = "pass bookkeeping"
+why = "The pass key's signature over this message, which ties the message to the pass without naming the sender."
+
+# ── Messages from the owner and from unknown senders ───────────────────────
+
+[[field]]
+path = "messages.*.admission.Owner.sig"
+class = "admission"
+why = "Lets the owner's own devices write to the inbox. Signed by the issuer key, which the owner holds."
+
+[[field]]
+path = "messages.*.admission.Quarantine.ghost.cert"
+class = "ghost key proof"
+why = "A Ghost Key certificate, in a RequireGhost inbox's quarantine, verified by the contract; an Open inbox refuses a message carrying one. It shows the key, its tier and its month, and the message is not anonymous to the recipient. It stays public until the owner drains the message, or until the owner's time moves past the send window, which does not happen while the owner is offline."
+
+[[field]]
+path = "messages.*.admission.Quarantine.ghost.scoped_payload"
+class = "ghost key proof"
+why = "What the Ghost Key signed: the recipient, the send hour and the ciphertext digest."
+
+[[field]]
+path = "messages.*.admission.Quarantine.ghost.ghost_sig"
+class = "ghost key proof"
+why = "The Ghost Key's signature over the payload."
+
+# ── Ciphertext and time ─────────────────────────────────────────────────────
+
+[[field]]
+path = "messages.[key]"
+class = "queue"
+why = "The message id, a hash of the recipient, the ciphertext, the send hour, the kind and the pass id or ghost key, so it shows nothing those do not. Any peer can subscribe and see each message arrive and each drain to the second, which the hour of the send time does not hide. There is no cover traffic, so a drain in one inbox followed by an arrival in another can link the two inboxes over a conversation."
+
+[[field]]
+path = "messages.*.ciphertext"
+class = "ciphertext"
+why = "Padded to 8, 16 or 32 KiB, so its size shows only one of three classes. Its contents are encrypted to the recipient."
+
+[[field]]
+path = "messages.*.sent_time"
+class = "send time"
+why = "To the hour, as the contract needs it for the send window and for ordering a pass's messages."
+
+# ── Revocations and usage ───────────────────────────────────────────────────
+
+[[field]]
+path = "revoked.[key]"
+class = "revocations and usage"
+why = "The revoked pass's id, the same as the entry's pass_id."
+
+[[field]]
+path = "revoked.*.pass_id"
+class = "revocations and usage"
+why = "The pass the owner revoked, by its random id."
+
+[[field]]
+path = "revoked.*.expiry"
+class = "revocations and usage"
+why = "When the revocation can be dropped, which is the revoked pass's own expiry: a whole day, as a pass's is."
+
+[[field]]
+path = "revoked.*.epoch"
+class = "revocations and usage"
+why = "A revocation from an old epoch is dropped."
+
+[[field]]
+path = "revoked.*.sig"
+class = "revocations and usage"
+why = "The issuer's signature, so only the owner can revoke."
+
+[[field]]
+path = "usage.[key]"
+class = "revocations and usage"
+why = "The invite's pass id, the same as the entry's pass_id."
+
+[[field]]
+path = "usage.*.pass_id"
+class = "revocations and usage"
+why = "The invite whose use is counted, by its random id."
+
+[[field]]
+path = "usage.*.used"
+class = "revocations and usage"
+why = "How many of an invite's messages have been used, so the allowance is enforced."
+
+[[field]]
+path = "usage.*.expiry"
+class = "revocations and usage"
+why = "When the entry can be dropped: a whole day, as a pass's expiry is."
+
+[[field]]
+path = "usage.*.owner_version"
+class = "revocations and usage"
+why = "The owner version that tombstones what the count includes; the count applies from it."
+
+[[field]]
+path = "usage.*.sig"
+class = "revocations and usage"
+why = "The issuer's signature, so only the owner can raise a count."

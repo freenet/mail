@@ -1,0 +1,64 @@
+# Standalone single-member workspace, as the other contract crates: fdev needs
+# a [workspace] manifest, and this crate's lockfile must not move with the
+# root workspace.
+[workspace]
+
+[package]
+name = "freenet-email-inbox-v2"
+version = "0.3.0"
+edition = "2024"
+license = "LGPL-3.0-or-later"
+publish = false
+description = "Freenet Mail's inbox contract, second generation"
+
+# EXCLUDED from the root workspace. A contract's id derives from its WASM, so
+# every dependency that reaches the WASM is pinned exactly, and the crate is
+# built only by scripts/build-wasm.sh (remapped paths, --locked). Its WASM is
+# committed under published-contract/candidate/ until v0.3.0 freezes it.
+#
+# Do not add `getrandom`, `rand` or anything that reads the clock: a contract
+# has neither, and its rules must be a function of its inputs.
+
+[dependencies]
+blake3 = { version = "=1.8.7", default-features = false }
+ciborium = "=0.2.2"
+ed25519-dalek = { version = "=2.2.0", default-features = false }
+freenet-stdlib = "=0.12.1"
+ghostkey-verify = "=0.1.0"
+ml-dsa = { version = "=0.1.1", default-features = false, features = ["alloc"] }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_bytes = "=0.11.19"
+
+[dev-dependencies]
+bs58 = "=0.5.1"
+# The real type, to prove the contract reads what the ghostkey vault signs.
+ghostkey-common = "=0.4.0"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["freenet-main-contract"]
+contract = ["freenet-stdlib/contract"]
+freenet-main-contract = []
+# Test seam for tests/plausible_mutants.rs (src/mutant.rs). Never in a build
+# of the contract.
+plausible-mutants = []
+
+[[test]]
+name = "plausible_mutants"
+required-features = ["plausible-mutants"]
+
+# Opt level 3, unlike the size-tuned crates: a call is limited to 5 s of wall
+# clock and signature checks are most of the cost. Measured in wasm: Ed25519
+# 147 vs 218 us, ML-DSA-65 491 vs 1398 us, against opt level z.
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
+
+# The merge-law runs sign and check thousands of times.
+[profile.dev.package."*"]
+opt-level = 3

@@ -35,6 +35,9 @@ exclude = [
     # complaining about the missing Cargo.toml when it walks the tree.
     "contracts/facade-loader",
     "contracts/inbox",
+    # Inbox v2: built only by scripts/build-wasm.sh, its candidate WASM
+    # committed under published-contract/candidate/ until v0.3.0 freezes it.
+    "contracts/inbox-v2",
     "contracts/web-container",
     "modules/antiflood-tokens/interfaces",
     "modules/antiflood-tokens/contracts/token-allocation-record",

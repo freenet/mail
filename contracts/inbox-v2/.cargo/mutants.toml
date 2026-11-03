@@ -1,0 +1,39 @@
+# cargo-mutants for the inbox v2 contract. See mutants-triage.md for what it
+# found and scripts/check-mutants-triage.sh for the gate.
+#
+# Scoped to the rules: the merge and everything it calls (admission, pruning,
+# caps, the overflow test), the contract interface that wraps it, summary and
+# delta, and the canonical-CBOR check in types.rs. The byte layouts in
+# signed.rs are pinned by tests/vectors.rs against a second implementation.
+#
+# Nothing is excluded by pattern. A mutant that survives is triaged in
+# mutants-triage.md and either gets a test or a written reason.
+examine_globs = ["src/merge.rs", "src/sync.rs", "src/lib.rs", "src/types.rs"]
+
+# A mutated loop bound can spin; a hung run is reported as a timeout, which
+# is not a pass. The merge-law run is the longest test.
+minimum_test_timeout = 180.0
+
+# The tests that bear on the rules. cargo-mutants copies only this crate, and
+# tests/metadata_disclosure.rs reads docs/metadata-fields.toml from the
+# repository at run time, so it would fail in the copy and is left out. The
+# workflow checks that every other test file is listed here.
+#
+# The plausible-mutants feature is on, so the seam's call sites in the rules are
+# compiled and mutated too, and tests/plausible_mutants.rs runs: a mutant of a
+# call site that does nothing the test notices is a gap in that test. Without the
+# feature the call sites would be mutated without being built, and every one
+# would be a false survivor.
+additional_cargo_args = ["--features", "plausible-mutants"]
+additional_cargo_test_args = [
+    "--lib",
+    "--test", "plausible_mutants",
+    "--test", "bounds",
+    "--test", "canonical",
+    "--test", "ghost",
+    "--test", "merge_laws",
+    "--test", "rules",
+    "--test", "tamper",
+    "--test", "vectors",
+    "--test", "worst_case",
+]
