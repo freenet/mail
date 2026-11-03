@@ -452,6 +452,13 @@ pub struct InboxV2Update {
     /// Messages left for the next call. The change itself is signed only
     /// once nothing is left.
     pub remaining: u32,
+    /// Messages left in the inbox because this identity's storage is full
+    /// (the change waits for them), or because its tombstones are (they are
+    /// stored and leave the inbox once older tombstones expire).
+    pub full: u32,
+    /// Earlier stranger messages this call removed to make room: only the
+    /// newest drained ones are kept (decision 21).
+    pub strangers_dropped: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -484,6 +491,10 @@ pub struct SealedV2 {
     pub admission: SendAdmission,
     pub ghost_payload: Option<ByteBuf>,
     pub notice: Option<SendNotice>,
+    /// Node time from which this message may have fallen out of the
+    /// recipient's window: a send still queued then is sealed again, after a
+    /// fresh GET (decision 9).
+    pub reseal_at: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

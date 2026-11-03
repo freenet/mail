@@ -76,6 +76,9 @@ pub fn process(
         // not recorded: a client can send this message, and a belief written
         // from it would let one switch off another's watch.
         InboundDelegateMsg::SubscribeContractResponse(_) => Ok(Vec::new()),
+        // An update a job sent: what landed is read back from the contract's
+        // state, never from this answer, which a client can forge.
+        InboundDelegateMsg::UpdateContractResponse(_) => Ok(Vec::new()),
         _ => Err(DelegateError::Other(
             "the mail delegate accepts only application messages and prompt answers".into(),
         )),
@@ -1210,7 +1213,7 @@ pub fn put_item(
     }
 }
 
-fn delete_item(s: &mut Space<'_>, item: ItemRef, expected_gen: u64) -> OpResult {
+pub(crate) fn delete_item(s: &mut Space<'_>, item: ItemRef, expected_gen: u64) -> OpResult {
     check_item(s, &item)?;
     let rel = item_rel(&item);
     let ix = index_rel(item.kind, item.owner.as_ref());

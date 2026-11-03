@@ -756,6 +756,8 @@ fn pass_timing_is_coarse_and_spread() {
             renew_at: 0,
             revoked: false,
             drained: Default::default(),
+            delivered: 0,
+            pending: None,
         };
         inbox_v2::start_term(&mut e, now, &mut rng);
         assert_eq!(e.expiry % DAY, 0, "expiry to the day");

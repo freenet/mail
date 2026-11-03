@@ -63,6 +63,19 @@ pub const BUMP_AT_REVOCATIONS: usize = 2048;
 /// Messages one call drains: decrypting and verifying one costs a KEM
 /// decapsulation and an ML-DSA check.
 pub const DRAIN_BATCH: usize = 32;
+/// Drained stranger (quarantine) messages kept per inbox, their stored copies
+/// and their tombstones both (decision 21). Past it the earliest drained give
+/// way, so strangers can hold at most this many of the 4096 tombstones and
+/// never fill this identity's storage. Contact mail is never removed.
+pub const STRANGERS_KEPT: usize = 1024;
+/// How long a certificate may go unseen in the contact's inbox before the
+/// renew job sends it again.
+pub const RESEND_AFTER: u64 = 6 * 3600;
+/// With no live pass to the contact, a renewal waits this long: it is sent
+/// only through the contact's pass, never through quarantine.
+pub const NO_PASS_RETRY: u64 = DAY;
+/// The clock job moves `owner_time` once it trails the node's clock by this.
+pub const CLOCK_LAG: u64 = 12 * 3600;
 
 // ── Keys ────────────────────────────────────────────────────────────────────
 
@@ -90,14 +103,33 @@ fn pass_key(dsa: &DsaSeed, issued_for: Option<&B24>, nonce: &B32) -> SigningKey 
     SigningKey::from_bytes(h.finalize().as_bytes())
 }
 
-struct Me {
-    addr: Addr,
+pub(crate) struct Me {
+    pub(crate) addr: Addr,
     dsa: DsaSeed,
     keys: Keys,
     issuer: SigningKey,
 }
 
-fn me(s: &Space<'_>, addr: &Addr) -> Result<Me, Failure> {
+/// Randomness for a run no page started: the host's, mixed with a value
+/// only this identity can derive in place of a page's entropy. `context`
+/// names what it is for, so a host whose RNG fails repeats randomness only
+/// for the same message (the same ciphertext), never for two.
+pub(crate) fn background_rng(
+    s: &mut Space<'_>,
+    me: &Me,
+    purpose: &str,
+    now: u64,
+    context: &[u8],
+) -> MixRng {
+    let host = s.env.host_random();
+    let mut h = blake3::Hasher::new_derive_key("freenet-mail background entropy v1");
+    h.update(&me.dsa.0);
+    h.update(&now.to_le_bytes());
+    h.update(context);
+    MixRng::new(purpose, &host, &Entropy(*h.finalize().as_bytes()))
+}
+
+pub(crate) fn me(s: &Space<'_>, addr: &Addr) -> Result<Me, Failure> {
     let (_, record) = require_identity(s, addr)?;
     Ok(Me {
         addr: *addr,
@@ -128,6 +160,23 @@ pub struct InboxRecord {
     pub reissue_seed: B32,
     /// The contact pass issued to each contact.
     pub issued: BTreeMap<B24, B16>,
+    /// When the renew job next looks at each contact's pass.
+    pub due: BTreeMap<B24, u64>,
+    /// Drained stranger messages, by drain order (decision 21).
+    pub strangers: BTreeMap<u64, B32>,
+    pub stranger_seq: u64,
+    /// Stranger messages removed to keep the newest, all told: what the
+    /// quarantine view says was dropped.
+    pub strangers_dropped: u64,
+}
+
+/// A message that carries a pass's newest certificate to its contact.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct Pending {
+    pub id: B32,
+    pub expiry: u64,
+    /// Node time it was sealed.
+    pub at: u64,
 }
 
 /// One issued pass (`ItemKind::PassLedger`, id the pass id).
@@ -150,9 +199,12 @@ pub struct LedgerEntry {
     /// Invite mail drained under it, by id: `used` is its size, which only
     /// grows, so no usage entry ever signs a lower `used` (decision 23).
     pub drained: BTreeSet<B32>,
+    /// The largest expiry of a certificate seen to reach the contact.
+    pub delivered: u64,
+    pub pending: Option<Pending>,
 }
 
-fn item(kind: ItemKind, owner: &Addr, id: &[u8]) -> ItemRef {
+pub(crate) fn item(kind: ItemKind, owner: &Addr, id: &[u8]) -> ItemRef {
     ItemRef {
         kind,
         owner: Some(*owner),
@@ -160,7 +212,10 @@ fn item(kind: ItemKind, owner: &Addr, id: &[u8]) -> ItemRef {
     }
 }
 
-fn load<T: DeserializeOwned>(s: &Space<'_>, item: &ItemRef) -> Result<Option<(u64, T)>, Failure> {
+pub(crate) fn load<T: DeserializeOwned>(
+    s: &Space<'_>,
+    item: &ItemRef,
+) -> Result<Option<(u64, T)>, Failure> {
     match s.read(&item_rel(item))? {
         None => Ok(None),
         Some((generation, body)) => from_cbor(&body)
@@ -175,7 +230,7 @@ fn load<T: DeserializeOwned>(s: &Space<'_>, item: &ItemRef) -> Result<Option<(u6
 }
 
 /// Write `value`, compare-and-swap against `generation` (0: absent).
-fn save<T: Serialize>(
+pub(crate) fn save<T: Serialize>(
     s: &mut Space<'_>,
     item: ItemRef,
     value: &T,
@@ -185,7 +240,7 @@ fn save<T: Serialize>(
     put_item(s, item, body, Some(generation)).map(|_| ())
 }
 
-fn record(s: &Space<'_>, addr: &Addr) -> Result<(u64, InboxRecord), Failure> {
+pub(crate) fn record(s: &Space<'_>, addr: &Addr) -> Result<(u64, InboxRecord), Failure> {
     load(s, &item(ItemKind::InboxV2, addr, &[]))?
         .ok_or_else(|| fail(FailureCode::NotFound, "this identity has no v2 inbox"))
 }
@@ -246,7 +301,7 @@ fn sign_time(me: &Me, owner_time: u64) -> w::TimeAttestation {
 }
 
 /// `bytes` as this identity's own inbox.
-fn own_state(me: &Me, bytes: &[u8]) -> Result<InboxState, Failure> {
+pub(crate) fn own_state(me: &Me, bytes: &[u8]) -> Result<InboxState, Failure> {
     let state: InboxState = w::decode(bytes).map_err(|e| fail(FailureCode::BadInput, e))?;
     if state.owner.owner_vk.as_slice() != me.keys.vk_bytes().as_slice() {
         return Err(fail(FailureCode::BadInput, "not this identity's inbox"));
@@ -292,6 +347,10 @@ pub fn create_inbox(
         reissue_grace: 0,
         reissue_seed: ByteArray::new([0; 32]),
         issued: BTreeMap::new(),
+        due: BTreeMap::new(),
+        strangers: BTreeMap::new(),
+        stranger_seq: 0,
+        strangers_dropped: 0,
     };
     let mut state = match existing {
         None => None,
@@ -381,6 +440,15 @@ pub fn reissue_at(rec: &InboxRecord, pass_id: &B16) -> u64 {
         }
 }
 
+/// When `e` is next renewed or reissued.
+pub fn refresh_at(rec: &InboxRecord, pass_id: &B16, e: &LedgerEntry) -> u64 {
+    if e.epoch < rec.pass_epoch {
+        e.renew_at.min(reissue_at(rec, pass_id))
+    } else {
+        e.renew_at
+    }
+}
+
 /// Renew or reissue `e` if it is due. Returns whether it changed.
 fn refresh(
     rec: &InboxRecord,
@@ -389,19 +457,72 @@ fn refresh(
     now: u64,
     rng: &mut MixRng,
 ) -> bool {
-    if e.revoked {
+    if e.revoked || now < refresh_at(rec, pass_id, e) {
         return false;
     }
-    if e.epoch < rec.pass_epoch && now >= reissue_at(rec, pass_id) {
-        e.epoch = rec.pass_epoch;
-        start_term(e, now, rng);
-        return true;
+    e.epoch = rec.pass_epoch;
+    start_term(e, now, rng);
+    true
+}
+
+/// When the renew job should next look at `e`: a certificate the contact
+/// has not been seen to get is looked at again soon.
+pub fn next_look(rec: &InboxRecord, pass_id: &B16, e: &LedgerEntry, now: u64) -> u64 {
+    match &e.pending {
+        _ if e.expiry <= e.delivered => refresh_at(rec, pass_id, e),
+        Some(p) => p.at + RESEND_AFTER,
+        None => now,
     }
-    if now >= e.renew_at {
-        start_term(e, now, rng);
-        return true;
+}
+
+/// Set when the renew job looks at `contact` next (`None`: never).
+pub(crate) fn set_due(
+    s: &mut Space<'_>,
+    owner: &Addr,
+    contact: &B24,
+    at: Option<u64>,
+) -> Result<(), Failure> {
+    let (generation, mut rec) = record(s, owner)?;
+    let before = rec.due.get(contact).copied();
+    if before == at {
+        return Ok(());
     }
-    false
+    match at {
+        Some(t) => rec.due.insert(*contact, t),
+        None => rec.due.remove(contact),
+    };
+    save(s, item(ItemKind::InboxV2, owner, &[]), &rec, generation)
+}
+
+/// Message `id` carries pass `pass_id`'s current certificate to its
+/// contact. Recorded when the contact has not been seen to get one that
+/// late (always, with `resend`), so the renew job reads back for it.
+pub(crate) fn note_sent(
+    s: &mut Space<'_>,
+    me: &Me,
+    pass_id: &B16,
+    id: &[u8; 32],
+    now: u64,
+    resend: bool,
+) -> Result<(), Failure> {
+    let at = item(ItemKind::PassLedger, &me.addr, pass_id.as_slice());
+    let Some((generation, mut e)) = load::<LedgerEntry>(s, &at)? else {
+        return Ok(());
+    };
+    let waiting = e.pending.as_ref().is_some_and(|p| p.expiry >= e.expiry);
+    let Some(contact) = e
+        .issued_for
+        .filter(|_| e.expiry > e.delivered && (resend || !waiting))
+    else {
+        return Ok(());
+    };
+    e.pending = Some(Pending {
+        id: ByteArray::new(*id),
+        expiry: e.expiry,
+        at: now,
+    });
+    save(s, at, &e, generation)?;
+    set_due(s, &me.addr, &contact, Some(now + RESEND_AFTER))
 }
 
 fn new_entry(
@@ -425,6 +546,8 @@ fn new_entry(
         renew_at: 0,
         revoked: false,
         drained: BTreeSet::new(),
+        delivered: 0,
+        pending: None,
     };
     start_term(&mut e, now, rng);
     (pass_id_of(&me.dsa, &nonce), e)
@@ -438,7 +561,7 @@ fn contact_pass(
     contact: &Addr,
     now: u64,
     rng: &mut MixRng,
-) -> Result<w::Pass, Failure> {
+) -> Result<(B16, w::Pass), Failure> {
     let (rec_gen, mut rec) = record(s, &me.addr)?;
     let contact = ByteArray::new(contact.0);
     if let Some(pass_id) = rec.issued.get(&contact).copied() {
@@ -450,7 +573,7 @@ fn contact_pass(
             if refresh(&rec, &pass_id, &mut e, now, rng) {
                 save(s, at, &e, generation)?;
             }
-            return Ok(pass_of(me, &pass_id, &e));
+            return Ok((pass_id, pass_of(me, &pass_id, &e)));
         }
     }
     let (pass_id, e) = new_entry(me, &rec, Some(contact), PassClass::Contact, now, rng);
@@ -461,8 +584,9 @@ fn contact_pass(
         0,
     )?;
     rec.issued.insert(contact, pass_id);
+    rec.due.insert(contact, now);
     save(s, item(ItemKind::InboxV2, &me.addr, &[]), &rec, rec_gen)?;
-    Ok(pass_of(me, &pass_id, &e))
+    Ok((pass_id, pass_of(me, &pass_id, &e)))
 }
 
 pub fn issue_pass(
@@ -478,7 +602,21 @@ pub fn issue_pass(
     let mut rng = MixRng::new("issue-pass", &host, entropy);
     match (contact, invite) {
         (Some(contact), None) => {
-            contact_pass(s, &me, &contact, now, &mut rng).map(Reply::PassIssued)
+            // The page hands this one over itself, so the renew job takes it
+            // as delivered and starts with its next renewal.
+            let (pass_id, pass) = contact_pass(s, &me, &contact, now, &mut rng)?;
+            let at = item(ItemKind::PassLedger, addr, pass_id.as_slice());
+            if let Some((generation, mut e)) = load::<LedgerEntry>(s, &at)?
+                && e.delivered < e.expiry
+            {
+                e.delivered = e.expiry;
+                e.pending = None;
+                let (_, rec) = record(s, addr)?;
+                let next = refresh_at(&rec, &pass_id, &e);
+                save(s, at, &e, generation)?;
+                set_due(s, addr, &ByteArray::new(contact.0), Some(next))?;
+            }
+            Ok(Reply::PassIssued(pass))
         }
         (_, Some(max_messages)) if max_messages > 0 => {
             let (_, rec) = record(s, addr)?;
@@ -536,35 +674,102 @@ struct Drained {
     tombstones: Vec<(B32, u64)>,
     /// Invites whose drained count grew: pass id, used, expiry.
     usage: BTreeMap<B16, (u8, u64)>,
+    /// Stranger messages drained, stored or not.
+    strangers: Vec<B32>,
+    /// Earlier stranger messages removed to make room in storage.
+    evicted: Vec<B32>,
+    /// Messages tried (each a decryption).
+    tried: usize,
     stored: u32,
     remaining: u32,
+    /// Left in the inbox because storage is full.
+    unstored: u32,
 }
 
-/// Store what `state` holds, up to [`DRAIN_BATCH`] messages. Returns the
-/// tombstones for what is stored (or unreadable by anyone). Any failure is
-/// returned before a tombstone leaves, so the inbox keeps the message.
-fn drain(s: &mut Space<'_>, me: &Me, state: &InboxState) -> Result<Drained, Failure> {
+/// Store what `state` holds, up to `limit` messages. Returns the tombstones
+/// for what is stored (or unreadable by anyone). A failure a retry can clear
+/// is returned before a tombstone leaves, so the inbox keeps the message; a
+/// message that full storage refuses stays in the inbox and the rest go on.
+fn drain(
+    s: &mut Space<'_>,
+    me: &Me,
+    rec: &mut InboxRecord,
+    state: &InboxState,
+    limit: usize,
+) -> Result<Drained, Failure> {
     let pending: Vec<_> = state
         .messages
         .iter()
         .filter(|(id, _)| !state.owner.tombstones.contains_key(*id))
         .collect();
     let mut out = Drained {
-        remaining: pending.len().saturating_sub(DRAIN_BATCH) as u32,
+        remaining: pending.len().saturating_sub(limit) as u32,
         ..Drained::default()
     };
-    for (id, m) in pending.into_iter().take(DRAIN_BATCH) {
+    for (id, m) in pending.into_iter().take(limit) {
+        out.tried += 1;
         if let Some(opened) = sealing::open(&me.keys, &me.addr.0, id, m) {
-            store_opened(s, me, id, m, opened, &mut out)?;
+            match store_opened(s, me, rec, id, m, opened, &mut out) {
+                Err(f) if f.code == FailureCode::CapReached => {
+                    out.unstored += 1;
+                    continue;
+                }
+                other => other?,
+            }
+        }
+        if matches!(m.admission, Admission::Quarantine { .. }) {
+            out.strangers.push(*id);
         }
         out.tombstones.push((*id, m.sent_time));
     }
     Ok(out)
 }
 
+fn inbound(owner: &Addr, id: &B32) -> ItemRef {
+    item(ItemKind::Inbound, owner, id.as_slice())
+}
+
+/// Remove the stored copy of drained message `id`, if there is one. Best
+/// effort: a copy left behind is only one more message kept.
+fn forget_inbound(s: &mut Space<'_>, owner: &Addr, id: &B32) {
+    if let Ok(Some((generation, _))) = s.read(&item_rel(&inbound(owner, id))) {
+        let _ = crate::handlers::delete_item(s, inbound(owner, id), generation);
+    }
+}
+
+/// Store `bytes` as drained message `id`, making room by removing the
+/// earliest drained stranger messages when storage is full. Contact mail is
+/// never removed for it.
+fn store_inbound(
+    s: &mut Space<'_>,
+    me: &Me,
+    rec: &mut InboxRecord,
+    id: &B32,
+    bytes: Vec<u8>,
+    out: &mut Drained,
+) -> Result<(), Failure> {
+    // A removed copy the page had deleted already frees nothing: a few tries.
+    for _ in 0..8 {
+        // Create-only; storing the same message again is acknowledged.
+        match put_item(s, inbound(&me.addr, id), bytes.clone(), None) {
+            Err(f) if f.code == FailureCode::CapReached && !rec.strangers.is_empty() => {
+                let (_, old) = rec.strangers.pop_first().expect("not empty");
+                forget_inbound(s, &me.addr, &old);
+                out.evicted.push(old);
+            }
+            other => return other.map(|_| ()),
+        }
+    }
+    Err(fail(
+        FailureCode::CapReached,
+        "this identity's storage is full",
+    ))
+}
+
 fn store_opened(
     s: &mut Space<'_>,
     me: &Me,
+    rec: &mut InboxRecord,
     id: &B32,
     m: &w::Message,
     opened: sealing::Opened,
@@ -582,13 +787,7 @@ fn store_opened(
             body: text.clone(),
         };
         let bytes = to_cbor(&inbound).map_err(|e| fail(FailureCode::Internal, e))?;
-        // Create-only; storing the same message again is acknowledged.
-        put_item(
-            s,
-            item(ItemKind::Inbound, &me.addr, id.as_slice()),
-            bytes,
-            None,
-        )?;
+        store_inbound(s, me, rec, id, bytes, out)?;
         out.stored += 1;
     }
     let sender = address_of(&opened.sender_vk);
@@ -668,6 +867,11 @@ fn revoke(
         e.revoked = true;
         save(s, at, &e, generation)?;
     }
+    if let Some(contact) = e.issued_for
+        && rec.issued.get(&contact) == Some(&key)
+    {
+        rec.due.remove(&contact);
+    }
     rec.issued.retain(|_, id| *id != key);
     let sig = me.issuer.sign(&w::revocation_bytes(
         &me.addr.0,
@@ -695,10 +899,25 @@ pub fn update_inbox(
     let now = clock(s)?;
     let host = s.env.host_random();
     let mut rng = MixRng::new("inbox-v2-update", &host, entropy);
-    let drained = drain(s, &me, &state)?;
-    // Read after the drain, which may have written nothing to it but must
-    // not race a write of its own.
+    owner_update(s, &me, &state, change, now, &mut rng, DRAIN_BATCH)
+        .map(|(u, _)| Reply::InboxV2Update(u))
+}
+
+/// Drain up to `limit` messages of `state`, then sign `change` if nothing is
+/// left that is not stored. The operation and the jobs both come here.
+/// Returns the update and how many messages were tried.
+pub(crate) fn owner_update(
+    s: &mut Space<'_>,
+    me: &Me,
+    state: &InboxState,
+    change: OwnerChange,
+    now: u64,
+    rng: &mut MixRng,
+    limit: usize,
+) -> Result<(InboxV2Update, usize), Failure> {
+    let addr = &me.addr;
     let (rec_gen, mut rec) = record(s, addr)?;
+    let drained = drain(s, me, &mut rec, state, limit)?;
 
     // A tombstone outside the window guards nothing: the filter drops the
     // message by its time. Pruned against the joined time already held.
@@ -710,17 +929,39 @@ pub fn update_inbox(
         .filter(|(_, t)| t.saturating_add(w::WINDOW_BACK) >= held_time)
         .map(|(id, t)| (*id, *t))
         .collect();
-    tombstones.extend(drained.tombstones.iter().copied());
-    if tombstones.len() > w::MAX_TOMBSTONES {
-        return Err(fail(
-            FailureCode::CapReached,
-            "the inbox's tombstones are full",
-        ));
+    // Decision 21: strangers keep at most STRANGERS_KEPT, the earliest
+    // drained giving way (stored copy and tombstone both), so they can never
+    // fill the tombstones or this identity's storage.
+    let mut dropped = drained.evicted.clone();
+    for id in &drained.strangers {
+        rec.stranger_seq += 1;
+        rec.strangers.insert(rec.stranger_seq, *id);
+    }
+    while rec.strangers.len() > STRANGERS_KEPT {
+        let (_, old) = rec.strangers.pop_first().expect("over the limit");
+        forget_inbound(s, addr, &old);
+        dropped.push(old);
+    }
+    for id in &dropped {
+        tombstones.remove(id);
+    }
+    rec.strangers_dropped += dropped.len() as u64;
+    // Past the cap (only contacts can get there) a stored message waits in
+    // the inbox until older tombstones expire.
+    let mut untombstoned = 0;
+    for (id, t) in &drained.tombstones {
+        if tombstones.len() < w::MAX_TOMBSTONES || tombstones.contains_key(id) {
+            tombstones.insert(*id, *t);
+        } else {
+            untombstoned += 1;
+        }
     }
 
     let mut delta = InboxDelta::default();
     let mut new_time = None;
-    if drained.remaining == 0 {
+    let epoch = rec.pass_epoch;
+    // Decision 9: nothing is signed while a message is not stored yet.
+    if drained.remaining == 0 && drained.unstored == 0 {
         match change {
             OwnerChange::Drain => {}
             OwnerChange::AdvanceTime => {
@@ -731,12 +972,22 @@ pub fn update_inbox(
             }
             OwnerChange::SetQuarantine(mode) => rec.quarantine = mode,
             OwnerChange::Revoke { pass_id } => {
-                let r = revoke(s, &me, &mut rec, &state, &pass_id, now, &mut rng)?;
+                let r = revoke(s, me, &mut rec, state, &pass_id, now, rng)?;
                 delta.revoked.insert(r.pass_id, r);
             }
-            OwnerChange::BumpEpoch { emergency } => {
-                bump(&mut rec, held_time, now, emergency, &mut rng)
-            }
+            OwnerChange::BumpEpoch { emergency } => bump(&mut rec, held_time, now, emergency, rng),
+        }
+    }
+    if rec.pass_epoch != epoch {
+        // Every contact pass is reissued at its own point of the grace.
+        let points: Vec<(B24, u64)> = rec
+            .issued
+            .iter()
+            .map(|(contact, pass_id)| (*contact, reissue_at(&rec, pass_id)))
+            .collect();
+        for (contact, at) in points {
+            let due = rec.due.entry(contact).or_insert(at);
+            *due = (*due).min(at);
         }
     }
     // A time signed earlier whose update did not land goes out again.
@@ -758,11 +1009,11 @@ pub fn update_inbox(
     // Recorded before anything signed leaves.
     save(s, item(ItemKind::InboxV2, addr, &[]), &rec, rec_gen)?;
     if let Some(v) = version {
-        delta.owner = Some(sign_owner(&me, &rec, v, tombstones));
+        delta.owner = Some(sign_owner(me, &rec, v, tombstones));
         // C1 fix round 1, S2: a usage entry is signed with the
         // owner version that carries its tombstones, and published with it.
         for (pass_id, (used, expiry)) in &drained.usage {
-            let bytes = w::usage_bytes(&me.addr.0, pass_id, *used, *expiry, v);
+            let bytes = w::usage_bytes(&addr.0, pass_id, *used, *expiry, v);
             delta.usage.insert(
                 *pass_id,
                 w::PassUsage {
@@ -775,20 +1026,25 @@ pub fn update_inbox(
             );
         }
     }
-    delta.time = new_time.map(|t| sign_time(&me, t));
+    delta.time = new_time.map(|t| sign_time(me, t));
     let update = (delta != InboxDelta::default()).then(|| ByteBuf::from(w::encode(&delta)));
-    Ok(Reply::InboxV2Update(InboxV2Update {
-        update,
-        drained: drained.stored,
-        remaining: drained.remaining,
-    }))
+    Ok((
+        InboxV2Update {
+            update,
+            drained: drained.stored,
+            remaining: drained.remaining,
+            full: drained.unstored + untombstoned,
+            strangers_dropped: dropped.len() as u32,
+        },
+        drained.tried,
+    ))
 }
 
 // ── Sending ─────────────────────────────────────────────────────────────────
 
 /// The recipient's state, with its owner record and time verified: the
 /// message is encrypted to the KEM key it names.
-fn their_state(to: &Addr, bytes: &[u8]) -> Result<InboxState, Failure> {
+pub(crate) fn their_state(to: &Addr, bytes: &[u8]) -> Result<InboxState, Failure> {
     let state: InboxState = w::decode(bytes).map_err(|e| fail(FailureCode::BadInput, e))?;
     let o = &state.owner;
     let issuer = VerifyingKey::from_bytes(&o.issuer_vk).ok();
@@ -886,6 +1142,26 @@ pub fn seal_v2(
     let now = clock(s)?;
     let host = s.env.host_random();
     let mut rng = MixRng::new("seal-v2", &host, entropy);
+    let (sealed, reply_pass) = seal_to(s, &me, to, &state, content, ghost_vk, now, &mut rng)?;
+    // A renewed certificate riding on mail: the renew job reads back for it.
+    note_sent(s, &me, &reply_pass, &sealed.id.0, now, false)?;
+    Ok(Reply::SealedV2(sealed))
+}
+
+/// Seal `content` from `me` to the inbox `to` holding `state`. Returns the
+/// sealed message and the id of the reply pass it carries.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn seal_to(
+    s: &mut Space<'_>,
+    me: &Me,
+    to: &Addr,
+    state: &InboxState,
+    content: SealContent,
+    ghost_vk: Option<Hash32>,
+    now: u64,
+    rng: &mut MixRng,
+) -> Result<(SealedV2, B16), Failure> {
+    let from = &me.addr;
     let owner_time = state.time.owner_time;
     let mut notice = None;
 
@@ -895,7 +1171,7 @@ pub fn seal_v2(
         load::<w::Pass>(s, &item(ItemKind::HeldPass, from, &to.0))?.map(|(_, p)| p)
     };
     let pass_time = sent_time_for(now, owner_time, w::WINDOW_FORWARD);
-    let pass = held.and_then(|p| match pass_room(&state, to, &p.cert, pass_time) {
+    let pass = held.and_then(|p| match pass_room(state, to, &p.cert, pass_time) {
         Some(room) => Some((p, room)),
         None => {
             notice = Some(SendNotice::PassLapsed);
@@ -919,12 +1195,13 @@ pub fn seal_v2(
         // Decision 19: an Open inbox refuses a proof, so none is bound.
         _ => None,
     };
+    let (reply_pass_id, reply_pass) = contact_pass(s, me, to, now, rng)?;
     let body = SealedBody {
         kind: match content {
             SealContent::Mail(text) => EnvelopeKind::Mail(text),
             SealContent::PassUpdate => EnvelopeKind::System(SystemMsg::PassUpdate),
         },
-        reply_pass: contact_pass(s, &me, to, now, &mut rng)?,
+        reply_pass: reply_pass.clone(),
         pass_grant: None,
         ghost_vk,
     };
@@ -944,7 +1221,7 @@ pub fn seal_v2(
         kind,
         &tag,
         &body,
-        &mut rng,
+        rng,
     )?;
     let ct_hash = *blake3::hash(&ciphertext).as_bytes();
     let id = w::message_id(&to.0, &ct_hash, sent_time, kind, &tag);
@@ -980,7 +1257,7 @@ pub fn seal_v2(
                     &to.0, sent_time, &ct_hash,
                 )));
             }
-            if queue_full(&state, &id) {
+            if queue_full(state, &id) {
                 notice = Some(SendNotice::QueueFull);
             }
             Admission::Quarantine { ghost: None }
@@ -991,12 +1268,18 @@ pub fn seal_v2(
         sent_time,
         admission: admission_value,
     };
-    Ok(Reply::SealedV2(SealedV2 {
+    // The window trails `owner_time`, which does not run ahead of real time
+    // by much: two days after the earlier of `sent_time` and now it may have
+    // moved past this message (decision 9).
+    let reseal_at = sent_time.min(now) + w::WINDOW_BACK;
+    let sealed = SealedV2 {
         message: ByteBuf::from(w::encode(&message)),
         id: Hash32(id),
         sent_time,
         admission,
         ghost_payload,
         notice,
-    }))
+        reseal_at,
+    };
+    Ok((sealed, reply_pass_id))
 }

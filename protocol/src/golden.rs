@@ -344,6 +344,8 @@ fn replies() -> Vec<Reply> {
             update: Some(b(&[7])),
             drained: 1,
             remaining: 2,
+            full: 3,
+            strangers_dropped: 4,
         }),
         Reply::PassIssued(pass()),
         Reply::SealedV2(SealedV2 {
@@ -353,6 +355,7 @@ fn replies() -> Vec<Reply> {
             admission: SendAdmission::Quarantine,
             ghost_payload: Some(b(&[9])),
             notice: Some(SendNotice::QueueFull),
+            reseal_at: 7200,
         }),
     ]
 }
