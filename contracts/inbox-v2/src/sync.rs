@@ -61,10 +61,11 @@ pub fn summarize(state: &InboxState) -> Vec<u8> {
 /// What a peer with `summary` lacks of `state`. Empty when it lacks nothing.
 pub fn delta(state: &InboxState, summary: &[u8]) -> Result<Vec<u8>, Malformed> {
     let theirs = decode::<Summary>(summary)?;
-    if theirs.messages.len() % ENTRY_LEN != 0 {
+    let (listed, rest) = theirs.messages.as_chunks::<ENTRY_LEN>();
+    if !rest.is_empty() {
         return Err(Malformed("summary"));
     }
-    let held: BTreeSet<&[u8]> = theirs.messages.chunks_exact(ENTRY_LEN).collect();
+    let held: BTreeSet<&[u8; ENTRY_LEN]> = listed.iter().collect();
 
     let mut delta = InboxDelta::default();
     if digest16(&state.owner) != theirs.owner {
@@ -82,7 +83,7 @@ pub fn delta(state: &InboxState, summary: &[u8]) -> Result<Vec<u8>, Malformed> {
         delta.usage = state.usage.clone();
     }
     for ((id, message), entry) in state.messages.iter().zip(entries(state)) {
-        if !held.contains(entry.as_slice()) {
+        if !held.contains(&entry) {
             delta.messages.insert(*id, message.clone());
         }
     }

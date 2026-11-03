@@ -50,7 +50,10 @@ fn quarantine_bytes(out: &mut Vec<u8>, mode: QuarantineMode) {
 /// len‖kem_ek ‖ count‖(id ‖ sent_time)*`. The verifying key is bound through
 /// the address.
 pub fn owner_bytes(addr: &[u8; 24], owner: &OwnerRecord) -> Vec<u8> {
-    let mut out = layout("fmail/owner/v1", 128 + owner.kem_ek.len() + owner.tombstones.len() * 40);
+    let mut out = layout(
+        "fmail/owner/v1",
+        128 + owner.kem_ek.len() + owner.tombstones.len() * 40,
+    );
     out.extend_from_slice(addr);
     out.extend_from_slice(&owner.version.to_be_bytes());
     out.extend_from_slice(&owner.pass_epoch.to_be_bytes());

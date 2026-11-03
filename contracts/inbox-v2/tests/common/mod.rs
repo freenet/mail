@@ -185,12 +185,22 @@ impl World {
     pub fn pass_msg(&self, pass: &Pass, ct: Vec<u8>, sent_time: u64) -> (B32, Message) {
         let hash = *blake3::hash(&ct).as_bytes();
         let msg_sig = sign64(&pass.sk, &admit_bytes(&self.params.addr, sent_time, &hash));
-        self.keyed(ct, sent_time, Admission::Pass { cert: pass.cert.clone(), msg_sig })
+        self.keyed(
+            ct,
+            sent_time,
+            Admission::Pass {
+                cert: pass.cert.clone(),
+                msg_sig,
+            },
+        )
     }
 
     pub fn owner_msg(&self, ct: Vec<u8>, sent_time: u64) -> (B32, Message) {
         let hash = *blake3::hash(&ct).as_bytes();
-        let sig = sign64(&self.issuer, &owner_msg_bytes(&self.params.addr, sent_time, &hash));
+        let sig = sign64(
+            &self.issuer,
+            &owner_msg_bytes(&self.params.addr, sent_time, &hash),
+        );
         self.keyed(ct, sent_time, Admission::Owner { sig })
     }
 
@@ -214,16 +224,28 @@ impl World {
         }
     }
 
-    pub fn quarantine_msg(&self, ct: Vec<u8>, sent_time: u64, ghost: Option<usize>) -> (B32, Message) {
+    pub fn quarantine_msg(
+        &self,
+        ct: Vec<u8>,
+        sent_time: u64,
+        ghost: Option<usize>,
+    ) -> (B32, Message) {
         let ghost = ghost.map(|g| self.proof(g, &ct, sent_time));
         self.keyed(ct, sent_time, Admission::Quarantine { ghost })
     }
 
     /// `(id, message)` with the id the message's contents derive.
     pub fn keyed(&self, ct: Vec<u8>, sent_time: u64, admission: Admission) -> (B32, Message) {
-        let message = Message { ciphertext: ByteBuf::from(ct), sent_time, admission };
+        let message = Message {
+            ciphertext: ByteBuf::from(ct),
+            sent_time,
+            admission,
+        };
         let hash = *blake3::hash(&message.ciphertext).as_bytes();
-        (ByteArray::new(message_id(&self.params.addr, &message, &hash)), message)
+        (
+            ByteArray::new(message_id(&self.params.addr, &message, &hash)),
+            message,
+        )
     }
 
     /// A raw state, valid or not, from its pieces.

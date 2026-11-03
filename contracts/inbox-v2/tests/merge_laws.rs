@@ -59,7 +59,11 @@ impl Rng {
         &items[self.below(items.len() as u64) as usize]
     }
     fn subset<T: Clone>(&mut self, items: &[T], percent: u64) -> Vec<T> {
-        items.iter().filter(|_| self.chance(percent)).cloned().collect()
+        items
+            .iter()
+            .filter(|_| self.chance(percent))
+            .cloned()
+            .collect()
     }
 }
 
@@ -105,7 +109,12 @@ fn universe(seed: u64, rng: &mut Rng, big: bool) -> Universe {
         passes.push(w.pass(key(i), epoch, far, PassClass::Contact));
     }
     for i in 0..3 {
-        passes.push(w.pass(key(50 + i), epoch, t0 + 30 * DAY, PassClass::Invite { max_messages: 3 }));
+        passes.push(w.pass(
+            key(50 + i),
+            epoch,
+            t0 + 30 * DAY,
+            PassClass::Invite { max_messages: 3 },
+        ));
     }
     passes.push(w.pass(key(60), epoch + 1, far, PassClass::Contact));
     passes.push(w.pass(key(61), epoch, t0 - 3 * DAY, PassClass::Contact));
@@ -131,7 +140,9 @@ fn universe(seed: u64, rng: &mut Rng, big: bool) -> Universe {
     }
     for _ in 0..if big { 28 } else { 12 } {
         let sent = t0 + rng.below(48) * HOUR;
-        let ghost = rng.chance(60).then(|| rng.below(w.ghosts.len() as u64) as usize);
+        let ghost = rng
+            .chance(60)
+            .then(|| rng.below(w.ghosts.len() as u64) as usize);
         messages.push(w.quarantine_msg(ct_next(rng), sent, ghost));
     }
     // The same quarantine message with and without its proof: one id.
@@ -176,10 +187,17 @@ fn universe(seed: u64, rng: &mut Rng, big: bool) -> Universe {
         let expiry = if i % 3 == 0 { t0 - DAY } else { far };
         let mut id = key(100 + i).to_be_bytes().repeat(2);
         id[0] = (i as u8) << 5;
-        revoked.push(w.revocation(ByteArray::new(id.try_into().unwrap()), expiry, epoch - (i % 2) as u32));
+        revoked.push(w.revocation(
+            ByteArray::new(id.try_into().unwrap()),
+            expiry,
+            epoch - (i % 2) as u32,
+        ));
     }
     let mut usage = Vec::new();
-    for pass in passes.iter().filter(|p| matches!(p.cert.class, PassClass::Invite { .. })) {
+    for pass in passes
+        .iter()
+        .filter(|p| matches!(p.cert.class, PassClass::Invite { .. }))
+    {
         usage.push(w.usage(pass.cert.pass_id, 1 + rng.below(3) as u8, pass.cert.expiry));
         usage.push(w.usage(pass.cert.pass_id, 1, pass.cert.expiry + DAY));
     }
@@ -202,7 +220,13 @@ fn universe(seed: u64, rng: &mut Rng, big: bool) -> Universe {
     // A version tie: the digest decides.
     owners.push(w.owner(3, epoch, modes(rng), BTreeMap::new()));
 
-    Universe { owners, times, revoked, usage, messages }
+    Universe {
+        owners,
+        times,
+        revoked,
+        usage,
+        messages,
+    }
 }
 
 /// A state a peer could hold: raw pieces, cleaned by the merge, perhaps several
@@ -307,7 +331,10 @@ impl Laws<'_> {
             return Err(format!("{}: applying B twice moved the state", self.label));
         }
         if self.merge(a, &ab)? != ab || self.merge(&ab, a)? != ab {
-            return Err(format!("{}: merge(A, merge(A,B)) is not absorbed", self.label));
+            return Err(format!(
+                "{}: merge(A, merge(A,B)) is not absorbed",
+                self.label
+            ));
         }
         let l = self.merge(&ab, c)?;
         let bc = self.merge(b, c)?;
@@ -335,11 +362,21 @@ impl Laws<'_> {
             return Err(format!("{}: delta to an up-to-date peer", self.label));
         }
         if summary_a.len() * 4 >= a.len() {
-            return Err(format!("{}: summary {} of state {}", self.label, summary_a.len(), a.len()));
+            return Err(format!(
+                "{}: summary {} of state {}",
+                self.label,
+                summary_a.len(),
+                a.len()
+            ));
         }
         let delta = sync::delta(&decoded_b, &summary_a).unwrap();
-        let via = apply(self.rules, &params, a, vec![UpdateData::Delta(delta.into())])
-            .map_err(|e| e.to_string())?;
+        let via = apply(
+            self.rules,
+            &params,
+            a,
+            vec![UpdateData::Delta(delta.into())],
+        )
+        .map_err(|e| e.to_string())?;
         if via != self.merge(a, b)? {
             return Err(format!("{}: delta path differs from the merge", self.label));
         }
@@ -386,7 +423,9 @@ fn non_canonical_forms(state: &[u8]) -> Vec<(&'static str, Vec<u8>)> {
         out
     };
     let value: Value = ciborium::from_reader(state).unwrap();
-    let Value::Map(fields) = value.clone() else { panic!("a map") };
+    let Value::Map(fields) = value.clone() else {
+        panic!("a map")
+    };
 
     let mut extra = fields.clone();
     extra.push((Value::Text("extra".into()), Value::Integer(1.into())));
@@ -398,8 +437,13 @@ fn non_canonical_forms(state: &[u8]) -> Vec<(&'static str, Vec<u8>)> {
 
     // Keys of a collection: repeat one, and reverse them.
     for field in ["revoked", "usage", "messages"] {
-        let at = fields.iter().position(|(k, _)| k.as_text() == Some(field)).unwrap();
-        let Value::Map(entries) = &fields[at].1 else { panic!("a map") };
+        let at = fields
+            .iter()
+            .position(|(k, _)| k.as_text() == Some(field))
+            .unwrap();
+        let Value::Map(entries) = &fields[at].1 else {
+            panic!("a map")
+        };
         if let Some(first) = entries.first() {
             let mut dup = fields.clone();
             let mut with_dup = entries.clone();
@@ -420,7 +464,10 @@ fn run_seed(seed: u64, tally: &mut Tally) -> Result<(), String> {
     for (name, rules, big) in [("tiny", TINY, false), ("v1", Rules::V1, true)] {
         let mut rng = Rng(seed ^ 0xF00D);
         let u = universe(seed, &mut rng, big);
-        let laws = Laws { rules: &rules, label: format!("seed {seed} {name}") };
+        let laws = Laws {
+            rules: &rules,
+            label: format!("seed {seed} {name}"),
+        };
         for _ in 0..TRIPLES_PER_SEED {
             let (a, b, c) = (
                 peer_state(&rules, &u, &mut rng),
@@ -472,12 +519,24 @@ fn the_merge_laws_hold_over_crafted_states() {
     }
     println!(
         "{} seeds: {} triples, {} strict, {} healed, {} messages held",
-        seeds.len(), total.triples, total.strict, total.healed, total.held
+        seeds.len(),
+        total.triples,
+        total.strict,
+        total.healed,
+        total.held
     );
-    assert!(failures.is_empty(), "{} failures, first: {}", failures.len(), failures[0]);
+    assert!(
+        failures.is_empty(),
+        "{} failures, first: {}",
+        failures.len(),
+        failures[0]
+    );
     assert_eq!(total.strict + total.healed, total.triples);
     // The run must reach both branches, or the heal law was never exercised.
-    assert!(total.strict > 0 && total.healed > 0, "both branches of the law ran");
+    assert!(
+        total.strict > 0 && total.healed > 0,
+        "both branches of the law ran"
+    );
     assert!(total.held > total.triples, "states held messages");
 }
 
@@ -500,5 +559,8 @@ fn a_dead_revocation_redelivered_does_not_move_the_state() {
     let again = apply(&rules, &params, &merged, update_state(holding.clone())).unwrap();
     assert_eq!(merged, again, "redelivering the holder moved the state");
     let back = apply(&rules, &params, &again, update_state(revoking)).unwrap();
-    assert_eq!(again, back, "redelivering the dead revocation moved the state");
+    assert_eq!(
+        again, back,
+        "redelivering the dead revocation moved the state"
+    );
 }

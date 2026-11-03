@@ -10,8 +10,10 @@
 //!    verify under the joined owner is dropped here, so it can neither revoke a
 //!    pass nor push a genuine item out of a cap.
 //! 4. Prune, then cap, revocations and usage entries.
-//! 5. Filter each message against the owner, the time and the UNPRUNED
-//!    revocations. One message per id: the smallest encoding that passed.
+//! 5. Filter each message against the owner, the time and the revocations left
+//!    after pruning. A pruned revocation must not filter: it can be redelivered
+//!    forever, and the message it would drop can too, so the state would cycle.
+//!    One message per id: the smallest encoding that passed.
 //! 6. Cap the messages, by pool.
 //!
 //! Only an owner record that fails, or no time that verifies, refuses the input.
@@ -110,7 +112,8 @@ enum Requestor {
 }
 
 fn verify_ed25519(key: &VerifyingKey, bytes: &[u8], sig: &[u8; 64]) -> bool {
-    key.verify_strict(bytes, &Signature::from_bytes(sig)).is_ok()
+    key.verify_strict(bytes, &Signature::from_bytes(sig))
+        .is_ok()
 }
 
 fn verify_owner(rules: &Rules, params: &Params, owner: &OwnerRecord) -> Result<(), Malformed> {
@@ -170,7 +173,11 @@ fn join_time(
         if best.is_some_and(|b| (b.owner_time, &b.sig) >= (time.owner_time, &time.sig)) {
             continue;
         }
-        if verify_ed25519(issuer, &time_bytes(&params.addr, time.owner_time), &time.sig) {
+        if verify_ed25519(
+            issuer,
+            &time_bytes(&params.addr, time.owner_time),
+            &time.sig,
+        ) {
             best = Some(time);
         }
     }
@@ -198,7 +205,7 @@ struct Filter<'a> {
     owner: &'a OwnerRecord,
     issuer: VerifyingKey,
     owner_time: u64,
-    unpruned_revoked: BTreeSet<B16>,
+    live_revoked: BTreeSet<B16>,
     usage: &'a BTreeMap<B16, PassUsage>,
     /// While the kept revocations are at their cap, some may have been lost,
     /// so no pass can be trusted. The bump of `pass_epoch` is the way out.
@@ -210,7 +217,7 @@ struct Filter<'a> {
 impl Filter<'_> {
     fn admit(&mut self, id: &B32, message: &Message) -> Option<Slot> {
         if !CIPHERTEXT_SIZES.contains(&message.ciphertext.len())
-            || message.sent_time % SENT_TIME_GRANULARITY != 0
+            || !message.sent_time.is_multiple_of(SENT_TIME_GRANULARITY)
             || message.sent_time < self.owner_time.saturating_sub(WINDOW_BACK)
             || message.sent_time > self.owner_time.saturating_add(WINDOW_FORWARD)
             || self.owner.tombstones.contains_key(id)
@@ -247,7 +254,7 @@ impl Filter<'_> {
             || cert.epoch != self.owner.pass_epoch
             || sent_time >= cert.expiry
             || self.revocations_full
-            || self.unpruned_revoked.contains(&cert.pass_id)
+            || self.live_revoked.contains(&cert.pass_id)
             || !self.cert_is_genuine(cert)
         {
             return None;
@@ -380,8 +387,7 @@ pub fn merge(
     parts: Vec<InboxDelta>,
 ) -> Result<InboxState, Malformed> {
     let owner = join_owner(rules, params, &parts)?;
-    let issuer =
-        VerifyingKey::from_bytes(&owner.issuer_vk).map_err(|_| Malformed("issuer key"))?;
+    let issuer = VerifyingKey::from_bytes(&owner.issuer_vk).map_err(|_| Malformed("issuer key"))?;
     let time = join_time(params, &issuer, &parts)?;
 
     let mut revoked = BTreeMap::new();
@@ -420,11 +426,11 @@ pub fn merge(
         }
     }
 
-    // Step 4. The filter reads the union as it was before pruning.
-    let unpruned_revoked: BTreeSet<B16> = revoked.keys().copied().collect();
+    // Step 4.
     let expired = |expiry: u64| expiry.saturating_add(WINDOW_BACK) <= time.owner_time;
     revoked.retain(|_, r: &mut Revocation| !expired(r.expiry) && r.epoch >= owner.pass_epoch);
     usage.retain(|_, u: &mut PassUsage| !expired(u.expiry));
+    let live_revoked: BTreeSet<B16> = revoked.keys().copied().collect();
     // Keeping the smallest ids absorbs redelivery: order does not matter.
     while revoked.len() > rules.revoked {
         revoked.pop_last();
@@ -440,7 +446,7 @@ pub fn merge(
         owner: &owner,
         issuer,
         owner_time: time.owner_time,
-        unpruned_revoked,
+        live_revoked,
         usage: &usage,
         revocations_full: revoked.len() >= rules.revoked,
         certs: BTreeMap::new(),
@@ -492,7 +498,10 @@ fn cap_messages(
     for (id, message, slot) in admitted {
         match slot {
             Slot::Pass { pass_id, limit } => {
-                by_pass.entry(pass_id).or_default().push((message.sent_time, id, limit));
+                by_pass
+                    .entry(pass_id)
+                    .or_default()
+                    .push((message.sent_time, id, limit));
             }
             Slot::Owner => owner_pool.push((message.sent_time, id)),
             Slot::Quarantine { ghost } => {
@@ -526,7 +535,12 @@ fn cap_messages(
         .collect();
 
     owner_pool.sort_unstable();
-    keep.extend(owner_pool.into_iter().take(rules.owner_pool).map(|(_, id)| id));
+    keep.extend(
+        owner_pool
+            .into_iter()
+            .take(rules.owner_pool)
+            .map(|(_, id)| id),
+    );
 
     quarantine.sort_unstable();
     let mut per_ghost: BTreeMap<[u8; 32], usize> = BTreeMap::new();
