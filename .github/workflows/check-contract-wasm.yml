@@ -195,6 +195,20 @@ jobs:
       - name: The inbox v2 candidate imports only the host's functions
         run: bash scripts/check-delegate-imports.sh published-contract/candidate/inbox_v2
 
+      # vectors.py, the inbox v2 byte layouts' second implementation, needs
+      # cbor2 and b3sum. Pinned, and isolated in a venv.
+      - name: Install what vectors.py needs
+        run: |
+          python3 -m venv "$RUNNER_TEMP/vectors"
+          "$RUNNER_TEMP/vectors/bin/pip" install cbor2==5.8.0
+          cargo install b3sum --version 1.8.5 --locked
+          echo "VECTORS_PYTHON=$RUNNER_TEMP/vectors/bin/python3" >> "$GITHUB_ENV"
+
+      # tests/vectors.rs holds the contract to vectors.txt, so vectors.txt must
+      # be what the second implementation writes, not a hand edit.
+      - name: The inbox v2 byte vectors are what vectors.py writes
+        run: bash scripts/check-inbox-vectors.sh
+
       # What a reader of the contract's state can see is the list in
       # docs/metadata-fields.toml: a field cannot become public without a line
       # there. The plausible mutants are wrong rules the tests must catch. Both
@@ -353,6 +367,15 @@ jobs:
             | tar -xz -C "$HOME/.cargo/bin/" fdev
           chmod +x "$HOME/.cargo/bin/fdev"
           fdev --version
+
+      # vectors.py, the inbox v2 byte layouts' second implementation, needs
+      # cbor2 and b3sum. Pinned, and isolated in a venv.
+      - name: Install what vectors.py needs
+        run: |
+          python3 -m venv "$RUNNER_TEMP/vectors"
+          "$RUNNER_TEMP/vectors/bin/pip" install cbor2==5.8.0
+          cargo install b3sum --version 1.8.5 --locked
+          echo "VECTORS_PYTHON=$RUNNER_TEMP/vectors/bin/python3" >> "$GITHUB_ENV"
 
       - name: Show each mail-delegate guard failing when broken (shard ${{ matrix.shard }}/4)
         run: bash scripts/check-guards-fail.sh --shard ${{ matrix.shard }}/4

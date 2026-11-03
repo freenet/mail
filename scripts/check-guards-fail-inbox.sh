@@ -14,6 +14,11 @@ guard "inbox v2: a non-canonical encoding is refused" "$I/src/types.rs" \
     "tests:every_other_spelling_is_refused_everywhere,a_delta_is_held_to_the_same_spelling" \
     inbox_rule_tests
 
+# ── The byte vectors come from the second implementation ───────────────────
+guard "inbox v2: a hand edit of vectors.txt fails the vectors check" \
+    "$I/tests/fixtures/vectors.txt" 'address_check 5a6a' 'address_check 5a6b' \
+    'FAIL: vectors.txt is not what vectors.py writes.' inbox_vectors_check
+
 # ── A real rule, broken ─────────────────────────────────────────────────────
 guard "inbox v2: a rule broken by one character is caught" "$I/src/merge.rs" \
     '|| message.sent_time < self.owner_time.saturating_sub(WINDOW_BACK)' \

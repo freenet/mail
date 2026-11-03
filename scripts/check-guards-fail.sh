@@ -105,6 +105,7 @@ inbox_plausible_tests() {
     cargo test --manifest-path "$STAGE/contracts/inbox-v2/Cargo.toml" \
         --features plausible-mutants --test plausible_mutants
 }
+inbox_vectors_check() { "$STAGE/scripts/check-inbox-vectors.sh"; }
 inbox_disclosure_tests() {
     cargo test --manifest-path "$STAGE/contracts/inbox-v2/Cargo.toml" --test metadata_disclosure
 }
@@ -141,6 +142,7 @@ baseline "release scrub tests" scrub_release_tests
 baseline "inbox v2 rule tests" inbox_rule_tests
 baseline "inbox v2 plausible mutants" inbox_plausible_tests
 baseline "inbox v2 disclosure gate" inbox_disclosure_tests
+baseline "inbox v2 byte vectors" inbox_vectors_check
 baseline "branch coverage check" coverage_check_tests
 baseline "mutants triage check" triage_check_tests
 baseline "verify-merge check" verify_merge_check_tests
