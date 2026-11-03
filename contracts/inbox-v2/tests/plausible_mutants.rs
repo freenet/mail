@@ -2,15 +2,15 @@
 //!
 //! `src/mutant.rs` is a test-only seam: with the `plausible-mutants` feature a
 //! call can run the real merge with one plausible mistake switched on. Every
-//! mutant here has a scenario that checks one law and returns the law it saw
-//! broken. The scenario must pass on the real rules and fail under its mutant,
-//! and it must fail for the law it names: the message is asserted, so a mutant
-//! stopped by some other check is not credited.
+//! mutant here has a scenario that checks the laws it bears on and returns each
+//! one it sees broken. On the real rules that list is empty. Under the mutant it
+//! must be exactly the list `fingerprint` gives, which names the law the mutant
+//! is for: a mutant stopped by some other check is not credited, and a seam that
+//! does something other than what its name says changes the list and fails.
 //!
 //! Run with `--features plausible-mutants` (`scripts/check-excluded-crates.sh
 //! test` does). The cargo manifest requires the feature for this file, so
-//! without it these tests are not built; `scripts/check-guards-fail.sh` keeps
-//! that from going unnoticed.
+//! without it these tests are not built; `check-drift` runs it.
 
 mod common;
 
@@ -29,7 +29,8 @@ const OPEN: QuarantineMode = QuarantineMode::Open;
 const REQUIRE: QuarantineMode = QuarantineMode::RequireGhost { min_usd: None };
 const DOLLAR5: QuarantineMode = QuarantineMode::RequireGhost { min_usd: Some(5) };
 
-type Law = Result<(), &'static str>;
+/// The laws a scenario saw broken, in the order it checks them.
+type Broken = Vec<&'static str>;
 
 fn owner(mode: QuarantineMode) -> OwnerRecord {
     world().owner(1, 3, mode, BTreeMap::new())
@@ -62,7 +63,7 @@ fn holds(state: &InboxState, message: &(B32, Message)) -> bool {
 
 /// Pass mail is filtered by a live revocation, even when expired entries have
 /// been taking up room in the set that holds it.
-fn revocations_are_pruned_before_they_are_capped() -> Law {
+fn revocations_are_pruned_before_they_are_capped() -> Broken {
     let w = world();
     let rules = Rules {
         revoked: 4,
@@ -79,14 +80,15 @@ fn revocations_are_pruned_before_they_are_capped() -> Law {
         &rules,
         vec![state(OPEN, T, revoked, vec![msg.clone()]).into()],
     );
+    let mut broken = vec![];
     if holds(&merged, &msg) {
-        return Err("a revoked pass delivered mail");
+        broken.push("a revoked pass delivered mail");
     }
-    Ok(())
+    broken
 }
 
 /// One message id holds one place, however many encodings arrive.
-fn one_id_takes_one_place() -> Law {
+fn one_id_takes_one_place() -> Broken {
     let w = world();
     let rules = Rules {
         per_pass: 2,
@@ -108,14 +110,18 @@ fn one_id_takes_one_place() -> Law {
             only_messages(vec![b.clone()]),
         ],
     );
-    if !holds(&merged, &a1) || !holds(&merged, &b) {
-        return Err("a message lost its place to a second copy of another");
+    let mut broken = vec![];
+    if !holds(&merged, &a1) {
+        broken.push("a message was lost");
     }
-    Ok(())
+    if !holds(&merged, &b) {
+        broken.push("a message lost its place to a second copy of another");
+    }
+    broken
 }
 
 /// Which of two encodings of one id is kept does not depend on arrival order.
-fn the_kept_encoding_does_not_depend_on_order() -> Law {
+fn the_kept_encoding_does_not_depend_on_order() -> Broken {
     let w = world();
     let pass = w.pass(1, 3, FAR, PassClass::Contact);
     let renewed = w.pass(1, 3, FAR + DAY, PassClass::Contact);
@@ -123,31 +129,40 @@ fn the_kept_encoding_does_not_depend_on_order() -> Law {
     let b = only_messages(vec![w.pass_msg(&renewed, ct(8192, 1), T)]);
     let forward = run(&Rules::V1, vec![a.clone().into(), b.clone()]);
     let backward = run(&Rules::V1, vec![b, a.into()]);
+    let mut broken = vec![];
     if forward != backward {
-        return Err("merge is not commutative");
+        broken.push("merge is not commutative");
     }
-    Ok(())
+    broken
 }
 
 /// Peers holding two encodings of one id can tell, so they converge.
-fn a_summary_tells_two_encodings_apart() -> Law {
+fn a_summary_tells_two_encodings_apart() -> Broken {
     let w = world();
     let pass = w.pass(1, 3, FAR, PassClass::Contact);
     let renewed = w.pass(1, 3, FAR + DAY, PassClass::Contact);
     let mine = state(OPEN, T, vec![], vec![w.pass_msg(&pass, ct(8192, 1), T)]);
     let theirs = state(OPEN, T, vec![], vec![w.pass_msg(&renewed, ct(8192, 1), T)]);
+    let mut broken = vec![];
     if sync::delta(&theirs, &sync::summarize(&mine))
         .unwrap()
         .is_empty()
     {
-        return Err("a peer with another encoding is sent nothing");
+        broken.push("a peer with another encoding is sent nothing");
     }
-    Ok(())
+    // The control: a peer with the same encoding is sent nothing.
+    if !sync::delta(&mine, &sync::summarize(&mine))
+        .unwrap()
+        .is_empty()
+    {
+        broken.push("a peer with the same state is sent something");
+    }
+    broken
 }
 
 /// Quarantine keeps what the salted rank keeps: a sender cannot pick its
 /// place by choosing `sent_time`.
-fn quarantine_is_ranked_by_the_salted_rank() -> Law {
+fn quarantine_is_ranked_by_the_salted_rank() -> Broken {
     let w = world();
     let msgs: Vec<_> = (0..40)
         .map(|i| w.quarantine_msg(ct(8192, i), T + i * HOUR, None))
@@ -168,19 +183,17 @@ fn quarantine_is_ranked_by_the_salted_rank() -> Law {
         .collect();
     order.sort();
     order.truncate(16);
-    let want: Vec<B32> = {
-        let mut ids: Vec<_> = order.into_iter().map(|(_, id)| id).collect();
-        ids.sort();
-        ids
-    };
+    let mut want: Vec<B32> = order.into_iter().map(|(_, id)| id).collect();
+    want.sort();
+    let mut broken = vec![];
     if merged.messages.keys().copied().collect::<Vec<_>>() != want {
-        return Err("quarantine did not keep the salted rank's sixteen");
+        broken.push("quarantine did not keep the salted rank's sixteen");
     }
-    Ok(())
+    broken
 }
 
 /// Pruning reads the joined time, so the order of the parts changes nothing.
-fn pruning_reads_the_merged_time() -> Law {
+fn pruning_reads_the_merged_time() -> Broken {
     let w = world();
     let r = w.revocation(id_of(9), T - WINDOW_BACK + 1, 3);
     let old = state(OPEN, T, vec![r], vec![]);
@@ -190,15 +203,20 @@ fn pruning_reads_the_merged_time() -> Law {
     };
     let forward = run(&Rules::V1, vec![old.clone().into(), later.clone()]);
     let backward = run(&Rules::V1, vec![later, old.into()]);
+    let mut broken = vec![];
     if forward != backward {
-        return Err("merge is not commutative");
+        broken.push("merge is not commutative");
     }
-    Ok(())
+    if !forward.revoked.is_empty() {
+        broken.push("a revocation survived the joined time");
+    }
+    broken
 }
 
 /// A forged certificate does not ride on a genuine one with the same pass id,
-/// and a genuine one does not fall with a forged one.
-fn a_certificate_is_judged_whole() -> Law {
+/// and a genuine one does not fall with a forged one. The ids are chosen so the
+/// genuine message is judged first.
+fn a_certificate_is_judged_whole() -> Broken {
     let w = world();
     let pass = w.pass(1, 3, FAR, PassClass::Contact);
     let forger = ed25519_dalek::SigningKey::from_bytes(&[0x77; 32]);
@@ -207,22 +225,26 @@ fn a_certificate_is_judged_whole() -> Law {
     fake.cert.sig = sign64(&forger, &cert_bytes(&fake.cert));
     fake.sk = forger;
     let genuine = w.pass_msg(&pass, ct(8192, 1), T);
-    let forged = w.pass_msg(&fake, ct(8192, 2), T);
+    let forged = (2..)
+        .map(|tag| w.pass_msg(&fake, ct(8192, tag), T))
+        .find(|forged| forged.0 > genuine.0)
+        .unwrap();
     let merged = run(
         &Rules::V1,
         vec![state(OPEN, T, vec![], vec![genuine.clone(), forged.clone()]).into()],
     );
+    let mut broken = vec![];
     if holds(&merged, &forged) {
-        return Err("a forged certificate was admitted");
+        broken.push("a forged certificate was admitted");
     }
     if !holds(&merged, &genuine) {
-        return Err("a genuine certificate was refused");
+        broken.push("a genuine certificate was refused");
     }
-    Ok(())
+    broken
 }
 
 /// A pass's places are counted over everything merged, not per delta.
-fn a_pass_is_ranked_over_the_union() -> Law {
+fn a_pass_is_ranked_over_the_union() -> Broken {
     let w = world();
     let rules = Rules {
         pass_pool: 2,
@@ -240,14 +262,15 @@ fn a_pass_is_ranked_over_the_union() -> Law {
         ],
     );
     let whole = run(&rules, vec![state(OPEN, T, vec![], msgs).into()]);
+    let mut broken = vec![];
     if split != whole {
-        return Err("the result depends on how the input was split");
+        broken.push("the result depends on how the input was split");
     }
-    Ok(())
+    broken
 }
 
 /// Room in the revocation set is what is left after pruning, not what was sent.
-fn overflow_reads_what_is_kept() -> Law {
+fn overflow_reads_what_is_kept() -> Broken {
     let w = world();
     let rules = Rules {
         revoked: 4,
@@ -263,10 +286,11 @@ fn overflow_reads_what_is_kept() -> Law {
         &rules,
         vec![state(OPEN, T, revoked, vec![msg.clone()]).into()],
     );
+    let mut broken = vec![];
     if !holds(&merged, &msg) {
-        return Err("a set with room refused pass mail");
+        broken.push("a set with room refused pass mail");
     }
-    Ok(())
+    broken
 }
 
 fn require(messages: Vec<(B32, Message)>, mode: QuarantineMode) -> InboxState {
@@ -274,7 +298,7 @@ fn require(messages: Vec<(B32, Message)>, mode: QuarantineMode) -> InboxState {
 }
 
 /// A proof signs the layout of decision 1 and nothing else.
-fn a_proof_signs_the_layout() -> Law {
+fn a_proof_signs_the_layout() -> Broken {
     let w = world();
     let good = w.quarantine_msg(ct(8192, 1), T, Some(0));
     let bytes = ct(8192, 2);
@@ -282,46 +306,54 @@ fn a_proof_signs_the_layout() -> Law {
     let bare = w.proof_over(0, hash.to_vec(), WEBAPP_REQUESTOR);
     let bare = w.keyed(bytes, T, Admission::Quarantine { ghost: Some(bare) });
     let merged = require(vec![good.clone(), bare.clone()], REQUIRE);
-    if !holds(&merged, &good) {
-        return Err("a proof over the layout was refused");
-    }
+    let mut broken = vec![];
     if holds(&merged, &bare) {
-        return Err("a proof over the ciphertext digest alone was admitted");
+        broken.push("a proof over the ciphertext digest alone was admitted");
     }
-    Ok(())
+    if !holds(&merged, &good) {
+        broken.push("a proof over the layout was refused");
+    }
+    broken
 }
 
 /// A proof is only taken from the webapp.
-fn a_proof_must_come_from_the_webapp() -> Law {
+fn a_proof_must_come_from_the_webapp() -> Broken {
     let w = world();
     let bytes = ct(8192, 1);
     let hash = *blake3::hash(&bytes).as_bytes();
     let payload = ghost_admit_bytes(&w.params.addr, T, &hash);
     let other = w.proof_over(0, payload, [7; 32]);
     let msg = w.keyed(bytes, T, Admission::Quarantine { ghost: Some(other) });
-    if holds(&require(vec![msg.clone()], REQUIRE), &msg) {
-        return Err("a proof for another requestor was admitted");
+    let good = w.quarantine_msg(ct(8192, 2), T, Some(0));
+    let merged = require(vec![msg.clone(), good.clone()], REQUIRE);
+    let mut broken = vec![];
+    if holds(&merged, &msg) {
+        broken.push("a proof for another requestor was admitted");
     }
-    Ok(())
+    if !holds(&merged, &good) {
+        broken.push("a proof from the webapp was refused");
+    }
+    broken
 }
 
 /// A Ghost Key under the inbox's tier is refused.
-fn the_tier_is_checked() -> Law {
+fn the_tier_is_checked() -> Broken {
     let w = world();
     let low = w.quarantine_msg(ct(8192, 1), T, Some(3));
     let ok = w.quarantine_msg(ct(8192, 2), T, Some(4));
     let merged = require(vec![low.clone(), ok.clone()], DOLLAR5);
-    if !holds(&merged, &ok) {
-        return Err("a proof at the tier was refused");
-    }
+    let mut broken = vec![];
     if holds(&merged, &low) {
-        return Err("a proof under the tier was admitted");
+        broken.push("a proof under the tier was admitted");
     }
-    Ok(())
+    if !holds(&merged, &ok) {
+        broken.push("a proof at the tier was refused");
+    }
+    broken
 }
 
 /// One ghost key holds two quarantine places however its mail arrives.
-fn a_ghost_is_capped_over_the_union() -> Law {
+fn a_ghost_is_capped_over_the_union() -> Broken {
     let w = world();
     let msgs: Vec<_> = (0..4)
         .map(|i| w.quarantine_msg(ct(8192, i), T, Some(0)))
@@ -333,18 +365,23 @@ fn a_ghost_is_capped_over_the_union() -> Law {
             only_messages(msgs[2..].to_vec()),
         ],
     );
-    if merged.messages.len() != Rules::V1.per_ghost {
-        return Err("a ghost key holds more than its cap");
+    let mut broken = vec![];
+    if merged.messages.len() > Rules::V1.per_ghost {
+        broken.push("a ghost key holds more than its cap");
     }
-    Ok(())
+    if merged.messages.len() < Rules::V1.per_ghost {
+        broken.push("a ghost key holds less than its cap");
+    }
+    broken
 }
 
 /// A revocation that pruning removed does not filter (decision 10): it can be
 /// redelivered forever, and so could the mail it dropped.
-fn only_the_revocations_left_after_pruning_filter() -> Law {
+fn only_the_revocations_left_after_pruning_filter() -> Broken {
     let w = world();
     let pass = w.pass(1, 3, FAR, PassClass::Contact);
     let msg = w.pass_msg(&pass, ct(8192, 1), T);
+    let mut broken = vec![];
     for dead in [
         w.revocation(pass.cert.pass_id, T - WINDOW_BACK, 3),
         w.revocation(pass.cert.pass_id, FAR, 2),
@@ -354,13 +391,22 @@ fn only_the_revocations_left_after_pruning_filter() -> Law {
             vec![state(OPEN, T, vec![dead], vec![msg.clone()]).into()],
         );
         if !holds(&merged, &msg) {
-            return Err("a pruned revocation dropped a message");
+            broken.push("a pruned revocation dropped a message");
         }
     }
-    Ok(())
+    // The control: a live one still filters.
+    let live = w.revocation(pass.cert.pass_id, FAR, 3);
+    let merged = run(
+        &Rules::V1,
+        vec![state(OPEN, T, vec![live], vec![msg.clone()]).into()],
+    );
+    if holds(&merged, &msg) {
+        broken.push("a live revocation did not filter");
+    }
+    broken
 }
 
-fn scenario(m: Mutant) -> fn() -> Law {
+fn scenario(m: Mutant) -> fn() -> Broken {
     match m {
         Mutant::CapBeforeCleanup => revocations_are_pruned_before_they_are_capped,
         Mutant::NoOnePerId => one_id_takes_one_place,
@@ -379,44 +425,43 @@ fn scenario(m: Mutant) -> fn() -> Law {
     }
 }
 
-fn law_broken(m: Mutant) -> [&'static str; 2] {
-    let one = |law| [law, law];
+/// Exactly what each mutant breaks. The first entry is the law the mutant is
+/// for; any others are what it does to the control checks beside it.
+fn fingerprint(m: Mutant) -> &'static [&'static str] {
     match m {
-        Mutant::CapBeforeCleanup => one("a revoked pass delivered mail"),
-        Mutant::NoOnePerId => one("a message lost its place to a second copy of another"),
-        Mutant::FirstAdmitted | Mutant::PruneUnmergedTime => one("merge is not commutative"),
-        Mutant::DigestDropped => one("a peer with another encoding is sent nothing"),
-        Mutant::QuarantineBySentTime => one("quarantine did not keep the salted rank's sixteen"),
-        // Whichever copy is judged first decides the other.
-        Mutant::CertMemoByPassId => [
-            "a forged certificate was admitted",
-            "a genuine certificate was refused",
+        Mutant::CapBeforeCleanup => &["a revoked pass delivered mail"],
+        Mutant::NoOnePerId => &["a message lost its place to a second copy of another"],
+        Mutant::FirstAdmitted => &["merge is not commutative"],
+        Mutant::DigestDropped => &["a peer with another encoding is sent nothing"],
+        Mutant::QuarantineBySentTime => &["quarantine did not keep the salted rank's sixteen"],
+        Mutant::PruneUnmergedTime => &[
+            "merge is not commutative",
+            "a revocation survived the joined time",
         ],
-        Mutant::PassRankPerDelta => one("the result depends on how the input was split"),
-        Mutant::OverflowReadsUnion => one("a set with room refused pass mail"),
-        Mutant::GhostPayloadIsCtHash => [
-            "a proof over the layout was refused",
+        Mutant::CertMemoByPassId => &["a forged certificate was admitted"],
+        Mutant::PassRankPerDelta => &["the result depends on how the input was split"],
+        Mutant::OverflowReadsUnion => &["a set with room refused pass mail"],
+        Mutant::GhostPayloadIsCtHash => &[
             "a proof over the ciphertext digest alone was admitted",
+            "a proof over the layout was refused",
         ],
-        Mutant::RequestorPinSkipped => one("a proof for another requestor was admitted"),
-        Mutant::TierCheckSkipped => one("a proof under the tier was admitted"),
-        Mutant::GhostCapPerDelta => one("a ghost key holds more than its cap"),
-        Mutant::FilterUnprunedRevocations => one("a pruned revocation dropped a message"),
+        Mutant::RequestorPinSkipped => &["a proof for another requestor was admitted"],
+        Mutant::TierCheckSkipped => &["a proof under the tier was admitted"],
+        Mutant::GhostCapPerDelta => &["a ghost key holds more than its cap"],
+        Mutant::FilterUnprunedRevocations => &["a pruned revocation dropped a message"; 2],
     }
 }
 
 fn caught(m: Mutant) {
     let real = scenario(m);
-    assert_eq!(real(), Ok(()), "{m:?}: the real rules must keep the law");
+    assert_eq!(
+        real(),
+        Broken::new(),
+        "{m:?}: the real rules must keep every law"
+    );
     let seen = with(m, real);
-    let want = law_broken(m);
-    match seen {
-        Ok(()) => panic!("{m:?} was not caught"),
-        Err(law) => {
-            println!("{m:?} breaks: {law}");
-            assert!(want.contains(&law), "{m:?}: broke `{law}`, not {want:?}");
-        }
-    }
+    println!("{m:?} breaks: {seen:?}");
+    assert_eq!(seen, fingerprint(m), "{m:?}");
 }
 
 macro_rules! mutant_tests {

@@ -10,7 +10,11 @@
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 
-use crate::types::B32;
+use freenet_stdlib::prelude::ContractInstanceId;
+
+use crate::merge::WEBAPP_REQUESTOR;
+use crate::signed::ghost_admit_bytes;
+use crate::types::{B16, B32, Revocation};
 
 /// One plausible mistake in the rules.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -91,4 +95,92 @@ pub fn note(id: &B32) {
 /// The part `id` first arrived in.
 pub fn origin(id: &B32) -> usize {
     ORIGIN.with(|o| o.borrow().get(id).copied().unwrap_or(0))
+}
+
+// What each mutant does when it is on. The rules call these at one-line sites,
+// so the mutated logic is here and the rules keep nothing but the calls.
+
+/// `TierCheckSkipped`.
+pub fn tier_met(real: bool) -> bool {
+    real || on(Mutant::TierCheckSkipped)
+}
+
+/// The payload of a proof, as the rule reads it (`scoped.payload`).
+pub struct Payload {
+    pub payload: Vec<u8>,
+}
+
+/// `RequestorPinSkipped` and `GhostPayloadIsCtHash`: the inputs to hand the real
+/// rule so that it reaches the mutant's verdict. With the pin skipped the
+/// requestor is the webapp whoever it was. With the payload read as the
+/// ciphertext digest, the rule sees the layout exactly when the proof signed the
+/// digest, and sees nothing when it signed the layout.
+pub fn proof_inputs(
+    requestor: ContractInstanceId,
+    payload: Vec<u8>,
+    addr: &[u8; 24],
+    sent_time: u64,
+    ct_hash: &[u8; 32],
+) -> (ContractInstanceId, Payload) {
+    let requestor = if on(Mutant::RequestorPinSkipped) {
+        ContractInstanceId::new(WEBAPP_REQUESTOR)
+    } else {
+        requestor
+    };
+    let payload = if on(Mutant::GhostPayloadIsCtHash) {
+        if payload == ct_hash {
+            ghost_admit_bytes(addr, sent_time, ct_hash)
+        } else {
+            Vec::new()
+        }
+    } else {
+        payload
+    };
+    (requestor, Payload { payload })
+}
+
+/// `CapBeforeCleanup`: the cap, applied before expired entries are pruned.
+pub fn cap_early(revoked: &mut BTreeMap<B16, Revocation>, cap: usize) {
+    if on(Mutant::CapBeforeCleanup) {
+        while revoked.len() > cap {
+            revoked.pop_last();
+        }
+    }
+}
+
+/// `OverflowReadsUnion`: whether the revocation set is full.
+pub fn overflow(real: bool, union_len: usize, cap: usize) -> bool {
+    if on(Mutant::OverflowReadsUnion) {
+        union_len >= cap
+    } else {
+        real
+    }
+}
+
+/// `PassRankPerDelta`: the key a pass's messages are ranked under.
+pub fn pass_key(pass_id: B16, id: &B32) -> B16 {
+    if !on(Mutant::PassRankPerDelta) {
+        return pass_id;
+    }
+    let mut raw = *pass_id;
+    raw[0] = origin(id) as u8 + 1;
+    B16::new(raw)
+}
+
+/// `QuarantineBySentTime`: what quarantine messages are ordered by.
+pub fn quarantine_rank(rank: [u8; 32], sent_time: u64) -> [u8; 32] {
+    if !on(Mutant::QuarantineBySentTime) {
+        return rank;
+    }
+    let mut by_time = [0u8; 32];
+    by_time[..8].copy_from_slice(&sent_time.to_be_bytes());
+    by_time
+}
+
+/// `GhostCapPerDelta`: the key a ghost's messages are counted under.
+pub fn ghost_key(mut key: [u8; 32], id: &B32) -> [u8; 32] {
+    if on(Mutant::GhostCapPerDelta) {
+        key[0] = key[0].wrapping_add(origin(id) as u8 + 1);
+    }
+    key
 }

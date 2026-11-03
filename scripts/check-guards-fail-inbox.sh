@@ -22,8 +22,8 @@ guard "inbox v2: a rule broken by one character is caught" "$I/src/merge.rs" \
 
 # ── The plausible mutants ───────────────────────────────────────────────────
 guard "inbox v2: a plausible mutant that is not switched on is not credited" "$I/src/merge.rs" \
-    '        let tier_met = tier_met || mutant::on(Mutant::TierCheckSkipped);' \
-    '        let tier_met = tier_met || false;' \
+    '        let tier_met = mutant::tier_met(tier_met);' \
+    '        let tier_met = tier_met;' \
     "tests:tier_check_skipped" inbox_plausible_tests
 guard "inbox v2: the real rules are held to a plausible mutant's law" "$I/src/merge.rs" \
     '        let tier_met = ghost.usd >= u64::from(min_usd.unwrap_or(0));' \

@@ -327,7 +327,7 @@ impl Filter<'_> {
         let ghost = self.verify_proof(proof, sent_time, ct_hash)?;
         let tier_met = ghost.usd >= u64::from(min_usd.unwrap_or(0));
         #[cfg(feature = "plausible-mutants")]
-        let tier_met = tier_met || mutant::on(Mutant::TierCheckSkipped);
+        let tier_met = mutant::tier_met(tier_met);
         tier_met.then_some(Slot::Quarantine {
             ghost: Some(ghost.key),
         })
@@ -343,24 +343,16 @@ impl Filter<'_> {
         let Requestor::WebApp(requestor) = scoped.requestor else {
             return None;
         };
+        // The two mutants of this check hand it other inputs, so the rule below
+        // is the one that runs.
         #[cfg(feature = "plausible-mutants")]
-        if mutant::on(Mutant::RequestorPinSkipped) || mutant::on(Mutant::GhostPayloadIsCtHash) {
-            let want = if mutant::on(Mutant::GhostPayloadIsCtHash) {
-                ct_hash.to_vec()
-            } else {
-                ghost_admit_bytes(&self.params.addr, sent_time, ct_hash)
-            };
-            let pinned = mutant::on(Mutant::RequestorPinSkipped)
-                || *requestor.as_bytes() == WEBAPP_REQUESTOR;
-            if !pinned || scoped.payload != want {
-                return None;
-            }
-        } else if *requestor.as_bytes() != WEBAPP_REQUESTOR
-            || scoped.payload != ghost_admit_bytes(&self.params.addr, sent_time, ct_hash)
-        {
-            return None;
-        }
-        #[cfg(not(feature = "plausible-mutants"))]
+        let (requestor, scoped) = mutant::proof_inputs(
+            requestor,
+            scoped.payload,
+            &self.params.addr,
+            sent_time,
+            ct_hash,
+        );
         if *requestor.as_bytes() != WEBAPP_REQUESTOR
             || scoped.payload != ghost_admit_bytes(&self.params.addr, sent_time, ct_hash)
         {
@@ -484,11 +476,7 @@ pub fn merge(
     #[cfg(feature = "plausible-mutants")]
     let unpruned: BTreeSet<B16> = revoked.keys().copied().collect();
     #[cfg(feature = "plausible-mutants")]
-    if mutant::on(Mutant::CapBeforeCleanup) {
-        while revoked.len() > rules.revoked {
-            revoked.pop_last();
-        }
-    }
+    mutant::cap_early(&mut revoked, rules.revoked);
     revoked.retain(|_, r: &mut Revocation| !expired(r.expiry) && r.epoch >= owner.pass_epoch);
     usage.retain(|_, u: &mut PassUsage| !expired(u.expiry));
     let live_revoked: BTreeSet<B16> = revoked.keys().copied().collect();
@@ -509,11 +497,7 @@ pub fn merge(
     // Step 5.
     let revocations_full = revoked.len() >= rules.revoked;
     #[cfg(feature = "plausible-mutants")]
-    let revocations_full = if mutant::on(Mutant::OverflowReadsUnion) {
-        union_len >= rules.revoked
-    } else {
-        revocations_full
-    };
+    let revocations_full = mutant::overflow(revocations_full, union_len, rules.revoked);
     let mut filter = Filter {
         rules,
         params,
@@ -585,13 +569,7 @@ fn cap_messages(
         match slot {
             Slot::Pass { pass_id, limit } => {
                 #[cfg(feature = "plausible-mutants")]
-                let pass_id = if mutant::on(Mutant::PassRankPerDelta) {
-                    let mut raw = *pass_id;
-                    raw[0] = mutant::origin(&id) as u8 + 1;
-                    B16::new(raw)
-                } else {
-                    pass_id
-                };
+                let pass_id = mutant::pass_key(pass_id, &id);
                 by_pass
                     .entry(pass_id)
                     .or_default()
@@ -604,20 +582,9 @@ fn cap_messages(
                 ranked.update(id.as_slice());
                 let rank = *ranked.finalize().as_bytes();
                 #[cfg(feature = "plausible-mutants")]
-                let rank = if mutant::on(Mutant::QuarantineBySentTime) {
-                    let mut by_time = [0u8; 32];
-                    by_time[..8].copy_from_slice(&message.sent_time.to_be_bytes());
-                    by_time
-                } else {
-                    rank
-                };
+                let rank = mutant::quarantine_rank(rank, message.sent_time);
                 #[cfg(feature = "plausible-mutants")]
-                let ghost = ghost.map(|mut key| {
-                    if mutant::on(Mutant::GhostCapPerDelta) {
-                        key[0] = key[0].wrapping_add(mutant::origin(&id) as u8 + 1);
-                    }
-                    key
-                });
+                let ghost = ghost.map(|key| mutant::ghost_key(key, &id));
                 quarantine.push((rank, id, ghost));
             }
         }
