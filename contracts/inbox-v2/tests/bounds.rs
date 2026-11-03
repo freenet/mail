@@ -198,6 +198,9 @@ fn one_call(parts: [InboxDelta; 2]) -> Result<Vec<u8>, freenet_stdlib::prelude::
     apply(&Rules::V1, &w.params, &base(), vec![data])
 }
 
+/// Fills a part with the entries numbered `from..to`.
+type Fill = dyn Fn(&mut InboxDelta, u64, u64);
+
 /// Decision 16: the bounds hold for the whole call, summed over every part the
 /// caller sent, so two parts at their bounds cannot double what one call costs.
 /// The state the contract already holds is not counted: it is valid, so it is
@@ -205,7 +208,7 @@ fn one_call(parts: [InboxDelta; 2]) -> Result<Vec<u8>, freenet_stdlib::prelude::
 #[test]
 fn the_bounds_hold_over_the_whole_call() {
     let w = world();
-    let pair = |n: usize, cut: usize, put: &dyn Fn(&mut InboxDelta, u64, u64)| {
+    let pair = |n: usize, cut: usize, put: &Fill| {
         let mut parts = [InboxDelta::default(), InboxDelta::default()];
         put(&mut parts[0], 0, cut as u64);
         put(&mut parts[1], cut as u64, n as u64);
@@ -225,7 +228,7 @@ fn the_bounds_hold_over_the_whole_call() {
         let held = all.into_iter().skip(from as usize).collect();
         d.owner = Some(w.owner(2 + from, 3, QuarantineMode::Open, held));
     };
-    let cases: [(&str, usize, &dyn Fn(&mut InboxDelta, u64, u64)); 4] = [
+    let cases: [(&str, usize, &Fill); 4] = [
         ("messages", MAX_MESSAGES, &msgs),
         ("revocations", MAX_REVOKED, &revs),
         ("usage entries", MAX_USAGE, &uses),

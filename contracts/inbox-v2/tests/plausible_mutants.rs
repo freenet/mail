@@ -455,6 +455,35 @@ fn a_dead_entry_never_wins_a_join() -> Broken {
     broken
 }
 
+/// The previous epoch's grace is the joined owner's (decision 18): a newer
+/// record that ends it early ends it whatever order the parts arrive in.
+fn the_grace_is_the_joined_owners() -> Broken {
+    let w = world();
+    let routine = w.owner_grace(1, 4, T + 14 * DAY, OPEN, BTreeMap::new());
+    let ended = w.owner_grace(2, 4, 0, OPEN, BTreeMap::new());
+    let old = w.pass(1, 3, FAR, PassClass::Contact);
+    let msg = w.pass_msg(&old, ct(8192, 1), T);
+    let held: InboxDelta = w.raw(routine, w.time(T), [], [], [msg.clone()]).into();
+    let newer = InboxDelta {
+        owner: Some(ended),
+        ..InboxDelta::default()
+    };
+    let mut broken = vec![];
+    // The control: in its grace, the old epoch's pass is admitted.
+    if !holds(&run(&Rules::V1, vec![held.clone()]), &msg) {
+        broken.push("a pass in its epoch's grace was refused");
+    }
+    let forward = run(&Rules::V1, vec![held.clone(), newer.clone()]);
+    let backward = run(&Rules::V1, vec![newer, held]);
+    if forward != backward {
+        broken.push("merge is not commutative");
+    }
+    if holds(&forward, &msg) || holds(&backward, &msg) {
+        broken.push("an old epoch's pass delivered mail after its grace ended");
+    }
+    broken
+}
+
 fn scenario(m: Mutant) -> fn() -> Broken {
     match m {
         Mutant::CapBeforeCleanup => revocations_are_pruned_before_they_are_capped,
@@ -472,6 +501,7 @@ fn scenario(m: Mutant) -> fn() -> Broken {
         Mutant::GhostCapPerDelta => a_ghost_is_capped_over_the_union,
         Mutant::FilterUnprunedRevocations => only_the_revocations_left_after_pruning_filter,
         Mutant::JoinBeforePrune => a_dead_entry_never_wins_a_join,
+        Mutant::GraceFromUnjoinedOwner => the_grace_is_the_joined_owners,
     }
 }
 
@@ -502,6 +532,10 @@ fn fingerprint(m: Mutant) -> &'static [&'static str] {
         Mutant::JoinBeforePrune => &[
             "a dead usage entry took the live one with it",
             "a dead revocation took the live one with it",
+        ],
+        Mutant::GraceFromUnjoinedOwner => &[
+            "merge is not commutative",
+            "an old epoch's pass delivered mail after its grace ended",
         ],
     }
 }
@@ -540,4 +574,5 @@ mutant_tests! {
     ghost_cap_computed_per_delta => GhostCapPerDelta,
     filtering_against_the_unpruned_revocations => FilterUnprunedRevocations,
     joining_before_pruning => JoinBeforePrune,
+    grace_read_from_an_unjoined_owner => GraceFromUnjoinedOwner,
 }

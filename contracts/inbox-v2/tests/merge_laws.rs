@@ -125,6 +125,7 @@ fn universe_at(seed: u64, rng: &mut Rng, big: bool, t0: u64) -> Universe {
     let w = world();
     let epoch = 3;
     let far = t0 + 300 * DAY;
+    let invite_gone = t0 + 30 * DAY + WINDOW_BACK;
     // Keys differ per seed so states of different seeds never look alike.
     let key = |i: u64| seed.wrapping_mul(1_000_003).wrapping_add(i);
     let mut tag = 0u64;
@@ -151,6 +152,17 @@ fn universe_at(seed: u64, rng: &mut Rng, big: bool, t0: u64) -> Universe {
     passes.push(w.pass(key(60), epoch + 1, far, PassClass::Contact));
     passes.push(w.pass(key(61), epoch, t0 - 3 * DAY, PassClass::Contact));
     passes.push(w.pass(key(62), epoch, t0 + DAY, PassClass::Contact));
+    // The previous epoch's: admitted only in a grace (decision 18).
+    let old_epoch = passes.len();
+    passes.push(w.pass(key(63), epoch - 1, far, PassClass::Contact));
+    passes.push(w.pass(
+        key(64),
+        epoch - 1,
+        t0 + 30 * DAY,
+        PassClass::Invite { max_messages: 3 },
+    ));
+    // An expiry off the day, which is never admitted (decision 17).
+    passes.push(w.pass(key(65), epoch, far + HOUR, PassClass::Contact));
     let renewed = w.pass(key(0), epoch, far + 100 * DAY, PassClass::Contact);
     // The same pass id certified again in the next epoch: one message id, two
     // encodings, and which one is live depends on the joined owner.
@@ -238,6 +250,17 @@ fn universe_at(seed: u64, rng: &mut Rng, big: bool, t0: u64) -> Universe {
     }
     revoked.push(w.revocation(next_epoch.cert.pass_id, far + 100 * DAY, epoch));
     revoked.push(w.revocation(next_epoch.cert.pass_id, far, epoch + 1));
+    // The previous epoch's passes, revoked in their own epoch or crossing the
+    // bump: which entry is live depends on the joined owner's grace.
+    for pass in rng.subset(&passes[old_epoch..old_epoch + 2], 60) {
+        let (id, expiry) = (pass.cert.pass_id, pass.cert.expiry);
+        revoked.push(w.revocation(id, expiry, epoch - 1));
+        if rng.chance(50) {
+            revoked.push(w.revocation(id, expiry + 100 * DAY, epoch - 2));
+        }
+    }
+    // Off the day: dropped wherever they land.
+    revoked.push(w.revocation(passes[2].cert.pass_id, far + 1, epoch));
     // Fillers: enough to go over TINY's cap, some soon prunable, some not, and
     // ids on both sides of the real ones.
     for i in 0..9 {
@@ -266,11 +289,11 @@ fn universe_at(seed: u64, rng: &mut Rng, big: bool, t0: u64) -> Universe {
         usage.push(at(2, pass.cert.expiry + 100 * DAY));
     }
     usage.push(w.usage(id_of(key(77)), 1, t0 - 10 * DAY));
+    usage.push(w.usage(passes[old_epoch + 1].cert.pass_id, 2, t0 + 30 * DAY + HOUR));
 
     // Near times, drawn twice as often, and times past every expiry and at
     // each window edge: an invite's expiry plus the window, either side of it,
     // then past the contact passes and past the renewed one.
-    let invite_gone = t0 + 30 * DAY + WINDOW_BACK;
     let near = [0, HOUR, DAY, 3 * DAY, 5 * DAY].map(|d| t0 + d);
     let late = [
         invite_gone - HOUR,
@@ -293,16 +316,29 @@ fn universe_at(seed: u64, rng: &mut Rng, big: bool, t0: u64) -> Universe {
     // Tombstones: a drained set that grows with the version, so a tombstone
     // can arrive before or after its message, and that the last version drops.
     let drained = rng.subset(&ids, 8);
+    // Where a grace ends: none, between the near times, on one of them, past
+    // them, after a routine bump's 14 days, and past every expiry.
+    let graces = [
+        0,
+        0,
+        t0 + 2 * HOUR,
+        t0 + DAY,
+        t0 + 4 * DAY,
+        t0 + 14 * DAY,
+        invite_gone + HOUR,
+        far + 100 * DAY,
+    ];
     let mut owners = Vec::new();
     for version in 1..=5 {
-        let e = if rng.chance(25) { epoch + 1 } else { epoch };
+        let e = if rng.chance(40) { epoch + 1 } else { epoch };
+        let grace = *rng.pick(&graces);
         let mut tomb: BTreeMap<B32, u64> =
             rng.subset(&ids, 5).into_iter().map(|id| (id, t0)).collect();
         if version < 5 {
             let upto = drained.len() * version as usize / 4;
             tomb.extend(drained.iter().take(upto).map(|id| (*id, t0)));
         }
-        owners.push(w.owner(version, e, modes(rng), tomb));
+        owners.push(w.owner_grace(version, e, grace, modes(rng), tomb));
     }
     // A version tie: the digest decides.
     owners.push(w.owner(3, epoch, modes(rng), BTreeMap::new()));
@@ -350,6 +386,11 @@ struct Tally {
     /// Peer states holding exactly V1's revocation cap.
     at_cap: u64,
     triples: u64,
+    /// Peer states whose owner bumped with a grace, before and after its end,
+    /// and messages held under a pass of the previous epoch.
+    in_grace: u64,
+    grace_over: u64,
+    grace_held: u64,
     strict: u64,
     healed: u64,
     held: u64,
@@ -476,6 +517,21 @@ impl Laws<'_> {
             return Err(format!("{}: delta path differs from the merge", self.label));
         }
         tally.held += decoded_a.messages.len() as u64;
+        let owner = &decoded_a.owner;
+        if owner.prev_epoch_until > 0 {
+            if decoded_a.time.owner_time < owner.prev_epoch_until {
+                tally.in_grace += 1;
+            } else {
+                tally.grace_over += 1;
+            }
+        }
+        tally.grace_held += decoded_a
+            .messages
+            .values()
+            .filter(|m| {
+                matches!(&m.admission, Admission::Pass { cert, .. } if cert.epoch < owner.pass_epoch)
+            })
+            .count() as u64;
         Ok(())
     }
 
@@ -593,6 +649,9 @@ fn the_merge_laws_hold_over_crafted_states() {
         total.healed += tally.healed;
         total.held += tally.held;
         total.at_cap += tally.at_cap;
+        total.in_grace += tally.in_grace;
+        total.grace_over += tally.grace_over;
+        total.grace_held += tally.grace_held;
         if let Err(e) = result {
             failures.push(e);
         }
@@ -605,6 +664,10 @@ fn the_merge_laws_hold_over_crafted_states() {
         total.healed,
         total.held,
         total.at_cap
+    );
+    println!(
+        "grace (decision 18): {} states in one, {} past its end, {} messages held under the previous epoch",
+        total.in_grace, total.grace_over, total.grace_held
     );
     assert!(
         failures.is_empty(),
@@ -619,6 +682,12 @@ fn the_merge_laws_hold_over_crafted_states() {
         "both branches of the law ran"
     );
     assert!(total.held > total.triples, "states held messages");
+    if seeds.len() >= 8 {
+        assert!(
+            total.in_grace > 0 && total.grace_over > 0 && total.grace_held > 0,
+            "the grace ran on both sides of its end and admitted mail"
+        );
+    }
 }
 
 /// A pass reissued in a new epoch under an id revoked in the old one, with the

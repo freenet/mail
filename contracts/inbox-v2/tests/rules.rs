@@ -206,6 +206,128 @@ fn a_pass_of_another_epoch_is_refused_either_way() {
     );
 }
 
+/// Decision 18: while `owner_time < prev_epoch_until`, passes of the epoch
+/// before `pass_epoch` are admitted too. Not two epochs back, not a later one,
+/// and not once the grace has ended or when there is none.
+#[test]
+fn the_previous_epoch_is_admitted_until_its_grace_ends() {
+    let w = world();
+    let grace = T + 14 * DAY;
+    let msgs: Vec<_> = (2..=5)
+        // Sent a day before the grace ends, so inside the window at every time below.
+        .map(|e| {
+            w.pass_msg(
+                &w.pass(e, e as u32, FAR, PassClass::Contact),
+                ct(8192, e),
+                grace - DAY,
+            )
+        })
+        .collect();
+    let bumped = |until| w.owner_grace(2, 4, until, OPEN, BTreeMap::new());
+    assert_eq!(
+        kept(bumped(grace), T, vec![], vec![], msgs.clone()),
+        [false, true, true, false],
+        "epochs 2 to 5 in its grace"
+    );
+    assert_eq!(
+        kept(bumped(grace), grace - 1, vec![], vec![], msgs.clone()),
+        [false, true, true, false],
+        "a second before it ends"
+    );
+    assert_eq!(
+        kept(bumped(grace), grace, vec![], vec![], msgs.clone()),
+        [false, false, true, false],
+        "when it ends"
+    );
+    assert_eq!(
+        kept(bumped(0), T, vec![], vec![], msgs),
+        [false, false, true, false],
+        "an emergency bump has none"
+    );
+}
+
+/// Decision 18: through the grace, the previous epoch's revocations are kept and
+/// still revoke. Pruning by epoch waits for the grace to end, when the passes
+/// they revoke stop being admitted too.
+#[test]
+fn the_previous_epochs_revocations_last_as_long_as_its_passes() {
+    let w = world();
+    let grace = T + 14 * DAY;
+    let bumped = w.owner_grace(2, 4, grace, OPEN, BTreeMap::new());
+    let (old, older) = (
+        w.pass(1, 3, FAR, PassClass::Contact),
+        w.pass(2, 3, FAR, PassClass::Contact),
+    );
+    let msgs = vec![
+        w.pass_msg(&old, ct(8192, 1), T),
+        w.pass_msg(&older, ct(8192, 2), T),
+    ];
+    let revoked = vec![
+        w.revocation(old.cert.pass_id, FAR, 3),
+        w.revocation(id_of(9), FAR, 2),
+    ];
+    assert_eq!(
+        kept(bumped.clone(), T, revoked.clone(), vec![], msgs.clone()),
+        [false, true],
+        "the revocation of epoch 3 still revokes"
+    );
+    let at = |time| {
+        let merged = clean(w.raw(bumped.clone(), w.time(time), revoked.clone(), [], []));
+        merged.revoked.keys().copied().collect::<Vec<_>>()
+    };
+    assert_eq!(at(T), [id_of(1)], "epoch 3's is kept, epoch 2's is not");
+    assert_eq!(at(grace - 1), [id_of(1)]);
+    assert!(at(grace).is_empty(), "pruned when the grace ends");
+    // Without a grace, pruned at once.
+    let emergency = w.owner(2, 4, OPEN, BTreeMap::new());
+    let merged = clean(w.raw(emergency, w.time(T), revoked, [], []));
+    assert!(merged.revoked.is_empty());
+}
+
+/// Decision 18, the laws across the end of a grace: a peer before it and a peer
+/// after it converge in either order, and redelivering either changes nothing.
+#[test]
+fn a_grace_ending_between_two_peers_converges() {
+    let w = world();
+    let params = w.params;
+    let grace = T + 14 * DAY;
+    let bumped = w.owner_grace(2, 4, grace, OPEN, BTreeMap::new());
+    let (old, revoked_old) = (
+        w.pass(1, 3, FAR, PassClass::Contact),
+        w.pass(2, 3, FAR, PassClass::Contact),
+    );
+    let fresh = w.pass(3, 4, FAR, PassClass::Contact);
+    let before = encode(&w.raw(
+        bumped.clone(),
+        w.time(T),
+        [w.revocation(revoked_old.cert.pass_id, FAR, 3)],
+        [],
+        [
+            w.pass_msg(&old, ct(8192, 1), grace - DAY),
+            w.pass_msg(&revoked_old, ct(8192, 2), grace - DAY),
+            w.pass_msg(&fresh, ct(8192, 3), grace - DAY),
+        ],
+    ));
+    let after = encode(&w.raw(bumped, w.time(grace), [], [], []));
+    let before = encode(&clean(decode(&before).unwrap()));
+    assert!(is_valid(&Rules::V1, &params, &before) && is_valid(&Rules::V1, &params, &after));
+    let held: InboxState = decode(&before).unwrap();
+    assert_eq!(held.messages.len(), 2, "the old pass and the new one");
+    let ab = apply(&Rules::V1, &params, &before, update_state(after.clone())).unwrap();
+    let ba = apply(&Rules::V1, &params, &after, update_state(before.clone())).unwrap();
+    assert_eq!(ab, ba);
+    assert!(is_valid(&Rules::V1, &params, &ab));
+    let merged: InboxState = decode(&ab).unwrap();
+    assert!(merged.revoked.is_empty());
+    assert_eq!(merged.messages.len(), 1, "only the new epoch's pass");
+    for redelivered in [before, after] {
+        assert_eq!(
+            apply(&Rules::V1, &params, &ab, update_state(redelivered)).unwrap(),
+            ab
+        );
+    }
+}
+
 #[test]
 fn a_tombstoned_message_is_dropped_and_others_are_not() {
     let w = world();

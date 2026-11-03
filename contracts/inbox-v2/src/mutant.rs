@@ -14,7 +14,7 @@ use freenet_stdlib::prelude::ContractInstanceId;
 
 use crate::merge::WEBAPP_REQUESTOR;
 use crate::signed::ghost_admit_bytes;
-use crate::types::{B16, B32, PassUsage, Revocation};
+use crate::types::{B16, B32, InboxDelta, PassUsage, Revocation};
 
 /// One plausible mistake in the rules.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -50,6 +50,9 @@ pub enum Mutant {
     /// A pass id's revocation and usage joins pick before pruning, so a dead
     /// entry can win and take a live one with it (review r1 B1).
     JoinBeforePrune,
+    /// The previous epoch's grace read from the first part's owner record, not
+    /// the joined one (decision 18).
+    GraceFromUnjoinedOwner,
 }
 
 thread_local! {
@@ -102,6 +105,16 @@ pub fn origin(id: &B32) -> usize {
 
 // What each mutant does when it is on. The rules call these at one-line sites,
 // so the mutated logic is here and the rules keep nothing but the calls.
+
+/// `GraceFromUnjoinedOwner`: the `prev_epoch_until` the rules read.
+pub fn grace_until(joined: u64, first: Option<&InboxDelta>) -> u64 {
+    if !on(Mutant::GraceFromUnjoinedOwner) {
+        return joined;
+    }
+    first
+        .and_then(|part| part.owner.as_ref())
+        .map_or(joined, |owner| owner.prev_epoch_until)
+}
 
 /// `TierCheckSkipped`.
 pub fn tier_met(real: bool) -> bool {

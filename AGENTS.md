@@ -184,7 +184,7 @@ small caps. Change any rule knowing it cannot be patched after publish.
   verified, and a call whose parts hold more than those counts between them
   (`types::MAX_*`, `types::CallCounts`, `tests/bounds.rs`). A message, revocation or usage entry
   that fails is dropped without one, so a sender reads back after an update.
-- **Gates on the rules.** `tests/plausible_mutants.rs` runs 15 wrong-but-plausible
+- **Gates on the rules.** `tests/plausible_mutants.rs` runs 16 wrong-but-plausible
   rules through `src/mutant.rs`, a seam compiled only with the
   `plausible-mutants` feature (so not in the WASM; `check-inbox-candidate.sh`
   proves the bytes are the same), and requires each scenario to find no broken

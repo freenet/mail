@@ -11,7 +11,9 @@
 //!    pass nor push a genuine item out of a cap.
 //! 4. Prune, then cap, revocations and usage entries. Pruning happens inside
 //!    step 3's join on each pass id: a dead entry never competes, so it cannot
-//!    win the join and then be pruned with the live entry it beat.
+//!    win the join and then be pruned with the live entry it beat. A
+//!    revocation lives while its epoch is admitted: the current one, and the
+//!    one before it while `owner_time < prev_epoch_until` (decision 18).
 //! 5. Filter each message against the owner, the time and the revocations left
 //!    after pruning. A pruned revocation must not filter: it can be redelivered
 //!    forever, and the message it would drop can too, so the state would cycle.
@@ -219,6 +221,8 @@ struct Filter<'a> {
     owner: &'a OwnerRecord,
     issuer: VerifyingKey,
     owner_time: u64,
+    /// The oldest epoch whose passes are admitted (decision 18).
+    oldest_epoch: u32,
     live_revoked: BTreeSet<B16>,
     usage: &'a BTreeMap<B16, PassUsage>,
     /// While the kept revocations are at their cap, some may have been lost,
@@ -269,7 +273,8 @@ impl Filter<'_> {
         ct_hash: &[u8; 32],
     ) -> Option<Slot> {
         if *cert.recipient != self.params.addr
-            || cert.epoch != self.owner.pass_epoch
+            || cert.epoch > self.owner.pass_epoch
+            || cert.epoch < self.oldest_epoch
             || sent_time >= cert.expiry
             || !cert.expiry.is_multiple_of(EXPIRY_GRANULARITY)
             || self.revocations_full
@@ -448,7 +453,19 @@ pub fn merge(
         .filter(|_| mutant::on(Mutant::PruneUnmergedTime))
         .unwrap_or(prune_time);
     let expired = |expiry: u64| expiry.saturating_add(WINDOW_BACK) <= prune_time;
-    let live_revocation = |r: &Revocation| !expired(r.expiry) && r.epoch >= owner.pass_epoch;
+    // Decision 18: the previous epoch's passes are admitted, and so its
+    // revocations kept, until the joined time reaches the joined owner's
+    // `prev_epoch_until`. Both ends move together, so a revocation is pruned
+    // by epoch exactly when the passes it could revoke stop being admitted.
+    let grace_until = owner.prev_epoch_until;
+    #[cfg(feature = "plausible-mutants")]
+    let grace_until = mutant::grace_until(grace_until, parts.first());
+    let oldest_epoch = if time.owner_time < grace_until {
+        owner.pass_epoch.saturating_sub(1)
+    } else {
+        owner.pass_epoch
+    };
+    let live_revocation = |r: &Revocation| !expired(r.expiry) && r.epoch >= oldest_epoch;
     // A usage entry counts from the owner version that tombstones what it counts.
     let live_usage = |u: &PassUsage| !expired(u.expiry) && u.owner_version <= owner.version;
     #[cfg(feature = "plausible-mutants")]
@@ -551,6 +568,7 @@ pub fn merge(
         owner: &owner,
         issuer,
         owner_time: time.owner_time,
+        oldest_epoch,
         live_revoked,
         usage: &usage,
         revocations_full,
