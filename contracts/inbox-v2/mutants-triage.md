@@ -8,15 +8,16 @@ pass, so each has a line below. `scripts/check-mutants-triage.sh` fails on a
 survivor with no line, and, on a run of every shard, on a line with no
 survivor. A line is the mutant as cargo-mutants names it, without its position.
 
-Last full run, after fix round 1 (review r1): 204 mutants, 176 caught, 20
+Last full run, after fix round 2 (review r2): 241 mutants, 207 caught, 26
 unviable (they do not compile, so no test could be run), 6 survived, 2 timed
-out. Two of the six were test gaps and now have tests (see the end). The other
-4 survivors and the 2 timeouts below are the whole list. Each was applied by
-hand at the position cargo-mutants gave, built, and run against every test:
-the survivors passed all of them, and the two timeouts did not finish in 240
-seconds. (The run that added this file: 168 mutants, the first five below.)
+out. The 6 survivors and the 2 timeouts below are the whole list. Each was
+applied by hand at the position cargo-mutants gave, built, and run against every
+test: the survivors passed all of them, and the two timeouts did not finish in
+240 seconds. (After fix round 1: 204 mutants, 176 caught, 6 survived of which 2
+were test gaps, now tested. The run that added this file: 168 mutants, the
+first five below.)
 
-None of the six is a test gap. Each is a mutant that does not change what the
+None of the eight is a test gap. Each is a mutant that does not change what the
 function returns, or one that cannot fail faster than a hang.
 
 ## Survivors
@@ -40,6 +41,20 @@ function returns, or one that cannot fail faster than a hang.
   message, and the copies collected for one id are distinct (`at_id.contains`;
   dropping that `!` is a mutant the tests do catch), so a tie never arises, and
   if it did the two values would be equal.
+
+- `src/merge.rs: replace > with >= in Filter<'_>::admit_quarantine` See the
+  next line.
+- `src/merge.rs: replace > with == in Filter<'_>::admit_quarantine` Both are
+  equivalent since decision 19. The mutant is the certificate's size cap,
+  `proof.cert.len() > ghostkey_verify::MAX_CERTIFICATE_BYTES`, which saves the
+  cost of reading an oversized certificate. `GhostkeyCertificate::from_cbor`
+  refuses the same sizes itself (over `MAX_CERTIFICATE_BYTES` as given, and over
+  it once armored, which a certificate of exactly that many bytes is), and it
+  runs before the certificate can admit anything. So neither `==` nor `>=`
+  changes what is admitted. Until decision 19 an Open inbox held a proof
+  without reading it, and the cap alone decided there, which a test pinned; an
+  Open inbox now refuses every proof, so nothing reaches the cap but a proof in
+  RequireGhost, which `from_cbor` also reads.
 
 - `src/types.rs: replace bounded::<impl serde::de::Visitor<'de> for Visit<K, V, N>>::expecting -> std::fmt::Result with Ok(Default::default())`
   Equivalent. `expecting` only writes the text of a type error. `decode` maps
