@@ -934,3 +934,22 @@ fn out_updates(world: &mut World, out: Vec<OutboundDelegateMsg>) -> Vec<(Addr, I
     sync(world);
     updates
 }
+
+/// The issuer and pass keys must sign exactly as the contract verifies:
+/// the delegate's own lockfile, which `build-wasm.sh` builds with
+/// `--locked`, holds the contract's ed25519-dalek and no other. (The manifest
+/// cannot say `=2.2.0`: the UI's workspace links this crate beside the
+/// frozen container's `=2.1.1`, and two of one crate's semver-compatible
+/// versions cannot be in one graph.)
+#[test]
+fn the_shipped_build_links_the_contracts_ed25519_dalek() {
+    let lock = include_str!("../../Cargo.lock");
+    let contract = include_str!("../../../../contracts/inbox-v2/Cargo.toml");
+    assert!(contract.contains(r#"ed25519-dalek = { version = "=2.2.0""#));
+    let versions: Vec<&str> = lock
+        .split("[[package]]")
+        .filter(|p| p.contains("name = \"ed25519-dalek\"\n"))
+        .filter_map(|p| p.lines().find_map(|l| l.strip_prefix("version = ")))
+        .collect();
+    assert_eq!(versions, ["\"2.2.0\""]);
+}

@@ -103,8 +103,8 @@ recovery-key codec. Its encoding is pinned per variant in
   host messages (notification, GET answer, subscription answer) are all
   unauthenticated, so a subscription answer is ignored and every refresh asks
   for every subscription again.
-  `Budget::take_write` and the 60 writes a minute limit were removed with
-  nothing to use them: inbox v2's drain adds both with the writes it makes.
+  Updates a run sends to one contract stop at 60 a minute
+  (`Budget::may_write`).
 - **v1 watch:** reads the inbox from the node's store, never from the message
   that prompted the look. A notification or GET answer is only a reason to
   look, so duplicates and reordering change nothing, and a dropped one is
@@ -154,9 +154,46 @@ recovery-key codec. Its encoding is pinned per variant in
   `sent_time` into the recipient's window, and reports a lapsed pass or a full
   queue; the caller reads the inbox back, since a filtered update is not an
   error. `src/tests/inbox_v2.rs` runs everything it builds through the
-  contract crate's `validate_state` and merge (a dev-dependency only). Not yet
-  built: the background drain, renew and clock jobs, the Open-inbox tombstone
-  budget (decision 21) and re-sealing a queued send.
+  contract crate's `validate_state` and merge (a dev-dependency only), and
+  `src/tests/inbox_jobs.rs` does the same for the jobs.
+- **Inbox v2 jobs** (`src/inbox_jobs.rs`, called from `watch::run`, so every
+  trigger takes one path). The drain reads the identity's own inbox from the
+  node's store and goes through the same owner update as `UpdateInboxV2`. The
+  clock is that drain with `AdvanceTime`, once `owner_time` trails the node's
+  clock by 12 hours, a week at most per step (the guard). The renew job sends
+  each contact pass's renewed or reissued certificate at its drawn point as a
+  silent system message through the pass the contact gave us, never through
+  quarantine, whether or not the user writes to that contact; it reads back
+  (the message held or tombstoned in the contact's inbox) and seals it again
+  every 6 hours until it lands. Mail to the contact carries the same
+  certificate and is read back the same way. A contact's inbox is found under
+  our own Ghost Key master. Owner updates and renewals draw on the run's
+  message slice (one and two messages' worth, `OWNER_SLOTS`, `RENEW_SLOTS`,
+  from a native measurement against the v1 import), so the per-run limit
+  holds whatever the mix. A run that no page started has no page entropy: it
+  mixes the host's randomness with a value derived from the identity's seed,
+  the time and the message's purpose.
+- **Strangers (decision 21):** an inbox keeps the newest 1024 drained
+  quarantine messages, stored copies and tombstones both; past that the
+  earliest drained give way (`InboxV2Update.strangers_dropped`, and the running
+  total in the inbox record for the quarantine view to say how many). Contact
+  mail is never removed for it. A message storage refuses stays in the inbox
+  and the drain goes on (`full`), but no change is signed while one is there;
+  past the 4096 tombstones (only contacts can get there) a stored message stays
+  in the inbox until older tombstones expire. A stranger message whose
+  tombstone was given way can come back if a peer still holds it inside the
+  window, and is then drained again as new.
+- **Queued sends (decision 9):** `SealedV2.reseal_at` is when a send still
+  queued must be sealed again from a fresh GET: two days after the earlier of
+  its `sent_time` and the sealing time, when the recipient's window may have
+  moved past it. The contract drops a message outside the window without an
+  error.
+- **Key-only restore:** an identity restored from its recovery key takes its
+  inbox over (`CreateInboxV2` with `existing`) and drains and sends as before,
+  since every key derives from the seed. The pass ledger is gone, so passes
+  issued before the restore cannot be renewed: they lapse at expiry, the
+  contact falls back to quarantine (told plainly) and gets a new pass with the
+  next mail. No epoch bump is forced.
 - **Imports:** a node refuses to instantiate a module that imports a function
   it does not provide. `scripts/check-delegate-imports.sh` (a step of CI
   `check-drift`, so it blocks) compares the candidate's imports to

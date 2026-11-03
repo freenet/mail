@@ -25,7 +25,8 @@ ciborium = "=0.2.2"
 # here: the UI links this crate into its workspace, where the frozen
 # container's types pin =2.1.1, while the contract (a dev-dependency) pins
 # =2.2.0. The delegate's own Cargo.lock holds 2.2.0, and build-wasm.sh builds
-# with --locked, so the shipped WASM is pinned all the same.
+# with --locked, so the shipped WASM is pinned all the same: the test
+# `the_shipped_build_links_the_contracts_ed25519_dalek` fails otherwise.
 ed25519-dalek = { version = "2.1.1", default-features = false }
 freenet-mail-protocol = { path = "../../protocol" }
 freenet-mail-wire-v1 = { path = "../../wire-v1" }

@@ -239,9 +239,8 @@ dt "creation returns the new identity's own recovery key" "$D/handlers.rs" \
 dt "compare-and-swap refuses a stale writer" "$D/handlers.rs" \
     'Some(g) => g == current_gen,' 'Some(_) => true,' cas_refuses_a_stale_writer_and_accepts_the_current_one
 dt "inbox v2: a message is tombstoned only once stored" "$D/inbox_v2.rs" \
-    'store_opened(s, me, id, m, opened, &mut out)?;' \
-    'let _ = store_opened(s, me, id, m, opened, &mut out);' \
-    a_refused_store_stops_the_drain,a_drain_over_a_faulty_host_never_tombstones_what_it_did_not_store
+    'other => other?,' 'other => drop(other),' \
+    a_refused_store_stops_the_drain,a_drain_over_a_faulty_host_never_tombstones_what_it_did_not_store,a_job_drain_over_a_faulty_host_never_tombstones_what_it_did_not_store
 dt "inbox v2: an owner version is recorded before it leaves" "$D/inbox_v2.rs" \
     'save(s, item(ItemKind::InboxV2, addr, &[]), &rec, rec_gen)?;' \
     'let _ = (&rec, rec_gen);' \
@@ -267,6 +266,39 @@ dt "inbox v2: the page cannot write the delegate's records" "$D/store.rs" \
     'ItemKind::InboxV2 | ItemKind::PassLedger => (true, false, false),' \
     'ItemKind::InboxV2 | ItemKind::PassLedger => (true, true, true),' \
     the_page_cannot_rewrite_inbox_records_or_read_held_passes
+dt "inbox v2 jobs: a renewal reaches a contact never written to" "$D/inbox_jobs.rs" \
+    'self.done.out.push(update(id, w::encode(&delta)));' 'let _ = (id, &delta);' \
+    a_renewal_reaches_a_contact_who_is_never_written_to
+dt "inbox v2 jobs: a renewal never goes through quarantine" "$D/inbox_jobs.rs" \
+    'if sealed.admission != SendAdmission::Pass {' 'if false {' \
+    a_renewal_never_goes_through_quarantine
+dt "inbox v2 jobs: a renewal not seen to land is sent again" "$D/inbox_jobs.rs" \
+    '&& now < p.at + v2::RESEND_AFTER' '&& true' \
+    a_renewal_that_does_not_land_is_sent_again
+dt "inbox v2 jobs: mail carrying a renewal is read back" "$D/inbox_v2.rs" \
+    'note_sent(s, &me, &reply_pass, &sealed.id.0, now, false)?;' 'let _ = &reply_pass;' \
+    a_renewal_never_goes_through_quarantine
+dt "inbox v2 jobs: the clock drains first" "$D/inbox_jobs.rs" \
+    'let limit = (*left - OWNER_SLOTS).min(v2::DRAIN_BATCH);' 'let limit = 0;' \
+    the_clock_advances_owner_time_after_draining
+dt "inbox v2 jobs: a bump reissues at points of the grace" "$D/inbox_v2.rs" \
+    '*due = (*due).min(at);' 'let _ = at;' \
+    a_bump_reissues_each_pass_at_its_own_point_of_the_grace
+dt "inbox v2: strangers keep only the newest" "$D/inbox_v2.rs" \
+    'while rec.strangers.len() > STRANGERS_KEPT {' 'while rec.strangers.len() > STRANGERS_KEPT * 100 {' \
+    strangers_give_way_earliest_first_and_never_a_contact
+dt "inbox v2: a stranger given way leaves the tombstones" "$D/inbox_v2.rs" \
+    '        tombstones.remove(id);' '        let _ = id;' \
+    strangers_give_way_earliest_first_and_never_a_contact
+dt "inbox v2: a sealed message says when to seal again" "$D/inbox_v2.rs" \
+    'let reseal_at = sent_time.min(now) + w::WINDOW_BACK;' 'let reseal_at = sent_time + w::WINDOW_FORWARD;' \
+    a_send_queued_past_two_days_is_sealed_again
+dt "inbox v2: the Ghost Key payload is what the contract checks" "$D/inbox_v2.rs" \
+    'ghost_payload = Some(ByteBuf::from(w::ghost_admit_bytes(' 'ghost_payload = Some(ByteBuf::from(w::owner_msg_bytes(' \
+    a_ghost_key_proof_from_the_fixtures_passes_the_contract
+dt "inbox v2 jobs: updates stop at the per-minute limit" "$D/jobs.rs" \
+    '.is_none_or(|(_, n)| *n < MAX_WRITES_PER_MINUTE)' '.is_none_or(|_| true)' \
+    updates_to_one_contract_stop_at_the_minute_limit
 dt "origins get separate namespaces" "$D/store.rs" \
     'format!("o/{}/", hex(&origin.0))' '{ let _ = origin; "o/shared/".to_string() }' \
     origins_and_kinds_never_share_a_key,a_foreign_origin_can_neither_read_nor_change_another_namespace
