@@ -505,6 +505,15 @@ dt "inbox v2: what a drain of a page's own state returns is accepted by the cont
     '            .sign_v2(w::OWNER_SIG_CONTEXT, &w::owner_bytes(&me.addr.0, &owner)),' \
     '            .sign_v2(&[], &w::owner_bytes(&me.addr.0, &owner)),' \
     strangers_never_crowd_out_a_new_correspondents_pass,a_page_state_admission_is_checked_before_it_counts
+dt "inbox v2: a RequireGhost inbox refuses a message with no proof" \
+    "$STAGE/contracts/inbox-v2/src/merge.rs" \
+    '        let proof = proof?;
+        if proof.cert.len()' \
+    '        let Some(proof) = proof else {
+            return Some(Slot::Quarantine { ghost: None });
+        };
+        if proof.cert.len()' \
+    a_ghost_key_proof_from_the_fixtures_passes_the_contract
 dt "origins get separate namespaces" "$D/store.rs" \
     'format!("o/{}/", hex(&origin.0))' '{ let _ = origin; "o/shared/".to_string() }' \
     origins_and_kinds_never_share_a_key,a_foreign_origin_can_neither_read_nor_change_another_namespace

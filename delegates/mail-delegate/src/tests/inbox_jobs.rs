@@ -809,6 +809,8 @@ fn a_ghost_key_proof_from_the_fixtures_passes_the_contract() {
     let mut world = World::with_master(master);
     let a = world.identity("alice");
     let b = world.identity("bob");
+    // The same inbox before it asks for a Ghost Key, for the control below.
+    let mut open = world.clone();
     world.change(
         &a,
         OwnerChange::SetQuarantine(w::QuarantineMode::RequireGhost { min_usd: Some(5) }),
@@ -854,9 +856,35 @@ fn a_ghost_key_proof_from_the_fixtures_passes_the_contract() {
         .map(|g| (&g.1, &g.2))
         .unwrap();
 
-    // No proof, and a proof over other bytes, are filtered.
+    // No proof is filtered for the missing proof, and for nothing else: the
+    // message carries its own id (the contract's id of a quarantine message
+    // with no proof), so only the proof differs from one an inbox that asks
+    // for none accepts.
     let sealed = seal(&mut world, usd5_sk);
-    assert!(!try_land(&mut world, &sealed, None));
+    let bare = {
+        let m: w::Message = w::decode(&sealed.message).unwrap();
+        let ct_hash = *blake3::hash(&m.ciphertext).as_bytes();
+        let id = w::message_id(&a.0, &ct_hash, m.sent_time, w::KIND_QUARANTINE, &[]);
+        let message = w::Message {
+            admission: w::Admission::Quarantine { ghost: None },
+            ..m
+        };
+        InboxDelta {
+            messages: [(ByteArray::new(id), message)].into(),
+            ..InboxDelta::default()
+        }
+    };
+    let bare_id = *bare.messages.keys().next().unwrap();
+    open.publish(&a, &w::encode(&bare));
+    assert!(
+        w::delivered(&open.state(&a), &bare_id),
+        "control: an inbox that asks for no proof takes this message"
+    );
+    world.publish(&a, &w::encode(&bare));
+    assert!(
+        !w::delivered(&world.state(&a), &bare_id),
+        "a RequireGhost inbox refuses it for the missing proof"
+    );
     let wrong = ghost_proof(usd5_sk, usd5_cert, b"not the payload".to_vec());
     assert!(!try_land(&mut world, &sealed, Some(wrong)));
     // A $1 key is below this inbox's tier.
