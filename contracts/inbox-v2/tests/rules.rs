@@ -724,6 +724,91 @@ fn a_union_over_the_revocation_cap_keeps_the_smallest_and_recovers() {
     assert_eq!(back.messages.keys().copied().collect::<Vec<_>>(), [msg.0]);
 }
 
+/// Decision 23: a full set (4096) refuses every pass, and the way out is an
+/// emergency epoch bump, grace 0, which prunes the old epoch's revocations at
+/// once, so the new epoch's pass mail comes in at the same time.
+#[test]
+fn an_emergency_bump_empties_a_full_set() {
+    let w = world();
+    let params = w.params;
+    let pass = w.pass(1 << 40, 4, FAR, PassClass::Contact);
+    let msg = w.pass_msg(&pass, ct(8192, 1), T);
+    let full = clean(w.raw(
+        owner(3),
+        w.time(T),
+        revocations(Rules::V1.revoked as u64, 0),
+        [],
+        [],
+    ));
+    assert_eq!(full.revoked.len(), Rules::V1.revoked);
+    let bump = w.raw(
+        w.owner_grace(2, 4, 0, OPEN, BTreeMap::new()),
+        w.time(T),
+        [],
+        [],
+        [msg.clone()],
+    );
+    let merged: InboxState = decode(
+        &apply(
+            &Rules::V1,
+            &params,
+            &encode(&full),
+            update_state(encode(&bump)),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        merged.revoked.is_empty(),
+        "the old epoch's revocations went with it"
+    );
+    assert_eq!(merged.messages.keys().copied().collect::<Vec<_>>(), [msg.0]);
+}
+
+/// Decision 23: a routine bump, with a grace, out of a full set keeps the old
+/// epoch's revocations through the grace, so the set stays full and refuses
+/// pass mail of both epochs; at the grace's end they are pruned and the mail
+/// comes in.
+#[test]
+fn a_routine_bump_from_a_full_set_refuses_until_the_grace_ends() {
+    let w = world();
+    let params = w.params;
+    let grace = T + 14 * DAY;
+    let new = w.pass(1 << 40, 4, FAR, PassClass::Contact);
+    let old = w.pass(1 << 41, 3, FAR, PassClass::Contact);
+    // Dated near the grace's end, so still inside the window then.
+    let msgs = [
+        w.pass_msg(&new, ct(8192, 1), grace),
+        w.pass_msg(&old, ct(8192, 2), grace - DAY),
+    ];
+    let full = encode(&clean(w.raw(
+        owner(3),
+        w.time(T),
+        revocations(Rules::V1.revoked as u64, 0),
+        [],
+        [],
+    )));
+    let routine = w.owner_grace(2, 4, grace, OPEN, BTreeMap::new());
+    let at = |time: u64| -> InboxState {
+        let bump = w.raw(routine.clone(), w.time(time), [], [], msgs.clone());
+        decode(&apply(&Rules::V1, &params, &full, update_state(encode(&bump))).unwrap()).unwrap()
+    };
+    let during = at(grace - HOUR);
+    assert_eq!(
+        during.revoked.len(),
+        Rules::V1.revoked,
+        "full through the grace"
+    );
+    assert!(during.messages.is_empty(), "both epochs refused while full");
+    let after = at(grace);
+    assert!(after.revoked.is_empty(), "pruned at the grace's end");
+    assert_eq!(
+        after.messages.keys().copied().collect::<Vec<_>>(),
+        [msgs[0].0],
+        "the new epoch's mail, and not the old epoch's, whose grace is over"
+    );
+}
+
 #[test]
 fn a_summary_cut_mid_entry_is_refused() {
     use ciborium::Value;
