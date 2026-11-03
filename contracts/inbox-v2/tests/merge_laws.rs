@@ -480,3 +480,25 @@ fn the_merge_laws_hold_over_crafted_states() {
     assert!(total.strict > 0 && total.healed > 0, "both branches of the law ran");
     assert!(total.held > total.triples, "states held messages");
 }
+
+/// A pass reissued in a new epoch under an id revoked in the old one, with the
+/// old revocation still being redelivered.
+#[test]
+fn a_dead_revocation_redelivered_does_not_move_the_state() {
+    let (w, rules) = (world(), Rules::V1);
+    let params = w.params;
+    let t = 1_800_000_000 / HOUR * HOUR;
+    let old = w.owner(1, 3, QuarantineMode::Open, BTreeMap::new());
+    let new = w.owner(2, 4, QuarantineMode::Open, BTreeMap::new());
+    let pass = w.pass(1, 4, t + 300 * DAY, PassClass::Contact);
+    let revocation = w.revocation(pass.cert.pass_id, t + 300 * DAY, 3);
+    let revoking = encode(&w.raw(old, w.time(t), [revocation], [], []));
+    let holding = encode(&w.raw(new, w.time(t), [], [], [w.pass_msg(&pass, ct(8192, 1), t)]));
+    assert!(is_valid(&rules, &params, &revoking) && is_valid(&rules, &params, &holding));
+
+    let merged = apply(&rules, &params, &revoking, update_state(holding.clone())).unwrap();
+    let again = apply(&rules, &params, &merged, update_state(holding.clone())).unwrap();
+    assert_eq!(merged, again, "redelivering the holder moved the state");
+    let back = apply(&rules, &params, &again, update_state(revoking)).unwrap();
+    assert_eq!(again, back, "redelivering the dead revocation moved the state");
+}
