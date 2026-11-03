@@ -63,6 +63,9 @@ guard "inbox v2: a stale allowlist entry fails the coverage gate" \
 guard "inbox v2: a survivor with no triage fails the mutants gate" \
     "$STAGE/scripts/check-mutants-triage.sh" 'untriaged = sorted(survivors - triaged)' 'untriaged = []' \
     'not ok - a survivor with no triage line' triage_check_tests
+guard "inbox v2: a mutants run that tested nothing fails the mutants gate" \
+    "$STAGE/scripts/check-mutants-triage.sh" '    if not caught:' '    if False:' \
+    'not ok - a run that tested nothing' triage_check_tests
 guard "inbox v2: an inconclusive verdict fails the verify-merge gate" \
     "$STAGE/scripts/check-fdev-verify-merge.sh" 'if r["inconclusive"]:' 'if False:' \
     'not ok - inconclusive is not a pass' verify_merge_check_tests
