@@ -20,7 +20,9 @@ pub mod consent;
 pub mod crypto;
 pub mod env;
 pub mod handlers;
+pub mod inbox_v2;
 pub mod jobs;
+pub mod sealing;
 pub mod store;
 pub mod watch;
 

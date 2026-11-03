@@ -376,6 +376,19 @@ pub enum EnvelopeKind {
     System(SystemMsg),
 }
 
+/// A drained message as the delegate stores it (`ItemKind::Inbound`).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct InboundMessage {
+    pub id: B32,
+    /// Verified: it signed the inner binding.
+    pub sender_vk: ByteBuf,
+    pub sent_time: u64,
+    /// [`KIND_PASS`], [`KIND_OWNER`] or [`KIND_QUARANTINE`].
+    pub admission: u8,
+    pub ghost_vk: Option<B32>,
+    pub body: ByteBuf,
+}
+
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SystemMsg {
     /// The reply pass is a renewed or reissued certificate of a pass the

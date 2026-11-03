@@ -17,6 +17,7 @@ use serde_bytes::ByteBuf;
 use crate::consent;
 use crate::crypto::{self, Keys, MixRng};
 use crate::env::Env;
+use crate::inbox_v2;
 use crate::jobs::{Tick, Trigger};
 use crate::store::{
     self, ALL_KINDS, IDENTITY_INDEX, MAX_IDENTITIES, Origin, Space, fail, identity_rel, index_rel,
@@ -202,14 +203,48 @@ fn handle_request(
             owner,
             after,
             limit,
-        } => list_items(s, kind, owner, after.as_ref().map(|a| a.as_slice()), limit),
-        Op::GetItem { item } => get_item(s, item),
+        } => page_may(kind, 0)
+            .and_then(|()| list_items(s, kind, owner, after.as_ref().map(|a| a.as_slice()), limit)),
+        Op::GetItem { item } => page_may(item.kind, 0).and_then(|()| get_item(s, item)),
         Op::PutItem {
             item,
             body,
             expected_gen,
-        } => put_item(s, item, body.into_vec(), expected_gen),
-        Op::DeleteItem { item, expected_gen } => delete_item(s, item, expected_gen),
+        } => page_may(item.kind, 1).and_then(|()| put_item(s, item, body.into_vec(), expected_gen)),
+        Op::DeleteItem { item, expected_gen } => {
+            page_may(item.kind, 2).and_then(|()| delete_item(s, item, expected_gen))
+        }
+        Op::CreateInboxV2 {
+            addr,
+            ghost_master,
+            existing,
+        } => inbox_v2::create_inbox(
+            s,
+            &addr,
+            &ghost_master,
+            existing.as_deref().map(|b| b.as_slice()),
+        ),
+        Op::UpdateInboxV2 {
+            addr,
+            state,
+            change,
+            ui_entropy,
+        } => inbox_v2::update_inbox(s, &addr, &state, change, &ui_entropy),
+        Op::IssuePass {
+            addr,
+            contact,
+            invite,
+            ui_entropy,
+        } => inbox_v2::issue_pass(s, &addr, contact, invite, &ui_entropy),
+        Op::HoldPass { addr, pass } => inbox_v2::hold_pass(s, &addr, &pass),
+        Op::SealV2 {
+            from,
+            to,
+            to_state,
+            content,
+            ghost_vk,
+            ui_entropy,
+        } => inbox_v2::seal_v2(s, &from, &to, &to_state, content, ghost_vk, &ui_entropy),
         Op::DecryptV1 { addr, ciphertexts } => decrypt_v1(s, &addr, ciphertexts),
         Op::SealV1Message {
             addr,
@@ -234,6 +269,20 @@ fn handle_request(
             .map(|()| Reply::Deleted),
     };
     Ok(respond(id, result))
+}
+
+/// Whether a page may use the item operations on `kind`: `what` 0 reads, 1
+/// writes, 2 deletes ([`store::page_access`]).
+fn page_may(kind: ItemKind, what: usize) -> Result<(), Failure> {
+    let (read, write, delete) = store::page_access(kind);
+    if [read, write, delete][what] {
+        Ok(())
+    } else {
+        Err(fail(
+            FailureCode::Refused,
+            "the delegate keeps these records itself",
+        ))
+    }
 }
 
 /// The page's way to run the jobs: the path a run the node starts takes,

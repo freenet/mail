@@ -63,6 +63,11 @@ fixed!(
     Hash32,
     32
 );
+fixed!(
+    /// An inbox v2 pass id.
+    PassId,
+    16
+);
 /// Private key material: not `Copy`, redacted from `Debug`, and zeroized
 /// when dropped.
 macro_rules! secret {
@@ -165,6 +170,19 @@ pub enum ItemKind {
     /// Local state of a v0.2.x alias that matches no identity, kept rather
     /// than lost. Owner: none. Id: 16 bytes (a content hash).
     LegacyOrphan,
+    /// An identity's inbox v2 bookkeeping: the highest owner version and
+    /// time it signed, its epoch and filters. Owner: an identity. Id: empty.
+    /// Written only by the delegate.
+    InboxV2,
+    /// One pass this identity issued (pass id to contact and nonce). Owner:
+    /// an identity. Id: the 16-byte pass id. Written only by the delegate.
+    PassLedger,
+    /// A pass this identity holds to write to someone. Owner: an identity.
+    /// Id: the recipient's 24-byte address. Never leaves the delegate.
+    HeldPass,
+    /// A message drained from this identity's v2 inbox. Owner: an identity.
+    /// Id: the first 16 bytes of the message id. The page may delete it.
+    Inbound,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -349,6 +367,123 @@ pub enum Op {
     /// node with no Background grant, or one too old for it, does not start
     /// by itself. One bounded slice per call; answers [`Reply::JobsRun`].
     RunJobs,
+
+    // ── Inbox v2 ────────────────────────────────────────────────────────
+    /// Start `addr`'s v2 inbox: the first owner record and time, as a full
+    /// state to PUT under [`inbox_v2::params_bytes`]`(addr, ghost_master)`.
+    /// Refused with `Conflict` once the identity has one. `existing` is the
+    /// inbox's state when it is already on the network (an identity restored
+    /// on this node): it is taken over, and its next version is returned.
+    CreateInboxV2 {
+        addr: Addr,
+        ghost_master: Hash32,
+        existing: Option<ByteBuf>,
+    },
+    /// Sign a change to `addr`'s own inbox, given its current state (a fresh
+    /// GET). Every change drains first (decision 9): what the state holds is
+    /// stored and tombstoned in the same update. Answers
+    /// [`Reply::InboxV2Update`]; `remaining > 0` means call again.
+    UpdateInboxV2 {
+        addr: Addr,
+        state: ByteBuf,
+        change: OwnerChange,
+        ui_entropy: Entropy,
+    },
+    /// Issue a pass to `addr`'s inbox: for a contact (reused while it is
+    /// live) or an invite of `invite` messages.
+    IssuePass {
+        addr: Addr,
+        contact: Option<Addr>,
+        invite: Option<u8>,
+        ui_entropy: Entropy,
+    },
+    /// Keep a pass someone gave `addr` out of band (an invite).
+    HoldPass {
+        addr: Addr,
+        pass: inbox_v2::Pass,
+    },
+    /// Seal a message from `from` to the inbox `to`, given that inbox's
+    /// current state (a fresh GET). Picks the admission (a held pass, the
+    /// owner's own key, or quarantine) and the `sent_time`.
+    SealV2 {
+        from: Addr,
+        to: Addr,
+        to_state: ByteBuf,
+        content: SealContent,
+        /// The Ghost Key the sender will prove with, for a RequireGhost
+        /// inbox: it is bound inside the envelope and names the message.
+        ghost_vk: Option<Hash32>,
+        ui_entropy: Entropy,
+    },
+}
+
+/// A change [`Op::UpdateInboxV2`] signs.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OwnerChange {
+    /// Drain only.
+    Drain,
+    /// Move `owner_time` towards the node's clock, under the guard.
+    AdvanceTime,
+    SetQuarantine(inbox_v2::QuarantineMode),
+    Revoke {
+        pass_id: PassId,
+    },
+    /// A new pass epoch: routine (a 14-day grace) or emergency (none).
+    BumpEpoch {
+        emergency: bool,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SealContent {
+    Mail(ByteBuf),
+    /// A system message carrying no mail, so the reply pass (renewed or
+    /// reissued if due) reaches the recipient.
+    PassUpdate,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InboxV2Update {
+    /// CBOR of an `inbox_v2::InboxDelta` to send as the update, when there
+    /// is anything to send.
+    pub update: Option<ByteBuf>,
+    /// Messages stored by this call.
+    pub drained: u32,
+    /// Messages left for the next call. The change itself is signed only
+    /// once nothing is left.
+    pub remaining: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SendAdmission {
+    Pass,
+    Owner,
+    Quarantine,
+}
+
+/// Why a sealed message may not land, said plainly to the user.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SendNotice {
+    /// The pass we held for this inbox no longer admits mail (expired,
+    /// revoked or from an old epoch): sent through quarantine instead.
+    PassLapsed,
+    /// The pass already has as many messages waiting as it may hold.
+    PassFull,
+    /// The new-contacts queue is full and this message would not get in.
+    QueueFull,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SealedV2 {
+    /// CBOR of the `inbox_v2::Message`. For a RequireGhost inbox it carries
+    /// no proof yet: the page asks Ghost Key to sign `ghost_payload` and
+    /// puts the proof in its admission.
+    pub message: ByteBuf,
+    pub id: Hash32,
+    pub sent_time: u64,
+    pub admission: SendAdmission,
+    pub ghost_payload: Option<ByteBuf>,
+    pub notice: Option<SendNotice>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -441,6 +576,11 @@ pub enum Reply {
     },
     /// What one [`Op::RunJobs`] did.
     JobsRun(JobsRun),
+    /// A full inbox v2 state to PUT.
+    InboxV2State(ByteBuf),
+    InboxV2Update(InboxV2Update),
+    PassIssued(inbox_v2::Pass),
+    SealedV2(SealedV2),
 }
 
 /// What one run of the jobs did.
