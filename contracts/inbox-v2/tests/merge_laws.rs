@@ -8,10 +8,16 @@
 //! absorbing a redelivery and no state repeating. Running out of passes is
 //! inconclusive in core and a failure here.
 //!
+//! Every merge the fuzzer makes is also held to `oracle::check`, a model of
+//! what the merge must keep that does not use the merge's code: the laws above
+//! cannot see a rule that drops a live item the same way every time.
+//!
 //! `FORK_SEEDS=n` sets how many seeds run (default below), `FORK_SEED=n` runs one.
 
 mod common;
+mod oracle;
 
+use std::cell::Cell;
 use std::collections::{BTreeMap, HashSet};
 use std::sync::OnceLock;
 
@@ -136,7 +142,7 @@ fn universe_at(seed: u64, rng: &mut Rng, big: bool, t0: u64) -> Universe {
 
     // Passes: live, wrong epoch, expired, invites, and one renewed (same id,
     // later expiry), which gives two encodings of one message id.
-    let n_contacts = if big { 14 } else { 5 };
+    let n_contacts = if big { 24 } else { 5 };
     let mut passes = Vec::new();
     for i in 0..n_contacts {
         passes.push(w.pass(key(i), epoch, far, PassClass::Contact));
@@ -355,9 +361,8 @@ fn universe_at(seed: u64, rng: &mut Rng, big: bool, t0: u64) -> Universe {
 
 /// A state a peer could hold: raw pieces, cleaned by the merge, perhaps several
 /// deliveries in.
-fn peer_state(rules: &Rules, u: &Universe, rng: &mut Rng) -> Vec<u8> {
-    let params = world().params;
-    let w = world();
+fn peer_state(laws: &Laws, u: &Universe, rng: &mut Rng) -> Result<Vec<u8>, String> {
+    let (rules, params, w) = (laws.rules, world().params, world());
     let mut bytes = None::<Vec<u8>>;
     // Some peers hold much and some little, so a cap can be full on one side
     // only.
@@ -372,18 +377,22 @@ fn peer_state(rules: &Rules, u: &Universe, rng: &mut Rng) -> Vec<u8> {
             rng.subset(&u.usage, share),
             rng.subset(&u.messages, share),
         );
-        let clean = encode(&merge(rules, &params, vec![raw.into()]).expect("genuine pieces"));
+        let part: InboxDelta = raw.into();
+        let merged = merge(rules, &params, vec![part.clone()]).expect("genuine pieces");
+        laws.count_at_cap(&merged);
+        laws.model(&[part], &merged)?;
+        let clean = encode(&merged);
         bytes = Some(match bytes {
             None => clean,
-            Some(prev) => apply(rules, &params, &prev, update_state(clean)).expect("merge"),
+            Some(prev) => laws.merge(&prev, &clean)?,
         });
     }
-    bytes.unwrap()
+    Ok(bytes.unwrap())
 }
 
 #[derive(Default)]
 struct Tally {
-    /// Peer states holding exactly V1's revocation cap.
+    /// Merges under V1 whose result holds exactly its revocation cap.
     at_cap: u64,
     triples: u64,
     /// Peer states whose owner bumped with a grace, before and after its end,
@@ -394,19 +403,88 @@ struct Tally {
     strict: u64,
     healed: u64,
     held: u64,
+    /// Merges under V1's caps in which each cap had more live items than
+    /// room, as the oracle counts them.
+    v1_overflow: [u64; 7],
 }
+
+const CAPS: [&str; 7] = [
+    "revocations",
+    "usage",
+    "per pass",
+    "pass pool",
+    "owner pool",
+    "per ghost",
+    "quarantine",
+];
 
 struct Laws<'a> {
     rules: &'a Rules,
     label: String,
+    /// Hold every merge to `oracle::check`. Off only to show what the laws
+    /// see without it.
+    oracle: bool,
+    overflow: Cell<[u64; 7]>,
+    at_cap: Cell<u64>,
 }
 
-impl Laws<'_> {
+impl<'a> Laws<'a> {
+    fn new(rules: &'a Rules, label: String) -> Self {
+        Laws {
+            rules,
+            label,
+            oracle: true,
+            overflow: Cell::new([0; 7]),
+            at_cap: Cell::new(0),
+        }
+    }
+
     fn merge(&self, a: &[u8], b: &[u8]) -> Result<Vec<u8>, String> {
         // As the node does: a state merged into an identical copy never
         // reaches the contract, but the law is checked on the call anyway.
-        apply(self.rules, &world().params, a, update_state(b.to_vec()))
-            .map_err(|e| format!("{}: merge refused: {e}", self.label))
+        let out = apply(self.rules, &world().params, a, update_state(b.to_vec()))
+            .map_err(|e| format!("{}: merge refused: {e}", self.label))?;
+        self.count_at_cap(&decode(&out).unwrap());
+        if self.oracle {
+            let parts: Vec<InboxDelta> = [a, b]
+                .iter()
+                .map(|s| decode::<InboxState>(s).unwrap().into())
+                .collect();
+            self.model(&parts, &decode(&out).unwrap())?;
+        }
+        Ok(out)
+    }
+
+    fn count_at_cap(&self, out: &InboxState) {
+        if *self.rules == Rules::V1 && out.revoked.len() == Rules::V1.revoked {
+            self.at_cap.set(self.at_cap.get() + 1);
+        }
+    }
+
+    /// Nothing live in `parts` is lost from `out`.
+    fn model(&self, parts: &[InboxDelta], out: &InboxState) -> Result<(), String> {
+        if !self.oracle {
+            return Ok(());
+        }
+        let o =
+            oracle::check(self.rules, parts, out).map_err(|e| format!("{}: {e}", self.label))?;
+        if *self.rules == Rules::V1 {
+            let mut n = self.overflow.get();
+            let hit = [
+                o.revoked,
+                o.usage,
+                o.per_pass,
+                o.pass_pool,
+                o.owner_pool,
+                o.per_ghost,
+                o.quarantine,
+            ];
+            for (n, hit) in n.iter_mut().zip(hit) {
+                *n += u64::from(hit);
+            }
+            self.overflow.set(n);
+        }
+        Ok(())
     }
 
     fn valid(&self, name: &str, state: &[u8]) -> Result<(), String> {
@@ -549,23 +627,25 @@ impl Laws<'_> {
     }
 }
 
-fn run_seed(seed: u64, tally: &mut Tally) -> Result<(), String> {
+fn run_seed(seed: u64, oracle: bool, tally: &mut Tally) -> Result<(), String> {
     for (name, rules, big) in [("tiny", TINY, false), ("v1", Rules::V1, true)] {
         let mut rng = Rng(seed ^ 0xF00D);
         let u = universe(seed, &mut rng, big);
-        let laws = Laws {
-            rules: &rules,
-            label: format!("seed {seed} {name}"),
-        };
-        for _ in 0..TRIPLES_PER_SEED {
-            let (a, b, c) = (
-                peer_state(&rules, &u, &mut rng),
-                peer_state(&rules, &u, &mut rng),
-                peer_state(&rules, &u, &mut rng),
-            );
-            laws.triple(&a, &b, &c, tally)?;
-        }
-        laws.non_canonical(&peer_state(&rules, &u, &mut rng))?;
+        let mut laws = Laws::new(&rules, format!("seed {seed} {name}"));
+        laws.oracle = oracle;
+        let result = (|| {
+            for _ in 0..TRIPLES_PER_SEED {
+                let (a, b, c) = (
+                    peer_state(&laws, &u, &mut rng)?,
+                    peer_state(&laws, &u, &mut rng)?,
+                    peer_state(&laws, &u, &mut rng)?,
+                );
+                laws.triple(&a, &b, &c, tally)?;
+            }
+            laws.non_canonical(&peer_state(&laws, &u, &mut rng)?)
+        })();
+        tally.add_overflow(&laws);
+        result?;
     }
     // V1's revocation set at its cap: each peer holds the fillers plus a few of
     // the universe's own, so unions land below, at and above 4096, and the late
@@ -575,22 +655,81 @@ fn run_seed(seed: u64, tally: &mut Tally) -> Result<(), String> {
         let mut rng = Rng(seed ^ 0xCA9);
         let mut u = universe_at(seed, &mut rng, false, AT_CAP_T0);
         u.fillers = cap_fillers();
-        let laws = Laws {
-            rules: &Rules::V1,
-            label: format!("seed {seed} v1 at the revocation cap"),
-        };
-        let (a, b, c) = (
-            peer_state(&Rules::V1, &u, &mut rng),
-            peer_state(&Rules::V1, &u, &mut rng),
-            peer_state(&Rules::V1, &u, &mut rng),
-        );
-        for s in [&a, &b, &c] {
-            let held = decode::<InboxState>(s).unwrap().revoked.len();
-            tally.at_cap += u64::from(held == Rules::V1.revoked);
-        }
-        laws.triple(&a, &b, &c, tally)?;
+        // The fillers are epoch 3's: keep the owners under which they live
+        // (epoch 3, or epoch 4 in a grace), or the set is never full. The
+        // bump out of a full set is pinned in `tests/rules.rs`.
+        u.owners
+            .retain(|o| o.pass_epoch == 3 || o.prev_epoch_until > AT_CAP_T0);
+        let mut laws = Laws::new(&Rules::V1, format!("seed {seed} v1 at the revocation cap"));
+        laws.oracle = oracle;
+        let result = (|| {
+            let (a, b, c) = (
+                peer_state(&laws, &u, &mut rng)?,
+                peer_state(&laws, &u, &mut rng)?,
+                peer_state(&laws, &u, &mut rng)?,
+            );
+            laws.triple(&a, &b, &c, tally)
+        })();
+        tally.add_overflow(&laws);
+        result?;
     }
     Ok(())
+}
+
+impl Tally {
+    fn add_overflow(&mut self, laws: &Laws) {
+        self.at_cap += laws.at_cap.get();
+        for (n, m) in self.v1_overflow.iter_mut().zip(laws.overflow.get()) {
+            *n += m;
+        }
+    }
+
+    fn add(&mut self, other: &Tally) {
+        self.triples += other.triples;
+        self.strict += other.strict;
+        self.healed += other.healed;
+        self.held += other.held;
+        self.at_cap += other.at_cap;
+        self.in_grace += other.in_grace;
+        self.grace_over += other.grace_over;
+        self.grace_held += other.grace_held;
+        for (n, m) in self.v1_overflow.iter_mut().zip(other.v1_overflow) {
+            *n += m;
+        }
+    }
+}
+
+/// Runs `seeds` over every core, each through `run`, which runs one seed on
+/// the calling thread.
+fn run_seeds(
+    seeds: &[u64],
+    run: &(dyn Fn(u64, &mut Tally) -> Result<(), String> + Sync),
+) -> (Tally, Vec<String>) {
+    world();
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        for chunk in seeds.chunks(seeds.len().div_ceil(threads)) {
+            let tx = tx.clone();
+            scope.spawn(move || {
+                for &seed in chunk {
+                    let mut tally = Tally::default();
+                    let result = run(seed, &mut tally);
+                    tx.send((tally, result)).unwrap();
+                }
+            });
+        }
+    });
+    drop(tx);
+    let mut total = Tally::default();
+    let mut failures = Vec::new();
+    for (tally, result) in rx {
+        total.add(&tally);
+        if let Err(e) = result {
+            failures.push(e);
+        }
+    }
+    (total, failures)
 }
 
 /// Writes the corpus `scripts/check-fdev-verify-merge.sh` hands to `fdev
@@ -608,8 +747,9 @@ fn capture_states_for_fdev() {
     for seed in 0..6 {
         let mut rng = Rng(seed ^ 0xF00D);
         let u = universe(seed, &mut rng, true);
+        let laws = Laws::new(&Rules::V1, format!("capture seed {seed}"));
         for _ in 0..3 {
-            let state = peer_state(&Rules::V1, &u, &mut rng);
+            let state = peer_state(&laws, &u, &mut rng).unwrap();
             std::fs::write(dir.join(format!("state-{n:02}.bin")), state).unwrap();
             n += 1;
         }
@@ -625,39 +765,9 @@ fn the_merge_laws_hold_over_crafted_states() {
             (0..n).collect()
         }
     };
-    world();
-    let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::scope(|scope| {
-        for chunk in seeds.chunks(seeds.len().div_ceil(threads)) {
-            let tx = tx.clone();
-            scope.spawn(move || {
-                for &seed in chunk {
-                    let mut tally = Tally::default();
-                    let result = run_seed(seed, &mut tally);
-                    tx.send((tally, result)).unwrap();
-                }
-            });
-        }
-    });
-    drop(tx);
-    let mut total = Tally::default();
-    let mut failures = Vec::new();
-    for (tally, result) in rx {
-        total.triples += tally.triples;
-        total.strict += tally.strict;
-        total.healed += tally.healed;
-        total.held += tally.held;
-        total.at_cap += tally.at_cap;
-        total.in_grace += tally.in_grace;
-        total.grace_over += tally.grace_over;
-        total.grace_held += tally.grace_held;
-        if let Err(e) = result {
-            failures.push(e);
-        }
-    }
+    let (total, failures) = run_seeds(&seeds, &|seed, tally| run_seed(seed, true, tally));
     println!(
-        "{} seeds: {} triples, {} strict, {} healed, {} messages held, {} states at the revocation cap",
+        "{} seeds: {} triples, {} strict, {} healed, {} messages held, {} merges ending at the revocation cap",
         seeds.len(),
         total.triples,
         total.strict,
@@ -668,6 +778,15 @@ fn the_merge_laws_hold_over_crafted_states() {
     println!(
         "grace (decision 18): {} states in one, {} past its end, {} messages held under the previous epoch",
         total.in_grace, total.grace_over, total.grace_held
+    );
+    let overflow: Vec<String> = CAPS
+        .iter()
+        .zip(total.v1_overflow)
+        .map(|(cap, n)| format!("{cap} {n}"))
+        .collect();
+    println!(
+        "V1 merges whose live items overflowed a cap: {}",
+        overflow.join(", ")
     );
     assert!(
         failures.is_empty(),
@@ -687,6 +806,70 @@ fn the_merge_laws_hold_over_crafted_states() {
             total.in_grace > 0 && total.grace_over > 0 && total.grace_held > 0,
             "the grace ran on both sides of its end and admitted mail"
         );
+        let [_, _, per_pass, pass_pool, owner_pool, per_ghost, _] = total.v1_overflow;
+        assert!(
+            per_pass > 0 && pass_pool > 0 && owner_pool > 0 && per_ghost > 0,
+            "V1's per-pass, pass pool, owner pool and per-ghost caps overflowed"
+        );
+    }
+    // Seeds 0, 20 and 40 of the default run: the 4096 rule was fuzzed only if
+    // merges got there. One such seed alone may not.
+    if seeds.iter().filter(|s| s.is_multiple_of(20)).count() >= 3 {
+        assert!(
+            total.at_cap > 0 && total.v1_overflow[0] > 0,
+            "merges reached and went over the 4096 revocation cap"
+        );
+    }
+}
+
+/// The oracle is what sees a rule that loses a live item the same way every
+/// time: run the fuzzer under each plausible mutant that did exactly that, and
+/// it must fail through the oracle. With the oracle off, what the laws alone
+/// see is printed beside it.
+#[cfg(feature = "plausible-mutants")]
+mod the_oracle_sees_a_silent_loss {
+    use super::*;
+    use freenet_email_inbox_v2::mutant::{Mutant, with};
+
+    const SEEDS: u64 = 48;
+
+    fn failures(m: Mutant, oracle: bool) -> Vec<String> {
+        let seeds: Vec<u64> = (0..SEEDS).collect();
+        run_seeds(&seeds, &|seed, tally| {
+            with(m, || run_seed(seed, oracle, tally))
+        })
+        .1
+    }
+
+    fn caught(m: Mutant) {
+        let laws_alone = failures(m, false);
+        let with_oracle = failures(m, true);
+        let by_oracle: Vec<&String> = with_oracle
+            .iter()
+            .filter(|f| f.contains(oracle::ORACLE))
+            .collect();
+        println!(
+            "{m:?}: the laws alone fail {} of {SEEDS} seeds; with the oracle {} fail, {} through it",
+            laws_alone.len(),
+            with_oracle.len(),
+            by_oracle.len()
+        );
+        for f in by_oracle.iter().take(3) {
+            println!("  {f}");
+        }
+        assert!(!by_oracle.is_empty(), "{m:?}: the oracle saw nothing");
+    }
+
+    /// Decision 22's bug.
+    #[test]
+    fn revocations_ranked_by_expiry_first() {
+        caught(Mutant::RevocationExpiryFirst);
+    }
+
+    /// Review r1 B1.
+    #[test]
+    fn joining_before_pruning() {
+        caught(Mutant::JoinBeforePrune);
     }
 }
 
@@ -729,10 +912,7 @@ fn a_dead_usage_entry_never_wins_the_join() {
     let a = encode(&w.raw(owner.clone(), w.time(t), [], [dying], []));
     let b = encode(&w.raw(owner.clone(), w.time(t + 10 * DAY), [], [], []));
     let c = encode(&w.raw(owner, w.time(t), [], [living.clone()], []));
-    let laws = Laws {
-        rules: &Rules::V1,
-        label: "usage".into(),
-    };
+    let laws = Laws::new(&Rules::V1, "usage".into());
     laws.triple(&a, &b, &c, &mut Tally::default()).unwrap();
     for (x, y) in [(&a, &b), (&b, &a)] {
         let ab = laws.merge(x, y).unwrap();
@@ -758,10 +938,7 @@ fn a_dead_revocation_never_wins_the_join() {
     let a = encode(&w.raw(old, w.time(t), [stale], [], []));
     let b = encode(&w.raw(new.clone(), w.time(t), [], [], []));
     let c = encode(&w.raw(new.clone(), w.time(t), [current.clone()], [], []));
-    let laws = Laws {
-        rules: &Rules::V1,
-        label: "revocation".into(),
-    };
+    let laws = Laws::new(&Rules::V1, "revocation".into());
     laws.triple(&a, &b, &c, &mut Tally::default()).unwrap();
     let ca = laws.merge(&c, &a).unwrap();
     let merged: InboxState = decode(&ca).unwrap();

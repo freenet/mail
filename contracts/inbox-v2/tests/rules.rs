@@ -1031,5 +1031,8 @@ fn a_revocation_that_dies_first_does_not_win_the_join() {
     later.messages.insert(msg.0, msg.1);
     let after = merge(&Rules::V1, &w.params, vec![later]).unwrap();
     assert_eq!(after.revoked.get(&pass.cert.pass_id), Some(&current));
-    assert!(!after.messages.contains_key(&msg.0), "a revoked pass was admitted");
+    assert!(
+        !after.messages.contains_key(&msg.0),
+        "a revoked pass was admitted"
+    );
 }

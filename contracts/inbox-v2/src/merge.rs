@@ -508,19 +508,13 @@ pub fn merge(
                 let bytes = revocation_bytes(&params.addr, &r.pass_id, r.expiry, r.epoch);
                 r.pass_id == key && verify_ed25519(&issuer, &bytes, &r.sig)
             });
-            join_entry(
-                &mut revoked,
-                key,
-                entry,
-                revocation_rank,
-                |r| {
-                    let bytes = revocation_bytes(&params.addr, &r.pass_id, r.expiry, r.epoch);
-                    r.pass_id == key
-                        && r.expiry.is_multiple_of(EXPIRY_GRANULARITY)
-                        && live_revocation(r)
-                        && verify_ed25519(&issuer, &bytes, &r.sig)
-                },
-            );
+            join_entry(&mut revoked, key, entry, revocation_rank, |r| {
+                let bytes = revocation_bytes(&params.addr, &r.pass_id, r.expiry, r.epoch);
+                r.pass_id == key
+                    && r.expiry.is_multiple_of(EXPIRY_GRANULARITY)
+                    && live_revocation(r)
+                    && verify_ed25519(&issuer, &bytes, &r.sig)
+            });
         }
         for (key, entry) in part.usage {
             join_entry(
