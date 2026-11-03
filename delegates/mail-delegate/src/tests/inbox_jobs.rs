@@ -1372,9 +1372,11 @@ impl crate::env::Env for Counting<'_> {
 /// host, natively. A v2 drain decrypts with ML-KEM and checks ML-DSA as the
 /// import does, and writes more (the stored copy, the reply pass it keeps).
 /// Printed as `COST` lines; run with `--release -- --nocapture` for numbers.
-/// The test holds the write count, which is deterministic: if a drained
-/// message ever writes more than twice what an import does, the per-message
-/// estimate the budgets use is no longer an upper bound.
+/// The test holds the write count, which is deterministic. Measured (2026-11-03):
+/// an import writes 35.3 a message, a drained message 24, a renewal 22. A
+/// drained message and a renewal are each charged what an import is, so the
+/// test fails if either ever writes more than an import does: the estimate
+/// the budgets use would no longer be an upper bound.
 #[test]
 fn a_drained_message_costs_about_what_an_import_does() {
     use std::time::Instant;
@@ -1436,7 +1438,8 @@ fn a_drained_message_costs_about_what_an_import_does() {
     );
     println!("COST an empty run {:.2} ms", empty.as_secs_f64() * 1000.0);
     // Bob's first message makes Alice keep his pass back; later ones change
-    // nothing, so per message a drain writes about what an import does.
+    // nothing, so per message a drain writes less than an import does
+    // (measured 24 against 35).
     assert!(
         v2_writes <= v1_writes,
         "a drain writes {v2_writes} for {N} messages, an import {v1_writes}"
@@ -1466,9 +1469,9 @@ fn a_drained_message_costs_about_what_an_import_does() {
         "COST a renewal {:.2} ms native, {renew_writes} writes",
         renew.as_secs_f64() * 1000.0 / sent as f64
     );
-    // Two messages' worth.
+    // No more than an import's worth (measured 22 against 35).
     assert!(
-        renew_writes * N as u64 <= 2 * v1_writes,
+        renew_writes * N as u64 <= v1_writes,
         "a renewal writes {renew_writes}, an import {} a message",
         v1_writes / N as u64
     );

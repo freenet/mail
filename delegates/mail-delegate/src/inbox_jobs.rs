@@ -70,7 +70,10 @@ pub const RENEW_LOOKS_PER_RUN: usize = 16;
 /// ([`jobs::MESSAGE_COST_MS`]), a drained message makes 24 and a renewal 22
 /// (`tests::inbox_jobs::a_drained_message_costs_about_what_an_import_does`).
 /// So a drained message is charged one slot of the message slice, and a
-/// renewal one import's duty, both at or above what they cost.
+/// renewal one import's duty, both at or above what they cost. The wasm timings
+/// above came from a one-off harness that is not kept in the repository
+/// (`tools/inbox-v2-cost` and `scripts/check-inbox-cost.sh` measure the
+/// contract, not the delegate); only the write counts are held by a test.
 pub const RENEW_COST_MS: u64 = 120;
 /// A page's own rotation over its origin's inboxes, in its namespace.
 const PAGE_CURSOR: &str = "bg/cursor-v2";

@@ -514,6 +514,16 @@ dt "inbox v2: a RequireGhost inbox refuses a message with no proof" \
         };
         if proof.cert.len()' \
     a_ghost_key_proof_from_the_fixtures_passes_the_contract
+dt "inbox v2 jobs: a drained message writes no more than an import" "$D/inbox_v2.rs" \
+    'store_inbound(s, me, rec, id, bytes, out)?;' \
+    'for i in 0..40 { let _ = s.put(&format!("zz/{i}"), &[0]); }
+        store_inbound(s, me, rec, id, bytes, out)?;' \
+    a_drained_message_costs_about_what_an_import_does
+dt "inbox v2 jobs: a renewal writes no more than an import" "$D/inbox_jobs.rs" \
+    'v2::note_sent(s, me, &pass_id, &sealed.id.0, now, true)?;' \
+    'for i in 0..40 { let _ = s.put(&format!("zz/{i}"), &[0]); }
+        v2::note_sent(s, me, &pass_id, &sealed.id.0, now, true)?;' \
+    a_drained_message_costs_about_what_an_import_does
 dt "origins get separate namespaces" "$D/store.rs" \
     'format!("o/{}/", hex(&origin.0))' '{ let _ = origin; "o/shared/".to_string() }' \
     origins_and_kinds_never_share_a_key,a_foreign_origin_can_neither_read_nor_change_another_namespace
