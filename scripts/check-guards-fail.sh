@@ -463,6 +463,33 @@ tt "inbox v2 jobs: a drained message is tombstoned only once stored" "$D/inbox_v
             }' '                    out.unstored.insert(*id);
                 }
             }'
+dt "inbox v2 jobs: the owner update takes a slot of the run's slice" "$D/inbox_jobs.rs" \
+    'pub const OWNER_SLOTS: usize = 1;' 'pub const OWNER_SLOTS: usize = 0;' \
+    a_run_drains_exactly_its_slice_less_the_owner_updates_share
+dt "inbox v2 jobs: a drain stops at the run's slice" "$D/inbox_jobs.rs" \
+    'let limit = left.saturating_sub(OWNER_SLOTS).min(v2::DRAIN_BATCH);' \
+    'let limit = v2::DRAIN_BATCH;' \
+    a_run_drains_exactly_its_slice_less_the_owner_updates_share
+dt "inbox v2 jobs: a drain waits when the contract's minute is spent" "$D/inbox_jobs.rs" \
+    '    if !budget.may_write(&own.id) {
+        return false;
+    }' '' the_jobs_stop_updating_a_contract_at_the_minute_limit
+dt "inbox v2 jobs: a renewal waits when the contact's minute is spent" "$D/inbox_jobs.rs" \
+    '        if !self.budget.may_write(&id) {
+            return Ok(Some(now + 60));
+        }' '' the_jobs_stop_updating_a_contract_at_the_minute_limit
+dt "inbox v2 jobs: a run sends four renewals" "$D/inbox_jobs.rs" \
+    'pub const RENEW_PER_RUN: usize = 4;' 'pub const RENEW_PER_RUN: usize = 5;' \
+    a_run_sends_at_most_its_renewals_and_the_next_run_the_next
+dt "inbox v2 jobs: a run sends no fewer than four renewals" "$D/inbox_jobs.rs" \
+    'pub const RENEW_PER_RUN: usize = 4;' 'pub const RENEW_PER_RUN: usize = 3;' \
+    a_run_sends_at_most_its_renewals_and_the_next_run_the_next
+dt "inbox v2 jobs: a run looks at sixteen contacts" "$D/inbox_jobs.rs" \
+    'pub const RENEW_LOOKS_PER_RUN: usize = 16;' 'pub const RENEW_LOOKS_PER_RUN: usize = 17;' \
+    a_run_looks_at_no_more_contacts_than_its_looks
+dt "inbox v2 jobs: due contacts are served oldest first" "$D/inbox_jobs.rs" \
+    '        due.sort_unstable();
+' '' due_contacts_are_served_oldest_first
 dt "origins get separate namespaces" "$D/store.rs" \
     'format!("o/{}/", hex(&origin.0))' '{ let _ = origin; "o/shared/".to_string() }' \
     origins_and_kinds_never_share_a_key,a_foreign_origin_can_neither_read_nor_change_another_namespace

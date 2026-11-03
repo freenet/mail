@@ -1086,6 +1086,230 @@ fn updates_to_one_contract_stop_at_the_minute_limit() {
     assert!(b.may_write(&[1; 32]));
 }
 
+/// Alice with `n` messages from Bob waiting in her inbox.
+fn with_waiting(n: usize) -> (World, Addr) {
+    let mut world = World::new();
+    let a = world.identity("alice");
+    let b = world.identity("bob");
+    for i in 0..n {
+        let (_, landed) = world.send(&b, &a, &format!("waiting {i}"));
+        assert!(landed);
+    }
+    (world, a)
+}
+
+/// A node-started run drains the message slice less the owner update's share
+/// (`OWNER_SLOTS`), and not a message more: 11 of 12 slots go to messages, and
+/// what is left waits for the next run, which takes it.
+#[test]
+fn a_run_drains_exactly_its_slice_less_the_owner_updates_share() {
+    // 12 slots to a run, one of them the owner update's.
+    let cap = 11;
+    for (waiting, imported, left) in [
+        (cap - 1, cap - 1, 0),
+        (cap, cap, 0),
+        (cap + 1, cap, 1),
+        (cap + 3, cap, 3),
+    ] {
+        let (mut world, a) = with_waiting(waiting);
+        let (done, _) = run(&mut world, Trigger::Tick(Tick::Rescan));
+        assert_eq!(
+            (done.imported as usize, done.remaining as usize),
+            (imported, left),
+            "{waiting} waiting"
+        );
+        assert_eq!(texts(&world.inbound(&a)).len(), imported);
+        let (done, _) = run(&mut world, Trigger::Tick(Tick::Rescan));
+        assert_eq!(done.imported as usize, left, "the next run takes the rest");
+        assert_eq!(texts(&world.inbound(&a)).len(), waiting);
+    }
+}
+
+/// What `inbox_jobs::run` does for `trigger` with a budget that has already
+/// written to the contracts in `spent` as often as a minute allows (and, with
+/// `advance_budget`, a minute later).
+fn run_with_spent(
+    world: &mut World,
+    trigger: Trigger,
+    spent: &[[u8; 32]],
+    advance_budget: bool,
+) -> (JobsRun, Vec<OutboundDelegateMsg>) {
+    sync(world);
+    let now = world.env.now.unwrap();
+    let origin = Origin([PROD; 32]);
+    let owns: Vec<_> = world
+        .inboxes
+        .keys()
+        .filter_map(|a| {
+            let s = crate::store::Space::new(&mut world.env, origin);
+            inbox_jobs::own(&s, a, now).unwrap()
+        })
+        .collect();
+    let mut budget = crate::jobs::Budget::new(now);
+    for id in spent {
+        for _ in 0..crate::jobs::MAX_WRITES_PER_MINUTE {
+            budget.take_write(*id);
+        }
+    }
+    // A minute on, the node's clock and the budget both: the budget starts over.
+    let now = if advance_budget {
+        world.advance(60);
+        budget.advance(now + 60);
+        now + 60
+    } else {
+        now
+    };
+    let mut left = crate::jobs::MAX_MESSAGES_PER_RUN;
+    let mut done = JobsRun::default();
+    let d = inbox_jobs::run(&mut world.env, trigger, &owns, &mut budget, now, &mut left, &mut done);
+    (done, d.out)
+}
+
+/// No more than `MAX_WRITES_PER_MINUTE` updates to one contract a minute, in
+/// the jobs themselves: a drain of an inbox written to that often waits for
+/// the next minute (and the message stays in the inbox), and so does a
+/// renewal to a contact written to that often, which is looked at again in
+/// 60 s. Another contract is not held back.
+#[test]
+fn the_jobs_stop_updating_a_contract_at_the_minute_limit() {
+    let (mut world, a) = with_waiting(2);
+    let id = id_of(&world, &a);
+    let (done, out) = run_with_spent(&mut world, Trigger::Tick(Tick::Rescan), &[id], false);
+    assert_eq!((done.imported, out.len()), (0, 0), "a spent contract is not written to");
+    assert_eq!(world.state(&a).messages.len(), 2, "the mail waits in the inbox");
+    let (done, out) = run_with_spent(&mut world, Trigger::Tick(Tick::Rescan), &[[7; 32]], false);
+    assert_eq!((done.imported, out.len()), (2, 1), "another contract's budget is not Alice's");
+    // The renewal: Alice reissues Bob's pass; Bob's contract is spent.
+    let (mut world, a) = with_waiting(0);
+    let c = world.identity_in("carol", 2);
+    let pass = world.issue(&a, Some(c), None);
+    hold(&mut world, &c, pass);
+    world.send(&c, &a, "hi");
+    settle(&mut world);
+    world.change(&a, OwnerChange::BumpEpoch { emergency: true });
+    let now = world.env.now.unwrap();
+    let key = ByteArray::new(c.0);
+    assert!(world.record(&a).due[&key] <= now, "the reissue is due");
+    let spent = id_of(&world, &c);
+    let (_, out) = run_with_spent(&mut world, PAGE, &[spent], false);
+    assert!(out.is_empty(), "no renewal to a contract written to that often");
+    assert_eq!(world.record(&a).due[&key], now + 60, "looked at again in a minute");
+    let (_, out) = run_with_spent(&mut world, PAGE, &[spent], true);
+    assert_eq!(out.len(), 1, "the next minute it goes");
+}
+
+/// Alice with `n` contacts, each holding her pass, after an emergency bump:
+/// every reissue is due now, at the times in `due` (by contact order).
+fn with_due_contacts(n: usize) -> (World, Addr, Vec<Addr>) {
+    let mut world = World::new();
+    let a = world.identity("alice");
+    let mut contacts: Vec<Addr> = (0..n)
+        .map(|i| {
+            let c = world.identity_in(&format!("contact{i}"), 2);
+            let pass = world.issue(&a, Some(c), None);
+            hold(&mut world, &c, pass);
+            // Writing once gives Alice the pass a renewal is sent through.
+            world.send(&c, &a, "hi");
+            c
+        })
+        .collect();
+    contacts.sort_by_key(|c| c.0);
+    settle(&mut world);
+    world.change(&a, OwnerChange::BumpEpoch { emergency: true });
+    (world, a, contacts)
+}
+
+/// A run sends at most `RENEW_PER_RUN` renewals however many are due, and the
+/// next run sends the next ones: after k runs, 4k.
+#[test]
+fn a_run_sends_at_most_its_renewals_and_the_next_run_the_next() {
+    const PER_RUN: usize = 4;
+    let n = PER_RUN * 2 + 1;
+    let (mut world, a, contacts) = with_due_contacts(n);
+    let mut reached = BTreeSet::new();
+    for k in 1..=3 {
+        let (_, updates) = run(&mut world, PAGE);
+        let sent: usize = contacts.iter().map(|c| messages_to(&updates, c)).sum();
+        assert_eq!(
+            sent,
+            PER_RUN.min(n - reached.len()),
+            "run {k}"
+        );
+        reached.extend(
+            contacts
+                .iter()
+                .filter(|c| messages_to(&updates, c) > 0)
+                .copied(),
+        );
+        assert_eq!(reached.len(), n.min(PER_RUN * k));
+    }
+    let _ = a;
+}
+
+/// A run looks at no more than `RENEW_LOOKS_PER_RUN` contacts, found or not:
+/// contacts whose inboxes this node does not hold cost a look each, and the
+/// rest wait for the next run.
+#[test]
+fn a_run_looks_at_no_more_contacts_than_its_looks() {
+    const LOOKS: usize = 16;
+    let n = LOOKS + 4;
+    let mut world = World::new();
+    let a = world.identity("alice");
+    // Contacts whose inboxes the node does not hold.
+    let contacts: Vec<Addr> = (1..=n as u8).map(|i| Addr([i; 24])).collect();
+    for c in &contacts {
+        world.issue(&a, Some(*c), None);
+    }
+    world.change(&a, OwnerChange::BumpEpoch { emergency: true });
+    let now = world.env.now.unwrap();
+    let looked = |world: &mut World| {
+        let rec = world.record(&a);
+        contacts
+            .iter()
+            .filter(|c| rec.due[&ByteArray::new(c.0)] > now)
+            .count()
+    };
+    assert_eq!(looked(&mut world), 0, "all due");
+    run(&mut world, Trigger::Tick(Tick::Rescan));
+    assert_eq!(looked(&mut world), LOOKS, "one look each, and no more");
+    run(&mut world, Trigger::Tick(Tick::Rescan));
+    assert_eq!(looked(&mut world), n, "the next run looks at the rest");
+}
+
+/// Due contacts are taken oldest first, so a contact that has waited longest
+/// is not passed over by newer ones however the addresses sort.
+#[test]
+fn due_contacts_are_served_oldest_first() {
+    const PER_RUN: usize = 4;
+    let n = PER_RUN + 2;
+    let (mut world, a, contacts) = with_due_contacts(n);
+    let now = world.env.now.unwrap();
+    // The largest address has waited longest, the smallest least.
+    {
+        let origin = Origin([PROD; 32]);
+        let mut s = crate::store::Space::new(&mut world.env, origin);
+        let (generation, mut rec) = v2::record(&s, &a).unwrap();
+        for (i, c) in contacts.iter().enumerate() {
+            rec.due.insert(ByteArray::new(c.0), now - 10 * (i as u64 + 1));
+        }
+        v2::save(&mut s, v2::item(freenet_mail_protocol::ItemKind::InboxV2, &a, &[]), &rec, generation)
+            .unwrap();
+    }
+    let (_, updates) = run(&mut world, PAGE);
+    let served: BTreeSet<Addr> = contacts
+        .iter()
+        .filter(|c| messages_to(&updates, c) > 0)
+        .copied()
+        .collect();
+    let oldest: BTreeSet<Addr> = contacts
+        .iter()
+        .rev()
+        .take(PER_RUN)
+        .copied()
+        .collect();
+    assert_eq!(served, oldest);
+}
+
 /// A host that counts writes, to compare what an import and a drain do.
 struct Counting<'a> {
     inner: &'a mut MemEnv,
