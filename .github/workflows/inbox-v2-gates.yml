@@ -1,0 +1,153 @@
+name: Inbox v2 gates
+
+# The slow gates on the inbox v2 contract's rules: branch coverage, cargo-mutants
+# and core's merge-law verifier. They run on a PR that touches the contract or
+# the gates themselves, and nightly. They are separate from `check-drift` so a
+# PR elsewhere does not wait for them, and they are not required checks: a
+# path-filtered workflow cannot be one (see check-contract-wasm.yml). A failure
+# is a red run on the PR, and a red run of the nightly.
+#
+# The cheap gates (the disclosure gate, the plausible mutants, the guards that
+# show each gate failing) run in `check-drift`.
+
+on:
+  pull_request:
+    paths:
+      - 'contracts/inbox-v2/**'
+      - 'docs/metadata-fields.toml'
+      - 'published-contract/candidate/inbox_v2*'
+      - 'scripts/check-branch-coverage*'
+      - 'scripts/check-mutants-triage*'
+      - 'scripts/check-fdev-verify-merge*'
+      - '.github/workflows/inbox-v2-gates.yml'
+  schedule:
+    - cron: '15 5 * * *'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Branch coverage is an unstable rustc flag, and what a nightly counts as a
+  # branch has changed before, so the nightly is pinned. Move it deliberately.
+  COVERAGE_NIGHTLY: nightly-2025-08-08
+  LLVM_COV: '0.6.21'
+  MUTANTS: '27.1.0'
+  FDEV_RELEASE: v0.2.151
+
+jobs:
+  branch-coverage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install the pinned nightly
+        run: rustup toolchain install "$COVERAGE_NIGHTLY" --profile minimal --component llvm-tools-preview
+      - name: Install cargo-llvm-cov
+        run: |
+          curl -fsSL "https://github.com/taiki-e/cargo-llvm-cov/releases/download/v${LLVM_COV}/cargo-llvm-cov-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar -xz -C "$HOME/.cargo/bin/"
+          cargo llvm-cov --version
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: contracts/inbox-v2
+      - name: Every branch of the rules is visited or allowed
+        # llvm-cov instruments every dependency too, which makes the crypto in
+        # the merge-law fuzzer slow; a few seeds still reach every arm it does.
+        env:
+          FORK_SEEDS: '3'
+        run: bash scripts/check-branch-coverage.sh
+      - name: Upload the coverage report
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: inbox-v2-branch-coverage-${{ github.sha }}
+          path: target/branch-coverage/
+          if-no-files-found: ignore
+
+  mutants:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.99.1
+      - name: Install cargo-mutants
+        run: |
+          curl -fsSL "https://github.com/sourcefrog/cargo-mutants/releases/download/v${MUTANTS}/cargo-mutants-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar -xz -C "$HOME/.cargo/bin/"
+          cargo mutants --version
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: contracts/inbox-v2
+      - name: The mutants run uses every test file that can build in its copy
+        run: |
+          for f in contracts/inbox-v2/tests/*.rs; do
+            n=$(basename "$f" .rs)
+            case "$n" in metadata_disclosure|plausible_mutants) continue ;; esac
+            grep -q "\"$n\"" contracts/inbox-v2/.cargo/mutants.toml \
+              || { echo "::error::tests/$n.rs is not in .cargo/mutants.toml"; exit 1; }
+          done
+      - name: Mutate the rules (shard ${{ matrix.shard }}/8)
+        # Exit status 2 is survivors, 3 is timeouts: both are read by the
+        # triage check below, which is what fails.
+        env:
+          FORK_SEEDS: '12'
+        working-directory: contracts/inbox-v2
+        run: |
+          status=0
+          cargo mutants --shard "${{ matrix.shard }}/8" --output "$GITHUB_WORKSPACE/target/mutants" || status=$?
+          case "$status" in 0|2|3) ;; *) exit "$status" ;; esac
+      - name: Every survivor is triaged
+        run: |
+          out=target/mutants/mutants.out
+          touch "$out/missed.txt" "$out/timeout.txt"
+          bash scripts/check-mutants-triage.sh "$out/missed.txt" "$out/timeout.txt"
+      - name: Keep the outcome for the stale-line check
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: mutants-shard-${{ matrix.shard }}
+          path: target/mutants/mutants.out/
+          if-no-files-found: ignore
+
+  mutants-triage-complete:
+    # A triage line for a mutant no shard leaves standing is a stale excuse.
+    needs: mutants
+    if: ${{ !cancelled() && needs.mutants.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: mutants-shard-*
+          path: target/shards
+      - name: No triage line is stale
+        run: |
+          shopt -s nullglob
+          files=(target/shards/*/missed.txt target/shards/*/timeout.txt)
+          [ "${#files[@]}" -gt 0 ] || { echo "::error::no shard outcome to read"; exit 1; }
+          [ "$(ls -d target/shards/*/ | wc -l)" -eq 8 ] || { echo "::error::expected 8 shards"; exit 1; }
+          bash scripts/check-mutants-triage.sh --complete "${files[@]}"
+
+  verify-merge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.99.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: contracts/inbox-v2
+      - name: Install fdev
+        run: |
+          mkdir -p "$HOME/.cargo/bin"
+          curl -fsSL "https://github.com/freenet/freenet-core/releases/download/${FDEV_RELEASE}/fdev-x86_64-unknown-linux-musl.tar.gz" \
+            | tar -xz -C "$HOME/.cargo/bin/" fdev
+          fdev --version
+      - name: Core's merge laws hold on the candidate, every case explicit
+        run: bash scripts/check-fdev-verify-merge.sh

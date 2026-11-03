@@ -398,68 +398,6 @@ impl Laws<'_> {
     }
 }
 
-/// `state` re-spelled so it decodes to the same value, or with one thing added.
-fn non_canonical_forms(state: &[u8]) -> Vec<(&'static str, Vec<u8>)> {
-    use ciborium::Value;
-    assert_eq!(state[0], 0xA5, "a five-field map");
-    let mut forms = Vec::new();
-
-    let mut trailing = state.to_vec();
-    trailing.push(0x00);
-    forms.push(("trailing byte", trailing));
-
-    let mut long_len = vec![0xB8, 0x05];
-    long_len.extend_from_slice(&state[1..]);
-    forms.push(("non-minimal map length", long_len));
-
-    let mut indefinite = vec![0xBF];
-    indefinite.extend_from_slice(&state[1..]);
-    indefinite.push(0xFF);
-    forms.push(("indefinite map", indefinite));
-
-    let reencode = |value: &Value| {
-        let mut out = Vec::new();
-        ciborium::into_writer(value, &mut out).unwrap();
-        out
-    };
-    let value: Value = ciborium::from_reader(state).unwrap();
-    let Value::Map(fields) = value.clone() else {
-        panic!("a map")
-    };
-
-    let mut extra = fields.clone();
-    extra.push((Value::Text("extra".into()), Value::Integer(1.into())));
-    forms.push(("unknown field", reencode(&Value::Map(extra))));
-
-    let mut swapped = fields.clone();
-    swapped.swap(0, 1);
-    forms.push(("fields out of order", reencode(&Value::Map(swapped))));
-
-    // Keys of a collection: repeat one, and reverse them.
-    for field in ["revoked", "usage", "messages"] {
-        let at = fields
-            .iter()
-            .position(|(k, _)| k.as_text() == Some(field))
-            .unwrap();
-        let Value::Map(entries) = &fields[at].1 else {
-            panic!("a map")
-        };
-        if let Some(first) = entries.first() {
-            let mut dup = fields.clone();
-            let mut with_dup = entries.clone();
-            with_dup.insert(0, first.clone());
-            dup[at].1 = Value::Map(with_dup);
-            forms.push(("duplicate key", reencode(&Value::Map(dup))));
-        }
-        if entries.len() >= 2 {
-            let mut rev = fields.clone();
-            rev[at].1 = Value::Map(entries.iter().rev().cloned().collect());
-            forms.push(("unsorted keys", reencode(&Value::Map(rev))));
-        }
-    }
-    forms
-}
-
 fn run_seed(seed: u64, tally: &mut Tally) -> Result<(), String> {
     for (name, rules, big) in [("tiny", TINY, false), ("v1", Rules::V1, true)] {
         let mut rng = Rng(seed ^ 0xF00D);
@@ -479,6 +417,29 @@ fn run_seed(seed: u64, tally: &mut Tally) -> Result<(), String> {
         laws.non_canonical(&peer_state(&rules, &u, &mut rng))?;
     }
     Ok(())
+}
+
+/// Writes the corpus `scripts/check-fdev-verify-merge.sh` hands to `fdev
+/// verify-merge`: the contract's parameters and states peers could hold, under
+/// the rules the WASM runs. Does nothing unless `INBOX_CAPTURE_DIR` names a
+/// directory; the script fails if the files are not there.
+#[test]
+fn capture_states_for_fdev() {
+    let Ok(dir) = std::env::var("INBOX_CAPTURE_DIR") else {
+        return;
+    };
+    let dir = std::path::Path::new(&dir);
+    std::fs::write(dir.join("params.bin"), world().params.to_bytes()).unwrap();
+    let mut n = 0;
+    for seed in 0..6 {
+        let mut rng = Rng(seed ^ 0xF00D);
+        let u = universe(seed, &mut rng, true);
+        for _ in 0..3 {
+            let state = peer_state(&Rules::V1, &u, &mut rng);
+            std::fs::write(dir.join(format!("state-{n:02}.bin")), state).unwrap();
+            n += 1;
+        }
+    }
 }
 
 #[test]

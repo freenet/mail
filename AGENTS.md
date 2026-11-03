@@ -180,6 +180,24 @@ small caps. Change any rule knowing it cannot be patched after publish.
 - **What is an error:** a part that cannot be decoded canonically, or that names
   an owner record that fails, is refused. A message, revocation or usage entry
   that fails is dropped without one, so a sender reads back after an update.
+- **Gates on the rules.** `tests/plausible_mutants.rs` runs 14 wrong-but-plausible
+  rules through `src/mutant.rs`, a seam compiled only with the
+  `plausible-mutants` feature (so not in the WASM; `check-inbox-candidate.sh`
+  proves the bytes are the same), and requires each scenario to pass on the real
+  rules and fail under its mutant for the law it names. A new rule that can go
+  wrong in a plausible way gets a mutant and a scenario. `docs/metadata-fields.toml`
+  lists every plaintext field of a populated state and `tests/metadata_disclosure.rs`
+  fails unless the list is exact (a field cannot become public without the README
+  line; `release.sh` refusing to publish on it comes with C3). Both run in
+  `check-drift`. The slow ones run in `.github/workflows/inbox-v2-gates.yml` on a
+  PR that touches the contract, and nightly, and are not required checks: branch
+  coverage (`scripts/check-branch-coverage.sh`, an arm never visited fails unless
+  `coverage-allowlist.toml` gives a reason, and a stale entry fails too),
+  cargo-mutants over the rules (`scripts/check-mutants-triage.sh`: a survivor
+  needs a line in `mutants-triage.md`, and a stale line fails), and core's
+  `fdev verify-merge` on the candidate over generated states
+  (`scripts/check-fdev-verify-merge.sh`; inconclusive is not a pass). The
+  `check-guards-fail.sh` guards named `inbox v2: ...` show each gate failing.
 - **Candidate:** `published-contract/candidate/inbox_v2`, built only by
   `scripts/build-wasm.sh`; `scripts/check-inbox-candidate.sh` (CI `check-drift`)
   fails unless the committed bytes are what the source builds. Unlike the mail
