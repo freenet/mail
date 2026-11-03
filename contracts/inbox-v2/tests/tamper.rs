@@ -452,8 +452,10 @@ fn the_time_and_entries_are_bound_to_the_address() {
     assert!(merged.revoked.is_empty() && merged.usage.is_empty());
 }
 
-/// The issuer key is an Ed25519 key, so `verify_strict` must hold: a signature
-/// with a non-canonical S would be a second encoding of a genuine item.
+/// A signature with a non-canonical S would be a second encoding of a genuine
+/// item. ed25519-dalek 2 refuses S >= L under plain `verify` too, so this holds
+/// whichever is called; `verify_strict` itself is pinned by
+/// `a_certificate_for_a_weak_key_is_no_use`.
 #[test]
 fn a_malleated_signature_is_refused() {
     let w = world();
@@ -480,6 +482,28 @@ fn a_malleated_signature_is_refused() {
     } else {
         panic!("this signature's S + L does not fit: pick another fixture");
     }
+}
+
+/// Decision 6 and fix round 1 N4, pinned as it is: an owner record that changes
+/// `issuer_vk` makes every later merge refuse, because no time attestation
+/// verifies under the new key. The client never changes it; a contract that
+/// "fixed" this would be a rule change.
+#[test]
+fn a_new_issuer_key_leaves_no_time_that_verifies() {
+    let w = world();
+    let mut rotated = w.owner(2, 3, QuarantineMode::Open, BTreeMap::new());
+    rotated.issuer_vk = ByteArray::new([0x5E; 32]);
+    w.sign_owner(&mut rotated);
+    let held = w.raw(owner(3), w.time(T), [], [], []);
+    let next = InboxDelta {
+        owner: Some(rotated),
+        ..InboxDelta::default()
+    };
+    let refused = merge(&Rules::V1, &w.params, vec![held.into(), next]);
+    assert!(
+        matches!(refused, Err(Malformed(why)) if why == "no time attestation" || why == "issuer key"),
+        "{refused:?}"
+    );
 }
 
 /// Signed by the owner, and still no use to a sender.

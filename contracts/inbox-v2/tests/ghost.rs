@@ -226,9 +226,24 @@ fn every_proof_field_is_checked() {
     assert!(!holds(REQUIRE, carrying(bytes.clone(), other)), "cert");
 
     // A signature bit in the certificate: the RSA or master check, not parsing.
-    let mut cert = good.clone();
-    let at = cert.cert.len() - 10;
-    cert.cert[at] ^= 1;
+    // The flipped byte is the last one at which the certificate still decodes
+    // to its canonical form and claims the same key, so the payload signature,
+    // checked first, passes, and what refuses it is the chain.
+    let claimed = |c: &[u8]| {
+        ghostkey_verify::GhostkeyCertificate::from_cbor(c)
+            .ok()
+            .filter(|cert| cert.to_cbor() == c)
+            .map(|cert| cert.claimed_ghost_key().to_bytes())
+    };
+    let cert = (1..good.cert.len())
+        .map(|back| {
+            let mut cert = good.clone();
+            let at = cert.cert.len() - back;
+            cert.cert[at] ^= 1;
+            cert
+        })
+        .find(|cert| claimed(&cert.cert).is_some() && claimed(&cert.cert) == claimed(&good.cert))
+        .unwrap();
     assert!(!holds(REQUIRE, carrying(bytes.clone(), cert)), "chain");
 
     // Bytes after the certificate parse, but are not its canonical form.

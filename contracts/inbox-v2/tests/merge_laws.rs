@@ -295,6 +295,8 @@ fn universe_at(seed: u64, rng: &mut Rng, big: bool, t0: u64) -> Universe {
         usage.push(at(2, pass.cert.expiry + 100 * DAY));
     }
     usage.push(w.usage(id_of(key(77)), 1, t0 - 10 * DAY));
+    // Off the day: dropped wherever it lands (decision 17).
+    usage.push(w.usage(passes[n_contacts as usize].cert.pass_id, 2, far + HOUR));
     usage.push(w.usage(passes[old_epoch + 1].cert.pass_id, 2, t0 + 30 * DAY + HOUR));
 
     // Near times, drawn twice as often, and times past every expiry and at

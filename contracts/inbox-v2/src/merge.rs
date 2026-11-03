@@ -20,9 +20,11 @@
 //!    One message per id: the smallest encoding that passed.
 //! 6. Cap the messages, by pool.
 //!
-//! Only an owner record that fails, or no time that verifies, refuses the input.
-//! Anything else that fails is dropped without an error, so a sender reads back
-//! to learn whether its message landed. Dropping a message is what the filter
+//! Within `merge`, only an owner record that fails, or no time that verifies,
+//! refuses the input; before it, decoding refuses non-canonical input, a part
+//! over a count bound and an input over the byte limit (`types.rs`). Anything
+//! else that fails is dropped without an error, so a sender reads back to
+//! learn whether its message landed. Dropping a message is what the filter
 //! does to anything the owner's later acts rule out, so a client drains before
 //! it signs a change that would drop mail.
 //!
