@@ -29,7 +29,7 @@ env:
   # Branch coverage is an unstable rustc flag, and what a nightly counts as a
   # branch has changed before, so the nightly is pinned. Move it deliberately.
   COVERAGE_NIGHTLY: nightly-2025-08-08
-  LLVM_COV: '0.6.21'
+  LLVM_COV_VERSION: '0.6.21'
   MUTANTS: '27.1.0'
   FDEV_RELEASE: v0.2.151
 
@@ -43,8 +43,9 @@ jobs:
         run: rustup toolchain install "$COVERAGE_NIGHTLY" --profile minimal --component llvm-tools-preview
       - name: Install cargo-llvm-cov
         run: |
-          curl -fsSL "https://github.com/taiki-e/cargo-llvm-cov/releases/download/v${LLVM_COV}/cargo-llvm-cov-x86_64-unknown-linux-gnu.tar.gz" \
+          curl -fsSL "https://github.com/taiki-e/cargo-llvm-cov/releases/download/v${LLVM_COV_VERSION}/cargo-llvm-cov-x86_64-unknown-linux-gnu.tar.gz" \
             | tar -xz -C "$HOME/.cargo/bin/"
+          chmod +x "$HOME/.cargo/bin/cargo-llvm-cov"
           cargo llvm-cov --version
       - uses: Swatinem/rust-cache@v2
         with:
@@ -78,6 +79,7 @@ jobs:
         run: |
           curl -fsSL "https://github.com/sourcefrog/cargo-mutants/releases/download/v${MUTANTS}/cargo-mutants-x86_64-unknown-linux-gnu.tar.gz" \
             | tar -xz -C "$HOME/.cargo/bin/"
+          chmod +x "$HOME/.cargo/bin/cargo-mutants"
           cargo mutants --version
       - uses: Swatinem/rust-cache@v2
         with:
@@ -98,6 +100,7 @@ jobs:
         working-directory: contracts/inbox-v2
         run: |
           status=0
+          mkdir -p "$GITHUB_WORKSPACE/target"
           cargo mutants --shard "${{ matrix.shard }}/8" --output "$GITHUB_WORKSPACE/target/mutants" || status=$?
           case "$status" in 0|2|3) ;; *) exit "$status" ;; esac
       - name: Every survivor is triaged
@@ -148,6 +151,7 @@ jobs:
           mkdir -p "$HOME/.cargo/bin"
           curl -fsSL "https://github.com/freenet/freenet-core/releases/download/${FDEV_RELEASE}/fdev-x86_64-unknown-linux-musl.tar.gz" \
             | tar -xz -C "$HOME/.cargo/bin/" fdev
+          chmod +x "$HOME/.cargo/bin/fdev"
           fdev --version
       - name: Core's merge laws hold on the candidate, every case explicit
         run: bash scripts/check-fdev-verify-merge.sh
