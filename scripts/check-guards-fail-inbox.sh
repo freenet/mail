@@ -25,6 +25,11 @@ guard "inbox v2: a rule broken by one character is caught" "$I/src/merge.rs" \
     '|| message.sent_time <= self.owner_time.saturating_sub(WINDOW_BACK)' \
     "tests:the_window_at_its_edges" inbox_rule_tests
 
+# ── The owner record's ML-DSA context (decision 24) ────────────────────────
+guard "inbox v2: the owner record is verified under its context" "$I/src/merge.rs" \
+    'OWNER_SIG_CONTEXT, &sig)' '&[], &sig)' \
+    "tests:an_owner_signature_outside_the_owner_context_does_not_verify" inbox_tamper_tests
+
 # ── The plausible mutants ───────────────────────────────────────────────────
 guard "inbox v2: a plausible mutant that is not switched on is not credited" "$I/src/merge.rs" \
     '        let tier_met = mutant::tier_met(tier_met);' \

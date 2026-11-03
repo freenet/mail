@@ -177,11 +177,12 @@ pub enum ItemKind {
     /// One pass this identity issued (pass id to contact and nonce). Owner:
     /// an identity. Id: the 16-byte pass id. Written only by the delegate.
     PassLedger,
-    /// A pass this identity holds to write to someone. Owner: an identity.
-    /// Id: the recipient's 24-byte address. Never leaves the delegate.
+    /// The passes this identity holds to write to someone, a few at most.
+    /// Owner: an identity. Id: the recipient's 24-byte address. A page can
+    /// never read it; it leaves only in the consented successor export.
     HeldPass,
     /// A message drained from this identity's v2 inbox. Owner: an identity.
-    /// Id: the first 16 bytes of the message id. The page may delete it.
+    /// Id: the 32-byte message id. The page may delete it.
     Inbound,
 }
 

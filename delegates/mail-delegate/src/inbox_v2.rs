@@ -129,6 +129,33 @@ pub(crate) fn background_rng(
     MixRng::new(purpose, &host, &Entropy(*h.finalize().as_bytes()))
 }
 
+/// Randomness for a page's call: the host's, mixed with the page's entropy,
+/// which must not be zero (as `seal_v1` requires), and with `bind`, so a host
+/// whose RNG fails and a page that repeats its entropy repeat randomness only
+/// for the same request.
+fn page_rng(
+    s: &mut Space<'_>,
+    purpose: &str,
+    entropy: &Entropy,
+    bind: &[u8],
+) -> Result<MixRng, Failure> {
+    if entropy.0 == [0; 32] {
+        return Err(fail(
+            FailureCode::BadInput,
+            "ui_entropy must be random bytes",
+        ));
+    }
+    let mut h = blake3::Hasher::new_derive_key("freenet-mail page entropy v1");
+    h.update(&entropy.0);
+    h.update(bind);
+    let host = s.env.host_random();
+    Ok(MixRng::new(
+        purpose,
+        &host,
+        &Entropy(*h.finalize().as_bytes()),
+    ))
+}
+
 pub(crate) fn me(s: &Space<'_>, addr: &Addr) -> Result<Me, Failure> {
     let (_, record) = require_identity(s, addr)?;
     Ok(Me {
@@ -168,6 +195,13 @@ pub struct InboxRecord {
     /// Stranger messages removed to keep the newest, all told: what the
     /// quarantine view says was dropped.
     pub strangers_dropped: u64,
+    /// Senders whose held passes came only from stranger (quarantine) mail,
+    /// with the `stranger_seq` they last wrote at. They share the stranger
+    /// budget: past `STRANGERS_KEPT` the earliest's passes go, so strangers
+    /// never fill the held passes. Writing to one, or a pass from it that is
+    /// not stranger mail, makes it a contact.
+    #[serde(default)]
+    pub stranger_held: BTreeMap<B24, u64>,
 }
 
 /// A message that carries a pass's newest certificate to its contact.
@@ -303,9 +337,22 @@ fn sign_time(me: &Me, owner_time: u64) -> w::TimeAttestation {
     }
 }
 
-/// `bytes` as this identity's own inbox.
+/// The owner version after `v`. An inbox at the last version can take no
+/// owner change: wrapping would sign a version every merge discards.
+fn next_version(v: u64) -> Result<u64, Failure> {
+    v.checked_add(1).ok_or_else(|| {
+        fail(
+            FailureCode::Refused,
+            "this inbox's owner version is at its limit",
+        )
+    })
+}
+
+/// `bytes` as this identity's own inbox. The owner record and the time must
+/// verify, as for anyone's inbox: a page's state is not trusted to carry an
+/// unsigned time (which the time guard would never move back from).
 pub(crate) fn own_state(me: &Me, bytes: &[u8]) -> Result<InboxState, Failure> {
-    let state: InboxState = w::decode(bytes).map_err(|e| fail(FailureCode::BadInput, e))?;
+    let state = their_state(&me.addr, bytes)?;
     if state.owner.owner_vk.as_slice() != me.keys.vk_bytes().as_slice() {
         return Err(fail(FailureCode::BadInput, "not this identity's inbox"));
     }
@@ -354,12 +401,13 @@ pub fn create_inbox(
         strangers: BTreeMap::new(),
         stranger_seq: 0,
         strangers_dropped: 0,
+        stranger_held: BTreeMap::new(),
     };
     let mut state = match existing {
         None => None,
         Some(bytes) => {
             let state = own_state(&me, bytes)?;
-            rec.max_version = state.owner.version + 1;
+            rec.max_version = next_version(state.owner.version)?;
             rec.max_owner_time = guarded_time(state.time.owner_time, now);
             rec.pass_epoch = state.owner.pass_epoch;
             rec.prev_epoch_until = state.owner.prev_epoch_until;
@@ -512,7 +560,12 @@ pub(crate) fn note_sent(
     let Some((generation, mut e)) = load::<LedgerEntry>(s, &at)? else {
         return Ok(());
     };
-    let waiting = e.pending.as_ref().is_some_and(|p| p.expiry >= e.expiry);
+    // A message older than the window can no longer land: a page may never
+    // have sent it, so a newer one takes its place.
+    let waiting = e
+        .pending
+        .as_ref()
+        .is_some_and(|p| p.expiry >= e.expiry && now < p.at + w::WINDOW_BACK);
     let Some(contact) = e
         .issued_for
         .filter(|_| e.expiry > e.delivered && (resend || !waiting))
@@ -565,8 +618,14 @@ fn contact_pass(
     now: u64,
     rng: &mut MixRng,
 ) -> Result<(B16, w::Pass), Failure> {
-    let (rec_gen, mut rec) = record(s, &me.addr)?;
+    let (mut rec_gen, mut rec) = record(s, &me.addr)?;
     let contact = ByteArray::new(contact.0);
+    // Writing to a stranger makes it a contact: its passes leave the
+    // stranger budget.
+    if rec.stranger_held.remove(&contact).is_some() {
+        save(s, item(ItemKind::InboxV2, &me.addr, &[]), &rec, rec_gen)?;
+        rec_gen = record(s, &me.addr)?.0;
+    }
     if let Some(pass_id) = rec.issued.get(&contact).copied() {
         let at = item(ItemKind::PassLedger, &me.addr, pass_id.as_slice());
         if let Some((generation, mut e)) = load::<LedgerEntry>(s, &at)?
@@ -601,8 +660,7 @@ pub fn issue_pass(
 ) -> OpResult {
     let me = me(s, addr)?;
     let now = clock(s)?;
-    let host = s.env.host_random();
-    let mut rng = MixRng::new("issue-pass", &host, entropy);
+    let mut rng = page_rng(s, "issue-pass", entropy, &[])?;
     match (contact, invite) {
         (Some(contact), None) => {
             // The page hands this one over itself, so the renew job takes it
@@ -641,33 +699,155 @@ pub fn issue_pass(
     }
 }
 
-/// Keep `pass` to write to its cert's recipient, unless a later one is held.
-fn hold(s: &mut Space<'_>, owner: &Addr, pass: &w::Pass) -> Result<(), Failure> {
+/// Passes held per recipient. A send uses the best one the recipient's
+/// state admits, so a revoked or forged one held beside a live one never
+/// shadows it; past this many the earliest to arrive goes.
+pub const HELD_PER_RECIPIENT: usize = 4;
+
+/// The issuer key of `recipient`'s inbox, if this node holds that inbox.
+/// The node's copy is what the contract accepted, so its owner record is
+/// genuine.
+fn held_issuer(s: &Space<'_>, ghost_master: &B32, recipient: &B24) -> Option<VerifyingKey> {
+    #[derive(Deserialize)]
+    struct Owner {
+        issuer_vk: B32,
+    }
+    #[derive(Deserialize)]
+    struct State {
+        owner: Owner,
+    }
+    let id = crate::inbox_jobs::inbox_id(&Addr(**recipient), ghost_master).ok()?;
+    let bytes = s.env.contract_state(&id)?;
+    // Only the owner's issuer key is read; the rest is skipped, not built.
+    let state: State = ciborium::from_reader(bytes.as_slice()).ok()?;
+    VerifyingKey::from_bytes(&state.owner.issuer_vk).ok()
+}
+
+/// Keep `pass` to write to its cert's recipient. The same pass is replaced
+/// only by a later certificate of it (a renewal); another pass id is kept
+/// beside it, since which one the recipient admits is known only from its
+/// state, at send time. The certificate is checked against the recipient's
+/// issuer key when this node holds its inbox, and at send time always.
+fn hold(
+    s: &mut Space<'_>,
+    owner: &Addr,
+    ghost_master: Option<&B32>,
+    pass: &w::Pass,
+) -> Result<(), Failure> {
+    let bad = |why| Err(fail(FailureCode::BadInput, why));
     let pk = SigningKey::from_bytes(&pass.pass_sk)
         .verifying_key()
         .to_bytes();
     if pk != *pass.cert.pass_vk {
-        return Err(fail(
-            FailureCode::BadInput,
-            "the pass key does not match its certificate",
-        ));
+        return bad("the pass key does not match its certificate");
+    }
+    if let Some(issuer) = ghost_master.and_then(|m| held_issuer(s, m, &pass.cert.recipient)) {
+        let sig = ed25519_dalek::Signature::from_bytes(&pass.cert.sig);
+        if issuer
+            .verify_strict(&w::cert_bytes(&pass.cert), &sig)
+            .is_err()
+        {
+            return bad("the pass certificate is not its recipient's");
+        }
     }
     let at = item(ItemKind::HeldPass, owner, pass.cert.recipient.as_slice());
-    let generation = match load::<w::Pass>(s, &at)? {
-        Some((_, held))
-            if (held.cert.epoch, held.cert.expiry) >= (pass.cert.epoch, pass.cert.expiry) =>
-        {
+    let (generation, mut held) = load::<Vec<w::Pass>>(s, &at)?.unwrap_or_default();
+    match held
+        .iter_mut()
+        .find(|p| p.cert.pass_id == pass.cert.pass_id)
+    {
+        Some(p) if (p.cert.epoch, p.cert.expiry) >= (pass.cert.epoch, pass.cert.expiry) => {
             return Ok(());
         }
-        Some((generation, _)) => generation,
-        None => 0,
-    };
-    save(s, at, pass, generation)
+        Some(p) => *p = pass.clone(),
+        None => {
+            held.push(pass.clone());
+            if held.len() > HELD_PER_RECIPIENT {
+                held.remove(0);
+            }
+        }
+    }
+    save(s, at, &held, generation)
 }
 
+/// Remove every pass held for `recipient`. Best effort, like removing a
+/// stored copy: a pass left behind is one more kept.
+fn forget_held(s: &mut Space<'_>, owner: &Addr, recipient: &B24) {
+    let at = item(ItemKind::HeldPass, owner, recipient.as_slice());
+    if let Ok(Some((generation, _))) = s.read(&item_rel(&at)) {
+        let _ = crate::handlers::delete_item(s, at, generation);
+    }
+}
+
+/// The page hands over a pass (an invite, or a contact's pass), which makes
+/// its recipient a contact.
 pub fn hold_pass(s: &mut Space<'_>, addr: &Addr, pass: &w::Pass) -> OpResult {
     require_identity(s, addr)?;
-    hold(s, addr, pass).map(|()| Reply::Ack { generation: 0 })
+    let rec = match record(s, addr) {
+        Ok(r) => Some(r),
+        Err(f) if f.code == FailureCode::NotFound => None,
+        Err(f) => return Err(f),
+    };
+    hold(s, addr, rec.as_ref().map(|(_, r)| &r.ghost_master), pass)?;
+    if let Some((generation, mut rec)) = rec
+        && rec.stranger_held.remove(&pass.cert.recipient).is_some()
+    {
+        save(s, item(ItemKind::InboxV2, addr, &[]), &rec, generation)?;
+    }
+    Ok(Reply::Ack { generation: 0 })
+}
+
+/// Keep a pass a drained message carried from `sender`. A stranger's (from
+/// quarantine mail, from a sender that is not a contact) counts against the
+/// stranger budget; when the held passes are full, the earliest stranger's
+/// go first. Full with no stranger's to remove is `CapReached`, which leaves
+/// the message in the inbox and is counted as full: never a contact's pass
+/// dropped in silence.
+fn keep_drained_pass(
+    s: &mut Space<'_>,
+    me: &Me,
+    rec: &mut InboxRecord,
+    pass: &w::Pass,
+    stranger: bool,
+) -> Result<(), Failure> {
+    let recipient = pass.cert.recipient;
+    let at = item(ItemKind::HeldPass, &me.addr, recipient.as_slice());
+    let contact = rec.issued.contains_key(&recipient)
+        || (!rec.stranger_held.contains_key(&recipient) && s.read(&item_rel(&at))?.is_some());
+    loop {
+        match hold(s, &me.addr, Some(&rec.ghost_master), pass) {
+            Err(f) if f.code == FailureCode::CapReached => {
+                let oldest = rec
+                    .stranger_held
+                    .iter()
+                    .filter(|(r, _)| **r != recipient)
+                    .min_by_key(|(r, seq)| (**seq, **r))
+                    .map(|(r, _)| *r);
+                let Some(old) = oldest else {
+                    return Err(f);
+                };
+                rec.stranger_held.remove(&old);
+                forget_held(s, &me.addr, &old);
+            }
+            other => break other?,
+        }
+    }
+    if stranger && !contact {
+        rec.stranger_held.insert(recipient, rec.stranger_seq);
+        while rec.stranger_held.len() > STRANGERS_KEPT {
+            let (old, _) = rec
+                .stranger_held
+                .iter()
+                .min_by_key(|(r, seq)| (**seq, **r))
+                .map(|(r, s)| (*r, *s))
+                .expect("over the limit");
+            rec.stranger_held.remove(&old);
+            forget_held(s, &me.addr, &old);
+        }
+    } else if !stranger {
+        rec.stranger_held.remove(&recipient);
+    }
+    Ok(())
 }
 
 // ── The owner's updates ─────────────────────────────────────────────────────
@@ -699,6 +879,7 @@ fn drain(
     rec: &mut InboxRecord,
     state: &InboxState,
     limit: usize,
+    from_node: bool,
 ) -> Result<Drained, Failure> {
     let pending: Vec<_> = state
         .messages
@@ -709,10 +890,13 @@ fn drain(
         remaining: pending.len().saturating_sub(limit) as u32,
         ..Drained::default()
     };
-    for (id, m) in pending.into_iter().take(limit) {
+    let batch: Vec<_> = pending.into_iter().take(limit).collect();
+    let proven = proven_ghosts(s, rec, &me.addr, &batch, from_node);
+    for (id, m) in batch {
         out.tried += 1;
         if let Some(opened) = sealing::open(&me.keys, &me.addr.0, id, m) {
-            match store_opened(s, me, rec, id, m, opened, &mut out) {
+            let ghost_proven = proven.contains(id);
+            match store_opened(s, me, rec, id, m, opened, ghost_proven, &mut out) {
                 Err(f) if f.code == FailureCode::CapReached => {
                     out.unstored += 1;
                     continue;
@@ -726,6 +910,61 @@ fn drain(
         out.tombstones.push((*id, m.sent_time));
     }
     Ok(out)
+}
+
+/// The messages of `batch` whose Ghost Key proof the contract checked. A
+/// state from the node's store is what the contract accepted. A page's
+/// state is not: a proof counts only if the node holds the same message
+/// with the same admission (the delegate does not carry the Ghost Key chain
+/// check), and otherwise the message is kept without its Ghost Key.
+fn proven_ghosts(
+    s: &Space<'_>,
+    rec: &InboxRecord,
+    addr: &Addr,
+    batch: &[(&B32, &w::Message)],
+    from_node: bool,
+) -> BTreeSet<B32> {
+    let claimed = batch
+        .iter()
+        .filter(|(_, m)| matches!(m.admission, Admission::Quarantine { ghost: Some(_) }));
+    if from_node {
+        return claimed.map(|(id, _)| **id).collect();
+    }
+    let node: Option<InboxState> = claimed.clone().next().and_then(|_| {
+        let id = crate::inbox_jobs::inbox_id(addr, &rec.ghost_master).ok()?;
+        w::decode(&s.env.contract_state(&id)?).ok()
+    });
+    let Some(node) = node else {
+        return BTreeSet::new();
+    };
+    claimed
+        .filter(|(id, m)| node.messages.get(*id) == Some(*m))
+        .map(|(id, _)| **id)
+        .collect()
+}
+
+/// Whether `cert` and `msg_sig` are a pass this identity issued, signing
+/// this message: what the contract checked, checked again for a page's
+/// state before an invite's use is counted.
+fn issued_here(me: &Me, m: &w::Message, cert: &w::PassCert, msg_sig: &w::B64) -> bool {
+    let ct_hash = *blake3::hash(&m.ciphertext).as_bytes();
+    let genuine_cert = me
+        .issuer
+        .verifying_key()
+        .verify_strict(
+            &w::cert_bytes(cert),
+            &ed25519_dalek::Signature::from_bytes(&cert.sig),
+        )
+        .is_ok();
+    genuine_cert
+        && *cert.recipient == me.addr.0
+        && VerifyingKey::from_bytes(&cert.pass_vk).is_ok_and(|k| {
+            k.verify_strict(
+                &w::admit_bytes(&me.addr.0, m.sent_time, &ct_hash),
+                &ed25519_dalek::Signature::from_bytes(msg_sig),
+            )
+            .is_ok()
+        })
 }
 
 fn inbound(owner: &Addr, id: &B32) -> ItemRef {
@@ -769,6 +1008,7 @@ fn store_inbound(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn store_opened(
     s: &mut Space<'_>,
     me: &Me,
@@ -776,41 +1016,46 @@ fn store_opened(
     id: &B32,
     m: &w::Message,
     opened: sealing::Opened,
+    ghost_proven: bool,
     out: &mut Drained,
 ) -> Result<(), Failure> {
     let body = opened.body;
+    let sender = address_of(&opened.sender_vk);
+    // The way back is kept, but a pass the sender got wrong must not hold
+    // the message in the inbox for good: only a failure a retry can clear,
+    // or held passes full with no stranger's to give way, does.
+    let grant = body
+        .pass_grant
+        .as_ref()
+        .filter(|g| *g.cert.recipient == sender.0);
+    let stranger = matches!(m.admission, Admission::Quarantine { .. });
+    for pass in std::iter::once(&body.reply_pass).chain(grant) {
+        match keep_drained_pass(s, me, rec, pass, stranger) {
+            Ok(()) => {}
+            Err(f) if f.code == FailureCode::BadInput => {}
+            Err(f) => return Err(f),
+        }
+    }
     if let EnvelopeKind::Mail(text) = &body.kind {
+        // A Ghost Key is the message's only when its proof was checked: in
+        // any other admission the sender merely named one.
+        let ghost_vk = body.ghost_vk.filter(|_| ghost_proven);
         let inbound = w::InboundMessage {
             id: *id,
             sender_vk: ByteBuf::from(opened.sender_vk.clone()),
             sent_time: m.sent_time,
             admission: sealing::kind_and_tag(&m.admission, body.ghost_vk.as_ref())
                 .map_or(0, |(k, _)| k),
-            ghost_vk: body.ghost_vk,
+            ghost_vk,
             body: text.clone(),
         };
         let bytes = to_cbor(&inbound).map_err(|e| fail(FailureCode::Internal, e))?;
         store_inbound(s, me, rec, id, bytes, out)?;
         out.stored += 1;
     }
-    let sender = address_of(&opened.sender_vk);
-    // The way back is kept, but a pass the sender got wrong, or one past the
-    // cap of held passes (which strangers can fill), must not hold the
-    // message in the inbox for good: only a failure a retry can clear does.
-    let grant = body
-        .pass_grant
-        .as_ref()
-        .filter(|g| *g.cert.recipient == sender.0);
-    for pass in std::iter::once(&body.reply_pass).chain(grant) {
-        match hold(s, &me.addr, pass) {
-            Err(f) if !matches!(f.code, FailureCode::BadInput | FailureCode::CapReached) => {
-                return Err(f);
-            }
-            _ => {}
-        }
-    }
-    if let Admission::Pass { cert, .. } = &m.admission
+    if let Admission::Pass { cert, msg_sig } = &m.admission
         && matches!(cert.class, PassClass::Invite { .. })
+        && issued_here(me, m, cert, msg_sig)
     {
         let at = item(ItemKind::PassLedger, &me.addr, cert.pass_id.as_slice());
         if let Some((generation, mut e)) = load::<LedgerEntry>(s, &at)? {
@@ -900,15 +1145,19 @@ pub fn update_inbox(
     let me = me(s, addr)?;
     let state = own_state(&me, state)?;
     let now = clock(s)?;
-    let host = s.env.host_random();
-    let mut rng = MixRng::new("inbox-v2-update", &host, entropy);
-    owner_update(s, &me, &state, change, now, &mut rng, DRAIN_BATCH)
+    let mut rng = page_rng(s, "inbox-v2-update", entropy, &[])?;
+    // The page's state: what the contract checked about an admission is
+    // checked again before the drain trusts it.
+    owner_update(s, &me, &state, change, now, &mut rng, DRAIN_BATCH, false)
         .map(|(u, _)| Reply::InboxV2Update(u))
 }
 
 /// Drain up to `limit` messages of `state`, then sign `change` if nothing is
 /// left that is not stored. The operation and the jobs both come here.
-/// Returns the update and how many messages were tried.
+/// `from_node`: `state` is the node's stored copy, which the contract
+/// accepted, rather than a page's. Returns the update and how many messages
+/// were tried.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn owner_update(
     s: &mut Space<'_>,
     me: &Me,
@@ -917,10 +1166,11 @@ pub(crate) fn owner_update(
     now: u64,
     rng: &mut MixRng,
     limit: usize,
+    from_node: bool,
 ) -> Result<(InboxV2Update, usize), Failure> {
     let addr = &me.addr;
     let (rec_gen, mut rec) = record(s, addr)?;
-    let drained = drain(s, me, &mut rec, state, limit)?;
+    let drained = drain(s, me, &mut rec, state, limit, from_node)?;
 
     // A tombstone outside the window guards nothing: the filter drops the
     // message by its time. Pruned against the joined time already held.
@@ -1007,7 +1257,10 @@ pub(crate) fn owner_update(
         || rec.pass_epoch != o.pass_epoch
         || rec.prev_epoch_until != o.prev_epoch_until
         || rec.quarantine != o.quarantine;
-    let version = needs_owner.then(|| rec.max_version.max(o.version) + 1);
+    let version = match needs_owner {
+        true => Some(next_version(rec.max_version.max(o.version))?),
+        false => None,
+    };
     if let Some(v) = version {
         rec.max_version = v;
     }
@@ -1153,8 +1406,8 @@ pub fn seal_v2(
     let me = me(s, from)?;
     let state = their_state(to, to_state)?;
     let now = clock(s)?;
-    let host = s.env.host_random();
-    let mut rng = MixRng::new("seal-v2", &host, entropy);
+    let bind = to_cbor(&(to, &content, ghost_vk)).map_err(|e| fail(FailureCode::Internal, e))?;
+    let mut rng = page_rng(s, "seal-v2", entropy, &bind)?;
     let (sealed, reply_pass) = seal_to(s, &me, to, &state, content, ghost_vk, now, &mut rng)?;
     // A renewed certificate riding on mail: the renew job reads back for it.
     note_sent(s, &me, &reply_pass, &sealed.id.0, now, false)?;
@@ -1179,18 +1432,23 @@ pub(crate) fn seal_to(
     let mut notice = None;
 
     let held = if to == from {
-        None
+        Vec::new()
     } else {
-        load::<w::Pass>(s, &item(ItemKind::HeldPass, from, &to.0))?.map(|(_, p)| p)
+        load::<Vec<w::Pass>>(s, &item(ItemKind::HeldPass, from, &to.0))?
+            .map(|(_, p)| p)
+            .unwrap_or_default()
     };
     let pass_time = sent_time_for(now, owner_time, w::WINDOW_FORWARD);
-    let pass = held.and_then(|p| match pass_room(state, to, &p.cert, pass_time) {
-        Some(room) => Some((p, room)),
-        None => {
-            notice = Some(SendNotice::PassLapsed);
-            None
-        }
-    });
+    // Of the passes held, the one the recipient's state admits: after a
+    // revoke and a new pass, the new one, whichever arrived last.
+    let any_held = !held.is_empty();
+    let pass = held
+        .into_iter()
+        .filter_map(|p| pass_room(state, to, &p.cert, pass_time).map(|room| (p, room)))
+        .max_by_key(|(p, room)| (p.cert.epoch, p.cert.expiry, *room));
+    if any_held && pass.is_none() {
+        notice = Some(SendNotice::PassLapsed);
+    }
     let (admission, sent_time) = match (&pass, to == from) {
         (Some(_), _) => (SendAdmission::Pass, pass_time),
         (None, true) => (SendAdmission::Owner, pass_time),

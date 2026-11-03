@@ -239,6 +239,43 @@ fn a_renewal_never_goes_through_quarantine() {
     assert_eq!(e.delivered, e.expiry);
 }
 
+/// Alice seals a reply to Bob, who wrote first, and the page never sends
+/// it. Nothing goes to Bob for it: composing to someone never makes the
+/// node write to them. Mail she does send is then read back as before.
+#[test]
+fn a_sealed_message_never_sent_sends_nothing() {
+    let mut world = World::new();
+    let a = world.identity("alice");
+    let b = world.identity("bob");
+    world.send(&b, &a, "hello");
+    world.change(&a, OwnerChange::Drain);
+    let draft = world.seal(&a, &b, "never sent").unwrap();
+    assert_eq!(
+        draft.admission,
+        SendAdmission::Pass,
+        "Alice holds Bob's pass"
+    );
+    let mut sent = 0;
+    for _ in 0..12 {
+        world.advance(v2::RESEND_AFTER);
+        let (_, updates) = run(&mut world, Trigger::Tick(Tick::Renew));
+        sent += messages_to(&updates, &b);
+        sent += messages_to(&settle(&mut world), &b);
+    }
+    assert_eq!(sent, 0);
+    assert!(world.record(&a).due.is_empty(), "nothing left to look at");
+    // Past the window the draft could not land; mail sealed now replaces it.
+    let (letter, landed) = world.send(&a, &b, "a letter");
+    assert!(landed);
+    let pass_id = *world.record(&a).issued.values().next().unwrap();
+    let e = world.ledger(&a, pass_id.as_slice());
+    assert_eq!(e.pending.unwrap().id.into_array(), letter.id.0);
+    world.advance(v2::RESEND_AFTER);
+    settle(&mut world);
+    let e = world.ledger(&a, pass_id.as_slice());
+    assert_eq!(e.delivered, e.expiry);
+}
+
 /// The clock job drains first and signs the new time in the same update; a
 /// message that cannot be stored holds the time back.
 #[test]
@@ -575,6 +612,9 @@ fn a_ghost_key_proof_from_the_fixtures_passes_the_contract() {
     let payload = sealed.ghost_payload.clone().expect("a payload to sign");
     let proof = ghost_proof(usd5_sk, usd5_cert, payload.into_vec());
     assert!(try_land(&mut world, &sealed, Some(proof)));
+    // A page's state is trusted with a proof only as far as the node holds
+    // the same message.
+    sync(&mut world);
     world.change(&a, OwnerChange::Drain);
     let got = world.inbound(&a);
     assert_eq!(texts(&got), ["proven"]);

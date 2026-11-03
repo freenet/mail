@@ -63,7 +63,8 @@ impl World {
     }
 
     pub fn entropy(&mut self) -> Entropy {
-        self.entropy = self.entropy.wrapping_add(1);
+        // Never all zeros, which the delegate refuses.
+        self.entropy = self.entropy.checked_add(1).unwrap_or(1);
         Entropy([self.entropy; 32])
     }
 

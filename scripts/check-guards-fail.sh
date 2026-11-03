@@ -109,6 +109,9 @@ inbox_candidate_check() { "$STAGE/scripts/check-inbox-candidate.sh"; }
 inbox_rule_tests() {
     cargo test --manifest-path "$STAGE/contracts/inbox-v2/Cargo.toml" --test canonical --test rules
 }
+inbox_tamper_tests() {
+    cargo test --manifest-path "$STAGE/contracts/inbox-v2/Cargo.toml" --test tamper
+}
 inbox_plausible_tests() {
     cargo test --manifest-path "$STAGE/contracts/inbox-v2/Cargo.toml" \
         --features plausible-mutants --test plausible_mutants
@@ -252,16 +255,58 @@ dt "inbox v2: pass expiries are whole days" "$D/inbox_v2.rs" \
     'e.expiry = ceil_day(now + lifetime);' 'e.expiry = now + lifetime;' \
     pass_timing_is_coarse_and_spread,a_full_round_runs_through_the_contract
 dt "inbox v2: the sender's binding names the message" "$D/sealing.rs" \
-    'if !crypto::verify_v1(&binding, &envelope.sender_vk, &envelope.sender_sig) {' \
-    'if false && !crypto::verify_v1(&binding, &envelope.sender_vk, &envelope.sender_sig) {' \
+    '    if !crypto::verify_v2(' '    if false && !crypto::verify_v2(' \
     a_restamped_copy_does_not_open
 dt "a failed retry of a create keeps the earlier entry" "$D/handlers.rs" \
     'if listed_before {' 'if false && listed_before {' \
     a_failed_retry_of_a_create_keeps_the_earlier_entry
 dt "inbox v2: a pass that cannot be kept does not hold mail back" "$D/inbox_v2.rs" \
-    'Err(f) if !matches!(f.code, FailureCode::BadInput | FailureCode::CapReached) => {' \
-    'Err(f) => {' \
+    'Err(f) if f.code == FailureCode::BadInput => {}' 'Err(f) if false => drop(f),' \
     a_bad_reply_pass_does_not_hold_mail_in_the_inbox
+dt "inbox v2: the sender's binding is signed under its context" "$D/sealing.rs" \
+    '        w::SEALED_SIG_CONTEXT,
+        &binding,' '        &[],
+        &binding,' a_v1_signature_over_an_inner_binding_does_not_open
+dt "inbox v2: an owner record is read under its context" "$D/inbox_v2.rs" \
+    '            w::OWNER_SIG_CONTEXT,
+            &w::owner_bytes(&to.0, o),' '            &[],
+            &w::owner_bytes(&to.0, o),' an_owner_record_without_the_v2_context_is_refused
+dt "inbox v2: the v1 removal signer refuses v2 layouts" "$D/handlers.rs" \
+    'if payload.starts_with(V2_DOMAIN) {' 'if false {' the_v1_removal_signer_refuses_v2_layouts
+dt "inbox v2: a Ghost Key is kept only with a checked proof" "$D/inbox_v2.rs" \
+    'let ghost_vk = body.ghost_vk.filter(|_| ghost_proven);' 'let ghost_vk = body.ghost_vk;' \
+    an_unproven_ghost_key_is_not_kept
+dt "inbox v2: a page's Ghost Key proof counts only as the node holds it" "$D/inbox_v2.rs" \
+    'owner_update(s, &me, &state, change, now, &mut rng, DRAIN_BATCH, false)' \
+    'owner_update(s, &me, &state, change, now, &mut rng, DRAIN_BATCH, true)' \
+    a_page_state_admission_is_checked_before_it_counts
+dt "inbox v2: a page's invite use is checked before it counts" "$D/inbox_v2.rs" \
+    '&& issued_here(me, m, cert, msg_sig)' '&& (issued_here(me, m, cert, msg_sig) || true)' \
+    a_page_state_admission_is_checked_before_it_counts
+dt "inbox v2: another pass id is held beside the first" "$D/inbox_v2.rs" \
+    '            held.push(pass.clone());' '            held = vec![pass.clone()];' \
+    a_reissued_pass_is_used_after_a_revoke_in_either_order
+dt "inbox v2: strangers' passes share the stranger budget" "$D/inbox_v2.rs" \
+    'rec.stranger_held.insert(recipient, rec.stranger_seq);' 'let _ = recipient;' \
+    strangers_never_crowd_out_a_new_correspondents_pass
+dt "inbox v2: held passes full is reported" "$D/inbox_v2.rs" \
+    '                let Some(old) = oldest else {
+                    return Err(f);' '                let Some(old) = oldest else {
+                    return Ok(drop(f));' a_full_set_of_held_passes_is_reported
+dt "inbox v2: a held certificate is checked" "$D/inbox_v2.rs" \
+    '.and_then(|m| held_issuer(s, m, &pass.cert.recipient))' '.and_then(|_| None::<VerifyingKey>)' \
+    held_certificates_are_checked_and_never_shadow_a_genuine_pass
+dt "inbox v2: a page's state must verify" "$D/inbox_v2.rs" \
+    '    let state = their_state(&me.addr, bytes)?;' \
+    '    let state: InboxState = w::decode(bytes).map_err(|e| fail(FailureCode::BadInput, e))?;' \
+    a_page_state_must_verify_and_versions_never_wrap
+dt "inbox v2: an owner version never wraps" "$D/inbox_v2.rs" \
+    '    v.checked_add(1).ok_or_else(|| {' '    Some(v.wrapping_add(1)).ok_or_else(|| {' \
+    a_page_state_must_verify_and_versions_never_wrap
+dt "inbox v2 jobs: a pass never seen delivered is never pushed" "$D/inbox_jobs.rs" \
+    'if e.delivered == 0 {' 'if false {' a_sealed_message_never_sent_sends_nothing
+dt "inbox v2: zero page entropy is refused" "$D/inbox_v2.rs" \
+    'if entropy.0 == [0; 32] {' 'if false {' v2_operations_refuse_zero_entropy
 dt "inbox v2: the page cannot write the delegate's records" "$D/store.rs" \
     'ItemKind::InboxV2 | ItemKind::PassLedger => (true, false, false),' \
     'ItemKind::InboxV2 | ItemKind::PassLedger => (true, true, true),' \

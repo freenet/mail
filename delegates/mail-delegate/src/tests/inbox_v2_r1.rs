@@ -43,7 +43,11 @@ fn plant_v1(world: &mut World, addr: &Addr, payload: &[u8]) -> Vec<Hash32> {
 }
 
 fn ascending(b: &[u8]) -> bool {
-    b.len() % 32 == 0 && b.chunks(32).collect::<Vec<_>>().windows(2).all(|p| p[0] < p[1])
+    b.len().is_multiple_of(32)
+        && b.chunks(32)
+            .collect::<Vec<_>>()
+            .windows(2)
+            .all(|p| p[0] < p[1])
 }
 
 /// A reply pass naming `addr`, with a key that matches and no genuine cert.
@@ -101,7 +105,13 @@ fn hand_seal(
     let nonce = [7u8; 24];
     let aad = [b"fmail/ct/v2".as_slice(), to.0.as_slice()].concat();
     let sealed = XChaCha20Poly1305::new(&key.into())
-        .encrypt(&XNonce::from(nonce), Payload { msg: &pt, aad: &aad })
+        .encrypt(
+            &XNonce::from(nonce),
+            Payload {
+                msg: &pt,
+                aad: &aad,
+            },
+        )
         .unwrap();
     let kct: &[u8] = kct.as_ref();
     let ct = [nonce.as_slice(), kct, &sealed].concat();
@@ -214,13 +224,22 @@ fn a_removal_signature_never_opens_as_mail() {
     let vvk = vk_of(&mut world, &v);
     let st = world.state(&r);
     let tag = [0x22u8; 16];
-    let sent_time =
-        crate::inbox_v2::sent_time_for(world.env.now.unwrap(), st.time.owner_time, w::WINDOW_FORWARD);
+    let sent_time = crate::inbox_v2::sent_time_for(
+        world.env.now.unwrap(),
+        st.time.owner_time,
+        w::WINDOW_FORWARD,
+    );
     let mut n = 0u32;
     let (binding, body) = loop {
         n += 1;
         let body = quarantine_body(&world, &v, &format!("invoice #{n}"));
-        let b = w::inner_binding(&r.0, blake3::hash(&body).as_bytes(), sent_time, w::KIND_PASS, &tag);
+        let b = w::inner_binding(
+            &r.0,
+            blake3::hash(&body).as_bytes(),
+            sent_time,
+            w::KIND_PASS,
+            &tag,
+        );
         if ascending(&b) {
             break (b, body);
         }
@@ -321,7 +340,13 @@ fn an_unproven_ghost_key_is_not_kept() {
         &mut rng,
     )
     .unwrap();
-    let id = w::message_id(&a.0, blake3::hash(&ct).as_bytes(), sent_time, w::KIND_QUARANTINE, &[]);
+    let id = w::message_id(
+        &a.0,
+        blake3::hash(&ct).as_bytes(),
+        sent_time,
+        w::KIND_QUARANTINE,
+        &[],
+    );
     let msg = w::Message {
         ciphertext: ByteBuf::from(ct),
         sent_time,
@@ -361,8 +386,8 @@ fn only_issued(world: &mut World, a: &Addr) -> w::B16 {
 fn a_reissued_pass_is_used_after_a_revoke_in_either_order() {
     let mut orders_seen = [false; 2];
     for seed in 0..80u8 {
-        for order in 0..2 {
-            if orders_seen[order] {
+        for (order, seen) in orders_seen.into_iter().enumerate() {
+            if seen {
                 continue;
             }
             let mut world = World::new();
@@ -381,7 +406,12 @@ fn a_reissued_pass_is_used_after_a_revoke_in_either_order() {
             }
             let p1 = only_issued(&mut world, &a);
             let e1 = world.ledger(&a, p1.as_slice());
-            world.change(&a, OwnerChange::Revoke { pass_id: PassId(*p1) });
+            world.change(
+                &a,
+                OwnerChange::Revoke {
+                    pass_id: PassId(*p1),
+                },
+            );
             world.send(&a, &b, "unblocked");
             world.change(&b, OwnerChange::Drain);
             let p2 = only_issued(&mut world, &a);
@@ -397,7 +427,8 @@ fn a_reissued_pass_is_used_after_a_revoke_in_either_order() {
             let (s, landed) = world.send(&b, &a, "back");
             assert!(landed);
             assert_eq!(s.notice, None, "order {order}, seed {seed}");
-            let w::Admission::Pass { cert, .. } = w::decode::<w::Message>(&s.message).unwrap().admission
+            let w::Admission::Pass { cert, .. } =
+                w::decode::<w::Message>(&s.message).unwrap().admission
             else {
                 panic!("order {order}: Bob fell back to quarantine");
             };
@@ -453,8 +484,13 @@ fn strangers_never_crowd_out_a_new_correspondents_pass() {
                 &mut rng,
             )
             .unwrap();
-            let id =
-                w::message_id(&a.0, blake3::hash(&ct).as_bytes(), sent_time, w::KIND_QUARANTINE, &[]);
+            let id = w::message_id(
+                &a.0,
+                blake3::hash(&ct).as_bytes(),
+                sent_time,
+                w::KIND_QUARANTINE,
+                &[],
+            );
             st.messages.insert(
                 ByteArray::new(id),
                 w::Message {
@@ -488,4 +524,236 @@ fn strangers_never_crowd_out_a_new_correspondents_pass() {
     assert!(landed);
     assert_eq!(reply.admission, SendAdmission::Pass, "{:?}", reply.notice);
     let _: Option<SendNotice> = reply.notice;
+}
+
+fn hold_pass(world: &mut World, addr: &Addr, pass: Pass) -> Result<Reply, FailureCode> {
+    call(&mut world.env, PROD, Op::HoldPass { addr: *addr, pass })
+}
+
+fn node_holds(world: &mut World, addr: &Addr) {
+    let id = crate::inbox_jobs::inbox_id(addr, &world.master).unwrap();
+    let state = world.inboxes[addr].clone();
+    world.env.contracts.insert(id, state);
+}
+
+/// Held passes full of contacts' (handed over by the page): a stranger's
+/// pass finds no room, and the drain says so rather than drop it. The
+/// message stays in the inbox, counted as full.
+#[test]
+fn a_full_set_of_held_passes_is_reported() {
+    let mut world = World::new();
+    let a = world.identity("alice");
+    for n in 0..crate::store::MAX_CONTACTS as u32 {
+        let mut addr = [0u8; 24];
+        addr[..4].copy_from_slice(&n.to_be_bytes());
+        hold_pass(&mut world, &a, junk_pass(&Addr(addr), 1)).unwrap();
+    }
+    let d = world.identity("dave");
+    let (sealed, landed) = world.send(&d, &a, "hello");
+    assert!(landed);
+    let u = world.update(&a, OwnerChange::Drain).unwrap();
+    assert_eq!((u.drained, u.full), (0, 1));
+    assert!(w::delivered(&world.state(&a), &sealed.id.0));
+    assert!(world.inbound(&a).is_empty());
+}
+
+/// A certificate that is not its recipient's is refused when this node holds
+/// the recipient's inbox; one held unchecked never shadows a genuine pass.
+#[test]
+fn held_certificates_are_checked_and_never_shadow_a_genuine_pass() {
+    let mut world = World::new();
+    let a = world.identity("alice");
+    let b = world.identity("bob");
+    let mut forged = junk_pass(&a, u32::MAX);
+    forged.cert.pass_id = ByteArray::new([9; 16]);
+    // Alice's inbox not held here: kept, and checked at send time.
+    hold_pass(&mut world, &b, forged.clone()).unwrap();
+    node_holds(&mut world, &a);
+    forged.cert.pass_id = ByteArray::new([8; 16]);
+    assert_eq!(
+        hold_pass(&mut world, &b, forged),
+        Err(FailureCode::BadInput)
+    );
+    let genuine = world.issue(&a, Some(b), None);
+    hold_pass(&mut world, &b, genuine.clone()).unwrap();
+    let (s, landed) = world.send(&b, &a, "hi");
+    assert!(landed);
+    let w::Admission::Pass { cert, .. } = w::decode::<w::Message>(&s.message).unwrap().admission
+    else {
+        panic!("not by pass");
+    };
+    assert_eq!(cert.pass_id, genuine.cert.pass_id);
+}
+
+/// A page's state must carry a genuine owner record and time, and an owner
+/// version at its limit takes no change rather than wrapping.
+#[test]
+fn a_page_state_must_verify_and_versions_never_wrap() {
+    let mut world = World::new();
+    let a = world.identity("alice");
+    let update = |world: &mut World, st: &w::InboxState| {
+        let ui_entropy = world.entropy();
+        world.call_as(
+            &a,
+            Op::UpdateInboxV2 {
+                addr: a,
+                state: ByteBuf::from(w::encode(st)),
+                change: OwnerChange::SetQuarantine(w::QuarantineMode::RequireGhost {
+                    min_usd: None,
+                }),
+                ui_entropy,
+            },
+        )
+    };
+    let mut st = world.state(&a);
+    st.time.owner_time += 400 * 86_400;
+    assert_eq!(update(&mut world, &st), Err(FailureCode::BadInput), "time");
+    let mut st = world.state(&a);
+    st.owner.version = u64::MAX;
+    assert_eq!(
+        update(&mut world, &st),
+        Err(FailureCode::BadInput),
+        "unsigned"
+    );
+    let keys = keys_of(&mut world, &a);
+    st.owner.sig =
+        ByteBuf::from(keys.sign_v2(w::OWNER_SIG_CONTEXT, &w::owner_bytes(&a.0, &st.owner)));
+    assert_eq!(
+        update(&mut world, &st),
+        Err(FailureCode::Refused),
+        "at the limit"
+    );
+}
+
+/// The page's state is checked again before the drain trusts an admission:
+/// a pass admission the contract never saw counts no invite use, and a
+/// Ghost Key proof the node does not hold is not the message's.
+#[test]
+fn a_page_state_admission_is_checked_before_it_counts() {
+    let mut world = World::new();
+    let a = world.identity("alice");
+    let invite = world.issue(&a, None, Some(3));
+    let mut st = world.state(&a);
+    let mut rng = MixRng::new("s5", &[3; 32], &Entropy([4; 32]));
+    let seeds = crypto::new_seeds(&mut rng);
+    let keys = Keys::from_seeds(&seeds.0, &seeds.1);
+    let sender = freenet_mail_protocol::address::address_of(&keys.vk_bytes());
+    let mut seal_as = |kind: u8, tag: &[u8], ghost_vk: Option<w::B32>, admission: w::Admission| {
+        let body = SealedBody {
+            kind: EnvelopeKind::Mail(ByteBuf::from(format!("kind {kind}").into_bytes())),
+            reply_pass: junk_pass(&sender, 1),
+            pass_grant: None,
+            ghost_vk,
+        };
+        let sent_time = crate::inbox_v2::sent_time_for(
+            world.env.now.unwrap(),
+            st.time.owner_time,
+            w::QUARANTINE_FORWARD,
+        );
+        let ct = crate::sealing::seal(
+            &keys,
+            &a.0,
+            &st.owner.kem_ek,
+            sent_time,
+            kind,
+            tag,
+            &body,
+            &mut rng,
+        )
+        .unwrap();
+        let id = w::message_id(&a.0, blake3::hash(&ct).as_bytes(), sent_time, kind, tag);
+        st.messages.insert(
+            ByteArray::new(id),
+            w::Message {
+                ciphertext: ByteBuf::from(ct),
+                sent_time,
+                admission,
+            },
+        );
+    };
+    // The invite's id and certificate, but no signature by its key.
+    seal_as(
+        w::KIND_PASS,
+        invite.cert.pass_id.as_slice(),
+        None,
+        w::Admission::Pass {
+            cert: invite.cert.clone(),
+            msg_sig: ByteArray::new([0; 64]),
+        },
+    );
+    let ghost = ByteArray::new([0xCD; 32]);
+    seal_as(
+        w::KIND_QUARANTINE,
+        ghost.as_slice(),
+        Some(ghost),
+        w::Admission::Quarantine {
+            ghost: Some(w::GhostProof {
+                cert: ByteBuf::from(vec![1, 2, 3]),
+                scoped_payload: ByteBuf::new(),
+                ghost_sig: ByteArray::new([0; 64]),
+            }),
+        },
+    );
+    let ui_entropy = world.entropy();
+    let Ok(Reply::InboxV2Update(u)) = world.call_as(
+        &a,
+        Op::UpdateInboxV2 {
+            addr: a,
+            state: ByteBuf::from(w::encode(&st)),
+            change: OwnerChange::Drain,
+            ui_entropy,
+        },
+    ) else {
+        panic!("update");
+    };
+    assert_eq!(u.drained, 2, "both are genuine mail from their sender");
+    let delta: InboxDelta = w::decode(&u.update.unwrap()).unwrap();
+    assert!(delta.usage.is_empty(), "an invite use was counted");
+    assert!(
+        world
+            .ledger(&a, invite.cert.pass_id.as_slice())
+            .drained
+            .is_empty()
+    );
+    assert!(world.inbound(&a).iter().all(|m| m.ghost_vk.is_none()));
+}
+
+/// The v2 operations refuse all-zero page entropy, as `seal_v1` does.
+#[test]
+fn v2_operations_refuse_zero_entropy() {
+    let mut world = World::new();
+    let a = world.identity("alice");
+    let b = world.identity("bob");
+    let zero = Entropy([0; 32]);
+    let ops = [
+        Op::SealV2 {
+            from: a,
+            to: b,
+            to_state: ByteBuf::from(world.inboxes[&b].clone()),
+            content: freenet_mail_protocol::SealContent::Mail(ByteBuf::from(b"x".to_vec())),
+            ghost_vk: None,
+            ui_entropy: zero,
+        },
+        Op::IssuePass {
+            addr: a,
+            contact: Some(b),
+            invite: None,
+            ui_entropy: zero,
+        },
+        Op::UpdateInboxV2 {
+            addr: a,
+            state: ByteBuf::from(world.inboxes[&a].clone()),
+            change: OwnerChange::Drain,
+            ui_entropy: zero,
+        },
+    ];
+    for op in ops {
+        let name = format!("{op:?}").chars().take(12).collect::<String>();
+        assert_eq!(
+            call(&mut world.env, PROD, op),
+            Err(FailureCode::BadInput),
+            "{name}"
+        );
+    }
+    assert!(world.record(&a).issued.is_empty(), "nothing was issued");
 }

@@ -264,7 +264,7 @@ fn drain_own(
     }
     let mut rng = v2::background_rng(s, me, "drain", now, &own.id);
     let limit = (*left - OWNER_SLOTS).min(v2::DRAIN_BATCH);
-    match v2::owner_update(s, me, &state, change, now, &mut rng, limit) {
+    match v2::owner_update(s, me, &state, change, now, &mut rng, limit, true) {
         Ok((u, tried)) => {
             *left = left.saturating_sub(tried + OWNER_SLOTS);
             done.imported += u.drained;
@@ -354,6 +354,21 @@ impl Renewing<'_> {
             e.delivered = e.delivered.max(p.expiry);
             e.pending = None;
             v2::save(s, at, &e, generation)?;
+        }
+        // A pass the contact has never been seen to get came with mail the
+        // page sealed, which it may never have sent: it is read back for
+        // while that mail could still land, and nothing is sent for it, so
+        // composing to someone never makes this node write to them.
+        if e.delivered == 0 {
+            if state.is_none() && e.pending.is_some() {
+                self.done.missing.push(id);
+            }
+            return Ok(e
+                .pending
+                .as_ref()
+                .map(|p| p.at + w::WINDOW_BACK)
+                .filter(|end| now < *end)
+                .map(|end| (now + v2::RESEND_AFTER).min(end)));
         }
         let renewing = now >= v2::refresh_at(&rec, &pass_id, &e) || e.expiry <= now;
         if !renewing && e.expiry <= e.delivered {
