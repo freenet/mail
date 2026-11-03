@@ -368,12 +368,13 @@ dt "inbox v2: a message is resealed a bounded number of times" "$D/inbox_v2.rs" 
 dt "inbox v2: a Ghost Key claim waits for the node's copy" "$D/inbox_v2.rs" \
     'if claimed && !proven.contains(id) {' 'if false {' \
     a_message_stored_by_a_lost_drain_is_drained_again,a_page_state_admission_is_checked_before_it_counts
-dt "inbox v2: only a copy with the same content counts as stored" "$D/inbox_v2.rs" \
-    'Ok(Some((_, stored))) if stored == bytes' 'Ok(Some((_, stored))) if stored != bytes' \
-    only_a_copy_that_reads_back_with_the_same_bytes_counts_as_stored
-dt "inbox v2: any readable copy counts as stored" "$D/inbox_v2.rs" \
-    'Ok(Some((_, stored))) if stored == bytes' 'Ok(Some((_, stored))) if !stored.is_empty() || true' \
-    only_a_copy_that_reads_back_with_the_same_bytes_counts_as_stored,a_copy_under_the_id_with_other_content_is_not_taken_for_the_message
+dt "inbox v2: only a copy that decodes as this message counts as stored" "$D/inbox_v2.rs" \
+    '    (copy.id == *id).then_some((generation, copy))' '    Some((generation, copy))' \
+    only_a_copy_that_reads_back_as_this_message_counts_as_stored
+dt "inbox v2: a stored copy lacking a proven Ghost Key is upgraded" "$D/inbox_v2.rs" \
+    '                if copy.ghost_vk.is_none() && msg.ghost_vk.is_some() {' \
+    '                if false {' \
+    a_drain_that_proves_the_ghost_key_upgrades_the_copy_and_tombstones
 dt "inbox v2: mail is a contact's by its sender" "$D/inbox_v2.rs" \
     'let contact = is_contact(s, me, rec, &from)?;' 'let contact = false;' \
     contact_mail_is_never_in_the_stranger_budget,a_contacts_quarantine_mail_is_never_evicted_as_a_strangers
@@ -558,17 +559,19 @@ dt "inbox v2: a proof's tag comes from the key the sender bound" "$D/sealing.rs"
     'Admission::Quarantine { ghost: Some(_) } => (KIND_QUARANTINE, vec![0x33; 32]),' \
     a_quarantine_message_with_an_undecodable_proof_has_the_vectors_id
 dt "inbox v2: a Conflict stores nothing until the copy reads back" "$D/inbox_v2.rs" \
-    '                return if counts_as_stored(s, &me.addr, id, &bytes) {' \
-    '                return if true {' \
+    '                let Some((generation, copy)) = stored_copy(s, &me.addr, id) else {
+                    return Err(f);' \
+    '                let Some((generation, copy)) = stored_copy(s, &me.addr, id) else {
+                    return Ok(());' \
     a_copy_under_the_id_with_other_content_is_not_taken_for_the_message,a_drain_over_an_unreadable_index_never_tombstones_what_it_did_not_store,a_job_drain_over_an_unreadable_index_never_tombstones_what_it_did_not_store
 dt "inbox v2 jobs: an unreadable ledger entry keeps the contact's schedule" "$D/inbox_jobs.rs" \
-    '        // asked about again later, on the backoff.
-        let Some((generation, mut e)) = v2::load::<LedgerEntry>(s, &at)? else {
-            return Ok(Some(self.miss(s, &key)));' \
-    '        // asked about again later, on the backoff.
-        let Some((generation, mut e)) = v2::load::<LedgerEntry>(s, &at)? else {
-            return Ok(None);' \
+    '            return Ok(Some(now + backoff(looks)));' \
+    '            return Ok(None);' \
     an_unreadable_ledger_entry_never_costs_a_contact_its_renewals
+dt "inbox v2 jobs: a missing ledger entry backs off across runs" "$D/inbox_jobs.rs" \
+    '            return Ok(Some(now + backoff(looks)));' \
+    '            return Ok(Some(now + backoff(1 + 0 * looks)));' \
+    a_missing_ledger_entry_backs_off_across_runs
 guard "inbox v2: a sweep whose unreadable keys never fire fails" "$D/env.rs" \
     'self.blinded.borrow().is_none() && self.roll(self.blind_rate)' \
     'self.blinded.borrow().is_none() && self.roll(self.blind_rate) && false' \

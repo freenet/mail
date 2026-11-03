@@ -2229,10 +2229,10 @@ fn a_contact_whose_renewal_errors_never_stops_the_others() {
 }
 
 /// A copy under a message's id counts as that message stored only if it
-/// reads back with the content this drain would store (an earlier drain's
-/// copy: `a_message_stored_by_a_lost_drain_is_drained_again`). One with other
-/// content is not known to be the message: it stays in the inbox, untombstoned
-/// and counted, and the rest drain.
+/// reads back and decodes as that message (an earlier drain's copy:
+/// `a_drain_that_proves_the_ghost_key_upgrades_the_copy_and_tombstones`).
+/// Bytes that are not a message are not known to be it: the message stays in
+/// the inbox, untombstoned and counted, and the rest drain.
 #[test]
 fn a_copy_under_the_id_with_other_content_is_not_taken_for_the_message() {
     let mut world = World::new();
