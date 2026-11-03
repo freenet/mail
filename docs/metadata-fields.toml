@@ -4,8 +4,8 @@
 # file lists exactly the plaintext fields of a fully populated state.
 #
 # No field names a sender. The Ghost Key proof is for RequireGhost inboxes: the
-# contract verifies it there, ignores it in Open ones, and the compose flow
-# attaches one only for a RequireGhost recipient.
+# contract verifies it there, an Open inbox refuses a message carrying one, and
+# the compose flow attaches one only for a RequireGhost recipient.
 
 # ── Recipient keys, epoch and quarantine mode ──────────────────────────────
 
@@ -123,7 +123,7 @@ why = "Lets the owner's own devices write to the inbox. Signed by the issuer key
 [[field]]
 path = "messages.*.admission.Quarantine.ghost.cert"
 class = "ghost key proof"
-why = "A Ghost Key certificate, in a RequireGhost inbox's quarantine. It shows the key, its tier and its month, and the message is not anonymous to the recipient."
+why = "A Ghost Key certificate, in a RequireGhost inbox's quarantine, verified by the contract; an Open inbox refuses a message carrying one. It shows the key, its tier and its month, and the message is not anonymous to the recipient. It stays public until the owner drains the message, or until the owner's time moves past the send window, which does not happen while the owner is offline."
 
 [[field]]
 path = "messages.*.admission.Quarantine.ghost.scoped_payload"

@@ -89,10 +89,12 @@ fn the_worst_case_is_valid_and_fits() {
 }
 
 /// The widest encoding a valid state can take: the worst case above, with
-/// every integer at its widest and, in an Open inbox, every quarantine message
-/// carrying a proof at the size cap (held and ignored there). It fits in
-/// 4 MiB, so `MAX_INPUT_BYTES`'s 256 KiB above that is margin no valid state
-/// or delta uses.
+/// every integer at its widest. Its quarantine is measured both ways: bare in
+/// an Open inbox, which is checked valid, and with every message carrying a
+/// proof at the size caps under the widest RequireGhost mode, which no valid
+/// proof exceeds (an Open inbox refuses a proof, decision 19). Both fit in
+/// 4 MiB, so `MAX_INPUT_BYTES`'s 256 KiB above that is margin no valid state or
+/// delta uses.
 #[test]
 fn the_widest_valid_state_fits() {
     let w = world();
@@ -110,7 +112,7 @@ fn the_widest_valid_state_fits() {
         .map(|i| (id32(i), never - i))
         .collect();
     let epoch = u32::MAX;
-    let owner = w.owner(never, epoch, QuarantineMode::Open, tombstones);
+    let owner = |mode| w.owner(u64::MAX, epoch, mode, tombstones.clone());
     let revoked: Vec<_> = (0..rules.revoked as u64 - 1)
         .map(|i| w.revocation(id_of(i), never, epoch))
         .collect();
@@ -129,7 +131,9 @@ fn the_widest_valid_state_fits() {
     for i in 0..rules.owner_pool as u64 {
         messages.push(w.owner_msg(ct(32768, (1 << 42) + i), t));
     }
+    let mut bare = messages.clone();
     for i in 0..rules.quarantine as u64 {
+        bare.push(w.quarantine_msg(ct(32768, (1 << 43) + i), t, None));
         let proof = GhostProof {
             cert: serde_bytes::ByteBuf::from(vec![0xFF; ghostkey_verify::MAX_CERTIFICATE_BYTES]),
             scoped_payload: serde_bytes::ByteBuf::from(vec![
@@ -141,16 +145,29 @@ fn the_widest_valid_state_fits() {
         let admission = Admission::Quarantine { ghost: Some(proof) };
         messages.push(w.keyed(ct(32768, (1 << 43) + i), t, admission));
     }
-    let state = w.raw(owner, w.time(t), revoked, usage, messages);
-    let bytes = encode(&state);
-    assert!(is_valid(&rules, &w.params, &bytes), "nothing was dropped");
-    assert_eq!(state.messages.len(), MAX_MESSAGES);
-    println!(
-        "widest valid state: {} bytes, {} under 4 MiB",
-        bytes.len(),
-        LIMIT - bytes.len()
+    let open = w.raw(
+        owner(QuarantineMode::Open),
+        w.time(t),
+        revoked.clone(),
+        usage.clone(),
+        bare,
     );
-    assert!(bytes.len() <= LIMIT);
+    let bytes = encode(&open);
+    assert!(is_valid(&rules, &w.params, &bytes), "nothing was dropped");
+    assert_eq!(open.messages.len(), MAX_MESSAGES);
+    let widest_mode = QuarantineMode::RequireGhost {
+        min_usd: Some(u32::MAX),
+    };
+    let proven = encode(&w.raw(owner(widest_mode), w.time(t), revoked, usage, messages));
+    assert!(proven.len() > bytes.len());
+    println!(
+        "widest valid state: {} bytes, {} under 4 MiB; with proofs at their caps {} bytes, {} under",
+        bytes.len(),
+        LIMIT - bytes.len(),
+        proven.len(),
+        LIMIT - proven.len()
+    );
+    assert!(proven.len() <= LIMIT);
     const { assert!(LIMIT < MAX_INPUT_BYTES) };
 }
 

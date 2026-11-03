@@ -1,4 +1,4 @@
-//! Ghost Key proofs: decisive in RequireGhost inboxes, inert in Open ones.
+//! Ghost Key proofs: decisive in RequireGhost inboxes, refused in Open ones.
 //! Fixture certificates: 0-3 are $1, 4-7 are $5, 8-9 are $20, 10 is a $5
 //! certificate from a notary that is not a donation notary.
 
@@ -271,48 +271,104 @@ fn a_memoed_certificate_still_needs_its_payload_signature() {
     assert_eq!(merged.messages.len(), 1);
 }
 
+/// Decision 19: an Open inbox refuses a message that carries a Ghost Key proof.
+/// It does not check one, and certificates are public in every RequireGhost
+/// inbox's state, so a stranger could attach one naming anyone's key and put a
+/// false attribution in public state (review r2 S1).
 #[test]
-fn in_an_open_inbox_a_proof_is_ignored() {
+fn an_open_inbox_refuses_a_message_carrying_a_proof() {
     let w = world();
+    let open = QuarantineMode::Open;
     // Garbage that no check could pass.
     let garbage = GhostProof {
         cert: ByteBuf::from(vec![0xFF; 10]),
         scoped_payload: ByteBuf::from(vec![0xFF; 10]),
         ghost_sig: ByteArray::new([0; 64]),
     };
-    assert!(holds(QuarantineMode::Open, carrying(ct(8192, 1), garbage)));
-
-    // Not counted either: three of one key all stay.
-    let three = (1..=3).map(|i| w.quarantine_msg(ct(8192, i), T, Some(0)));
-    let open = w.owner(1, 3, QuarantineMode::Open, BTreeMap::new());
-    let raw = w.raw(open, w.time(T), [], [], three);
-    assert_eq!(
-        merge(&Rules::V1, &w.params, vec![raw.into()])
-            .unwrap()
-            .messages
-            .len(),
-        3
-    );
+    assert!(!holds(open, carrying(ct(8192, 1), garbage)));
+    // A victim's genuine certificate, signed by nobody: the review's case.
+    let mut named = w.proof(0, &ct(8192, 2), T);
+    named.ghost_sig = ByteArray::new([0x5A; 64]);
+    assert!(!holds(open, carrying(ct(8192, 2), named)));
+    // A genuine proof, which RequireGhost admits.
+    assert!(!holds(open, w.quarantine_msg(ct(8192, 3), T, Some(0))));
+    assert!(holds(REQUIRE, w.quarantine_msg(ct(8192, 3), T, Some(0))));
+    // The control: a bare message stays.
+    assert!(holds(open, w.quarantine_msg(ct(8192, 4), T, None)));
 }
 
+/// In RequireGhost, a proof over its size cap is refused before it is read.
+/// The payload is the one part a key holder can pad and still sign: the vault's
+/// reader ignores bytes after the CBOR.
 #[test]
-fn in_an_open_inbox_a_proof_is_size_capped() {
-    let open = QuarantineMode::Open;
-    let make = |cert: usize, payload: usize| GhostProof {
-        cert: ByteBuf::from(vec![0; cert]),
-        scoped_payload: ByteBuf::from(vec![0; payload]),
-        ghost_sig: ByteArray::new([0; 64]),
+fn a_proof_over_its_size_cap_is_refused() {
+    let w = world();
+    let padded = |bytes: Vec<u8>, to: usize| {
+        let mut proof = w.proof(0, &bytes, T);
+        proof.scoped_payload.resize(to, 0);
+        proof.ghost_sig = sign64(&w.ghosts[0].sk, &proof.scoped_payload);
+        carrying(bytes, proof)
     };
-    let cert_cap = ghostkey_verify::MAX_CERTIFICATE_BYTES;
-    assert!(holds(
-        open,
-        carrying(ct(8192, 1), make(cert_cap, MAX_SCOPED_PAYLOAD))
+    assert!(holds(REQUIRE, padded(ct(8192, 1), MAX_SCOPED_PAYLOAD)));
+    assert!(!holds(REQUIRE, padded(ct(8192, 2), MAX_SCOPED_PAYLOAD + 1)));
+    let mut proof = w.proof(0, &ct(8192, 3), T);
+    proof.cert = ByteBuf::from(vec![0; ghostkey_verify::MAX_CERTIFICATE_BYTES + 1]);
+    assert!(!holds(REQUIRE, carrying(ct(8192, 3), proof)));
+}
+
+/// Decision 19, the switch: the owner turns RequireGhost off while a proven
+/// message is still held. The newer record filters it, in either order and on
+/// redelivery of the old state, and the bare mail the switch admits stays. The
+/// owner drains before signing the switch (decision 9); a sender whose message
+/// was filtered reads back and resends without a proof.
+#[test]
+fn a_switch_to_open_filters_an_undrained_proven_message() {
+    let w = world();
+    let proven = w.quarantine_msg(ct(8192, 1), T, Some(0));
+    let bare = w.quarantine_msg(ct(8192, 2), T, None);
+    let required = encode(&w.raw(
+        w.owner(1, 3, REQUIRE, BTreeMap::new()),
+        w.time(T),
+        [],
+        [],
+        [proven.clone()],
     ));
-    assert!(!holds(open, carrying(ct(8192, 2), make(cert_cap + 1, 0))));
-    assert!(!holds(
-        open,
-        carrying(ct(8192, 3), make(0, MAX_SCOPED_PAYLOAD + 1))
+    let opened = encode(&w.raw(
+        w.owner(2, 3, QuarantineMode::Open, BTreeMap::new()),
+        w.time(T),
+        [],
+        [],
+        [bare.clone()],
     ));
+    assert!(is_valid(&Rules::V1, &w.params, &required));
+    assert!(is_valid(&Rules::V1, &w.params, &opened));
+    let ab = apply(
+        &Rules::V1,
+        &w.params,
+        &required,
+        update_state(opened.clone()),
+    )
+    .unwrap();
+    let ba = apply(
+        &Rules::V1,
+        &w.params,
+        &opened,
+        update_state(required.clone()),
+    )
+    .unwrap();
+    assert_eq!(ab, ba, "either order");
+    assert!(is_valid(&Rules::V1, &w.params, &ab));
+    let merged: InboxState = decode(&ab).unwrap();
+    assert_eq!(
+        merged.messages.keys().copied().collect::<Vec<_>>(),
+        [bare.0],
+        "the proven message is filtered, the bare one stays"
+    );
+    assert_eq!(
+        apply(&Rules::V1, &w.params, &ab, update_state(required)).unwrap(),
+        ab,
+        "redelivering the old state brings nothing back"
+    );
 }
 
 /// Review r1 M1 (decision 11). A donor holding ghost key K signs the public
@@ -361,9 +417,8 @@ fn a_donor_reproving_honest_mail_leaves_it() {
 }
 
 /// One ciphertext and hour, with and without a proof, are two messages: the
-/// proof's ghost key is in the id. In Open both stand. When the owner turns on
-/// RequireGhost the bare one is filtered, and relaxing to Open again leaves
-/// the proven one ignored, not filtered.
+/// proof's ghost key is in the id. RequireGhost holds the proven one and
+/// filters the bare one; Open does the reverse (decision 19).
 #[test]
 fn a_proof_and_none_are_two_messages() {
     let w = world();
@@ -389,32 +444,16 @@ fn a_proof_and_none_are_two_messages() {
     stripped.admission = Admission::Quarantine { ghost: None };
     assert!(!holds(QuarantineMode::Open, (proven.0, stripped)));
 
-    let state =
-        |owner: OwnerRecord, m: Vec<(B32, Message)>| encode(&w.raw(owner, w.time(T), [], [], m));
-    let open = w.owner(1, 3, QuarantineMode::Open, BTreeMap::new());
-    let a = state(open.clone(), vec![proven.clone()]);
-    let b = state(open, vec![bare.clone()]);
-    let merged: InboxState =
-        decode(&apply(&Rules::V1, &w.params, &a, update_state(b.clone())).unwrap()).unwrap();
-    assert_eq!(merged.messages.len(), 2, "Open holds both");
-
-    let required = w.owner(2, 3, REQUIRE, BTreeMap::new());
-    let c = state(required, vec![proven.clone()]);
-    let c = apply(&Rules::V1, &w.params, &c, update_state(b)).unwrap();
-    let merged: InboxState = decode(&c).unwrap();
-    assert_eq!(
-        merged.messages.keys().copied().collect::<Vec<_>>(),
-        [proven.0]
-    );
-
-    let relaxed = w.owner(3, 3, QuarantineMode::Open, BTreeMap::new());
-    let d = state(relaxed, vec![]);
-    let merged: InboxState =
-        decode(&apply(&Rules::V1, &w.params, &c, update_state(d)).unwrap()).unwrap();
-    assert_eq!(
-        merged.messages.keys().copied().collect::<Vec<_>>(),
-        [proven.0]
-    );
+    let both = vec![proven.clone(), bare.clone()];
+    for (mode, kept) in [(REQUIRE, proven.0), (QuarantineMode::Open, bare.0)] {
+        let raw = w.raw(require(mode), w.time(T), [], [], both.clone());
+        let merged = merge(&Rules::V1, &w.params, vec![raw.into()]).unwrap();
+        assert_eq!(
+            merged.messages.keys().copied().collect::<Vec<_>>(),
+            [kept],
+            "{mode:?}"
+        );
+    }
 }
 
 /// Two encodings of one id: one proof under one ghost key, with its

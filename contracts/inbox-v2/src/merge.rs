@@ -325,24 +325,24 @@ impl Filter<'_> {
         }
     }
 
-    /// In an Open inbox a proof is size-capped and otherwise ignored: nothing
-    /// public may rest on it there. In a RequireGhost inbox it decides.
+    /// In a RequireGhost inbox a proof decides. An Open inbox refuses a message
+    /// that carries one (decision 19): it does not check a proof, and one it
+    /// held would name a ghost key in public state with nothing behind it.
     fn admit_quarantine(
         &mut self,
         proof: Option<&GhostProof>,
         sent_time: u64,
         ct_hash: &[u8; 32],
     ) -> Option<Slot> {
-        if proof.is_some_and(|p| {
-            p.cert.len() > ghostkey_verify::MAX_CERTIFICATE_BYTES
-                || p.scoped_payload.len() > MAX_SCOPED_PAYLOAD
-        }) {
-            return None;
-        }
         let QuarantineMode::RequireGhost { min_usd } = self.owner.quarantine else {
-            return Some(Slot::Quarantine { ghost: None });
+            return proof.is_none().then_some(Slot::Quarantine { ghost: None });
         };
         let proof = proof?;
+        if proof.cert.len() > ghostkey_verify::MAX_CERTIFICATE_BYTES
+            || proof.scoped_payload.len() > MAX_SCOPED_PAYLOAD
+        {
+            return None;
+        }
         let ghost = self.verify_proof(proof, sent_time, ct_hash)?;
         let tier_met = ghost.usd >= u64::from(min_usd.unwrap_or(0));
         #[cfg(feature = "plausible-mutants")]

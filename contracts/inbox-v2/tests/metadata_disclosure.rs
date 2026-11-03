@@ -58,7 +58,7 @@ fn populated(mode: QuarantineMode) -> InboxState {
         w.pass_msg(&invite, ct(8192, 2), T),
         w.owner_msg(ct(8192, 3), T),
     ];
-    // A proof is decisive in RequireGhost and carried as-is in Open.
+    // A proof is decisive in RequireGhost and refused in Open.
     messages.push(w.quarantine_msg(ct(8192, 4), T, Some(4)));
     messages.push(w.quarantine_msg(ct(8192, 5), T, None));
     let raw = w.raw(
@@ -121,9 +121,8 @@ fn state_paths() -> BTreeSet<String> {
             })
             .collect();
         let want: &[&str] = if matches!(mode, QuarantineMode::Open) {
-            // Open ignores a proof but keeps it, so the populated state still
-            // names every message kind.
-            &["contact", "invite", "owner", "proof", "bare"]
+            // Open refuses a message carrying a proof (decision 19).
+            &["contact", "invite", "owner", "bare"]
         } else {
             // RequireGhost filters a message with no proof.
             &["contact", "invite", "owner", "proof"]

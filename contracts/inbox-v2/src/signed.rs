@@ -171,8 +171,9 @@ pub fn inner_binding(
 }
 
 /// The ghost key a proof's certificate claims, unverified; all zeros when the
-/// certificate does not decode. Only an Open inbox can hold such a proof, where
-/// it is ignored, so the zeros name no key that could pass.
+/// certificate does not decode. No inbox holds such a proof: RequireGhost
+/// refuses it and Open refuses any proof (decision 19), so the zeros name no
+/// key that could pass.
 pub fn proof_ghost_vk(proof: &GhostProof) -> [u8; 32] {
     GhostkeyCertificate::from_cbor(&proof.cert)
         .map(|cert| cert.claimed_ghost_key().to_bytes())
