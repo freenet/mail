@@ -1,0 +1,28 @@
+# The inbox v2 contract's rules behind a thin C ABI, for
+# scripts/check-inbox-cost.sh to run under wasmtime. Not the candidate: the
+# candidate's exports speak freenet-stdlib's buffer protocol, which a plain
+# runtime cannot drive. This calls the same `is_valid` and `apply` the
+# contract's `validate_state` and `update_state` call, built with the
+# contract's release profile, so what it costs is what the rules cost.
+[workspace]
+
+[package]
+name = "inbox-v2-cost-guest"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+freenet-email-inbox-v2 = { path = "../../../contracts/inbox-v2", default-features = false }
+freenet-stdlib = "=0.12.1"
+
+# The contract's profile (contracts/inbox-v2/Cargo.toml).
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

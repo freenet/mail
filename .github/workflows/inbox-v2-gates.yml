@@ -1,7 +1,7 @@
 name: Inbox v2 gates
 
-# The slow gates on the inbox v2 contract's rules: branch coverage, cargo-mutants
-# and core's merge-law verifier. They run on a PR that touches the contract or
+# The slow gates on the inbox v2 contract's rules: branch coverage, cargo-mutants,
+# core's merge-law verifier and the cost of the worst calls. They run on a PR that touches the contract or
 # the gates themselves, and nightly. They are separate from `check-drift` so a
 # PR elsewhere does not wait for them, and they are not required checks: a
 # path-filtered workflow cannot be one (see check-contract-wasm.yml). A failure
@@ -19,6 +19,8 @@ on:
       - 'scripts/check-branch-coverage*'
       - 'scripts/check-mutants-triage*'
       - 'scripts/check-fdev-verify-merge*'
+      - 'scripts/check-inbox-cost.sh'
+      - 'tools/inbox-v2-cost/**'
       - '.github/workflows/inbox-v2-gates.yml'
   schedule:
     - cron: '15 5 * * *'
@@ -155,3 +157,23 @@ jobs:
           fdev --version
       - name: Core's merge laws hold on the candidate, every case explicit
         run: bash scripts/check-fdev-verify-merge.sh
+
+  cost:
+    # Decision 8's 2.5 s line, as wasmtime fuel: the same count on any machine.
+    # The calibration against wall clock is in the script.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.99.1
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            contracts/inbox-v2
+            tools/inbox-v2-cost/guest
+            tools/inbox-v2-cost/host
+      - name: The worst calls cost under the 2.5 s budget
+        run: bash scripts/check-inbox-cost.sh

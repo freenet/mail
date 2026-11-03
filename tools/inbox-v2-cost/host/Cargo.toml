@@ -1,0 +1,13 @@
+# Runs tools/inbox-v2-cost/guest under wasmtime, counting fuel (wasm
+# instructions, the same on every machine) or timing it. Used by
+# scripts/check-inbox-cost.sh.
+[workspace]
+
+[package]
+name = "inbox-v2-cost-host"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+wasmtime = { version = "=47.0.4", default-features = false, features = ["cranelift", "runtime", "std", "parallel-compilation"] }
