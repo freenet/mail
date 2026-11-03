@@ -8,13 +8,13 @@
 //! on the calling thread only, so tests running in parallel do not see it.
 
 use std::cell::{Cell, RefCell};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use freenet_stdlib::prelude::ContractInstanceId;
 
 use crate::merge::WEBAPP_REQUESTOR;
 use crate::signed::ghost_admit_bytes;
-use crate::types::{B16, B32, Revocation};
+use crate::types::{B16, B32, PassUsage, Revocation};
 
 /// One plausible mistake in the rules.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,6 +47,9 @@ pub enum Mutant {
     GhostCapPerDelta,
     /// Filtering against the revocation union before pruning.
     FilterUnprunedRevocations,
+    /// A pass id's revocation and usage joins pick before pruning, so a dead
+    /// entry can win and take a live one with it (review r1 B1).
+    JoinBeforePrune,
 }
 
 thread_local! {
@@ -139,12 +142,40 @@ pub fn proof_inputs(
     (requestor, Payload { payload })
 }
 
-/// `CapBeforeCleanup`: the cap, applied before expired entries are pruned.
-pub fn cap_early(revoked: &mut BTreeMap<B16, Revocation>, cap: usize) {
+/// Whether a pass id's join sees an entry, given whether it is live. Under
+/// `JoinBeforePrune` and `CapBeforeCleanup` the join sees dead entries too and
+/// `prune_late` removes them afterwards.
+pub fn join_live(live: bool) -> bool {
+    live || on(Mutant::JoinBeforePrune) || on(Mutant::CapBeforeCleanup)
+}
+
+/// `JoinBeforePrune`: pruning after the join, as review r1 B1 found it.
+/// `CapBeforeCleanup`: the same, with the revocation cap applied first.
+pub fn prune_late(
+    revoked: &mut BTreeMap<B16, Revocation>,
+    usage: &mut BTreeMap<B16, PassUsage>,
+    cap: usize,
+    live_revocation: impl Fn(&Revocation) -> bool,
+    live_usage: impl Fn(&PassUsage) -> bool,
+) {
     if on(Mutant::CapBeforeCleanup) {
         while revoked.len() > cap {
             revoked.pop_last();
         }
+    }
+    revoked.retain(|_, r| live_revocation(r));
+    usage.retain(|_, u| live_usage(u));
+}
+
+/// Collects the pass ids of every genuine revocation, dead or alive, for the
+/// two mutants that read the union before pruning.
+pub fn note_revocation(
+    unpruned: &mut BTreeSet<B16>,
+    entry: &Revocation,
+    genuine: impl Fn(&Revocation) -> bool,
+) {
+    if (on(Mutant::FilterUnprunedRevocations) || on(Mutant::OverflowReadsUnion)) && genuine(entry) {
+        unpruned.insert(entry.pass_id);
     }
 }
 

@@ -9,7 +9,9 @@
 //! 3. Union of revocations, usage entries and messages. An item that does not
 //!    verify under the joined owner is dropped here, so it can neither revoke a
 //!    pass nor push a genuine item out of a cap.
-//! 4. Prune, then cap, revocations and usage entries.
+//! 4. Prune, then cap, revocations and usage entries. Pruning happens inside
+//!    step 3's join on each pass id: a dead entry never competes, so it cannot
+//!    win the join and then be pruned with the live entry it beat.
 //! 5. Filter each message against the owner, the time and the revocations left
 //!    after pruning. A pruned revocation must not filter: it can be redelivered
 //!    forever, and the message it would drop can too, so the state would cycle.
@@ -417,20 +419,43 @@ pub fn merge(
     let issuer = VerifyingKey::from_bytes(&owner.issuer_vk).map_err(|_| Malformed("issuer key"))?;
     let time = join_time(params, &issuer, &parts)?;
 
+    // Step 4's pruning, applied inside step 3's joins: an entry that is
+    // already dead never competes, so it cannot win a pass id's join and then
+    // be pruned, taking the live entry it beat with it (review r1 B1).
+    let prune_time = time.owner_time;
+    #[cfg(feature = "plausible-mutants")]
+    let prune_time = parts
+        .first()
+        .and_then(|p| p.time.as_ref())
+        .map(|t| t.owner_time)
+        .filter(|_| mutant::on(Mutant::PruneUnmergedTime))
+        .unwrap_or(prune_time);
+    let expired = |expiry: u64| expiry.saturating_add(WINDOW_BACK) <= prune_time;
+    let live_revocation = |r: &Revocation| !expired(r.expiry) && r.epoch >= owner.pass_epoch;
+    let live_usage = |u: &PassUsage| !expired(u.expiry);
+    #[cfg(feature = "plausible-mutants")]
+    let (real_live_revocation, real_live_usage) = (live_revocation, live_usage);
+    #[cfg(feature = "plausible-mutants")]
+    let live_revocation = |r: &Revocation| mutant::join_live(live_revocation(r));
+    #[cfg(feature = "plausible-mutants")]
+    let live_usage = |u: &PassUsage| mutant::join_live(live_usage(u));
+
     let mut revoked = BTreeMap::new();
     let mut usage = BTreeMap::new();
     let mut candidates: BTreeMap<B32, Vec<Message>> = BTreeMap::new();
     #[cfg(feature = "plausible-mutants")]
-    let unmerged_time = parts
-        .first()
-        .and_then(|p| p.time.as_ref())
-        .map(|t| t.owner_time);
+    let mut unpruned = BTreeSet::new();
     #[cfg(feature = "plausible-mutants")]
     mutant::begin();
     for part in parts {
         #[cfg(feature = "plausible-mutants")]
         mutant::next_part();
         for (key, entry) in part.revoked {
+            #[cfg(feature = "plausible-mutants")]
+            mutant::note_revocation(&mut unpruned, &entry, |r| {
+                let bytes = revocation_bytes(&params.addr, &r.pass_id, r.expiry, r.epoch);
+                r.pass_id == key && verify_ed25519(&issuer, &bytes, &r.sig)
+            });
             join_entry(
                 &mut revoked,
                 key,
@@ -438,7 +463,9 @@ pub fn merge(
                 |r: &Revocation| (r.expiry, r.epoch, r.sig),
                 |r| {
                     let bytes = revocation_bytes(&params.addr, &r.pass_id, r.expiry, r.epoch);
-                    r.pass_id == key && verify_ed25519(&issuer, &bytes, &r.sig)
+                    r.pass_id == key
+                        && live_revocation(r)
+                        && verify_ed25519(&issuer, &bytes, &r.sig)
                 },
             );
         }
@@ -450,7 +477,7 @@ pub fn merge(
                 |u: &PassUsage| (u.used, u.expiry, u.sig),
                 |u| {
                     let bytes = usage_bytes(&params.addr, &u.pass_id, u.used, u.expiry);
-                    u.pass_id == key && verify_ed25519(&issuer, &bytes, &u.sig)
+                    u.pass_id == key && live_usage(u) && verify_ed25519(&issuer, &bytes, &u.sig)
                 },
             );
         }
@@ -464,21 +491,17 @@ pub fn merge(
         }
     }
 
-    // Step 4.
-    let prune_time = time.owner_time;
+    // Step 4: what is left is live, so only the caps remain.
     #[cfg(feature = "plausible-mutants")]
-    let prune_time = unmerged_time
-        .filter(|_| mutant::on(Mutant::PruneUnmergedTime))
-        .unwrap_or(prune_time);
-    let expired = |expiry: u64| expiry.saturating_add(WINDOW_BACK) <= prune_time;
+    let union_len = unpruned.len();
     #[cfg(feature = "plausible-mutants")]
-    let union_len = revoked.len();
-    #[cfg(feature = "plausible-mutants")]
-    let unpruned: BTreeSet<B16> = revoked.keys().copied().collect();
-    #[cfg(feature = "plausible-mutants")]
-    mutant::cap_early(&mut revoked, rules.revoked);
-    revoked.retain(|_, r: &mut Revocation| !expired(r.expiry) && r.epoch >= owner.pass_epoch);
-    usage.retain(|_, u: &mut PassUsage| !expired(u.expiry));
+    mutant::prune_late(
+        &mut revoked,
+        &mut usage,
+        rules.revoked,
+        real_live_revocation,
+        real_live_usage,
+    );
     let live_revoked: BTreeSet<B16> = revoked.keys().copied().collect();
     #[cfg(feature = "plausible-mutants")]
     let live_revoked = if mutant::on(Mutant::FilterUnprunedRevocations) {

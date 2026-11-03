@@ -13,9 +13,10 @@
 mod common;
 
 use std::collections::{BTreeMap, HashSet};
+use std::sync::OnceLock;
 
 use common::*;
-use freenet_email_inbox_v2::merge::merge;
+use freenet_email_inbox_v2::merge::{WINDOW_BACK, merge};
 use freenet_email_inbox_v2::types::*;
 use freenet_email_inbox_v2::{apply, is_valid, sync};
 use freenet_stdlib::prelude::UpdateData;
@@ -70,6 +71,8 @@ impl Rng {
 /// Every piece one seed can draw on: the cases the plan lists, side by side, so
 /// that a state can hold any mixture of them.
 struct Universe {
+    /// Revocations every peer holds: none, or V1's set filled to near its cap.
+    fillers: &'static [Revocation],
     owners: Vec<OwnerRecord>,
     times: Vec<TimeAttestation>,
     revoked: Vec<Revocation>,
@@ -88,9 +91,38 @@ fn modes(rng: &mut Rng) -> QuarantineMode {
     ])
 }
 
+/// The base time of the universe that runs at the revocation cap: its fillers
+/// are signed once and shared, so their expiries are fixed against it.
+const AT_CAP_T0: u64 = 1_800_000_000 / HOUR * HOUR;
+
+/// Revocations that fill V1's set to within a few of its cap: most live past
+/// every time the universe draws, a third run out at its 31st day.
+fn cap_fillers() -> &'static [Revocation] {
+    static FILLERS: OnceLock<Vec<Revocation>> = OnceLock::new();
+    FILLERS.get_or_init(|| {
+        let w = world();
+        (0..Rules::V1.revoked as u64 - 6)
+            .map(|i| {
+                let mut id = [0xF0u8; 16];
+                id[8..].copy_from_slice(&i.to_be_bytes());
+                let expiry = if i % 3 == 0 {
+                    AT_CAP_T0 + 31 * DAY
+                } else {
+                    AT_CAP_T0 + 900 * DAY
+                };
+                w.revocation(ByteArray::new(id), expiry, 3)
+            })
+            .collect()
+    })
+}
+
 fn universe(seed: u64, rng: &mut Rng, big: bool) -> Universe {
-    let w = world();
     let t0 = 1_800_000_000 / HOUR * HOUR + rng.below(1000) * DAY;
+    universe_at(seed, rng, big, t0)
+}
+
+fn universe_at(seed: u64, rng: &mut Rng, big: bool, t0: u64) -> Universe {
+    let w = world();
     let epoch = 3;
     let far = t0 + 300 * DAY;
     // Keys differ per seed so states of different seeds never look alike.
@@ -120,6 +152,9 @@ fn universe(seed: u64, rng: &mut Rng, big: bool) -> Universe {
     passes.push(w.pass(key(61), epoch, t0 - 3 * DAY, PassClass::Contact));
     passes.push(w.pass(key(62), epoch, t0 + DAY, PassClass::Contact));
     let renewed = w.pass(key(0), epoch, far + 100 * DAY, PassClass::Contact);
+    // The same pass id certified again in the next epoch: one message id, two
+    // encodings, and which one is live depends on the joined owner.
+    let next_epoch = w.pass(key(1), epoch + 1, far, PassClass::Contact);
 
     let mut messages = Vec::new();
     let per_pass = if big { 9 } else { 4 };
@@ -133,6 +168,9 @@ fn universe(seed: u64, rng: &mut Rng, big: bool) -> Universe {
     let same = ct_next(rng);
     messages.push(w.pass_msg(&passes[0], same.clone(), t0));
     messages.push(w.pass_msg(&renewed, same, t0));
+    let reissued = ct_next(rng);
+    messages.push(w.pass_msg(&passes[1], reissued.clone(), t0));
+    messages.push(w.pass_msg(&next_epoch, reissued, t0));
 
     for _ in 0..if big { 12 } else { 5 } {
         let sent = t0 + rng.below(48) * HOUR;
@@ -162,6 +200,14 @@ fn universe(seed: u64, rng: &mut Rng, big: bool) -> Universe {
         messages.push(w.pass_msg(&passes[2], ct_next(rng), t0 - 3 * DAY - i * HOUR));
         messages.push(w.quarantine_msg(ct_next(rng), t0 + 400 * DAY + i * DAY, None));
         messages.push(w.owner_msg(ct_next(rng), t0 + 400 * DAY + i * DAY));
+        // Either side of a two-day top, the quarantine window's.
+        messages.push(w.quarantine_msg(ct_next(rng), t0 + 2 * DAY + i * HOUR - 2 * HOUR, None));
+        messages.push(w.quarantine_msg(ct_next(rng), t0 + 3 * DAY + (i + 1) * HOUR, None));
+    }
+    // Mail dated after the time has moved past every expiry.
+    for i in 0..3 {
+        messages.push(w.owner_msg(ct_next(rng), far + 101 * DAY + i * HOUR));
+        messages.push(w.quarantine_msg(ct_next(rng), far + 101 * DAY + i * HOUR, None));
     }
     // Malformed in themselves: the merge must drop these wherever they land.
     {
@@ -181,6 +227,15 @@ fn universe(seed: u64, rng: &mut Rng, big: bool) -> Universe {
         let expiry = pass.cert.expiry;
         revoked.push(w.revocation(pass.cert.pass_id, expiry, epoch));
     }
+    // Crossing pairs on one pass id: the entry that wins the join on rank is
+    // the one pruned first, by an epoch bump.
+    for pass in rng.subset(&passes, 30) {
+        let (id, expiry) = (pass.cert.pass_id, pass.cert.expiry);
+        revoked.push(w.revocation(id, expiry + 100 * DAY, epoch));
+        revoked.push(w.revocation(id, expiry, epoch + 1));
+    }
+    revoked.push(w.revocation(next_epoch.cert.pass_id, far + 100 * DAY, epoch));
+    revoked.push(w.revocation(next_epoch.cert.pass_id, far, epoch + 1));
     // Fillers: enough to go over TINY's cap, some soon prunable, some not, and
     // ids on both sides of the real ones.
     for i in 0..9 {
@@ -200,27 +255,54 @@ fn universe(seed: u64, rng: &mut Rng, big: bool) -> Universe {
     {
         usage.push(w.usage(pass.cert.pass_id, 1 + rng.below(3) as u8, pass.cert.expiry));
         usage.push(w.usage(pass.cert.pass_id, 1, pass.cert.expiry + DAY));
+        // Crossing: the higher count runs out long before the lower one.
+        usage.push(w.usage(pass.cert.pass_id, 3, pass.cert.expiry - 20 * DAY));
+        usage.push(w.usage(pass.cert.pass_id, 2, pass.cert.expiry + 100 * DAY));
     }
     usage.push(w.usage(id_of(key(77)), 1, t0 - 10 * DAY));
 
-    let times: Vec<_> = [0, HOUR, DAY, 3 * DAY, 5 * DAY]
+    // Near times, drawn twice as often, and times past every expiry and at
+    // each window edge: an invite's expiry plus the window, either side of it,
+    // then past the contact passes and past the renewed one.
+    let invite_gone = t0 + 30 * DAY + WINDOW_BACK;
+    let near = [0, HOUR, DAY, 3 * DAY, 5 * DAY].map(|d| t0 + d);
+    let late = [
+        invite_gone - HOUR,
+        invite_gone,
+        invite_gone + 12 * HOUR,
+        invite_gone + DAY + HOUR,
+        far + WINDOW_BACK,
+        far + 100 * DAY + WINDOW_BACK + HOUR,
+    ];
+    let times: Vec<_> = near
         .iter()
-        .map(|d| w.time(t0 + d))
+        .chain(&near)
+        .chain(&late)
+        .map(|t| w.time(*t))
         .collect();
 
     // Owner versions, any of which may tighten or relax: a later version can
     // go back to Open or lower min_usd, which re-admits what was filtered.
     let ids: Vec<B32> = messages.iter().map(|(id, _)| *id).collect();
+    // Tombstones: a drained set that grows with the version, so a tombstone
+    // can arrive before or after its message, and that the last version drops.
+    let drained = rng.subset(&ids, 8);
     let mut owners = Vec::new();
     for version in 1..=5 {
         let e = if rng.chance(25) { epoch + 1 } else { epoch };
-        let tomb: BTreeMap<B32, u64> = rng.subset(&ids, 5).into_iter().map(|id| (id, t0)).collect();
+        let mut tomb: BTreeMap<B32, u64> =
+            rng.subset(&ids, 5).into_iter().map(|id| (id, t0)).collect();
+        if version < 5 {
+            let upto = drained.len() * version as usize / 4;
+            tomb.extend(drained.iter().take(upto).map(|id| (*id, t0)));
+        }
         owners.push(w.owner(version, e, modes(rng), tomb));
     }
     // A version tie: the digest decides.
     owners.push(w.owner(3, epoch, modes(rng), BTreeMap::new()));
 
     Universe {
+        fillers: &[],
         owners,
         times,
         revoked,
@@ -235,13 +317,18 @@ fn peer_state(rules: &Rules, u: &Universe, rng: &mut Rng) -> Vec<u8> {
     let params = world().params;
     let w = world();
     let mut bytes = None::<Vec<u8>>;
+    // Some peers hold much and some little, so a cap can be full on one side
+    // only.
+    let share = *rng.pick(&[10, 45, 45, 90]);
     for _ in 0..1 + rng.below(3) {
+        let mut revoked = rng.subset(&u.revoked, share);
+        revoked.extend(u.fillers.iter().cloned());
         let raw = w.raw(
             rng.pick(&u.owners).clone(),
             rng.pick(&u.times).clone(),
-            rng.subset(&u.revoked, 40),
-            rng.subset(&u.usage, 40),
-            rng.subset(&u.messages, 45),
+            revoked,
+            rng.subset(&u.usage, share),
+            rng.subset(&u.messages, share),
         );
         let clean = encode(&merge(rules, &params, vec![raw.into()]).expect("genuine pieces"));
         bytes = Some(match bytes {
@@ -254,6 +341,8 @@ fn peer_state(rules: &Rules, u: &Universe, rng: &mut Rng) -> Vec<u8> {
 
 #[derive(Default)]
 struct Tally {
+    /// Peer states holding exactly V1's revocation cap.
+    at_cap: u64,
     triples: u64,
     strict: u64,
     healed: u64,
@@ -416,6 +505,29 @@ fn run_seed(seed: u64, tally: &mut Tally) -> Result<(), String> {
         }
         laws.non_canonical(&peer_state(&rules, &u, &mut rng))?;
     }
+    // V1's revocation set at its cap: each peer holds the fillers plus a few of
+    // the universe's own, so unions land below, at and above 4096, and the late
+    // times prune a third of the fillers. A merge here checks 4096 signatures,
+    // so this runs on every 20th seed.
+    if seed.is_multiple_of(20) {
+        let mut rng = Rng(seed ^ 0xCA9);
+        let mut u = universe_at(seed, &mut rng, false, AT_CAP_T0);
+        u.fillers = cap_fillers();
+        let laws = Laws {
+            rules: &Rules::V1,
+            label: format!("seed {seed} v1 at the revocation cap"),
+        };
+        let (a, b, c) = (
+            peer_state(&Rules::V1, &u, &mut rng),
+            peer_state(&Rules::V1, &u, &mut rng),
+            peer_state(&Rules::V1, &u, &mut rng),
+        );
+        for s in [&a, &b, &c] {
+            let held = decode::<InboxState>(s).unwrap().revoked.len();
+            tally.at_cap += u64::from(held == Rules::V1.revoked);
+        }
+        laws.triple(&a, &b, &c, tally)?;
+    }
     Ok(())
 }
 
@@ -474,17 +586,19 @@ fn the_merge_laws_hold_over_crafted_states() {
         total.strict += tally.strict;
         total.healed += tally.healed;
         total.held += tally.held;
+        total.at_cap += tally.at_cap;
         if let Err(e) = result {
             failures.push(e);
         }
     }
     println!(
-        "{} seeds: {} triples, {} strict, {} healed, {} messages held",
+        "{} seeds: {} triples, {} strict, {} healed, {} messages held, {} states at the revocation cap",
         seeds.len(),
         total.triples,
         total.strict,
         total.healed,
-        total.held
+        total.held,
+        total.at_cap
     );
     assert!(
         failures.is_empty(),
@@ -524,4 +638,61 @@ fn a_dead_revocation_redelivered_does_not_move_the_state() {
         again, back,
         "redelivering the dead revocation moved the state"
     );
+}
+
+/// Review r1 B1, usage: on one pass id, the entry that ranks highest (used 3)
+/// runs out first. It must not win the join and then be pruned, taking the
+/// live entry (used 1) with it, or the state cycles under redelivery.
+#[test]
+fn a_dead_usage_entry_never_wins_the_join() {
+    let w = world();
+    let t = 1_800_000_000 / HOUR * HOUR;
+    let owner = w.owner(1, 3, QuarantineMode::Open, BTreeMap::new());
+    let p = id_of(7);
+    let dying = w.usage(p, 3, t);
+    let living = w.usage(p, 1, t + 100 * DAY);
+    let a = encode(&w.raw(owner.clone(), w.time(t), [], [dying], []));
+    let b = encode(&w.raw(owner.clone(), w.time(t + 10 * DAY), [], [], []));
+    let c = encode(&w.raw(owner, w.time(t), [], [living.clone()], []));
+    let laws = Laws {
+        rules: &Rules::V1,
+        label: "usage".into(),
+    };
+    laws.triple(&a, &b, &c, &mut Tally::default()).unwrap();
+    for (x, y) in [(&a, &b), (&b, &a)] {
+        let ab = laws.merge(x, y).unwrap();
+        let abc: InboxState = decode(&laws.merge(&ab, &c).unwrap()).unwrap();
+        assert_eq!(abc.usage.get(&p), Some(&living), "the live entry stays");
+    }
+}
+
+/// Review r1 B1, revocations: an entry from the old epoch with a later expiry
+/// ranks above the new epoch's. The epoch bump prunes it, and it must not take
+/// the new epoch's revocation with it, which would admit a revoked pass again.
+#[test]
+fn a_dead_revocation_never_wins_the_join() {
+    let w = world();
+    let t = 1_800_000_000 / HOUR * HOUR;
+    let old = w.owner(1, 3, QuarantineMode::Open, BTreeMap::new());
+    let new = w.owner(2, 4, QuarantineMode::Open, BTreeMap::new());
+    let far = t + 300 * DAY;
+    let pass = w.pass(9, 4, far, PassClass::Contact);
+    let stale = w.revocation(pass.cert.pass_id, far + 100 * DAY, 3);
+    let current = w.revocation(pass.cert.pass_id, far, 4);
+    let msg = w.pass_msg(&pass, ct(8192, 1), t);
+    let a = encode(&w.raw(old, w.time(t), [stale], [], []));
+    let b = encode(&w.raw(new.clone(), w.time(t), [], [], []));
+    let c = encode(&w.raw(new.clone(), w.time(t), [current.clone()], [], []));
+    let laws = Laws {
+        rules: &Rules::V1,
+        label: "revocation".into(),
+    };
+    laws.triple(&a, &b, &c, &mut Tally::default()).unwrap();
+    let ca = laws.merge(&c, &a).unwrap();
+    let merged: InboxState = decode(&ca).unwrap();
+    assert_eq!(merged.revoked.get(&pass.cert.pass_id), Some(&current));
+    // And the pass it revokes stays refused.
+    let mail = encode(&w.raw(new, w.time(t), [], [], [msg]));
+    let held: InboxState = decode(&laws.merge(&ca, &mail).unwrap()).unwrap();
+    assert!(held.messages.is_empty(), "a revoked pass delivered mail");
 }

@@ -406,6 +406,43 @@ fn only_the_revocations_left_after_pruning_filter() -> Broken {
     broken
 }
 
+/// On one pass id, a dead entry that outranks a live one does not win the join
+/// (review r1 B1): pruning it afterwards would take the live one with it.
+fn a_dead_entry_never_wins_a_join() -> Broken {
+    let w = world();
+    let p = id_of(7);
+    let living_use = w.usage(p, 1, FAR);
+    let dying_use = w.usage(p, 3, T - WINDOW_BACK);
+    let current = w.revocation(p, FAR, 4);
+    let stale = w.revocation(p, FAR + DAY, 3);
+    let merged = run(
+        &Rules::V1,
+        vec![
+            w.raw(
+                w.owner(1, 4, OPEN, BTreeMap::new()),
+                w.time(T),
+                [current.clone()],
+                [living_use.clone()],
+                [],
+            )
+            .into(),
+            InboxDelta {
+                revoked: BTreeMap::from([(p, stale)]),
+                usage: BTreeMap::from([(p, dying_use)]),
+                ..InboxDelta::default()
+            },
+        ],
+    );
+    let mut broken = vec![];
+    if merged.usage.get(&p) != Some(&living_use) {
+        broken.push("a dead usage entry took the live one with it");
+    }
+    if merged.revoked.get(&p) != Some(&current) {
+        broken.push("a dead revocation took the live one with it");
+    }
+    broken
+}
+
 fn scenario(m: Mutant) -> fn() -> Broken {
     match m {
         Mutant::CapBeforeCleanup => revocations_are_pruned_before_they_are_capped,
@@ -422,6 +459,7 @@ fn scenario(m: Mutant) -> fn() -> Broken {
         Mutant::TierCheckSkipped => the_tier_is_checked,
         Mutant::GhostCapPerDelta => a_ghost_is_capped_over_the_union,
         Mutant::FilterUnprunedRevocations => only_the_revocations_left_after_pruning_filter,
+        Mutant::JoinBeforePrune => a_dead_entry_never_wins_a_join,
     }
 }
 
@@ -449,6 +487,10 @@ fn fingerprint(m: Mutant) -> &'static [&'static str] {
         Mutant::TierCheckSkipped => &["a proof under the tier was admitted"],
         Mutant::GhostCapPerDelta => &["a ghost key holds more than its cap"],
         Mutant::FilterUnprunedRevocations => &["a pruned revocation dropped a message"; 2],
+        Mutant::JoinBeforePrune => &[
+            "a dead usage entry took the live one with it",
+            "a dead revocation took the live one with it",
+        ],
     }
 }
 
@@ -485,4 +527,5 @@ mutant_tests! {
     tier_check_skipped => TierCheckSkipped,
     ghost_cap_computed_per_delta => GhostCapPerDelta,
     filtering_against_the_unpruned_revocations => FilterUnprunedRevocations,
+    joining_before_pruning => JoinBeforePrune,
 }
