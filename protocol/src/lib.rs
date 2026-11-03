@@ -10,6 +10,7 @@
 
 pub mod address;
 pub mod fixed_bytes;
+pub mod inbox_v2;
 pub mod recovery_key;
 
 #[cfg(test)]
