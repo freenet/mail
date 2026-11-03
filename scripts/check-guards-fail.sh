@@ -558,9 +558,8 @@ dt "inbox v2: a proof's tag comes from the key the sender bound" "$D/sealing.rs"
     'Admission::Quarantine { ghost: Some(_) } => (KIND_QUARANTINE, vec![0x33; 32]),' \
     a_quarantine_message_with_an_undecodable_proof_has_the_vectors_id
 dt "inbox v2: a Conflict stores nothing until the copy reads back" "$D/inbox_v2.rs" \
-    '                    Ok(Some((_, stored))) if stored == bytes => Ok(()),
-                    _ => Err(f),' \
-    '                    _ => Ok(()),' \
+    '                return if counts_as_stored(s, &me.addr, id, &bytes) {' \
+    '                return if true {' \
     a_copy_under_the_id_with_other_content_is_not_taken_for_the_message,a_drain_over_an_unreadable_index_never_tombstones_what_it_did_not_store,a_job_drain_over_an_unreadable_index_never_tombstones_what_it_did_not_store
 dt "inbox v2 jobs: an unreadable ledger entry keeps the contact's schedule" "$D/inbox_jobs.rs" \
     '        // asked about again later, on the backoff.
