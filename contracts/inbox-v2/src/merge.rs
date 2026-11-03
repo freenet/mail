@@ -305,7 +305,10 @@ impl Filter<'_> {
         genuine
     }
 
-    /// How many messages this certificate may have held at once.
+    /// How many messages this certificate may have held at once. An invite
+    /// whose usage entry the 1024 cap cut reads as unused, so it may hold up
+    /// to `per_invite` again: the cap keeps the smallest pass ids (review r1
+    /// N2).
     fn pass_limit(&self, cert: &PassCert) -> usize {
         match cert.class {
             PassClass::Contact => self.rules.per_pass,
@@ -528,7 +531,8 @@ pub fn merge(
         usage.pop_last();
     }
 
-    // Step 5.
+    // Step 5. A set holding exactly the cap counts as full even when nothing
+    // was cut: deterministic and on the safe side (review r1 N1).
     let revocations_full = revoked.len() >= rules.revoked;
     #[cfg(feature = "plausible-mutants")]
     let revocations_full = mutant::overflow(revocations_full, union_len, rules.revoked);
