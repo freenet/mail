@@ -176,7 +176,8 @@ vectors += [
     ("cbor_delta", enc(delta_some)),
 ]
 
-entry = HASH[:16] + b3(enc(bare_msg))[:8]
+# 16 bytes of the id, 16 of the encoding's digest (decision 13).
+entry = HASH[:16] + b3(enc(bare_msg))[:16]
 summary = {
     "owner": b3(enc(owner))[:16],
     "time": b3(enc(time))[:16],

@@ -14,8 +14,10 @@ use serde_bytes::{ByteArray, ByteBuf};
 
 use crate::types::{B16, InboxDelta, InboxState, Malformed, decode, encode};
 
-/// One listed message: 16 bytes of its id, 8 of its encoding's digest.
-const ENTRY_LEN: usize = 24;
+/// One listed message: 16 bytes of its id, 16 of its encoding's digest. Eight
+/// digest bytes could be collided by a sender at 2^32 work, leaving two peers
+/// with different encodings of one id that each list the other's (decision 13).
+const ENTRY_LEN: usize = 32;
 
 #[derive(Serialize, Deserialize)]
 struct Summary {
@@ -42,7 +44,7 @@ fn entries(state: &InboxState) -> impl Iterator<Item = [u8; ENTRY_LEN]> + '_ {
         if crate::mutant::on(crate::mutant::Mutant::DigestDropped) {
             return entry;
         }
-        entry[16..].copy_from_slice(&blake3::hash(&encode(message)).as_bytes()[..8]);
+        entry[16..].copy_from_slice(&blake3::hash(&encode(message)).as_bytes()[..16]);
         entry
     })
 }
