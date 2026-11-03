@@ -183,8 +183,9 @@ small caps. Change any rule knowing it cannot be patched after publish.
 - **Gates on the rules.** `tests/plausible_mutants.rs` runs 14 wrong-but-plausible
   rules through `src/mutant.rs`, a seam compiled only with the
   `plausible-mutants` feature (so not in the WASM; `check-inbox-candidate.sh`
-  proves the bytes are the same), and requires each scenario to pass on the real
-  rules and fail under its mutant for the law it names. A new rule that can go
+  proves the bytes are the same), and requires each scenario to find no broken
+  law on the real rules and exactly the listed laws under its mutant. The mutated
+  logic lives in `src/mutant.rs`; the rules hold one-line calls. A new rule that can go
   wrong in a plausible way gets a mutant and a scenario. `docs/metadata-fields.toml`
   lists every plaintext field of a populated state and `tests/metadata_disclosure.rs`
   fails unless the list is exact (a field cannot become public without the README
