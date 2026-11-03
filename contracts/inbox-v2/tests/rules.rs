@@ -990,3 +990,46 @@ fn a_summary_that_counts_the_revocations_differently_is_sent_them() {
     assert_eq!(delta.revoked.len(), 2, "the whole set is sent");
     assert!(delta.owner.is_none() && delta.time.is_none() && delta.messages.is_empty());
 }
+
+/// Decision 22. Two genuine revocations of one pass id across an epoch bump are
+/// both live during the grace. The previous epoch's dies at the grace end
+/// whatever its expiry, so it must not win the join: the current epoch's would
+/// be dropped everywhere and, once the winner is pruned, nothing would be left
+/// to revoke the pass.
+#[test]
+fn a_revocation_that_dies_first_does_not_win_the_join() {
+    let w = world();
+    let grace = T + 14 * DAY;
+    let owner = w.owner_grace(2, 4, grace, OPEN, BTreeMap::new());
+    let pass = w.pass(1, 4, FAR, PassClass::Contact);
+    let previous = w.revocation(pass.cert.pass_id, FAR + 100 * DAY, 3);
+    let current = w.revocation(pass.cert.pass_id, FAR, 4);
+    let part = |r: &Revocation| -> InboxDelta {
+        w.raw(
+            owner.clone(),
+            w.time(T),
+            [r.clone()],
+            Vec::<PassUsage>::new(),
+            Vec::<(B32, Message)>::new(),
+        )
+        .into()
+    };
+    let (p, c) = (part(&previous), part(&current));
+    let forward = merge(&Rules::V1, &w.params, vec![p.clone(), c.clone()]).unwrap();
+    let backward = merge(&Rules::V1, &w.params, vec![c, p]).unwrap();
+    assert_eq!(forward, backward, "order of the parts");
+    assert_eq!(
+        forward.revoked.get(&pass.cert.pass_id),
+        Some(&current),
+        "the current epoch's revocation wins during the grace"
+    );
+    // Past the grace the previous epoch's entry is pruned; the current one
+    // still revokes, so the epoch-4 pass stays refused.
+    let msg = w.pass_msg(&pass, ct(8192, 1), grace);
+    let mut later: InboxDelta = forward.into();
+    later.time = Some(w.time(grace));
+    later.messages.insert(msg.0, msg.1);
+    let after = merge(&Rules::V1, &w.params, vec![later]).unwrap();
+    assert_eq!(after.revoked.get(&pass.cert.pass_id), Some(&current));
+    assert!(!after.messages.contains_key(&msg.0), "a revoked pass was admitted");
+}

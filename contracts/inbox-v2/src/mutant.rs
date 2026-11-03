@@ -53,6 +53,9 @@ pub enum Mutant {
     /// The previous epoch's grace read from the first part's owner record, not
     /// the joined one (decision 18).
     GraceFromUnjoinedOwner,
+    /// Revocations of one pass id ranked by expiry before epoch, so the
+    /// previous epoch's entry can win a grace and then be pruned (decision 22).
+    RevocationExpiryFirst,
 }
 
 thread_local! {

@@ -426,7 +426,8 @@ fn a_dead_entry_never_wins_a_join() -> Broken {
     let living_use = w.usage(p, 1, FAR);
     let dying_use = w.usage(p, 3, T - WINDOW_BACK);
     let current = w.revocation(p, FAR, 4);
-    let stale = w.revocation(p, FAR + DAY, 3);
+    // Ranks above `current` by epoch (decision 22) yet is dead by expiry.
+    let stale = w.revocation(p, T - WINDOW_BACK, 5);
     let merged = run(
         &Rules::V1,
         vec![
@@ -484,6 +485,31 @@ fn the_grace_is_the_joined_owners() -> Broken {
     broken
 }
 
+/// Decision 22: during a grace the current epoch's revocation of a pass id
+/// beats the previous epoch's, whatever the expiries, in either order.
+fn the_current_epochs_revocation_wins() -> Broken {
+    let w = world();
+    let grace = T + 14 * DAY;
+    let owner = w.owner_grace(2, 4, grace, OPEN, BTreeMap::new());
+    let p = id_of(7);
+    let previous = w.revocation(p, FAR + 100 * DAY, 3);
+    let current = w.revocation(p, FAR, 4);
+    let part = |r: &Revocation| -> InboxDelta {
+        w.raw(owner.clone(), w.time(T), [r.clone()], [], []).into()
+    };
+    let (a, b) = (part(&previous), part(&current));
+    let forward = run(&Rules::V1, vec![a.clone(), b.clone()]);
+    let backward = run(&Rules::V1, vec![b, a]);
+    let mut broken = vec![];
+    if forward != backward {
+        broken.push("merge is not commutative");
+    }
+    if forward.revoked.get(&p) != Some(&current) {
+        broken.push("the previous epoch's revocation won the join");
+    }
+    broken
+}
+
 fn scenario(m: Mutant) -> fn() -> Broken {
     match m {
         Mutant::CapBeforeCleanup => revocations_are_pruned_before_they_are_capped,
@@ -502,6 +528,7 @@ fn scenario(m: Mutant) -> fn() -> Broken {
         Mutant::FilterUnprunedRevocations => only_the_revocations_left_after_pruning_filter,
         Mutant::JoinBeforePrune => a_dead_entry_never_wins_a_join,
         Mutant::GraceFromUnjoinedOwner => the_grace_is_the_joined_owners,
+        Mutant::RevocationExpiryFirst => the_current_epochs_revocation_wins,
     }
 }
 
@@ -537,6 +564,7 @@ fn fingerprint(m: Mutant) -> &'static [&'static str] {
             "merge is not commutative",
             "an old epoch's pass delivered mail after its grace ended",
         ],
+        Mutant::RevocationExpiryFirst => &["the previous epoch's revocation won the join"],
     }
 }
 
@@ -575,4 +603,5 @@ mutant_tests! {
     filtering_against_the_unpruned_revocations => FilterUnprunedRevocations,
     joining_before_pruning => JoinBeforePrune,
     grace_read_from_an_unjoined_owner => GraceFromUnjoinedOwner,
+    revocations_ranked_by_expiry_first => RevocationExpiryFirst,
 }

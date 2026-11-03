@@ -214,6 +214,18 @@ struct Ghost {
     usd: u64,
 }
 
+/// How revocations of one pass id rank in the join (decision 22): the epoch
+/// first, so the current epoch's entry beats the previous epoch's, which dies at
+/// the end of the grace whatever its expiry. Ranking expiry first let the entry
+/// that dies first win and take the other with it.
+fn revocation_rank(r: &Revocation) -> (u64, u64, crate::types::B64) {
+    #[cfg(feature = "plausible-mutants")]
+    if mutant::on(Mutant::RevocationExpiryFirst) {
+        return (r.expiry, u64::from(r.epoch), r.sig);
+    }
+    (u64::from(r.epoch), r.expiry, r.sig)
+}
+
 /// Step 5's inputs, and the memos that verify each distinct certificate once.
 struct Filter<'a> {
     rules: &'a Rules,
@@ -226,7 +238,12 @@ struct Filter<'a> {
     live_revoked: BTreeSet<B16>,
     usage: &'a BTreeMap<B16, PassUsage>,
     /// While the kept revocations are at their cap, some may have been lost,
-    /// so no pass can be trusted. The bump of `pass_epoch` is the way out.
+    /// so no pass can be trusted. An emergency bump of `pass_epoch` (grace 0) is
+    /// the way out. A routine bump from a full set is not: the grace keeps the
+    /// previous epoch's revocations, so the set stays full and refuses every
+    /// pass of both epochs until the grace ends. The client never gets there
+    /// (decision 23): it bumps at 2048 revocations, half the cap, and a full
+    /// set means a misbehaving owner, whose bump is an emergency one.
     revocations_full: bool,
     certs: BTreeMap<Vec<u8>, bool>,
     ghosts: BTreeMap<Vec<u8>, Option<Ghost>>,
@@ -495,7 +512,7 @@ pub fn merge(
                 &mut revoked,
                 key,
                 entry,
-                |r: &Revocation| (r.expiry, r.epoch, r.sig),
+                revocation_rank,
                 |r| {
                     let bytes = revocation_bytes(&params.addr, &r.pass_id, r.expiry, r.epoch);
                     r.pass_id == key

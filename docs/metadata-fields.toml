@@ -99,7 +99,7 @@ why = "A random key per pass, so the contract can check the message signature."
 [[field]]
 path = "messages.*.admission.Pass.cert.epoch"
 class = "pass bookkeeping"
-why = "Checked against the owner's current epoch."
+why = "Checked against the owner's current epoch. A change of cert (a new expiry or a new epoch) under one pass id marks when a renewal or reissue arrived, so it is public in the next message."
 
 [[field]]
 path = "messages.*.admission.Pass.cert.expiry"

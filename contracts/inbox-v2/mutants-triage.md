@@ -29,7 +29,7 @@ function returns, or one that cannot fail faster than a hang.
 - `src/merge.rs: replace > with >= in join_entry` Equivalent. The mutant is
   `rank(&value) > rank(held)` becoming `>=`. It could only matter when the new
   value has the same rank as the held one but is not equal to it. The rank of a
-  revocation is `(expiry, epoch, sig)` and of a usage entry `(used, expiry,
+  revocation is `(epoch, expiry, sig)` and of a usage entry `(used, expiry,
   sig)`; the one field left out is `pass_id`, and `genuine` requires it to equal
   the map key, as the held entry's does. A value that passes `genuine` and
   matches the rank is therefore equal to the held one, and `*held != value`
