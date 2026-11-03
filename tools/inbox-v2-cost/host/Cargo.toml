@@ -10,4 +10,4 @@ edition = "2024"
 publish = false
 
 [dependencies]
-wasmtime = { version = "=47.0.4", default-features = false, features = ["cranelift", "runtime", "std", "parallel-compilation"] }
+wasmtime = { version = "=48.0.7", default-features = false, features = ["cranelift", "runtime", "std", "parallel-compilation"] }
