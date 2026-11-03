@@ -160,6 +160,11 @@ pub struct OwnerRecord {
     pub kem_ek: ByteBuf,
     pub issuer_vk: B32,
     pub pass_epoch: u32,
+    /// An `owner_time`. Before it, passes of `pass_epoch - 1` are admitted and
+    /// their revocations kept (decision 18): a routine bump sets it 14 days on,
+    /// so contacts can be reissued passes over that time, and an emergency bump
+    /// sets 0, so the old epoch ends at once.
+    pub prev_epoch_until: u64,
     pub version: u64,
     pub quarantine: QuarantineMode,
     /// Message id to its `sent_time`. Signed, so only the owner's client can

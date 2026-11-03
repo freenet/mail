@@ -357,9 +357,10 @@ fn every_owner_field_is_signed() {
         &encode(&w.raw(good.clone(), w.time(T), [], [], []))
     ));
     type Change = fn(&mut OwnerRecord);
-    let tamper: [(&str, Change); 7] = [
+    let tamper: [(&str, Change); 8] = [
         ("version", |o| o.version += 1),
         ("pass_epoch", |o| o.pass_epoch += 1),
+        ("prev_epoch_until", |o| o.prev_epoch_until += 1),
         ("issuer_vk", |o| o.issuer_vk[0] ^= 1),
         ("quarantine", |o| {
             o.quarantine = QuarantineMode::RequireGhost { min_usd: None }

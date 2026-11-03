@@ -30,6 +30,11 @@ class = "recipient keys"
 why = "A pass names its epoch, so senders and the contract need the current one."
 
 [[field]]
+path = "owner.prev_epoch_until"
+class = "recipient keys"
+why = "The owner time until which passes of the previous epoch still work, so contacts can be reissued passes over days rather than all at once. It shows when the owner last bumped the epoch, and whether it was routine (a grace) or an emergency (none)."
+
+[[field]]
 path = "owner.quarantine"
 class = "recipient keys"
 why = "The Open mode, which senders need to know to choose how to write."

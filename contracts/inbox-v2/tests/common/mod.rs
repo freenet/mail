@@ -111,10 +111,23 @@ impl World {
         ByteArray::new(self.params.addr)
     }
 
+    /// An owner record with no previous-epoch grace.
     pub fn owner(
         &self,
         version: u64,
         pass_epoch: u32,
+        quarantine: QuarantineMode,
+        tombstones: BTreeMap<B32, u64>,
+    ) -> OwnerRecord {
+        self.owner_grace(version, pass_epoch, 0, quarantine, tombstones)
+    }
+
+    /// An owner record whose previous epoch lasts until `prev_epoch_until`.
+    pub fn owner_grace(
+        &self,
+        version: u64,
+        pass_epoch: u32,
+        prev_epoch_until: u64,
         quarantine: QuarantineMode,
         tombstones: BTreeMap<B32, u64>,
     ) -> OwnerRecord {
@@ -123,6 +136,7 @@ impl World {
             kem_ek: ByteBuf::from(self.kem_ek.clone()),
             issuer_vk: ByteArray::new(self.issuer.verifying_key().to_bytes()),
             pass_epoch,
+            prev_epoch_until,
             version,
             quarantine,
             tombstones,

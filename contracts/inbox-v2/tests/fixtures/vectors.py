@@ -38,6 +38,8 @@ T = 0x0102030405060708
 SENT = 0x68000000 // 3600 * 3600
 # Expiries are whole days (decision 17).
 EXPIRY = 0x69000000 // 86400 * 86400
+# The owner's previous-epoch grace, an owner_time (decision 18).
+GRACE = 0x0A0B0C0D0E0F1011
 
 
 def quarantine(mode):
@@ -50,7 +52,7 @@ def quarantine(mode):
 
 def owner_layout(mode):
     return (
-        b"fmail/owner/v1" + ADDR + u64(7) + u32(3) + KEY + quarantine(mode)
+        b"fmail/owner/v1" + ADDR + u64(7) + u32(3) + u64(GRACE) + KEY + quarantine(mode)
         + u32(len(KEM)) + KEM + u32(1) + TOMB + u64(0x1000)
     )
 
@@ -106,6 +108,7 @@ owner = {
     "kem_ek": KEM,
     "issuer_vk": KEY,
     "pass_epoch": 3,
+    "prev_epoch_until": GRACE,
     "version": 7,
     "quarantine": {"RequireGhost": {"min_usd": 5}},
     "tombstones": {TOMB: 0x1000},

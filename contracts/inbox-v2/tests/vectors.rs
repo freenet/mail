@@ -16,6 +16,8 @@ const T: u64 = 0x0102_0304_0506_0708;
 const SENT: u64 = 0x6800_0000 / 3600 * 3600;
 /// Expiries are whole days (decision 17).
 const EXPIRY: u64 = 0x6900_0000 / 86_400 * 86_400;
+/// The owner's previous-epoch grace (decision 18).
+const GRACE: u64 = 0x0A0B_0C0D_0E0F_1011;
 
 fn expected(name: &str) -> Vec<u8> {
     let line = include_str!("fixtures/vectors.txt")
@@ -49,6 +51,7 @@ fn owner(quarantine: QuarantineMode) -> OwnerRecord {
         kem_ek: ByteBuf::from(vec![0xAA, 0xBB, 0xCC, 0xDD]),
         issuer_vk: key(),
         pass_epoch: 3,
+        prev_epoch_until: GRACE,
         version: 7,
         quarantine,
         tombstones: BTreeMap::from([(ByteArray::new([0x66; 32]), 0x1000)]),
