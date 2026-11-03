@@ -66,15 +66,23 @@ D="$STAGE/delegates/mail-delegate/src"
 # it and the guards it backs run it alone.
 FAULT_RUN=invariants_hold_over_a_host_that_misses_reads_and_refuses_writes
 BLIND_RUN=invariants_hold_while_a_key_stays_unreadable
+# The delegate's tests link the inbox v2 contract as a dev-dependency, over the
+# delegate's lockfile. Built in the target dir the contract's own runs use, the
+# two builds of the contract crate collide and the tests stop compiling, so the
+# delegate gets a target dir of its own.
+DELEGATE_TARGET="$ROOT/target/guards-cargo-delegate"
 delegate_tests() {
+    CARGO_TARGET_DIR="$DELEGATE_TARGET" \
     cargo test --manifest-path "$STAGE/delegates/mail-delegate/Cargo.toml" --features v1-transition \
         -- --skip "$FAULT_RUN" --skip "$BLIND_RUN"
 }
 fault_tests() {
+    CARGO_TARGET_DIR="$DELEGATE_TARGET" \
     cargo test --manifest-path "$STAGE/delegates/mail-delegate/Cargo.toml" --features v1-transition \
         -- --exact "tests::faults::$FAULT_RUN"
 }
 blind_tests() {
+    CARGO_TARGET_DIR="$DELEGATE_TARGET" \
     cargo test --manifest-path "$STAGE/delegates/mail-delegate/Cargo.toml" --features v1-transition \
         -- --exact "tests::faults::$BLIND_RUN"
 }
