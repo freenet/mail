@@ -95,7 +95,12 @@ fn the_2048th_live_revocation_bumps_the_epoch_and_the_2047th_does_not() {
     let bumped = world.state(&a);
     assert_eq!(bumped.owner.pass_epoch, after.owner.pass_epoch + 1);
     assert_eq!(bumped.owner.prev_epoch_until, held.max(now) + EPOCH_GRACE);
-    assert!(delta.revoked.values().all(|r| r.epoch == bumped.owner.pass_epoch));
+    assert!(
+        delta
+            .revoked
+            .values()
+            .all(|r| r.epoch == bumped.owner.pass_epoch)
+    );
     let rec = world.record(&a);
     assert_eq!(rec.pass_epoch, bumped.owner.pass_epoch);
     assert_eq!(rec.reissue_grace, EPOCH_GRACE);

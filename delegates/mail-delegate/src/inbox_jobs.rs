@@ -448,8 +448,14 @@ impl Renewing<'_> {
         // is Unknown, never Absent. The contact keeps its schedule and is
         // asked about again later, on the backoff.
         let Some((generation, mut e)) = v2::load::<LedgerEntry>(s, &at)? else {
-            return Ok(Some(self.miss(s, &key)));
+            // Counted in the record across runs: the entry that is missing
+            // cannot hold its own count.
+            let looks = v2::note_absent(s, &me.addr, &key);
+            return Ok(Some(now + backoff(looks)));
         };
+        if rec.absent_looks.contains_key(&key) {
+            v2::clear_absent(s, &me.addr, &key)?;
+        }
         if e.revoked {
             return Ok(None);
         }

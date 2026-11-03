@@ -423,7 +423,10 @@ impl Monotonic {
         for (_, d) in updates.iter().filter(|(to, _)| to == a) {
             if let Some(o) = &d.owner {
                 if o.version <= self.version {
-                    return Err(format!("owner version {} after {}", o.version, self.version));
+                    return Err(format!(
+                        "owner version {} after {}",
+                        o.version, self.version
+                    ));
                 }
                 if o.pass_epoch < self.epoch {
                     return Err(format!("epoch {} after {}", o.pass_epoch, self.epoch));
@@ -619,7 +622,9 @@ fn job_time_run(
         {
             return Err(format!(
                 "{c:?} holds epoch {:?} of a pass now at epoch {} expiring {} (delivered {})",
-                held.iter().map(|p| (p.cert.epoch, p.cert.expiry)).collect::<Vec<_>>(),
+                held.iter()
+                    .map(|p| (p.cert.epoch, p.cert.expiry))
+                    .collect::<Vec<_>>(),
                 e.epoch,
                 e.expiry,
                 e.delivered
@@ -1254,7 +1259,15 @@ fn run_with_spent(
     };
     let mut left = crate::jobs::MAX_MESSAGES_PER_RUN;
     let mut done = JobsRun::default();
-    let d = inbox_jobs::run(&mut world.env, trigger, &owns, &mut budget, now, &mut left, &mut done);
+    let d = inbox_jobs::run(
+        &mut world.env,
+        trigger,
+        &owns,
+        &mut budget,
+        now,
+        &mut left,
+        &mut done,
+    );
     (done, d.out)
 }
 
@@ -1268,10 +1281,22 @@ fn the_jobs_stop_updating_a_contract_at_the_minute_limit() {
     let (mut world, a) = with_waiting(2);
     let id = id_of(&world, &a);
     let (done, out) = run_with_spent(&mut world, Trigger::Tick(Tick::Rescan), &[id], false);
-    assert_eq!((done.imported, out.len()), (0, 0), "a spent contract is not written to");
-    assert_eq!(world.state(&a).messages.len(), 2, "the mail waits in the inbox");
+    assert_eq!(
+        (done.imported, out.len()),
+        (0, 0),
+        "a spent contract is not written to"
+    );
+    assert_eq!(
+        world.state(&a).messages.len(),
+        2,
+        "the mail waits in the inbox"
+    );
     let (done, out) = run_with_spent(&mut world, Trigger::Tick(Tick::Rescan), &[[7; 32]], false);
-    assert_eq!((done.imported, out.len()), (2, 1), "another contract's budget is not Alice's");
+    assert_eq!(
+        (done.imported, out.len()),
+        (2, 1),
+        "another contract's budget is not Alice's"
+    );
     // The renewal: Alice reissues Bob's pass; Bob's contract is spent.
     let (mut world, a) = with_waiting(0);
     let c = world.identity_in("carol", 2);
@@ -1285,8 +1310,15 @@ fn the_jobs_stop_updating_a_contract_at_the_minute_limit() {
     assert!(world.record(&a).due[&key] <= now, "the reissue is due");
     let spent = id_of(&world, &c);
     let (_, out) = run_with_spent(&mut world, PAGE, &[spent], false);
-    assert!(out.is_empty(), "no renewal to a contract written to that often");
-    assert_eq!(world.record(&a).due[&key], now + 60, "looked at again in a minute");
+    assert!(
+        out.is_empty(),
+        "no renewal to a contract written to that often"
+    );
+    assert_eq!(
+        world.record(&a).due[&key],
+        now + 60,
+        "looked at again in a minute"
+    );
     let (_, out) = run_with_spent(&mut world, PAGE, &[spent], true);
     assert_eq!(out.len(), 1, "the next minute it goes");
 }
@@ -1323,11 +1355,7 @@ fn a_run_sends_at_most_its_renewals_and_the_next_run_the_next() {
     for k in 1..=3 {
         let (_, updates) = run(&mut world, PAGE);
         let sent: usize = contacts.iter().map(|c| messages_to(&updates, c)).sum();
-        assert_eq!(
-            sent,
-            PER_RUN.min(n - reached.len()),
-            "run {k}"
-        );
+        assert_eq!(sent, PER_RUN.min(n - reached.len()), "run {k}");
         reached.extend(
             contacts
                 .iter()
@@ -1383,10 +1411,16 @@ fn due_contacts_are_served_oldest_first() {
         let mut s = crate::store::Space::new(&mut world.env, origin);
         let (generation, mut rec) = v2::record(&s, &a).unwrap();
         for (i, c) in contacts.iter().enumerate() {
-            rec.due.insert(ByteArray::new(c.0), now - 10 * (i as u64 + 1));
+            rec.due
+                .insert(ByteArray::new(c.0), now - 10 * (i as u64 + 1));
         }
-        v2::save(&mut s, v2::item(freenet_mail_protocol::ItemKind::InboxV2, &a, &[]), &rec, generation)
-            .unwrap();
+        v2::save(
+            &mut s,
+            v2::item(freenet_mail_protocol::ItemKind::InboxV2, &a, &[]),
+            &rec,
+            generation,
+        )
+        .unwrap();
     }
     let (_, updates) = run(&mut world, PAGE);
     let served: BTreeSet<Addr> = contacts
@@ -1394,12 +1428,7 @@ fn due_contacts_are_served_oldest_first() {
         .filter(|c| messages_to(&updates, c) > 0)
         .copied()
         .collect();
-    let oldest: BTreeSet<Addr> = contacts
-        .iter()
-        .rev()
-        .take(PER_RUN)
-        .copied()
-        .collect();
+    let oldest: BTreeSet<Addr> = contacts.iter().rev().take(PER_RUN).copied().collect();
     assert_eq!(served, oldest);
 }
 
@@ -2017,6 +2046,47 @@ fn a_vanished_contact_backs_off() {
     );
 }
 
+/// A contact whose ledger entry cannot be found while the record still
+/// names its pass is asked about on the same doubling backoff, counted in the
+/// record across runs, not at the first wait for good.
+#[test]
+fn a_missing_ledger_entry_backs_off_across_runs() {
+    let mut world = World::new();
+    let a = world.identity("alice");
+    let b = world.identity("bob");
+    let pass = world.issue(&a, Some(b), None);
+    hold(&mut world, &b, pass.clone());
+    world.send(&b, &a, "hello");
+    settle(&mut world);
+    let id = pass.cert.pass_id;
+    let e = world.ledger(&a, id.as_slice());
+    {
+        let item = freenet_mail_protocol::ItemRef {
+            kind: freenet_mail_protocol::ItemKind::PassLedger,
+            owner: Some(a),
+            id: id.to_vec(),
+        };
+        let mut s = crate::store::Space::new(&mut world.env, Origin([PROD; 32]));
+        let (generation, _) = s.read(&crate::store::item_rel(&item)).unwrap().unwrap();
+        crate::handlers::delete_item(&mut s, item, generation).unwrap();
+    }
+    world.advance(e.renew_at - world.env.now.unwrap() + 1);
+    let mut waits = Vec::new();
+    for _ in 0..8 {
+        sync(&mut world);
+        let now = world.env.now.unwrap();
+        let _ = watch::run(&mut world.env, Trigger::Tick(Tick::Renew));
+        let due = world.record(&a).due[&ByteArray::new(b.0)];
+        waits.push(due - now);
+        world.advance(due - now);
+    }
+    assert_eq!(
+        waits,
+        [1, 2, 4, 8, 16, 24, 24, 24].map(|h| h * 3600),
+        "doubling to a day"
+    );
+}
+
 /// A look that finds the contact's inbox starts the backoff over: after it,
 /// the contact that vanishes again is asked about in an hour, not at the
 /// delay it had reached.
@@ -2186,13 +2256,18 @@ fn a_copy_under_the_id_with_other_content_is_not_taken_for_the_message() {
     assert!(tombstoned.filter(|id| ***id == sealed.id.0).count() == 0);
     world.publish(&a, &u.update.unwrap());
     let left: Vec<_> = world.state(&a).messages.keys().copied().collect();
-    assert_eq!(left, [ByteArray::new(sealed.id.0)], "only that message stays");
+    assert_eq!(
+        left,
+        [ByteArray::new(sealed.id.0)],
+        "only that message stays"
+    );
 }
 
-/// What "already stored" means: a copy that reads back with the same bytes,
-/// and nothing else.
+/// What "already stored" means: a copy that reads back and decodes as this
+/// message (the id binds its content), whatever its derived fields say, and
+/// nothing else.
 #[test]
-fn only_a_copy_that_reads_back_with_the_same_bytes_counts_as_stored() {
+fn only_a_copy_that_reads_back_as_this_message_counts_as_stored() {
     let mut world = World::new();
     let a = world.identity("alice");
     let id = ByteArray::new([5; 32]);
@@ -2202,13 +2277,42 @@ fn only_a_copy_that_reads_back_with_the_same_bytes_counts_as_stored() {
         owner: Some(a),
         id: id.to_vec(),
     };
+    let copy = w::InboundMessage {
+        id,
+        sender_vk: ByteBuf::from(vec![1, 2, 3]),
+        sent_time: 7,
+        admission: w::KIND_QUARANTINE,
+        ghost_vk: None,
+        body: ByteBuf::from(b"copy".to_vec()),
+    };
     let origin = Origin([PROD; 32]);
     {
         let mut s = crate::store::Space::new(&mut world.env, origin);
-        crate::handlers::put_item(&mut s, item.clone(), b"copy".to_vec(), None).unwrap();
-        assert!(v2::counts_as_stored(&s, &a, &id, b"copy"));
-        assert!(!v2::counts_as_stored(&s, &a, &id, b"another"), "other content");
-        assert!(!v2::counts_as_stored(&s, &a, &other, b"copy"), "no copy");
+        crate::handlers::put_item(&mut s, item.clone(), w::encode(&copy), None).unwrap();
+        assert_eq!(
+            v2::stored_copy(&s, &a, &id).map(|c| c.1),
+            Some(copy.clone())
+        );
+        assert!(v2::stored_copy(&s, &a, &other).is_none(), "no copy");
+    }
+    {
+        // Bytes that are not a message, and a message of another id.
+        let mut s = crate::store::Space::new(&mut world.env, origin);
+        let (generation, _) = s.read(&crate::store::item_rel(&item)).unwrap().unwrap();
+        crate::handlers::put_item(&mut s, item.clone(), b"garbage".to_vec(), Some(generation))
+            .unwrap();
+        assert!(v2::stored_copy(&s, &a, &id).is_none(), "undecodable");
+        let (generation, _) = s.read(&crate::store::item_rel(&item)).unwrap().unwrap();
+        let wrong = w::InboundMessage {
+            id: other,
+            ..copy.clone()
+        };
+        crate::handlers::put_item(&mut s, item.clone(), w::encode(&wrong), Some(generation))
+            .unwrap();
+        assert!(v2::stored_copy(&s, &a, &id).is_none(), "another message");
+        let (generation, _) = s.read(&crate::store::item_rel(&item)).unwrap().unwrap();
+        crate::handlers::put_item(&mut s, item.clone(), w::encode(&copy), Some(generation))
+            .unwrap();
     }
     // The same copy, unreadable: Unknown, so not counted.
     let key = {
@@ -2218,7 +2322,101 @@ fn only_a_copy_that_reads_back_with_the_same_bytes_counts_as_stored() {
     };
     world.env.faults = Some(Faults::blind(&key));
     let s = crate::store::Space::new(&mut world.env, origin);
-    assert!(!v2::counts_as_stored(&s, &a, &id, b"copy"), "unreadable");
+    assert!(v2::stored_copy(&s, &a, &id).is_none(), "unreadable");
+}
+
+/// A copy stored without the Ghost Key (a drain that could not prove it) is
+/// this message: a later drain that proves it tombstones the message once
+/// and upgrades the stored copy, rather than leaving it in the inbox for good.
+#[test]
+fn a_drain_that_proves_the_ghost_key_upgrades_the_copy_and_tombstones() {
+    let (master, ghosts) = ghost_fixture();
+    let mut world = World::with_master(master);
+    let a = world.identity("alice");
+    let b = world.identity("bob");
+    // Bob's sender key, from an ordinary message drained first.
+    world.send(&b, &a, "twin");
+    world.change(&a, OwnerChange::Drain);
+    let sender_vk = world.inbound(&a)[0].sender_vk.clone();
+    world.change(
+        &a,
+        OwnerChange::SetQuarantine(w::QuarantineMode::RequireGhost { min_usd: Some(5) }),
+    );
+    let (sk, cert) = ghosts
+        .iter()
+        .find(|g| g.0 == 5)
+        .map(|g| (&g.1, &g.2))
+        .unwrap();
+    let ui_entropy = world.entropy();
+    let Ok(Reply::SealedV2(sealed)) = call(
+        &mut world.env,
+        PROD,
+        Op::SealV2 {
+            from: b,
+            to: a,
+            to_state: ByteBuf::from(world.inboxes[&a].clone()),
+            content: SealContent::Mail(ByteBuf::from(b"proven".to_vec())),
+            ghost_vk: Some(Hash32(sk.verifying_key().to_bytes())),
+            ui_entropy,
+            reseals: 0,
+        },
+    ) else {
+        panic!()
+    };
+    let mut message: w::Message = w::decode(&sealed.message).unwrap();
+    message.admission = w::Admission::Quarantine {
+        ghost: Some(ghost_proof(
+            sk,
+            cert,
+            sealed.ghost_payload.clone().unwrap().into_vec(),
+        )),
+    };
+    let sent_time = message.sent_time;
+    let delta = InboxDelta {
+        messages: [(ByteArray::new(sealed.id.0), message)].into(),
+        ..InboxDelta::default()
+    };
+    world.publish(&a, &w::encode(&delta));
+    // The earlier copy, as a drain without the proof stores it.
+    let without = w::InboundMessage {
+        id: ByteArray::new(sealed.id.0),
+        sender_vk,
+        sent_time,
+        admission: w::KIND_QUARANTINE,
+        ghost_vk: None,
+        body: ByteBuf::from(b"proven".to_vec()),
+    };
+    {
+        let item = freenet_mail_protocol::ItemRef {
+            kind: freenet_mail_protocol::ItemKind::Inbound,
+            owner: Some(a),
+            id: sealed.id.0.to_vec(),
+        };
+        let mut s = crate::store::Space::new(&mut world.env, Origin([PROD; 32]));
+        crate::handlers::put_item(&mut s, item, w::encode(&without), None).unwrap();
+    }
+    // The node's drain has the proof.
+    let (_, updates) = run(&mut world, PAGE);
+    let (_, d) = updates.iter().find(|(to, _)| *to == a).expect("an update");
+    let owner = d.owner.as_ref().expect("tombstones");
+    let id = ByteArray::new(sealed.id.0);
+    assert!(owner.tombstones.contains_key(&id));
+    assert_eq!(owner.tombstones.keys().filter(|k| **k == id).count(), 1);
+    assert!(world.state(&a).messages.is_empty());
+    let got: Vec<_> = world
+        .inbound(&a)
+        .into_iter()
+        .filter(|m| m.id == id)
+        .collect();
+    assert_eq!(got.len(), 1);
+    assert_eq!(
+        got[0],
+        w::InboundMessage {
+            ghost_vk: Some(ByteArray::new(sk.verifying_key().to_bytes())),
+            ..without
+        },
+        "the proven copy is kept"
+    );
 }
 
 /// The rotation moves past an inbox only once it is served: an inbox the

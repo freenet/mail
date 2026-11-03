@@ -221,6 +221,10 @@ pub struct InboxRecord {
     /// The last ledger entry the prune looked at.
     #[serde(default)]
     pub pruned_to: Option<B16>,
+    /// How many looks in a row found no ledger entry for a contact whose
+    /// pass the record still names: the renew job's backoff for it.
+    #[serde(default)]
+    pub absent_looks: BTreeMap<B24, u32>,
 }
 
 /// A message that carries a pass's newest certificate to its contact.
@@ -431,6 +435,7 @@ pub fn create_inbox(
         tombstones: BTreeMap::new(),
         invites: BTreeSet::new(),
         pruned_to: None,
+        absent_looks: BTreeMap::new(),
     };
     let mut state = match existing {
         None => None,
@@ -569,8 +574,38 @@ pub(crate) fn set_due(
     }
     match at {
         Some(t) => rec.due.insert(*contact, t),
-        None => rec.due.remove(contact),
+        None => {
+            rec.absent_looks.remove(contact);
+            rec.due.remove(contact)
+        }
     };
+    save(s, item(ItemKind::InboxV2, owner, &[]), &rec, generation)
+}
+
+/// A look at `contact` found no ledger entry for its pass: the count of such
+/// looks in a row, this one included, kept in the record so it survives runs.
+pub(crate) fn note_absent(s: &mut Space<'_>, owner: &Addr, contact: &B24) -> u32 {
+    let Ok((generation, mut rec)) = record(s, owner) else {
+        return 1;
+    };
+    let n = rec
+        .absent_looks
+        .get(contact)
+        .copied()
+        .unwrap_or(0)
+        .saturating_add(1);
+    rec.absent_looks.insert(*contact, n);
+    // Best effort: a count not saved is one look short.
+    let _ = save(s, item(ItemKind::InboxV2, owner, &[]), &rec, generation);
+    n
+}
+
+/// `contact`'s ledger entry was found: its count of absent looks starts over.
+pub(crate) fn clear_absent(s: &mut Space<'_>, owner: &Addr, contact: &B24) -> Result<(), Failure> {
+    let (generation, mut rec) = record(s, owner)?;
+    if rec.absent_looks.remove(contact).is_none() {
+        return Ok(());
+    }
     save(s, item(ItemKind::InboxV2, owner, &[]), &rec, generation)
 }
 
@@ -1152,17 +1187,20 @@ fn forget_inbound(s: &mut Space<'_>, owner: &Addr, id: &B32) {
     }
 }
 
-/// Whether the copy under message `id` reads back with exactly `bytes`. Anything
-/// else (no copy, another content, a record that will not read) is not known
-/// to be this message stored.
-pub(crate) fn counts_as_stored(s: &Space<'_>, owner: &Addr, id: &B32, bytes: &[u8]) -> bool {
-    matches!(
-        s.read(&item_rel(&inbound(owner, id))),
-        Ok(Some((_, stored))) if stored == bytes
-    )
+/// The copy stored under message `id`, when it reads back and decodes as
+/// that message. Anything else (no copy, a record that will not read or
+/// decode) is not known to be this message stored.
+pub(crate) fn stored_copy(
+    s: &Space<'_>,
+    owner: &Addr,
+    id: &B32,
+) -> Option<(u64, w::InboundMessage)> {
+    let (generation, bytes) = s.read(&item_rel(&inbound(owner, id))).ok()??;
+    let copy: w::InboundMessage = w::decode(&bytes).ok()?;
+    (copy.id == *id).then_some((generation, copy))
 }
 
-/// Store `bytes` as drained message `id`, making room by removing the
+/// Store `msg` as drained message `id`, making room by removing the
 /// earliest drained stranger messages when storage is full. Contact mail is
 /// never removed for it.
 fn store_inbound(
@@ -1170,25 +1208,37 @@ fn store_inbound(
     me: &Me,
     rec: &mut InboxRecord,
     id: &B32,
-    bytes: Vec<u8>,
+    msg: &w::InboundMessage,
     out: &mut Drained,
 ) -> Result<(), Failure> {
+    let bytes = to_cbor(msg).map_err(|e| fail(FailureCode::Internal, e))?;
     // A removed copy the page had deleted already frees nothing: a few tries.
     for _ in 0..8 {
-        // Create-only. A copy already under this id is this message, stored
-        // by an earlier drain (the id binds the ciphertext): it counts as
-        // stored, whatever path stored it. A Conflict alone proves nothing (the
-        // index record's own write can raise one), so the copy is read back:
-        // only a readable one with this content counts. A read that finds
-        // nothing may be an unreadable record, so that is Unknown: the
-        // message stays in the inbox and is tried again.
+        // Create-only. A copy already under this id is this message: the id
+        // binds the ciphertext, the time and the admission, and the sender
+        // and body come from the ciphertext, so a stored copy can differ
+        // from this one only in the Ghost Key, which a drain keeps only when
+        // it proved it. A Conflict alone proves nothing (the index record's
+        // own write can raise one), so the copy is read back: a readable one
+        // counts as stored, upgraded to carry a Ghost Key this drain proved
+        // and the stored one lacks, never downgraded. No copy, or one that
+        // will not read or decode, is Unknown: the message stays in the
+        // inbox and is tried again.
         match put_item(s, inbound(&me.addr, id), bytes.clone(), None) {
             Err(f) if matches!(f.code, FailureCode::Conflict { .. }) => {
-                return if counts_as_stored(s, &me.addr, id, &bytes) {
-                    Ok(())
-                } else {
-                    Err(f)
+                let Some((generation, copy)) = stored_copy(s, &me.addr, id) else {
+                    return Err(f);
                 };
+                if copy.ghost_vk.is_none() && msg.ghost_vk.is_some() {
+                    let upgraded = w::InboundMessage {
+                        ghost_vk: msg.ghost_vk,
+                        ..copy
+                    };
+                    if upgraded == *msg {
+                        put_item(s, inbound(&me.addr, id), bytes, Some(generation))?;
+                    }
+                }
+                return Ok(());
             }
             Err(f) if f.code == FailureCode::CapReached && !rec.strangers.is_empty() => {
                 let (_, (old, _)) = rec.strangers.pop_first().expect("not empty");
@@ -1250,8 +1300,7 @@ fn store_opened(
             ghost_vk,
             body: text.clone(),
         };
-        let bytes = to_cbor(&inbound).map_err(|e| fail(FailureCode::Internal, e))?;
-        store_inbound(s, me, rec, id, bytes, out)?;
+        store_inbound(s, me, rec, id, &inbound, out)?;
         out.stored += 1;
     }
     if let Admission::Pass { cert, msg_sig } = &m.admission
