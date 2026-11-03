@@ -154,7 +154,7 @@ recovery-key codec. Its encoding is pinned per variant in
   `sent_time` into the recipient's window, and reports a lapsed pass or a full
   queue; the caller reads the inbox back, since a filtered update is not an
   error. `src/tests/inbox_v2.rs` runs everything it builds through the
-  contract crate's `validate_state` and merge (a dev-dependency only), and
+  contract crate's `apply` and `is_valid` (a dev-dependency only), and
   `src/tests/inbox_jobs.rs` does the same for the jobs.
 - **Inbox v2 jobs** (`src/inbox_jobs.rs`, called from `watch::run`, so every
   trigger takes one path). The drain reads the identity's own inbox from the
@@ -167,10 +167,13 @@ recovery-key codec. Its encoding is pinned per variant in
   (the message held or tombstoned in the contact's inbox) and seals it again
   every 6 hours until it lands. Mail to the contact carries the same
   certificate and is read back the same way. A contact's inbox is found under
-  our own Ghost Key master. Owner updates and renewals draw on the run's
-  message slice (one and two messages' worth, `OWNER_SLOTS`, `RENEW_SLOTS`,
-  from a native measurement against the v1 import), so the per-run limit
-  holds whatever the mix. A run that no page started has no page entropy: it
+  our own Ghost Key master. An owner update takes `OWNER_SLOTS` (one message's
+  worth) of the run's message slice, so the per-run drain limit holds whatever
+  the mix. Renewals have their own allowance and do not use the slice: at most
+  `RENEW_PER_RUN` sent and `RENEW_LOOKS_PER_RUN` contacts looked at in a run,
+  each send charged to the duty budget at `RENEW_COST_MS` (one v1 import's
+  worth; the measurement is in the comment on that constant). There is no
+  `RENEW_SLOTS`. A run that no page started has no page entropy: it
   mixes the host's randomness with a value derived from the identity's seed,
   the time and the message's purpose.
 - **Strangers (decision 21):** an inbox keeps the newest 1024 drained
