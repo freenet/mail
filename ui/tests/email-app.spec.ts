@@ -2628,6 +2628,15 @@ test.describe("Archive folder (#47c)", () => {
 });
 
 test.describe("Message timestamps (#49)", () => {
+  // The example messages are dated minutes before now, so in the first minutes
+  // of a day they fall on yesterday. Pin the clock to midday, in one time zone.
+  test.use({ timezoneId: "UTC" });
+  test.beforeEach(async ({ page }) => {
+    await page.clock.setFixedTime(
+      new Date(process.env.TIMESTAMPS_TEST_NOW ?? "2026-06-15T12:00:00Z"),
+    );
+  });
+
   test("inbox cards show timestamps and sort newest-first", async ({ page }) => {
     await page.goto("/");
     await waitForApp(page);

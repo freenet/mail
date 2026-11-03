@@ -39,6 +39,7 @@ on:
 jobs:
   changes:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       relevant: ${{ steps.filter.outputs.relevant }}
     steps:
@@ -68,7 +69,7 @@ jobs:
           fi
           echo "relevant=$relevant" >> "$GITHUB_OUTPUT"
 
-  check-drift:
+  drift-checks:
     needs: changes
     # Run unless `changes` positively said "docs only". If `changes`
     # failed or was cancelled, its output is empty and the gate runs:
@@ -79,6 +80,7 @@ jobs:
     # ubicloud-standard-8: the container contract byte-equality step
     # below is a full wasm32 release compile.
     runs-on: ubicloud-standard-8
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
         with:
@@ -191,11 +193,11 @@ jobs:
       - name: The delegate imports only the host's functions
         run: bash scripts/check-delegate-imports.sh
 
-      # A guard only ever seen passing is not known to work. This applies,
-      # to a staged copy, the regression each delegate guard exists to catch
-      # (and runs the release guard's tests) and requires each to fail.
-      - name: Show each mail-delegate guard failing when broken
-        run: bash scripts/check-guards-fail.sh
+      # The guard mutations run in the guard-shards jobs. This proves the
+      # shards between them cover every guard exactly once, so a guard
+      # cannot fall out of all of them. It runs no mutation.
+      - name: The guard shards cover every guard once
+        run: bash scripts/check-guard-shards.sh
 
       - name: Upload the rebuilt mail-delegate candidate
         if: failure()
@@ -267,3 +269,86 @@ jobs:
           fi
           echo "✅ container.parameters matches the committed production pubkey."
 
+  # A guard only ever seen passing is not known to work. Each shard
+  # applies, to a staged copy, the regression each of its guards exists to
+  # catch (the release guard's tests count as one guard) and requires each
+  # to fail. A shard that runs no guard fails. `check-drift` below waits
+  # for every shard. check-guard-shards.sh reads the count from this matrix.
+  guard-shards:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.relevant != 'false' }}
+    runs-on: ubicloud-standard-8
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+          fetch-depth: 2
+
+      - name: Install Rust
+        # Keep in sync with rust-toolchain.toml.
+        uses: dtolnay/rust-toolchain@1.99.1
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install the container contract's pinned Rust
+        # Issue #206: container.wasm bytes, and so the container contract
+        # id, depend on the rustc version. contracts/facade/rust-toolchain.toml
+        # pins it; rustup reads that file here and in every container build.
+        working-directory: contracts/facade
+        run: rustup toolchain install
+
+      - name: Cache cargo-installed binaries
+        id: cache-bins
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/bin/fdev
+          key: ${{ runner.os }}-cargo-bins-fdev-0.3.313-v4
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install fdev
+        if: steps.cache-bins.outputs.cache-hit != 'true'
+        # The prebuilt fdev from the matching freenet-core release
+        # (v0.2.151 ships fdev 0.3.313).
+        run: |
+          mkdir -p "$HOME/.cargo/bin"
+          curl -fsSL "https://github.com/freenet/freenet-core/releases/download/v0.2.151/fdev-x86_64-unknown-linux-musl.tar.gz" \
+            | tar -xz -C "$HOME/.cargo/bin/" fdev
+          chmod +x "$HOME/.cargo/bin/fdev"
+          fdev --version
+
+      - name: Show each mail-delegate guard failing when broken (shard ${{ matrix.shard }}/4)
+        run: bash scripts/check-guards-fail.sh --shard ${{ matrix.shard }}/4
+
+  # The required check, by name (a ruleset requires `check-drift`). It
+  # reports one result for the drift checks and every guard shard, and
+  # is red unless each of them succeeded. A job that did not run is
+  # `skipped`, which GitHub counts as passing, so it is checked by value
+  # here. The one allowed skip is a docs-only change, where `changes`
+  # said so; the job is then skipped itself, as before.
+  check-drift:
+    needs: [changes, drift-checks, guard-shards]
+    if: ${{ always() && needs.changes.outputs.relevant != 'false' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every part to have succeeded
+        env:
+          CHANGES: ${{ needs.changes.result }}
+          DRIFT: ${{ needs.drift-checks.result }}
+          SHARDS: ${{ needs.guard-shards.result }}
+        run: |
+          echo "changes=$CHANGES drift-checks=$DRIFT guard-shards=$SHARDS"
+          for r in "$CHANGES" "$DRIFT" "$SHARDS"; do
+            if [ "$r" != success ]; then
+              echo "::error::a part of check-drift did not succeed (failed, skipped or cancelled)"
+              exit 1
+            fi
+          done
