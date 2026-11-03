@@ -155,6 +155,11 @@ pub fn ghost_admit_bytes(recipient: &[u8; 24], sent_time: u64, ct_hash: &[u8; 32
 /// (pass_id | ghost_vk | ∅)`. It takes the body, never the ciphertext, because
 /// the signature is inside the ciphertext. The contract cannot see this; the
 /// layout is here so the vector that pins it sits beside the others.
+///
+/// No test here checks that no ciphertext digest is in it: no argument takes
+/// the ciphertext, and the `sealed_*` vectors pin every byte, so such a test
+/// could not fail. What can go wrong is a caller passing `blake3(ct)` as
+/// `body_hash`; that is checked where the envelope is built (C2).
 pub fn inner_binding(
     recipient: &[u8; 24],
     body_hash: &[u8; 32],

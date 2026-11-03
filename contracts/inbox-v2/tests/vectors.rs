@@ -260,27 +260,3 @@ fn wire_formats() {
     };
     wire("cbor_delta", &delta);
 }
-
-/// The sender's signature lives inside the ciphertext, so it cannot cover it.
-/// The layout's only hash input is the body's: pass a body and its ciphertext
-/// and check no digest of the ciphertext appears.
-#[test]
-fn the_inner_binding_holds_no_ciphertext_digest() {
-    let body = vec![0x42u8; 500];
-    let ciphertext = vec![0x24u8; 8192];
-    let (body_hash, ct_hash) = (blake3::hash(&body), blake3::hash(&ciphertext));
-    let bytes = inner_binding(
-        &ADDR,
-        body_hash.as_bytes(),
-        SENT,
-        KIND_PASS,
-        pass_id().as_slice(),
-    );
-    let contains = |needle: &[u8]| bytes.windows(needle.len()).any(|w| w == needle);
-    assert!(contains(body_hash.as_bytes()), "the body digest is bound");
-    assert!(!contains(&ct_hash.as_bytes()[..8]), "no ciphertext digest");
-    assert_eq!(bytes.len(), "fmail/sealed/v1".len() + 24 + 32 + 8 + 1 + 16);
-    // Its field map holds exactly one hash, so no room for a second digest.
-    let no_tag = inner_binding(&ADDR, body_hash.as_bytes(), SENT, KIND_OWNER, &[]);
-    assert_eq!(no_tag.len(), "fmail/sealed/v1".len() + 24 + 32 + 8 + 1);
-}
