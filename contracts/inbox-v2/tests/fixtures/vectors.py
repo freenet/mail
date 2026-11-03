@@ -91,6 +91,10 @@ vectors = [
     ("id_pass", msgid(0, PASS_ID)),
     ("id_owner", msgid(1, b"")),
     ("id_quarantine", msgid(2, b"")),
+    # With a Ghost Key proof, the key its certificate claims; zeros when the
+    # certificate does not decode.
+    ("id_quarantine_proven", msgid(2, KEY)),
+    ("id_quarantine_undecodable", msgid(2, b"\x00" * 32)),
 ]
 
 # Wire: structs are maps in field order, fixed bytes are byte strings, enums are

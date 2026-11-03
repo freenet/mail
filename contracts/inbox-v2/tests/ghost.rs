@@ -48,6 +48,10 @@ fn carrying(bytes: Vec<u8>, proof: GhostProof) -> (B32, Message) {
     world().keyed(bytes, T, Admission::Quarantine { ghost: Some(proof) })
 }
 
+fn bytes_of(message: &Message) -> Vec<u8> {
+    message.ciphertext.to_vec()
+}
+
 fn genuine_payload(bytes: &[u8]) -> Vec<u8> {
     ghost_admit_bytes(&world().params.addr, T, blake3::hash(bytes).as_bytes())
 }
@@ -311,34 +315,133 @@ fn in_an_open_inbox_a_proof_is_size_capped() {
     ));
 }
 
-/// One id, with and without a proof. In Open the smaller stands; when the owner
-/// turns on RequireGhost a surviving proof is checked then, which is why the
-/// client drains first.
+/// Review r1 M1 (decision 11). A donor holding ghost key K signs the public
+/// payload of three honest messages and attaches its own certificate. The id
+/// binds the proof's ghost key, so its copies are three other messages that
+/// count against K, and the honest ones all stay. The donor's key is one whose
+/// copies would have encoded smaller, so before decision 11 they took the ids.
 #[test]
-fn one_id_keeps_the_smallest_that_passed() {
+fn a_donor_reproving_honest_mail_leaves_it() {
+    let w = world();
+    let owner = w.owner(1, 3, REQUIRE, BTreeMap::new());
+    let n = w.ghosts.len();
+    let len = |g: usize| encode(&w.quarantine_msg(ct(8192, 1), T, Some(g)).1).len();
+    let (donor, victims) = (0..n)
+        .find_map(|g| {
+            let victims: Vec<usize> = (0..n)
+                .filter(|&h| h != g && (len(h), h) > (len(g), g))
+                .take(3)
+                .collect();
+            (victims.len() == 3).then_some((g, victims))
+        })
+        .expect("a fixture key that encodes below three others");
+    let honest: Vec<_> = victims
+        .iter()
+        .enumerate()
+        .map(|(i, &h)| w.quarantine_msg(ct(8192, 100 + i as u64), T, Some(h)))
+        .collect();
+    let forged: Vec<_> = (0..3)
+        .map(|i| w.quarantine_msg(ct(8192, 100 + i), T, Some(donor)))
+        .collect();
+    let state = encode(&w.raw(owner.clone(), w.time(T), [], [], honest.clone()));
+    let attack = encode(&w.raw(owner, w.time(T), [], [], forged.clone()));
+    for merged in [
+        apply(&Rules::V1, &w.params, &state, update_state(attack.clone())).unwrap(),
+        apply(&Rules::V1, &w.params, &attack, update_state(state)).unwrap(),
+    ] {
+        let merged: InboxState = decode(&merged).unwrap();
+        for (id, _) in &honest {
+            assert!(merged.messages.contains_key(id), "honest mail was evicted");
+        }
+        assert_eq!(merged.messages.len(), 3 + Rules::V1.per_ghost);
+    }
+    for (h, f) in honest.iter().zip(&forged) {
+        assert_ne!(h.0, f.0, "a re-proved copy is another message");
+    }
+}
+
+/// One ciphertext and hour, with and without a proof, are two messages: the
+/// proof's ghost key is in the id. In Open both stand. When the owner turns on
+/// RequireGhost the bare one is filtered, and relaxing to Open again leaves
+/// the proven one ignored, not filtered.
+#[test]
+fn a_proof_and_none_are_two_messages() {
     let w = world();
     let bytes = ct(8192, 1);
     let proven = w.quarantine_msg(bytes.clone(), T, Some(0));
     let bare = w.quarantine_msg(bytes, T, None);
-    assert_eq!(proven.0, bare.0, "the proof is outside the id");
+    assert_ne!(proven.0, bare.0, "the proof's key is in the id");
+    let ghost_vk = w.ghosts[0].sk.verifying_key().to_bytes();
+    let hash = blake3::hash(&bytes_of(&proven.1));
+    assert_eq!(
+        *proven.0,
+        message_id_of(
+            &w.params.addr,
+            hash.as_bytes(),
+            T,
+            KIND_QUARANTINE,
+            &ghost_vk
+        ),
+        "the tag is the certificate's ghost key"
+    );
+    // A proof stripped from its message no longer matches the id.
+    let (_, mut stripped) = proven.clone();
+    stripped.admission = Admission::Quarantine { ghost: None };
+    assert!(!holds(QuarantineMode::Open, (proven.0, stripped)));
+
     let state =
-        |owner: OwnerRecord, m: (B32, Message)| encode(&w.raw(owner, w.time(T), [], [], [m]));
-
+        |owner: OwnerRecord, m: Vec<(B32, Message)>| encode(&w.raw(owner, w.time(T), [], [], m));
     let open = w.owner(1, 3, QuarantineMode::Open, BTreeMap::new());
-    let a = state(open.clone(), proven.clone());
-    let b = state(open, bare.clone());
-    let merged = apply(&Rules::V1, &w.params, &a, update_state(b.clone())).unwrap();
-    assert_eq!(merged, b, "Open: no proof is smaller");
+    let a = state(open.clone(), vec![proven.clone()]);
+    let b = state(open, vec![bare.clone()]);
+    let merged: InboxState =
+        decode(&apply(&Rules::V1, &w.params, &a, update_state(b.clone())).unwrap()).unwrap();
+    assert_eq!(merged.messages.len(), 2, "Open holds both");
 
-    // RequireGhost: the bare one is filtered, so a valid proof beats none.
     let required = w.owner(2, 3, REQUIRE, BTreeMap::new());
-    let c = state(required.clone(), proven.clone());
-    let merged = apply(&Rules::V1, &w.params, &c, update_state(b)).unwrap();
-    assert_eq!(merged, c);
+    let c = state(required, vec![proven.clone()]);
+    let c = apply(&Rules::V1, &w.params, &c, update_state(b)).unwrap();
+    let merged: InboxState = decode(&c).unwrap();
+    assert_eq!(
+        merged.messages.keys().copied().collect::<Vec<_>>(),
+        [proven.0]
+    );
 
-    // An owner relaxing to Open leaves the proof ignored, not filtered.
     let relaxed = w.owner(3, 3, QuarantineMode::Open, BTreeMap::new());
-    let d = state(relaxed, bare);
-    let merged = decode::<InboxState>(&apply(&Rules::V1, &w.params, &c, update_state(d)).unwrap());
-    assert_eq!(merged.unwrap().messages.len(), 1);
+    let d = state(relaxed, vec![]);
+    let merged: InboxState =
+        decode(&apply(&Rules::V1, &w.params, &c, update_state(d)).unwrap()).unwrap();
+    assert_eq!(
+        merged.messages.keys().copied().collect::<Vec<_>>(),
+        [proven.0]
+    );
+}
+
+/// Two encodings of one id: one proof under one ghost key, with its
+/// certificate spelled two ways. RequireGhost keeps the smaller.
+#[test]
+fn one_id_keeps_the_smallest_that_passed() {
+    let w = world();
+    let bytes = ct(8192, 1);
+    let (id, small) = w.quarantine_msg(bytes.clone(), T, Some(0));
+    // The key holder signs the same payload spelled with a trailing byte,
+    // which the vault's reader ignores: a second valid proof, one byte longer.
+    let mut proof = w.proof(0, &bytes, T);
+    proof.scoped_payload.push(0);
+    proof.ghost_sig = sign64(&w.ghosts[0].sk, &proof.scoped_payload);
+    let (same, large) = w.keyed(bytes, T, Admission::Quarantine { ghost: Some(proof) });
+    assert_eq!(id, same, "one ghost key, one id");
+    let state =
+        |m: &Message| encode(&w.raw(require(REQUIRE), w.time(T), [], [], [(id, m.clone())]));
+    let (a, b) = (state(&small), state(&large));
+    assert!(
+        is_valid(&Rules::V1, &w.params, &b),
+        "the longer proof passes alone"
+    );
+    for (x, y) in [(&a, &b), (&b, &a)] {
+        assert_eq!(
+            apply(&Rules::V1, &w.params, x, update_state(y.clone())).unwrap(),
+            a
+        );
+    }
 }

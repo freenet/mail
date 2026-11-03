@@ -5,7 +5,11 @@
 //! The fields of a layout have fixed sizes, or say their length, so no two
 //! inputs of one layout share bytes.
 
-use crate::types::{Admission, Message, OwnerRecord, PassCert, PassClass, QuarantineMode};
+use ghostkey_verify::GhostkeyCertificate;
+
+use crate::types::{
+    Admission, GhostProof, Message, OwnerRecord, PassCert, PassClass, QuarantineMode,
+};
 
 pub const KIND_PASS: u8 = 0;
 pub const KIND_OWNER: u8 = 1;
@@ -159,19 +163,43 @@ pub fn inner_binding(
     out
 }
 
-/// `blake3("fmail/msgid/v1" ‖ recipient ‖ blake3(ct) ‖ sent_time ‖ kind ‖ pass_id?)`
-pub fn message_id(recipient: &[u8; 24], message: &Message, ct_hash: &[u8; 32]) -> [u8; 32] {
-    let mut bytes = layout("fmail/msgid/v1", 81);
+/// The ghost key a proof's certificate claims, unverified; all zeros when the
+/// certificate does not decode. Only an Open inbox can hold such a proof, where
+/// it is ignored, so the zeros name no key that could pass.
+pub fn proof_ghost_vk(proof: &GhostProof) -> [u8; 32] {
+    GhostkeyCertificate::from_cbor(&proof.cert)
+        .map(|cert| cert.claimed_ghost_key().to_bytes())
+        .unwrap_or([0; 32])
+}
+
+/// `blake3("fmail/msgid/v1" ‖ recipient ‖ blake3(ct) ‖ sent_time ‖ kind ‖
+/// (pass_id | ghost_vk | ∅))`, from its fields.
+pub fn message_id_of(
+    recipient: &[u8; 24],
+    ct_hash: &[u8; 32],
+    sent_time: u64,
+    kind: u8,
+    tag: &[u8],
+) -> [u8; 32] {
+    let mut bytes = layout("fmail/msgid/v1", 65 + tag.len());
     bytes.extend_from_slice(recipient);
     bytes.extend_from_slice(ct_hash);
-    bytes.extend_from_slice(&message.sent_time.to_be_bytes());
-    match &message.admission {
-        Admission::Pass { cert, .. } => {
-            bytes.push(KIND_PASS);
-            bytes.extend_from_slice(cert.pass_id.as_slice());
-        }
-        Admission::Owner { .. } => bytes.push(KIND_OWNER),
-        Admission::Quarantine { .. } => bytes.push(KIND_QUARANTINE),
-    }
+    bytes.extend_from_slice(&sent_time.to_be_bytes());
+    bytes.push(kind);
+    bytes.extend_from_slice(tag);
     *blake3::hash(&bytes).as_bytes()
+}
+
+/// A message's id. The tag is the pass id for pass mail, and for quarantine mail
+/// carrying a Ghost Key proof the proof's ghost key (decision 11): a donor who
+/// re-proves someone else's message makes another message, which counts
+/// against the donor's own key, and the recipient's inner check drops it.
+pub fn message_id(recipient: &[u8; 24], message: &Message, ct_hash: &[u8; 32]) -> [u8; 32] {
+    let at = |kind, tag: &[u8]| message_id_of(recipient, ct_hash, message.sent_time, kind, tag);
+    match &message.admission {
+        Admission::Pass { cert, .. } => at(KIND_PASS, cert.pass_id.as_slice()),
+        Admission::Owner { .. } => at(KIND_OWNER, &[]),
+        Admission::Quarantine { ghost: None } => at(KIND_QUARANTINE, &[]),
+        Admission::Quarantine { ghost: Some(proof) } => at(KIND_QUARANTINE, &proof_ghost_vk(proof)),
+    }
 }

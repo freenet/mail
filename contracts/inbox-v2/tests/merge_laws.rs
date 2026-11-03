@@ -183,10 +183,12 @@ fn universe_at(seed: u64, rng: &mut Rng, big: bool, t0: u64) -> Universe {
             .then(|| rng.below(w.ghosts.len() as u64) as usize);
         messages.push(w.quarantine_msg(ct_next(rng), sent, ghost));
     }
-    // The same quarantine message with and without its proof: one id.
+    // One ciphertext and hour with no proof, with a proof, and re-proved under
+    // another donor's key: three ids (decision 11).
     let both = ct_next(rng);
     messages.push(w.quarantine_msg(both.clone(), t0, Some(0)));
     messages.push(w.quarantine_msg(both.clone(), t0, None));
+    messages.push(w.quarantine_msg(both.clone(), t0, Some(1)));
     // A restamped copy: another id, unsigned.
     messages.push(w.quarantine_msg(both.clone(), t0 + HOUR, None));
     // Cross-kind duplicates: one ciphertext as three messages.

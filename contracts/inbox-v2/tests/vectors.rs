@@ -163,15 +163,27 @@ fn message_ids() {
         &message_id(&ADDR, &message(Admission::Owner { sig: sig() }), &HASH),
     );
     check("id_quarantine", &message_id(&ADDR, &message(bare()), &HASH));
-    // The proof is outside the id, so one id can have two encodings.
-    let proven = Admission::Quarantine {
+    // With a proof, the ghost key its certificate claims is the tag
+    // (decision 11). A certificate that does not decode tags all zeros.
+    check(
+        "id_quarantine_proven",
+        &message_id_of(&ADDR, &HASH, SENT, KIND_QUARANTINE, key().as_slice()),
+    );
+    check(
+        "id_quarantine_undecodable",
+        &message_id_of(&ADDR, &HASH, SENT, KIND_QUARANTINE, &[0; 32]),
+    );
+    let garbage = Admission::Quarantine {
         ghost: Some(GhostProof {
             cert: ByteBuf::from(vec![1]),
             scoped_payload: ByteBuf::from(vec![2]),
             ghost_sig: sig(),
         }),
     };
-    check("id_quarantine", &message_id(&ADDR, &message(proven), &HASH));
+    check(
+        "id_quarantine_undecodable",
+        &message_id(&ADDR, &message(garbage), &HASH),
+    );
 }
 
 fn wire<T>(name: &str, value: &T)
