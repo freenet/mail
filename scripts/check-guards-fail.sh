@@ -401,6 +401,35 @@ dt "inbox v2: the Ghost Key payload is what the contract checks" "$D/inbox_v2.rs
 dt "inbox v2 jobs: updates stop at the per-minute limit" "$D/jobs.rs" \
     '.is_none_or(|(_, n)| *n < MAX_WRITES_PER_MINUTE)' '.is_none_or(|_| true)' \
     updates_to_one_contract_stop_at_the_minute_limit
+BUMPS=the_2048th_live_revocation_bumps_the_epoch_and_the_2047th_does_not
+FULL_SET=a_full_revoked_set_bumps_the_epoch_with_no_grace
+dt "inbox v2: the 2048th revocation bumps (not the 2049th)" "$D/inbox_v2.rs" \
+    '!state.revoked.contains_key(&key) && this_epoch + 1 >= BUMP_AT_REVOCATIONS' \
+    '!state.revoked.contains_key(&key) && this_epoch >= BUMP_AT_REVOCATIONS' "$BUMPS"
+dt "inbox v2: the 2047th revocation does not bump" "$D/inbox_v2.rs" \
+    '!state.revoked.contains_key(&key) && this_epoch + 1 >= BUMP_AT_REVOCATIONS' \
+    '!state.revoked.contains_key(&key) && this_epoch + 2 >= BUMP_AT_REVOCATIONS' "$BUMPS"
+dt "inbox v2: the routine bump at the revocation count exists" "$D/inbox_v2.rs" \
+    '!state.revoked.contains_key(&key) && this_epoch + 1 >= BUMP_AT_REVOCATIONS' \
+    'false && this_epoch + 1 >= BUMP_AT_REVOCATIONS' "$BUMPS"
+dt "inbox v2: a full revoked set bumps" "$D/inbox_v2.rs" \
+    '    if state.revoked.len() >= w::MAX_REVOKED {
+        bump(rec' \
+    '    if false {
+        bump(rec' "$FULL_SET"
+dt "inbox v2: a full set is full at exactly its size" "$D/inbox_v2.rs" \
+    '    if state.revoked.len() >= w::MAX_REVOKED {
+        bump(rec' \
+    '    if state.revoked.len() > w::MAX_REVOKED {
+        bump(rec' "$FULL_SET"
+dt "inbox v2: an emergency bump opens no grace" "$D/inbox_v2.rs" \
+    'rec.reissue_grace = if emergency { 0 } else { EPOCH_GRACE };' \
+    'rec.reissue_grace = EPOCH_GRACE;' "$FULL_SET"
+dt "inbox v2: an emergency bump keeps no previous epoch" "$D/inbox_v2.rs" \
+    '    rec.prev_epoch_until = if emergency {
+        0' \
+    '    rec.prev_epoch_until = if emergency {
+        owner_time.max(now) + EPOCH_GRACE' "$FULL_SET"
 dt "origins get separate namespaces" "$D/store.rs" \
     'format!("o/{}/", hex(&origin.0))' '{ let _ = origin; "o/shared/".to_string() }' \
     origins_and_kinds_never_share_a_key,a_foreign_origin_can_neither_read_nor_change_another_namespace
