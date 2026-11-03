@@ -251,24 +251,35 @@ fn at_most_two_per_ghost_key_when_required() {
 }
 
 /// Two messages of one certificate reach the memo: both are decided right.
+/// Ids are visited in order, and the genuine one is chosen to come first, so
+/// the certificate is in the memo when the forged signature is judged: a memo
+/// read before the payload signature would admit it.
 #[test]
 fn a_memoed_certificate_still_needs_its_payload_signature() {
     let w = world();
-    let bytes = ct(8192, 2);
-    let mut forged = w.proof(0, &bytes, T);
-    forged.ghost_sig[0] ^= 1;
+    let genuine = w.quarantine_msg(ct(8192, 1), T, Some(0));
+    let forged = (2..)
+        .map(|tag| {
+            let bytes = ct(8192, tag);
+            let mut proof = w.proof(0, &bytes, T);
+            proof.ghost_sig[0] ^= 1;
+            carrying(bytes, proof)
+        })
+        .find(|forged| forged.0 > genuine.0)
+        .unwrap();
     let raw = w.raw(
         require(REQUIRE),
         w.time(T),
         [],
         [],
-        [
-            w.quarantine_msg(ct(8192, 1), T, Some(0)),
-            carrying(bytes, forged),
-        ],
+        [genuine.clone(), forged],
     );
     let merged = merge(&Rules::V1, &w.params, vec![raw.into()]).unwrap();
-    assert_eq!(merged.messages.len(), 1);
+    assert_eq!(
+        merged.messages.keys().collect::<Vec<_>>(),
+        [&genuine.0],
+        "the genuine message only"
+    );
 }
 
 /// Decision 19: an Open inbox refuses a message that carries a Ghost Key proof.

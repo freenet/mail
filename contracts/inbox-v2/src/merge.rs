@@ -405,6 +405,10 @@ impl Filter<'_> {
             return None;
         }
         let claimed = cert.claimed_ghost_key();
+        #[cfg(feature = "plausible-mutants")]
+        if let Some(known) = mutant::ghost_memo_first(&self.ghosts, &proof.cert) {
+            return known;
+        }
         ghostkey_verify::verify_payload_signature(
             claimed,
             &proof.scoped_payload,

@@ -56,6 +56,9 @@ pub enum Mutant {
     /// Revocations of one pass id ranked by expiry before epoch, so the
     /// previous epoch's entry can win a grace and then be pruned (decision 22).
     RevocationExpiryFirst,
+    /// The Ghost Key certificate memo read before the payload signature, so a
+    /// forged signature rides on a certificate judged earlier in the call.
+    GhostMemoBeforeSignature,
 }
 
 thread_local! {
@@ -117,6 +120,15 @@ pub fn grace_until(joined: u64, first: Option<&InboxDelta>) -> u64 {
     first
         .and_then(|part| part.owner.as_ref())
         .map_or(joined, |owner| owner.prev_epoch_until)
+}
+
+/// `GhostMemoBeforeSignature`: what the memo says, read before the signature.
+pub fn ghost_memo_first<G: Copy>(memo: &BTreeMap<Vec<u8>, G>, cert: &[u8]) -> Option<G> {
+    if on(Mutant::GhostMemoBeforeSignature) {
+        memo.get(cert).copied()
+    } else {
+        None
+    }
 }
 
 /// `TierCheckSkipped`.

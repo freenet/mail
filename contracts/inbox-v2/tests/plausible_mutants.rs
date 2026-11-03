@@ -510,6 +510,32 @@ fn the_current_epochs_revocation_wins() -> Broken {
     broken
 }
 
+/// A Ghost Key certificate judged once in a call still needs each message's
+/// own payload signature. The ids are chosen so the genuine message is judged
+/// first and its certificate is in the memo when the forged one comes.
+fn a_memoed_ghost_still_needs_its_signature() -> Broken {
+    let w = world();
+    let genuine = w.quarantine_msg(ct(8192, 1), T, Some(0));
+    let forged = (2..)
+        .map(|tag| {
+            let bytes = ct(8192, tag);
+            let mut proof = w.proof(0, &bytes, T);
+            proof.ghost_sig[0] ^= 1;
+            w.keyed(bytes, T, Admission::Quarantine { ghost: Some(proof) })
+        })
+        .find(|forged| forged.0 > genuine.0)
+        .unwrap();
+    let merged = require(vec![genuine.clone(), forged.clone()], REQUIRE);
+    let mut broken = vec![];
+    if holds(&merged, &forged) {
+        broken.push("a forged payload signature rode on a memoed certificate");
+    }
+    if !holds(&merged, &genuine) {
+        broken.push("a genuine proof was refused");
+    }
+    broken
+}
+
 fn scenario(m: Mutant) -> fn() -> Broken {
     match m {
         Mutant::CapBeforeCleanup => revocations_are_pruned_before_they_are_capped,
@@ -529,6 +555,7 @@ fn scenario(m: Mutant) -> fn() -> Broken {
         Mutant::JoinBeforePrune => a_dead_entry_never_wins_a_join,
         Mutant::GraceFromUnjoinedOwner => the_grace_is_the_joined_owners,
         Mutant::RevocationExpiryFirst => the_current_epochs_revocation_wins,
+        Mutant::GhostMemoBeforeSignature => a_memoed_ghost_still_needs_its_signature,
     }
 }
 
@@ -565,6 +592,9 @@ fn fingerprint(m: Mutant) -> &'static [&'static str] {
             "an old epoch's pass delivered mail after its grace ended",
         ],
         Mutant::RevocationExpiryFirst => &["the previous epoch's revocation won the join"],
+        Mutant::GhostMemoBeforeSignature => {
+            &["a forged payload signature rode on a memoed certificate"]
+        }
     }
 }
 
@@ -604,4 +634,5 @@ mutant_tests! {
     joining_before_pruning => JoinBeforePrune,
     grace_read_from_an_unjoined_owner => GraceFromUnjoinedOwner,
     revocations_ranked_by_expiry_first => RevocationExpiryFirst,
+    ghost_memo_read_before_the_signature => GhostMemoBeforeSignature,
 }
