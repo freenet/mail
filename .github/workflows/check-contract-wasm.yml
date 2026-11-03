@@ -28,6 +28,7 @@ on:
       - 'wire-v1/**'
       - 'scripts/**'
       - 'contracts/inbox/**'
+      - 'contracts/inbox-v2/**'
       - 'contracts/.cargo/**'
       - 'wire-v1/**'
       - 'scripts/**'
@@ -183,6 +184,16 @@ jobs:
       - name: Verify the mail-delegate candidate is the source's build
         run: bash scripts/check-delegate-candidate.sh
 
+      # Inbox v2's merge rules cannot be patched after publish, so the bytes
+      # reviewed must be the bytes shipped. Its imports are checked against
+      # the same host set: a contract importing anything else fails to
+      # instantiate on every node.
+      - name: Verify the inbox v2 candidate is the source's build
+        run: bash scripts/check-inbox-candidate.sh
+
+      - name: The inbox v2 candidate imports only the host's functions
+        run: bash scripts/check-delegate-imports.sh published-contract/candidate/inbox_v2
+
       # Reads the committed candidate, which the step above proves is the
       # source's build. A failure here means a node could not instantiate the
       # delegate. It is a step of this required job, not a job of its own,
@@ -205,6 +216,14 @@ jobs:
         with:
           name: mail-delegate-candidate-${{ github.sha }}
           path: target/delegate-candidate-rebuilt/
+          if-no-files-found: ignore
+
+      - name: Upload the rebuilt inbox v2 candidate
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: inbox-v2-candidate-${{ github.sha }}
+          path: target/inbox-candidate-rebuilt/
           if-no-files-found: ignore
 
       # Issue #206 (closes the Phase 1 informational gate). The container

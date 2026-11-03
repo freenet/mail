@@ -97,6 +97,7 @@ ui_jobs_tests() {
         -- kept_import_is_unread unread_flags_mark an_import_between the_loop_starts the_probe_marker
 }
 candidate_check() { "$STAGE/scripts/check-delegate-candidate.sh"; }
+inbox_candidate_check() { "$STAGE/scripts/check-inbox-candidate.sh"; }
 freeze_tests() { "$STAGE/scripts/release-freeze_test.sh"; }
 scrub_release_tests() { "$STAGE/scripts/check-release-scrub_test.sh"; }
 
@@ -125,6 +126,7 @@ baseline "UI background jobs tests" ui_jobs_tests
 baseline "release freeze tests" freeze_tests
 baseline "release scrub tests" scrub_release_tests
 [ "$WASM" -eq 1 ] && baseline "candidate check" candidate_check
+[ "$WASM" -eq 1 ] && baseline "inbox candidate check" inbox_candidate_check
 if [ "$failures" -ne 0 ]; then
     echo "the guards fail without any regression applied; nothing below would mean anything"
     exit 1
@@ -1146,6 +1148,9 @@ if [ "$WASM" -eq 1 ]; then
     guard "the candidate is the source's build" "$D/store.rs" \
         'pub const MAX_PENDING_PROMPTS: usize = 4;' 'pub const MAX_PENDING_PROMPTS: usize = 5;' \
         'FAIL: published-contract/candidate/mail_delegate is not what' candidate_check
+    guard "the inbox candidate is the source's build" "$STAGE/contracts/inbox-v2/src/merge.rs" \
+        'per_pass: 8,' 'per_pass: 9,' \
+        'FAIL: published-contract/candidate/inbox_v2 is not what' inbox_candidate_check
     # The release guard's own tests build real WASM and show each refusal,
     # including each of its two feature checks alone.
     if [ "$LIST" -eq 1 ]; then

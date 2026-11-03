@@ -11,6 +11,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 CRATES=(
     contracts/inbox
+    contracts/inbox-v2
     contracts/web-container
     delegates/mail-delegate
     modules/antiflood-tokens/interfaces

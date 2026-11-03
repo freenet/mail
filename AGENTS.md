@@ -162,6 +162,29 @@ shard succeeded, and `scripts/check-guard-shards.sh` proves the shards cover
 every guard once. `--list` prints the guards. A local run with no argument
 runs them all.
 
+### Inbox v2
+
+`contracts/inbox-v2` is the next inbox. The UI does not use it yet, and the
+v1 source stays at `contracts/inbox` so the frozen generation stays readable.
+`merge::merge` is the one set of rules: `update_state` calls it, and
+`validate_state` asks whether a state is a fixed point of it. Its numbers are
+in `merge::Rules`, passed as an argument so tests can run the same code with
+small caps. Change any rule knowing it cannot be patched after publish.
+
+- **The law:** core's `associativity_heals`, in `tests/merge_laws.rs`. Bounded
+  retention and owner-driven removals cannot be strictly associative, so two
+  groupings that differ must heal. `FORK_SEEDS=n` sets the seeds; CI workflow
+  `inbox-v2-laws.yml` runs 1000 nightly.
+- **Byte layouts:** `tests/fixtures/vectors.txt` comes from a second
+  implementation in `vectors.py`. Never regenerate it to make a test pass.
+- **What is an error:** a part that cannot be decoded canonically, or that names
+  an owner record that fails, is refused. A message, revocation or usage entry
+  that fails is dropped without one, so a sender reads back after an update.
+- **Candidate:** `published-contract/candidate/inbox_v2`, built only by
+  `scripts/build-wasm.sh`; `scripts/check-inbox-candidate.sh` (CI `check-drift`)
+  fails unless the committed bytes are what the source builds. Unlike the mail
+  delegate, it needs no fault sweeps: a contract has no storage of its own.
+
 The `legacy_*.toml` registries are validated by `ui/build.rs`
 (`freenet-migrate-build`; an empty registry fails the build) and pinned by
 `ui/src/legacy_registry.rs`. The delegate rows feed the walk below. The inbox
