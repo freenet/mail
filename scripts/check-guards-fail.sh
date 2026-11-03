@@ -501,6 +501,10 @@ dt "inbox v2 jobs: a refused renewal is a wait, not a failure" "$D/inbox_jobs.rs
     'Err(f) if f.code == FailureCode::Refused => return Ok(Some(now + v2::NO_PASS_RETRY)),' \
     'Err(f) if false => return Ok(Some(now + v2::NO_PASS_RETRY)),' \
     a_contact_whose_renewal_fails_never_stops_the_others
+dt "inbox v2: what a drain of a page's own state returns is accepted by the contract" "$D/inbox_v2.rs" \
+    '            .sign_v2(w::OWNER_SIG_CONTEXT, &w::owner_bytes(&me.addr.0, &owner)),' \
+    '            .sign_v2(&[], &w::owner_bytes(&me.addr.0, &owner)),' \
+    strangers_never_crowd_out_a_new_correspondents_pass,a_page_state_admission_is_checked_before_it_counts
 dt "origins get separate namespaces" "$D/store.rs" \
     'format!("o/{}/", hex(&origin.0))' '{ let _ = origin; "o/shared/".to_string() }' \
     origins_and_kinds_never_share_a_key,a_foreign_origin_can_neither_read_nor_change_another_namespace

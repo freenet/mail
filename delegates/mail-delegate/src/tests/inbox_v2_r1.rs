@@ -515,6 +515,9 @@ fn strangers_never_crowd_out_a_new_correspondents_pass() {
             panic!("{got:?}");
         };
         assert_eq!((u.remaining, u.full), (0, 0), "after {made}");
+        // What it returned for a state the page invented is still an update
+        // the contract accepts, into the inbox as the network holds it.
+        world.publish(&a, &u.update.expect("an update"));
     }
     let c = world.identity("carol");
     let (hello, landed) = world.send(&c, &a, "hello");
@@ -741,7 +744,11 @@ fn a_page_state_admission_is_checked_before_it_counts() {
     // The pass message is stored; the Ghost Key claim the node's copy cannot
     // confirm waits for one that can, rather than being stored without it.
     assert_eq!((u.drained, u.full), (1, 1), "the claim waits");
-    let delta: InboxDelta = w::decode(&u.update.unwrap()).unwrap();
+    let update = u.update.unwrap();
+    let delta: InboxDelta = w::decode(&update).unwrap();
+    // The contract accepts it into the inbox as the network holds it, and the
+    // state that results is valid.
+    world.publish(&a, &update);
     assert!(delta.usage.is_empty(), "an invite use was counted");
     assert!(
         world
