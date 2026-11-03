@@ -219,7 +219,7 @@ fn universe_at(seed: u64, rng: &mut Rng, big: bool, t0: u64) -> Universe {
         let sent = t0 + rng.below(48) * HOUR;
         messages.push(w.owner_msg(ct_next(rng), sent));
     }
-    for _ in 0..if big { 28 } else { 12 } {
+    for _ in 0..if big { 80 } else { 12 } {
         let sent = t0 + rng.below(48) * HOUR;
         let ghost = rng
             .chance(60)
