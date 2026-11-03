@@ -353,7 +353,7 @@ fn pass_of(me: &Me, pass_id: &B16, e: &LedgerEntry) -> w::Pass {
 }
 
 /// A new lifetime from `now`: expiry a whole day, renewal at 40 to 60%.
-fn start_term(e: &mut LedgerEntry, now: u64, rng: &mut MixRng) {
+pub fn start_term(e: &mut LedgerEntry, now: u64, rng: &mut MixRng) {
     let lifetime = match e.class {
         PassClass::Contact => LIFETIME_MIN + below(rng, LIFETIME_MAX - LIFETIME_MIN + 1),
         PassClass::Invite { .. } => INVITE_LIFETIME,

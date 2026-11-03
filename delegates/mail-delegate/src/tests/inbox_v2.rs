@@ -15,14 +15,16 @@ use freenet_stdlib::prelude::{StateDelta, UpdateData};
 use serde_bytes::ByteBuf;
 
 use super::{PROD, call, create};
-use crate::env::mem::MemEnv;
+use crate::env::mem::{Faults, MemEnv};
 use crate::inbox_v2::{self, InboxRecord, LedgerEntry};
+use crate::store::{Origin, Space, item_rel};
 
 const MASTER: [u8; 32] = [0x42; 32];
 const DAY: u64 = 86_400;
 /// 2026-11-03, a little after midnight.
 const START: u64 = 1_793_664_123;
 
+#[derive(Clone)]
 pub struct World {
     pub env: MemEnv,
     /// Each inbox's state as the network holds it.
@@ -489,4 +491,276 @@ fn the_page_cannot_rewrite_inbox_records_or_read_held_passes() {
     ] {
         assert_eq!(call(&mut world.env, PROD, op), Err(FailureCode::Refused));
     }
+}
+
+fn env_or(name: &str, default: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
+/// Alice's inbox holding pass, invite and quarantine mail.
+fn loaded() -> (World, Addr, BTreeMap<[u8; 32], String>) {
+    let mut world = World::new();
+    let a = world.identity("alice");
+    let b = world.identity("bob");
+    let c = world.identity("carol");
+    let d = world.identity("dave");
+    world.send(&b, &a, "first");
+    world.change(&a, OwnerChange::Drain);
+    world.send(&a, &b, "back");
+    world.change(&b, OwnerChange::Drain);
+    let invite = world.issue(&a, None, Some(3));
+    call(
+        &mut world.env,
+        PROD,
+        Op::HoldPass {
+            addr: c,
+            pass: invite,
+        },
+    )
+    .unwrap();
+    let mut mail = BTreeMap::new();
+    for (from, text) in [
+        (b, "pass 1"),
+        (b, "pass 2"),
+        (c, "invite 1"),
+        (c, "invite 2"),
+        (d, "stranger 1"),
+        (d, "stranger 2"),
+    ] {
+        let (sealed, landed) = world.send(&from, &a, text);
+        assert!(landed, "{text}");
+        mail.insert(sealed.id.0, text.to_string());
+    }
+    (world, a, mail)
+}
+
+fn inbound_stored(world: &World, owner: &Addr, id: &[u8; 32]) -> bool {
+    let item = ItemRef {
+        kind: ItemKind::Inbound,
+        owner: Some(*owner),
+        id: id.to_vec(),
+    };
+    let mut probe = MemEnv::default();
+    let key = Space::new(&mut probe, Origin([PROD; 32])).full_key(&item_rel(&item));
+    world.env.secrets.contains_key(&key)
+}
+
+/// One drain run over a faulty host: every tombstone an update carries names
+/// a message already stored, and once the host heals everything arrives.
+fn drain_run(
+    base: &World,
+    a: &Addr,
+    mail: &BTreeMap<[u8; 32], String>,
+    faults: Faults,
+) -> Result<u64, String> {
+    let mut world = base.clone();
+    world.env.faults = Some(faults);
+    for _ in 0..8 {
+        let Ok(u) = world.update(a, OwnerChange::Drain) else {
+            continue;
+        };
+        let Some(update) = u.update else { continue };
+        let delta: InboxDelta = w::decode(&update).unwrap();
+        for id in delta.owner.iter().flat_map(|o| o.tombstones.keys()) {
+            if mail.contains_key(&**id) && !inbound_stored(&world, a, id) {
+                return Err(format!("{} tombstoned before it was stored", mail[&**id]));
+            }
+        }
+        world.publish(a, &update);
+    }
+    let injected = world.env.faults.take().map_or(0, |f| f.injected.get());
+    world.change(a, OwnerChange::Drain);
+    if !world.state(a).messages.is_empty() {
+        return Err("mail left in the inbox after healing".into());
+    }
+    let got = texts(&world.inbound(a));
+    let mut want: Vec<String> = mail.values().cloned().collect();
+    want.push("first".into());
+    want.sort();
+    if got != want {
+        return Err(format!("stored {got:?}, sent {want:?}"));
+    }
+    Ok(injected)
+}
+
+/// Never lose a message: drain over a host that misses reads and refuses
+/// writes at `DRAIN_RATE` per mille (default 60), and, with `DRAIN_BLIND`
+/// per mille, lets one key at a time go unreadable for good.
+#[test]
+fn a_drain_over_a_faulty_host_never_tombstones_what_it_did_not_store() {
+    let (base, a, mail) = loaded();
+    let seeds = env_or("DRAIN_SEEDS", 60);
+    let rate = env_or("DRAIN_RATE", 60) as u32;
+    let blind = env_or("DRAIN_BLIND", 0) as u32;
+    let mut injected = 0;
+    let mut failures = Vec::new();
+    for seed in 1..=seeds {
+        let faults = Faults::seeded_with_blindness(seed, rate, blind);
+        match drain_run(&base, &a, &mail, faults) {
+            Ok(n) => injected += n,
+            Err(e) => failures.push(format!("seed {seed}: {e}")),
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    assert!(injected > seeds, "only {injected} faults injected");
+}
+
+/// A refused store stops the drain before anything is tombstoned.
+#[test]
+fn a_refused_store_stops_the_drain() {
+    let (base, a, mail) = loaded();
+    let mut world = base.clone();
+    world.env.fail_keys_containing = Some("it/in/".into());
+    assert!(world.update(&a, OwnerChange::Drain).is_err());
+    assert_eq!(world.state(&a).messages.len(), mail.len());
+}
+
+/// A copy restamped with another time gets a new id the contract may hold,
+/// but the sender's binding does not name it: it is tombstoned unread.
+#[test]
+fn a_restamped_copy_does_not_open() {
+    let mut world = World::new();
+    let a = world.identity("alice");
+    let b = world.identity("bob");
+    let sealed = world.seal(&b, &a, "original").unwrap();
+    let message: w::Message = w::decode(&sealed.message).unwrap();
+    let ct_hash = *blake3::hash(&message.ciphertext).as_bytes();
+    let restamped = w::Message {
+        sent_time: message.sent_time - 3600,
+        ..message.clone()
+    };
+    let id = w::message_id(&a.0, &ct_hash, restamped.sent_time, w::KIND_QUARANTINE, &[]);
+    let delta = InboxDelta {
+        messages: BTreeMap::from([(serde_bytes::ByteArray::new(id), restamped)]),
+        ..InboxDelta::default()
+    };
+    world.publish(&a, &w::encode(&delta));
+    assert!(w::delivered(&world.state(&a), &id), "the contract holds it");
+    let u = world.update(&a, OwnerChange::Drain).unwrap();
+    assert_eq!((u.drained, u.remaining), (0, 0));
+    world.publish(&a, &u.update.unwrap());
+    assert!(world.state(&a).messages.is_empty(), "tombstoned unread");
+    assert!(world.inbound(&a).is_empty());
+}
+
+/// The inner binding is over the envelope's body, never the ciphertext.
+#[test]
+fn the_inner_binding_never_covers_the_ciphertext() {
+    use crate::crypto::{Keys, MixRng};
+    use freenet_mail_protocol::{DsaSeed, KemSeed};
+    let keys = Keys::from_seeds(&DsaSeed([1; 32]), &KemSeed([2; 64]));
+    let to = freenet_mail_protocol::address::address_of(&keys.vk_bytes());
+    let body = w::SealedBody {
+        kind: w::EnvelopeKind::Mail(ByteBuf::from(b"x".to_vec())),
+        reply_pass: w::Pass {
+            cert: w::PassCert {
+                recipient: serde_bytes::ByteArray::new(to.0),
+                pass_id: serde_bytes::ByteArray::new([0; 16]),
+                pass_vk: serde_bytes::ByteArray::new([0; 32]),
+                epoch: 1,
+                expiry: DAY,
+                class: w::PassClass::Contact,
+                sig: serde_bytes::ByteArray::new([0; 64]),
+            },
+            pass_sk: serde_bytes::ByteArray::new([0; 32]),
+        },
+        pass_grant: None,
+        ghost_vk: None,
+    };
+    let mut rng = MixRng::new("t", &[3; 32], &Entropy([4; 32]));
+    let ct = crate::sealing::seal(
+        &keys,
+        &to.0,
+        &keys.ek_bytes(),
+        7200,
+        w::KIND_OWNER,
+        &[],
+        &body,
+        &mut rng,
+    )
+    .unwrap();
+    let ct_hash = *blake3::hash(&ct).as_bytes();
+    let body_hash = *blake3::hash(&w::encode(&body)).as_bytes();
+    let binding = w::inner_binding(&to.0, &body_hash, 7200, w::KIND_OWNER, &[]);
+    assert!(
+        !binding.windows(32).any(|win| win == ct_hash),
+        "the binding holds the ciphertext's hash"
+    );
+    let message = w::Message {
+        ciphertext: ByteBuf::from(ct),
+        sent_time: 7200,
+        admission: w::Admission::Owner {
+            sig: serde_bytes::ByteArray::new([0; 64]),
+        },
+    };
+    assert!(w::CIPHERTEXT_SIZES.contains(&message.ciphertext.len()));
+    let id = w::message_id(&to.0, &ct_hash, 7200, w::KIND_OWNER, &[]);
+    let opened = crate::sealing::open(&keys, &to.0, &id, &message).expect("opens");
+    assert_eq!(opened.body, body, "the body signed is the body sealed");
+}
+
+/// Decisions 17 and 20: what a pass publishes is no more precise than a day,
+/// its lifetime is drawn from 335 to 395 days, renewal falls at 40 to 60% of
+/// it, and reissue after a bump at a point of the grace drawn per pass.
+#[test]
+fn pass_timing_is_coarse_and_spread() {
+    use crate::crypto::MixRng;
+    let mut rng = MixRng::new("t", &[5; 32], &Entropy([6; 32]));
+    let (mut short, mut long) = (u64::MAX, 0);
+    let (mut early, mut late) = (u64::MAX, 0);
+    for i in 0..2000u64 {
+        let now = START + i * 3_607;
+        let mut e = LedgerEntry {
+            v: 1,
+            issued_for: None,
+            contact: None,
+            nonce: serde_bytes::ByteArray::new([0; 32]),
+            class: w::PassClass::Contact,
+            epoch: 1,
+            expiry: 0,
+            max_expiry: 0,
+            renew_at: 0,
+            revoked: false,
+            drained: Default::default(),
+        };
+        inbox_v2::start_term(&mut e, now, &mut rng);
+        assert_eq!(e.expiry % DAY, 0, "expiry to the day");
+        let lifetime = e.expiry - now;
+        assert!(
+            (335 * DAY..396 * DAY).contains(&lifetime),
+            "lifetime {lifetime}"
+        );
+        short = short.min(lifetime);
+        long = long.max(lifetime);
+        // As a share of the drawn lifetime (the expiry adds under a day).
+        let share = (e.renew_at - now) * 1000 / (lifetime - DAY / 2);
+        assert!((395..=605).contains(&share), "renewal at {share} per mille");
+        early = early.min(share);
+        late = late.max(share);
+    }
+    assert!(
+        short < 340 * DAY && long > 390 * DAY,
+        "lifetimes {short}..{long}"
+    );
+    assert!(
+        early < 410 && late > 590,
+        "renewals {early}..{late} per mille"
+    );
+    let mut world = World::new();
+    let a = world.identity("alice");
+    let mut rec = world.record(&a);
+    rec.epoch_began = START;
+    rec.reissue_grace = inbox_v2::EPOCH_GRACE;
+    let points: Vec<u64> = (0..500u16)
+        .map(|i| {
+            let mut id = [0u8; 16];
+            id[..2].copy_from_slice(&i.to_le_bytes());
+            inbox_v2::reissue_at(&rec, &serde_bytes::ByteArray::new(id)) - START
+        })
+        .collect();
+    assert!(points.iter().all(|p| *p < inbox_v2::EPOCH_GRACE));
+    assert!(*points.iter().min().unwrap() < DAY && *points.iter().max().unwrap() > 13 * DAY);
 }
