@@ -8,14 +8,15 @@ pass, so each has a line below. `scripts/check-mutants-triage.sh` fails on a
 survivor with no line, and, on a run of every shard, on a line with no
 survivor. A line is the mutant as cargo-mutants names it, without its position.
 
-Last full run, at the commit that added this file: 168 mutants, 147 caught,
-16 unviable (they do not compile, so no test could be run), 3 survived, 2 timed
-out. The 5 below are the whole list. Each was applied by hand to
-`src/merge.rs` at the position cargo-mutants gave, built, and run against every
-test: the three survivors passed all of them, and the two timeouts did not
-finish in 240 seconds.
+Last full run, after fix round 1 (review r1): 204 mutants, 176 caught, 20
+unviable (they do not compile, so no test could be run), 6 survived, 2 timed
+out. Two of the six were test gaps and now have tests (see the end). The other
+4 survivors and the 2 timeouts below are the whole list. Each was applied by
+hand at the position cargo-mutants gave, built, and run against every test:
+the survivors passed all of them, and the two timeouts did not finish in 240
+seconds. (The run that added this file: 168 mutants, the first five below.)
 
-None of the five is a test gap. Each is a mutant that does not change what the
+None of the six is a test gap. Each is a mutant that does not change what the
 function returns, or one that cannot fail faster than a hang.
 
 ## Survivors
@@ -39,6 +40,11 @@ function returns, or one that cannot fail faster than a hang.
   message, and the copies collected for one id are distinct (`at_id.contains`;
   dropping that `!` is a mutant the tests do catch), so a tie never arises, and
   if it did the two values would be equal.
+
+- `src/types.rs: replace bounded::<impl serde::de::Visitor<'de> for Visit<K, V, N>>::expecting -> std::fmt::Result with Ok(Default::default())`
+  Equivalent. `expecting` only writes the text of a type error. `decode` maps
+  every error except the count bound's to one fixed reason, so the text is never
+  read.
 
 ## Timeouts
 
@@ -66,3 +72,11 @@ function returns, or one that cannot fail faster than a hang.
   which no mutant run reached either. `tests/rules.rs` now has a test for it; it
   fails with that arm removed (`|| state.revoked.len() as u32 != theirs.revoked_count`
   replaced by `|| false`).
+- Fix round 1 left two survivors that were test gaps. `replace && with || in
+  merge`, in the seam's `note_revocation` call, let a forged revocation into the
+  union the `FilterUnprunedRevocations` and `OverflowReadsUnion` mutants read;
+  that scenario now has a forged-revocation control, which fails under the
+  mutant applied by hand. `replace match guard why == OVER_A_BOUND with true in
+  decode` reported every semantic decode error as a count bound;
+  `tests/bounds.rs` `other_decode_errors_are_not_a_bound` fails under it,
+  applied by hand.

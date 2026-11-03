@@ -403,6 +403,17 @@ fn only_the_revocations_left_after_pruning_filter() -> Broken {
     if holds(&merged, &msg) {
         broken.push("a live revocation did not filter");
     }
+    // The control: a forged one, dead or alive, never filters, so the union
+    // the mutant reads holds genuine entries only.
+    let mut forged = w.revocation(pass.cert.pass_id, T - WINDOW_BACK, 3);
+    forged.sig[0] ^= 1;
+    let merged = run(
+        &Rules::V1,
+        vec![state(OPEN, T, vec![forged], vec![msg.clone()]).into()],
+    );
+    if !holds(&merged, &msg) {
+        broken.push("a forged revocation dropped a message");
+    }
     broken
 }
 

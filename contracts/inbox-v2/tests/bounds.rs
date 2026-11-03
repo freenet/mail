@@ -174,6 +174,26 @@ fn revocations_usage_and_tombstones_at_their_bounds() {
 
 /// The count is checked entry by entry: a map that says it holds a million
 /// messages and carries 89 is refused for the 89th, not for running short.
+/// Only the bound's own error reads as one: another error the decoder raises
+/// from the input's meaning (a field of the wrong type) is plain malformed.
+#[test]
+fn other_decode_errors_are_not_a_bound() {
+    use ciborium::Value;
+    let bytes = encode(&InboxDelta::default());
+    let mut value: Value = ciborium::from_reader(bytes.as_slice()).unwrap();
+    let Value::Map(fields) = &mut value else {
+        panic!("a map")
+    };
+    let (_, time) = fields
+        .iter_mut()
+        .find(|(k, _)| k.as_text() == Some("time"))
+        .unwrap();
+    *time = Value::Integer(5.into());
+    let mut wrong = Vec::new();
+    ciborium::into_writer(&value, &mut wrong).unwrap();
+    assert_eq!(reason::<InboxDelta>(&wrong), Some("not CBOR of this type"));
+}
+
 #[test]
 fn a_count_is_refused_at_the_entry_that_passes_it() {
     let delta = InboxDelta {
