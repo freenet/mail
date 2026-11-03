@@ -17,11 +17,15 @@ printf '%s\n' 'src/merge.rs:10:5: replace a with b in f' \
 # The run behind those survivors: ten caught, so it clears the floor.
 seq 1 10 | sed 's/^/src\/merge.rs:1:1: caught /' > "$DIR/caught.txt"
 # A run that tested nothing: an empty survivor list and no caught.txt.
-mkdir -p "$DIR/empty" "$DIR/thin"
+mkdir -p "$DIR/empty" "$DIR/thin" "$DIR/unviable"
 : > "$DIR/empty/missed.txt"
 # A run that caught a few, under the floor.
 printf '%s\n' 'src/merge.rs:1:1: caught one' > "$DIR/thin/caught.txt"
 : > "$DIR/thin/missed.txt"
+# One caught and many unviable: they never ran against a test, so it is thin.
+printf '%s\n' 'src/merge.rs:1:1: caught one' > "$DIR/unviable/caught.txt"
+seq 1 20 | sed 's/^/src\/merge.rs:1:1: unviable /' > "$DIR/unviable/unviable.txt"
+: > "$DIR/unviable/missed.txt"
 printf '%s\n' '- `src/merge.rs: replace a with b in f` an equivalent mutant' \
     '- `src/sync.rs: replace c with d in g` the reason' > "$DIR/full.md"
 printf '%s\n' '- `src/merge.rs: replace a with b in f` an equivalent mutant' > "$DIR/short.md"
@@ -58,6 +62,8 @@ expect fail "an empty shard among full ones" "the run tested nothing" \
     --complete --triage "$DIR/full.md" "$DIR/missed.txt" "$DIR/empty/missed.txt"
 expect fail "a run under the floor" "1 mutants tested, under the floor of 10" \
     --triage "$DIR/full.md" "$DIR/thin/missed.txt"
+expect fail "a run padded with unviable mutants" "1 mutants tested, under the floor of 10" \
+    --triage "$DIR/full.md" "$DIR/unviable/missed.txt"
 
 [ "$failures" -eq 0 ] || exit 1
 echo "ok: the triage check passes and fails as it should"

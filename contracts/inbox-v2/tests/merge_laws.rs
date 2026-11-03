@@ -79,6 +79,9 @@ impl Rng {
 struct Universe {
     /// Revocations every peer holds: none, or V1's set filled to near its cap.
     fillers: &'static [Revocation],
+    /// Usage entries every peer holds: more live ones than V1's usage cap, or
+    /// none.
+    usage_fillers: &'static [PassUsage],
     owners: Vec<OwnerRecord>,
     times: Vec<TimeAttestation>,
     revoked: Vec<Revocation>,
@@ -117,6 +120,28 @@ fn cap_fillers() -> &'static [Revocation] {
                     AT_CAP_T0 + 900 * DAY
                 };
                 w.revocation(ByteArray::new(id), expiry, 3)
+            })
+            .collect()
+    })
+}
+
+/// More live usage entries than V1's usage cap, on pass ids no pass uses, all
+/// counting from owner version 1. Shared by every peer of the at-cap universe,
+/// so the usage cap overflows in each merge there.
+fn usage_fillers() -> &'static [PassUsage] {
+    static FILLERS: OnceLock<Vec<PassUsage>> = OnceLock::new();
+    FILLERS.get_or_init(|| {
+        let w = world();
+        (0..Rules::V1.usage as u64 + 6)
+            .map(|i| {
+                let mut id = [0xE0u8; 16];
+                id[8..].copy_from_slice(&i.to_be_bytes());
+                w.usage_at(
+                    ByteArray::new(id),
+                    1 + (i % 3) as u8,
+                    AT_CAP_T0 + 900 * DAY,
+                    1,
+                )
             })
             .collect()
     })
@@ -353,6 +378,7 @@ fn universe_at(seed: u64, rng: &mut Rng, big: bool, t0: u64) -> Universe {
 
     Universe {
         fillers: &[],
+        usage_fillers: &[],
         owners,
         times,
         revoked,
@@ -372,11 +398,13 @@ fn peer_state(laws: &Laws, u: &Universe, rng: &mut Rng) -> Result<Vec<u8>, Strin
     for _ in 0..1 + rng.below(3) {
         let mut revoked = rng.subset(&u.revoked, share);
         revoked.extend(u.fillers.iter().cloned());
+        let mut usage = rng.subset(&u.usage, share);
+        usage.extend(u.usage_fillers.iter().cloned());
         let raw = w.raw(
             rng.pick(&u.owners).clone(),
             rng.pick(&u.times).clone(),
             revoked,
-            rng.subset(&u.usage, share),
+            usage,
             rng.subset(&u.messages, share),
         );
         let part: InboxDelta = raw.into();
@@ -657,6 +685,7 @@ fn run_seed(seed: u64, oracle: bool, tally: &mut Tally) -> Result<(), String> {
         let mut rng = Rng(seed ^ 0xCA9);
         let mut u = universe_at(seed, &mut rng, false, AT_CAP_T0);
         u.fillers = cap_fillers();
+        u.usage_fillers = usage_fillers();
         // The fillers are epoch 3's: keep the owners under which they live
         // (epoch 3, or epoch 4 in a grace), or the set is never full. The
         // bump out of a full set is pinned in `tests/rules.rs`.
@@ -808,10 +837,10 @@ fn the_merge_laws_hold_over_crafted_states() {
             total.in_grace > 0 && total.grace_over > 0 && total.grace_held > 0,
             "the grace ran on both sides of its end and admitted mail"
         );
-        let [_, _, per_pass, pass_pool, owner_pool, per_ghost, _] = total.v1_overflow;
+        let [_, _, per_pass, pass_pool, owner_pool, per_ghost, quarantine] = total.v1_overflow;
         assert!(
-            per_pass > 0 && pass_pool > 0 && owner_pool > 0 && per_ghost > 0,
-            "V1's per-pass, pass pool, owner pool and per-ghost caps overflowed"
+            per_pass > 0 && pass_pool > 0 && owner_pool > 0 && per_ghost > 0 && quarantine > 0,
+            "V1's per-pass, pass pool, owner pool, per-ghost and quarantine caps overflowed"
         );
     }
     // Seeds 0, 20 and 40 of the default run: the 4096 rule was fuzzed only if
@@ -820,6 +849,10 @@ fn the_merge_laws_hold_over_crafted_states() {
         assert!(
             total.at_cap > 0 && total.v1_overflow[0] > 0,
             "merges reached and went over the 4096 revocation cap"
+        );
+        assert!(
+            total.v1_overflow[1] > 0,
+            "merges went over the 1024 usage cap"
         );
     }
 }
@@ -937,4 +970,32 @@ fn a_dead_revocation_never_wins_the_join() {
     let mail = encode(&w.raw(new, w.time(t), [], [], [msg]));
     let held: InboxState = decode(&laws.merge(&ca, &mail).unwrap()).unwrap();
     assert!(held.messages.is_empty(), "a revoked pass delivered mail");
+}
+
+/// The oracle states every number it is handed as its own literal, from the
+/// plan and decisions. A wrong constant in the crate then fails here: it would
+/// pass the fuzzer, which holds the merge to the oracle with the same number on
+/// both sides.
+#[test]
+fn the_oracles_numbers_are_the_crates() {
+    use freenet_email_inbox_v2::merge as m;
+    assert_eq!(Rules::V1, oracle::SPEC_V1, "V1's caps");
+    assert_eq!(
+        WINDOW_BACK,
+        oracle::WINDOW_BACK,
+        "how far sent_time may trail"
+    );
+    assert_eq!(
+        m::WINDOW_FORWARD,
+        oracle::FORWARD,
+        "how far sent_time may lead"
+    );
+    assert_eq!(
+        m::QUARANTINE_FORWARD,
+        oracle::QUARANTINE_FORWARD,
+        "how far a quarantine message may lead"
+    );
+    assert_eq!(m::CIPHERTEXT_SIZES, oracle::SIZES, "ciphertext sizes");
+    assert_eq!(m::SENT_TIME_GRANULARITY, HOUR, "sent_time granularity");
+    assert_eq!(m::EXPIRY_GRANULARITY, DAY, "expiry granularity");
 }

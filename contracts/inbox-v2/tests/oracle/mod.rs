@@ -42,7 +42,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Debug;
 
 use ed25519_dalek::{Signature, VerifyingKey};
-use freenet_email_inbox_v2::merge::{Rules, WINDOW_BACK};
+use freenet_email_inbox_v2::merge::Rules;
 use freenet_email_inbox_v2::signed::*;
 use freenet_email_inbox_v2::types::*;
 use freenet_stdlib::prelude::ContractInstanceId;
@@ -53,9 +53,26 @@ use super::common::{DAY, HOUR, WEBAPP_REQUESTOR, world};
 
 pub const ORACLE: &str = "ORACLE";
 
-const SIZES: [usize; 3] = [8192, 16384, 32768];
-const FORWARD: u64 = 400 * DAY;
-const QUARANTINE_FORWARD: u64 = 2 * DAY;
+// The spec's numbers, stated here from the plan and decisions and not read
+// from the crate: `the_oracles_numbers_are_the_crates` pins the crate to them,
+// so a wrong constant in the crate fails there and is not shared by both sides.
+pub const SIZES: [usize; 3] = [8192, 16384, 32768];
+pub const FORWARD: u64 = 400 * DAY;
+pub const QUARANTINE_FORWARD: u64 = 2 * DAY;
+/// Plan 5.3: how far `sent_time` may trail `owner_time`.
+pub const WINDOW_BACK: u64 = 2 * DAY;
+/// V1's caps (plan; decision 14 for quarantine and per-ghost).
+pub const SPEC_V1: Rules = Rules {
+    per_pass: 8,
+    per_invite: 2,
+    pass_pool: 64,
+    owner_pool: 8,
+    quarantine: 16,
+    per_ghost: 2,
+    revoked: 4096,
+    usage: 1024,
+    tombstones: 4096,
+};
 
 /// Which caps had more live items than room, in one merge.
 #[derive(Default, Clone, Copy)]

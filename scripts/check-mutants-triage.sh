@@ -16,8 +16,9 @@
 #
 # A run that tested nothing has no survivors, so it would pass. Each directory
 # the outcome files are in is a run's mutants.out: its caught.txt must name at
-# least one mutant, and caught, missed, timeout and unviable together at least
-# --min-tested (default 10; a shard of the ~245 holds about 30).
+# least one mutant, and caught, missed and timeout together at least
+# --min-tested (default 10; a shard of the ~245 holds about 30). Unviable
+# mutants never ran against a test, so they do not count.
 #
 # Usage: scripts/check-mutants-triage.sh [--complete] [--triage FILE]
 #            [--min-tested N] OUTCOME_FILE...
@@ -61,7 +62,7 @@ thin = False
 for run in sorted({os.path.dirname(os.path.abspath(path)) for path in files}):
     caught = lines(os.path.join(run, "caught.txt"))
     tested = sum(lines(os.path.join(run, name)) or 0
-                 for name in ("caught.txt", "missed.txt", "timeout.txt", "unviable.txt"))
+                 for name in ("caught.txt", "missed.txt", "timeout.txt"))
     if not caught:
         print("FAIL: %s: no mutant caught (caught.txt %s): the run tested nothing"
               % (run, "empty" if caught == 0 else "missing"), file=sys.stderr)

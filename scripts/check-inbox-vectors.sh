@@ -27,6 +27,10 @@ if ! (cd "$DIR" && "$PYTHON" -I vectors.py) > "$OUT"; then
     echo "FAIL: vectors.py did not run (it needs cbor2 and b3sum)." >&2
     exit 1
 fi
+if [ ! -s "$OUT" ] || [ ! -s "$DIR/vectors.txt" ]; then
+    echo "FAIL: vectors.py wrote, or vectors.txt holds, no vectors." >&2
+    exit 1
+fi
 if ! diff -u "$DIR/vectors.txt" "$OUT" >&2; then
     echo "FAIL: vectors.txt is not what vectors.py writes." >&2
     exit 1

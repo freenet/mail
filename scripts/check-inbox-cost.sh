@@ -40,6 +40,10 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 BUDGET="${INBOX_COST_BUDGET:-37000000000}"
+if ! [[ "$BUDGET" =~ ^[0-9]+$ ]]; then
+    echo "FAIL: INBOX_COST_BUDGET is '$BUDGET', not a number of fuel." >&2
+    exit 1
+fi
 TOOLS="$ROOT/tools/inbox-v2-cost"
 mkdir -p "$ROOT/target"
 DATA="$(mktemp -d "$ROOT/target/inbox-cost.XXXXXX")"
