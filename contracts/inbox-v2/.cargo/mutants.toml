@@ -28,6 +28,7 @@ additional_cargo_args = ["--features", "plausible-mutants"]
 additional_cargo_test_args = [
     "--lib",
     "--test", "plausible_mutants",
+    "--test", "bounds",
     "--test", "canonical",
     "--test", "ghost",
     "--test", "merge_laws",

@@ -22,12 +22,80 @@ pub type B64 = ByteArray<64>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Malformed(pub &'static str);
 
+/// What one decoded part may hold (decision 12): a valid state holds no more,
+/// so a part over any of these is refused as it is decoded, before anything in
+/// it is verified. `tests/bounds.rs` pins them to `Rules::V1`.
+pub const MAX_MESSAGES: usize = 88;
+pub const MAX_REVOKED: usize = 4096;
+pub const MAX_USAGE: usize = 1024;
+pub const MAX_TOMBSTONES: usize = 4096;
+/// The largest input `decode` reads: 4 MiB, which the largest valid state fits
+/// in (`tests/worst_case.rs`), plus a 256 KiB margin so that no valid state or
+/// delta comes near it.
+pub const MAX_INPUT_BYTES: usize = 4 * 1024 * 1024 + 256 * 1024;
+
+const OVER_A_BOUND: &str = "a count over its bound";
+
+/// Deserializes a map, refusing it at the entry that takes it past `N`.
+fn bounded<'de, D, K, V, const N: usize>(de: D) -> Result<BTreeMap<K, V>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    K: Deserialize<'de> + Ord,
+    V: Deserialize<'de>,
+{
+    struct Visit<K, V, const N: usize>(std::marker::PhantomData<(K, V)>);
+    impl<'de, K, V, const N: usize> serde::de::Visitor<'de> for Visit<K, V, N>
+    where
+        K: Deserialize<'de> + Ord,
+        V: Deserialize<'de>,
+    {
+        type Value = BTreeMap<K, V>;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            write!(f, "a map of at most {N} entries")
+        }
+        fn visit_map<A: serde::de::MapAccess<'de>>(
+            self,
+            mut map: A,
+        ) -> Result<Self::Value, A::Error> {
+            let mut out = BTreeMap::new();
+            while let Some(key) = map.next_key()? {
+                if out.len() == N {
+                    return Err(serde::de::Error::custom(OVER_A_BOUND));
+                }
+                let value = map.next_value()?;
+                out.insert(key, value);
+            }
+            Ok(out)
+        }
+    }
+    de.deserialize_map(Visit::<K, V, N>(std::marker::PhantomData))
+}
+
+fn messages<'de, D: serde::Deserializer<'de>>(de: D) -> Result<BTreeMap<B32, Message>, D::Error> {
+    bounded::<D, B32, Message, MAX_MESSAGES>(de)
+}
+
+fn revoked<'de, D: serde::Deserializer<'de>>(de: D) -> Result<BTreeMap<B16, Revocation>, D::Error> {
+    bounded::<D, B16, Revocation, MAX_REVOKED>(de)
+}
+
+fn usage<'de, D: serde::Deserializer<'de>>(de: D) -> Result<BTreeMap<B16, PassUsage>, D::Error> {
+    bounded::<D, B16, PassUsage, MAX_USAGE>(de)
+}
+
+fn tombstones<'de, D: serde::Deserializer<'de>>(de: D) -> Result<BTreeMap<B32, u64>, D::Error> {
+    bounded::<D, B32, u64, MAX_TOMBSTONES>(de)
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct InboxState {
     pub owner: OwnerRecord,
     pub time: TimeAttestation,
+    #[serde(deserialize_with = "revoked")]
     pub revoked: BTreeMap<B16, Revocation>,
+    #[serde(deserialize_with = "usage")]
     pub usage: BTreeMap<B16, PassUsage>,
+    #[serde(deserialize_with = "messages")]
     pub messages: BTreeMap<B32, Message>,
 }
 
@@ -37,8 +105,11 @@ pub struct InboxState {
 pub struct InboxDelta {
     pub owner: Option<OwnerRecord>,
     pub time: Option<TimeAttestation>,
+    #[serde(deserialize_with = "revoked")]
     pub revoked: BTreeMap<B16, Revocation>,
+    #[serde(deserialize_with = "usage")]
     pub usage: BTreeMap<B16, PassUsage>,
+    #[serde(deserialize_with = "messages")]
     pub messages: BTreeMap<B32, Message>,
 }
 
@@ -64,6 +135,7 @@ pub struct OwnerRecord {
     pub quarantine: QuarantineMode,
     /// Message id to its `sent_time`. Signed, so only the owner's client can
     /// prune it; the contract enforces the count.
+    #[serde(deserialize_with = "tombstones")]
     pub tombstones: BTreeMap<B32, u64>,
     /// ML-DSA-65.
     pub sig: ByteBuf,
@@ -149,7 +221,13 @@ pub fn encode<T: Serialize>(value: &T) -> Vec<u8> {
 
 /// Decode `bytes`, refusing anything but the canonical encoding.
 pub fn decode<T: DeserializeOwned + Serialize>(bytes: &[u8]) -> Result<T, Malformed> {
-    let value: T = ciborium::from_reader(bytes).map_err(|_| Malformed("not CBOR of this type"))?;
+    if bytes.len() > MAX_INPUT_BYTES {
+        return Err(Malformed("an input over the byte limit"));
+    }
+    let value: T = ciborium::from_reader(bytes).map_err(|e| match e {
+        ciborium::de::Error::Semantic(_, why) if why == OVER_A_BOUND => Malformed(OVER_A_BOUND),
+        _ => Malformed("not CBOR of this type"),
+    })?;
     if encode(&value) != bytes {
         return Err(Malformed("non-canonical CBOR"));
     }
