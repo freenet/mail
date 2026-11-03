@@ -11,6 +11,10 @@
 //! data is its name, a map keyed by bytes is `*`. A unit variant or a `None`
 //! is a leaf (or nothing), so `owner.quarantine` is the leaf for `Open` and
 //! `owner.quarantine.RequireGhost.min_usd` the field of the other mode.
+//!
+//! The keys of a map are public too, so each is a path of its own,
+//! `<map>.[key]` (decision 20): a map keyed by something new cannot pass the
+//! gate because its values were already declared.
 
 mod common;
 
@@ -79,7 +83,10 @@ fn walk(prefix: &str, value: &Value, out: &mut BTreeSet<String>) {
             for (key, inner) in entries {
                 let part = match key {
                     Value::Text(name) => name.as_str(),
-                    Value::Bytes(_) => "*",
+                    Value::Bytes(_) => {
+                        out.insert(format!("{prefix}.[key]"));
+                        "*"
+                    }
                     other => panic!("a map key that is neither a name nor bytes: {other:?}"),
                 };
                 let path = if prefix.is_empty() {

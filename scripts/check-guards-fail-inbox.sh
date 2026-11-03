@@ -34,6 +34,14 @@ guard "inbox v2: the real rules are held to a plausible mutant's law" "$I/src/me
 guard "inbox v2: a plaintext field missing from the toml fails the gate" \
     "$STAGE/docs/metadata-fields.toml" 'path = "owner.version"' 'path = "owner.versions"' \
     "tests:the_toml_lists_exactly_the_plaintext_fields" inbox_disclosure_tests
+guard "inbox v2: a map key missing from the toml fails the gate" \
+    "$STAGE/docs/metadata-fields.toml" 'path = "revoked.[key]"' 'path = "revoked.[keys]"' \
+    "tests:the_toml_lists_exactly_the_plaintext_fields" inbox_disclosure_tests
+guard "inbox v2: a gate that skips map keys fails" \
+    "$I/tests/metadata_disclosure.rs" \
+    '                        out.insert(format!("{prefix}.[key]"));' \
+    '                        let _ = &out;' \
+    "tests:the_toml_lists_exactly_the_plaintext_fields" inbox_disclosure_tests
 guard "inbox v2: a field with no reason fails the gate" \
     "$STAGE/docs/metadata-fields.toml" \
     'why = "The issuer'"'"'s signature over the owner time."' 'why = "x"' \

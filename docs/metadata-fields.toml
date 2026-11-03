@@ -6,6 +6,9 @@
 # No field names a sender. The Ghost Key proof is for RequireGhost inboxes: the
 # contract verifies it there, an Open inbox refuses a message carrying one, and
 # the compose flow attaches one only for a RequireGhost recipient.
+#
+# A path ending in `.[key]` is the key of a map, which is as public as its
+# values. What timing gives an observer is under `messages.[key]`.
 
 # ── Recipient keys, epoch and quarantine mode ──────────────────────────────
 
@@ -57,9 +60,14 @@ class = "owner activity"
 why = "Orders owner records, so peers can tell which is newer. It shows how often the owner changed settings."
 
 [[field]]
+path = "owner.tombstones.[key]"
+class = "owner activity"
+why = "The id of a message the owner drained, so the contract does not take it back. It is the id the message had while it was held, so anyone who saw the message can tell which one was deleted, by its pass id or ghost key whose it was, and from the owner version that added it, when."
+
+[[field]]
 path = "owner.tombstones.*"
 class = "owner activity"
-why = "Message ids the owner deleted, with their send times, so the contract does not take them back. Only the count and times are visible."
+why = "The send time of each drained message, so the owner's client can drop the tombstone once the message is outside the window."
 
 [[field]]
 path = "time.owner_time"
@@ -81,7 +89,7 @@ why = "The inbox address the pass was issued for."
 [[field]]
 path = "messages.*.admission.Pass.cert.pass_id"
 class = "pass bookkeeping"
-why = "A random id, stable across renewals, so the contract can limit and revoke by pass. It is not derived from the holder."
+why = "A random id, stable across renewals, so the contract can limit and revoke by pass. It is not derived from the holder, but every message under one pass carries it, so an observer can group an inbox's pass mail by contact and count the contacts over time."
 
 [[field]]
 path = "messages.*.admission.Pass.cert.pass_vk"
@@ -143,6 +151,11 @@ why = "The Ghost Key's signature over the payload."
 # ── Ciphertext and time ─────────────────────────────────────────────────────
 
 [[field]]
+path = "messages.[key]"
+class = "queue"
+why = "The message id, a hash of the recipient, the ciphertext, the send hour, the kind and the pass id or ghost key, so it shows nothing those do not. Any peer can subscribe and see each message arrive and each drain to the second, which the hour of the send time does not hide. There is no cover traffic, so a drain in one inbox followed by an arrival in another can link the two inboxes over a conversation."
+
+[[field]]
 path = "messages.*.ciphertext"
 class = "ciphertext"
 why = "Padded to 8, 16 or 32 KiB, so its size shows only one of three classes. Its contents are encrypted to the recipient."
@@ -153,6 +166,11 @@ class = "send time"
 why = "To the hour, as the contract needs it for the send window and for ordering a pass's messages."
 
 # ── Revocations and usage ───────────────────────────────────────────────────
+
+[[field]]
+path = "revoked.[key]"
+class = "revocations and usage"
+why = "The revoked pass's id, the same as the entry's pass_id."
 
 [[field]]
 path = "revoked.*.pass_id"
@@ -173,6 +191,11 @@ why = "A revocation from an old epoch is dropped."
 path = "revoked.*.sig"
 class = "revocations and usage"
 why = "The issuer's signature, so only the owner can revoke."
+
+[[field]]
+path = "usage.[key]"
+class = "revocations and usage"
+why = "The invite's pass id, the same as the entry's pass_id."
 
 [[field]]
 path = "usage.*.pass_id"

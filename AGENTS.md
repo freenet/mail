@@ -191,7 +191,7 @@ small caps. Change any rule knowing it cannot be patched after publish.
   law on the real rules and exactly the listed laws under its mutant. The mutated
   logic lives in `src/mutant.rs`; the rules hold one-line calls. A new rule that can go
   wrong in a plausible way gets a mutant and a scenario. `docs/metadata-fields.toml`
-  lists every plaintext field of a populated state and `tests/metadata_disclosure.rs`
+  lists every plaintext field and map key of a populated state and `tests/metadata_disclosure.rs`
   fails unless the list is exact (a field cannot become public without the README
   line; `release.sh` refusing to publish on it comes with C3). Both run in
   `check-drift`. The slow ones run in `.github/workflows/inbox-v2-gates.yml` on a
