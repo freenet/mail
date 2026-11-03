@@ -62,11 +62,18 @@ def main(argv):
         rel = os.path.relpath(name, crate)
         with open(name) as f:
             lines = f.read().split("\n")
+        # A generic function or a closure appears once per instantiation, and an
+        # arm is visited if any instantiation visited it.
+        counts = {}
         for branch in entry.get("branches", []):
-            line, _, _, _, taken, not_taken = branch[:6]
+            line, col, end_line, end_col, taken, not_taken = branch[:6]
             # A branch inside a macro expansion belongs to the macro's file.
             if len(branch) > 7 and branch[6] != branch[7]:
                 continue
+            here = counts.setdefault((line, col, end_line, end_col), [0, 0])
+            here[0] += taken
+            here[1] += not_taken
+        for (line, _, _, _), (taken, not_taken) in counts.items():
             code = lines[line - 1].strip()
             for arm, count in (("true", taken), ("false", not_taken)):
                 arms += 1

@@ -677,3 +677,36 @@ fn parameters_must_be_the_exact_shape() {
     version[0] = 1;
     assert!(Params::parse(&version).is_err());
 }
+
+/// The revocation digest is not the only thing a summary says about the set:
+/// it also counts it. A peer whose count differs is sent the set whatever its
+/// digest says, so a digest that agrees by accident cannot hide a missing entry.
+#[test]
+fn a_summary_that_counts_the_revocations_differently_is_sent_them() {
+    let w = world();
+    let revoked = [
+        w.revocation(id_of(1), FAR, 3),
+        w.revocation(id_of(2), FAR, 3),
+    ];
+    let state = w.raw(owner(3), w.time(T), revoked, [], []);
+    let summary = sync::summarize(&state);
+    assert!(sync::delta(&state, &summary).unwrap().is_empty());
+
+    let mut value: ciborium::Value = ciborium::from_reader(summary.as_slice()).unwrap();
+    let ciborium::Value::Map(fields) = &mut value else {
+        panic!("a summary is a map")
+    };
+    let count = fields
+        .iter_mut()
+        .find(|(k, _)| k.as_text() == Some("revoked_count"))
+        .expect("a count of the revocations");
+    assert_eq!(count.1, ciborium::Value::Integer(2.into()));
+    count.1 = ciborium::Value::Integer(1.into());
+    let mut counted_otherwise = Vec::new();
+    ciborium::into_writer(&value, &mut counted_otherwise).unwrap();
+
+    let delta = sync::delta(&state, &counted_otherwise).unwrap();
+    let delta: InboxDelta = decode(&delta).unwrap();
+    assert_eq!(delta.revoked.len(), 2, "the whole set is sent");
+    assert!(delta.owner.is_none() && delta.time.is_none() && delta.messages.is_empty());
+}

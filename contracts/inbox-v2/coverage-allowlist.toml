@@ -1,0 +1,9 @@
+# Branch arms of the rules that no test visits, each with the reason. Empty is
+# the aim: scripts/check-branch-coverage.py fails on an unvisited arm that is
+# not listed here and on an entry that excuses nothing.
+#
+# [[allow]]
+# file = "src/merge.rs"
+# code = "if let Some(x) = y {"   # the source line the branch starts on, trimmed
+# arm = "false"                    # "true" or "false": the arm never visited
+# why = "unreachable because ..."

@@ -16,10 +16,18 @@ minimum_test_timeout = 180.0
 
 # The tests that bear on the rules. cargo-mutants copies only this crate, and
 # tests/metadata_disclosure.rs reads docs/metadata-fields.toml from the
-# repository, so it cannot build in the copy; tests/plausible_mutants.rs needs
-# a feature. The workflow checks that every other test file is listed here.
+# repository at run time, so it would fail in the copy and is left out. The
+# workflow checks that every other test file is listed here.
+#
+# The plausible-mutants feature is on, so the seam's call sites in the rules are
+# compiled and mutated too, and tests/plausible_mutants.rs runs: a mutant of a
+# call site that does nothing the test notices is a gap in that test. Without the
+# feature the call sites would be mutated without being built, and every one
+# would be a false survivor.
+additional_cargo_args = ["--features", "plausible-mutants"]
 additional_cargo_test_args = [
     "--lib",
+    "--test", "plausible_mutants",
     "--test", "canonical",
     "--test", "ghost",
     "--test", "merge_laws",

@@ -86,7 +86,7 @@ jobs:
         run: |
           for f in contracts/inbox-v2/tests/*.rs; do
             n=$(basename "$f" .rs)
-            case "$n" in metadata_disclosure|plausible_mutants) continue ;; esac
+            case "$n" in metadata_disclosure) continue ;; esac
             grep -q "\"$n\"" contracts/inbox-v2/.cargo/mutants.toml \
               || { echo "::error::tests/$n.rs is not in .cargo/mutants.toml"; exit 1; }
           done
