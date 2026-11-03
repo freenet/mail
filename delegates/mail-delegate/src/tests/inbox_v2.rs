@@ -579,14 +579,18 @@ fn drain_run(
     a: &Addr,
     mail: &BTreeMap<[u8; 32], String>,
     faults: Faults,
-) -> Result<u64, String> {
+) -> Result<(u64, u64), String> {
     let mut world = base.clone();
     world.env.faults = Some(faults);
-    let mut injected = 0;
+    let mut injected = (0, 0);
     // Eight calls over the faulty host, then up to four over a healed one.
     for call in 0..12 {
         if call == 8 {
-            injected = world.env.faults.take().map_or(0, |f| f.injected.get());
+            injected = world
+                .env
+                .faults
+                .take()
+                .map_or((0, 0), |f| (f.injected.get(), f.observed.get()));
         }
         let Ok(u) = world.update(a, OwnerChange::Drain) else {
             continue;
@@ -649,18 +653,52 @@ fn a_drain_over_a_faulty_host_never_tombstones_what_it_did_not_store() {
     let seeds = env_or("DRAIN_SEEDS", 60);
     let rate = env_or("DRAIN_RATE", 60) as u32;
     let blind = env_or("DRAIN_BLIND", 0) as u32;
-    let mut injected = 0;
+    let (mut injected, mut seen) = (0u64, 0u64);
     let mut failures = Vec::new();
     let from = env_or("DRAIN_FROM", 1);
     for seed in from..from + seeds {
         let faults = Faults::seeded_with_blindness(seed, rate, blind);
         match drain_run(&base, &a, &mail, faults) {
-            Ok(n) => injected += n,
+            Ok((n, m)) => {
+                injected += n;
+                seen += m;
+            }
             Err(e) => failures.push(format!("seed {seed}: {e}")),
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
     assert!(injected > seeds, "only {injected} faults injected");
+    // A sweep that asks for unreadable keys must have made some unreadable and
+    // had the code read them: a blind rate that never hits one tests nothing.
+    assert!(
+        blind == 0 || seen > 0,
+        "no unreadable key was ever read as missing in {seeds} seeds at blind rate {blind}"
+    );
+}
+
+/// Seeds that tombstoned a message that was not stored while the inbox's
+/// index of stored mail was the key that would not read: the index write's
+/// `Conflict` was taken for "this message is already stored". Each is
+/// (seed, fault rate, unreadable rate), per mille.
+const UNREADABLE_INDEX_SEEDS: [(u64, u32, u32); 7] = [
+    (33, 60, 20),
+    (155, 60, 20),
+    (246, 60, 20),
+    (249, 60, 20),
+    (159, 200, 20),
+    (277, 200, 20),
+    (323, 200, 20),
+];
+
+#[test]
+fn a_drain_over_an_unreadable_index_never_tombstones_what_it_did_not_store() {
+    let (base, a, mail) = loaded();
+    for (seed, rate, blind) in UNREADABLE_INDEX_SEEDS {
+        let faults = Faults::seeded_with_blindness(seed, rate, blind);
+        if let Err(e) = drain_run(&base, &a, &mail, faults) {
+            panic!("seed {seed} at {rate}/{blind}: {e}");
+        }
+    }
 }
 
 /// A refused store tombstones nothing: every message stays in the inbox,

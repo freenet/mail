@@ -84,6 +84,14 @@ fault_tests() {
     cargo test --manifest-path "$STAGE/delegates/mail-delegate/Cargo.toml" --features v1-transition \
         -- --exact "tests::faults::$FAULT_RUN"
 }
+# A sweep that asks for unreadable keys fails if none was ever read as missing.
+# Run with a blind rate, a few seeds, as the long sweeps are.
+blind_assert_tests() {
+    DRAIN_SEEDS=30 DRAIN_RATE=60 DRAIN_BLIND=200 \
+    CARGO_TARGET_DIR="$DELEGATE_TARGET" \
+    cargo test --manifest-path "$STAGE/delegates/mail-delegate/Cargo.toml" --features v1-transition \
+        -- --exact tests::inbox_v2::a_drain_over_a_faulty_host_never_tombstones_what_it_did_not_store
+}
 blind_tests() {
     CARGO_TARGET_DIR="$DELEGATE_TARGET" \
     cargo test --manifest-path "$STAGE/delegates/mail-delegate/Cargo.toml" --features v1-transition \
@@ -361,8 +369,8 @@ dt "inbox v2: a Ghost Key claim waits for the node's copy" "$D/inbox_v2.rs" \
     'if claimed && !proven.contains(id) {' 'if false {' \
     a_message_stored_by_a_lost_drain_is_drained_again,a_page_state_admission_is_checked_before_it_counts
 dt "inbox v2: a copy already stored counts as stored" "$D/inbox_v2.rs" \
-    'Err(f) if matches!(f.code, FailureCode::Conflict { .. }) => return Ok(()),' \
-    'Err(f) if false => return Err(f),' a_copy_already_stored_under_the_id_counts_as_stored
+    'Err(f) if matches!(f.code, FailureCode::Conflict { .. }) => {' \
+    'Err(f) if false => {' a_message_stored_by_a_lost_drain_is_drained_again
 dt "inbox v2: mail is a contact's by its sender" "$D/inbox_v2.rs" \
     'let contact = is_contact(s, me, rec, &from)?;' 'let contact = false;' \
     contact_mail_is_never_in_the_stranger_budget,a_contacts_quarantine_mail_is_never_evicted_as_a_strangers
@@ -546,6 +554,23 @@ dt "inbox v2: a proof's tag comes from the key the sender bound" "$D/sealing.rs"
     'Admission::Quarantine { ghost: Some(_) } => (KIND_QUARANTINE, ghost_vk?.to_vec()),' \
     'Admission::Quarantine { ghost: Some(_) } => (KIND_QUARANTINE, vec![0x33; 32]),' \
     a_quarantine_message_with_an_undecodable_proof_has_the_vectors_id
+dt "inbox v2: a Conflict stores nothing until the copy reads back" "$D/inbox_v2.rs" \
+    '                    Ok(Some((_, stored))) if stored == bytes => Ok(()),
+                    _ => Err(f),' \
+    '                    _ => Ok(()),' \
+    a_copy_under_the_id_with_other_content_is_not_taken_for_the_message,a_drain_over_an_unreadable_index_never_tombstones_what_it_did_not_store,a_job_drain_over_an_unreadable_index_never_tombstones_what_it_did_not_store
+dt "inbox v2 jobs: an unreadable ledger entry keeps the contact's schedule" "$D/inbox_jobs.rs" \
+    '        // asked about again later, on the backoff.
+        let Some((generation, mut e)) = v2::load::<LedgerEntry>(s, &at)? else {
+            return Ok(Some(self.miss(s, &key)));' \
+    '        // asked about again later, on the backoff.
+        let Some((generation, mut e)) = v2::load::<LedgerEntry>(s, &at)? else {
+            return Ok(None);' \
+    an_unreadable_ledger_entry_never_costs_a_contact_its_renewals
+guard "inbox v2: a sweep whose unreadable keys never fire fails" "$D/env.rs" \
+    'self.blinded.borrow().is_none() && self.roll(self.blind_rate)' \
+    'self.blinded.borrow().is_none() && self.roll(self.blind_rate) && false' \
+    "tests:a_drain_over_a_faulty_host_never_tombstones_what_it_did_not_store" blind_assert_tests
 dt "origins get separate namespaces" "$D/store.rs" \
     'format!("o/{}/", hex(&origin.0))' '{ let _ = origin; "o/shared/".to_string() }' \
     origins_and_kinds_never_share_a_key,a_foreign_origin_can_neither_read_nor_change_another_namespace

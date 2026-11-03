@@ -1167,9 +1167,18 @@ fn store_inbound(
     for _ in 0..8 {
         // Create-only. A copy already under this id is this message, stored
         // by an earlier drain (the id binds the ciphertext): it counts as
-        // stored, whatever path stored it.
+        // stored, whatever path stored it. A Conflict alone proves nothing (the
+        // index record's own write can raise one), so the copy is read back:
+        // only a readable one with this content counts. A read that finds
+        // nothing may be an unreadable record, so that is Unknown: the
+        // message stays in the inbox and is tried again.
         match put_item(s, inbound(&me.addr, id), bytes.clone(), None) {
-            Err(f) if matches!(f.code, FailureCode::Conflict { .. }) => return Ok(()),
+            Err(f) if matches!(f.code, FailureCode::Conflict { .. }) => {
+                return match s.read(&item_rel(&inbound(&me.addr, id))) {
+                    Ok(Some((_, stored))) if stored == bytes => Ok(()),
+                    _ => Err(f),
+                };
+            }
             Err(f) if f.code == FailureCode::CapReached && !rec.strangers.is_empty() => {
                 let (_, (old, _)) = rec.strangers.pop_first().expect("not empty");
                 forget_inbound(s, &me.addr, &old);

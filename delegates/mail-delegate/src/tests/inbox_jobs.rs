@@ -325,13 +325,17 @@ fn job_drain_run(
     a: &Addr,
     mail: &BTreeMap<[u8; 32], String>,
     faults: Faults,
-) -> Result<u64, String> {
+) -> Result<(u64, u64), String> {
     let mut world = base.clone();
     world.env.faults = Some(faults);
-    let mut injected = 0;
+    let mut injected = (0, 0);
     for call in 0..14 {
         if call == 8 {
-            injected = world.env.faults.take().map_or(0, |f| f.injected.get());
+            injected = world
+                .env
+                .faults
+                .take()
+                .map_or((0, 0), |f| (f.injected.get(), f.observed.get()));
         }
         sync(&mut world);
         let (_, out) = watch::run(&mut world.env, PAGE);
@@ -376,17 +380,26 @@ fn a_job_drain_over_a_faulty_host_never_tombstones_what_it_did_not_store() {
     let rate = env_or("JOB_DRAIN_RATE", 60) as u32;
     let blind = env_or("JOB_DRAIN_BLIND", 0) as u32;
     let from = env_or("JOB_DRAIN_FROM", 1);
-    let mut injected = 0;
+    let (mut injected, mut seen) = (0u64, 0u64);
     let mut failures = Vec::new();
     for seed in from..from + seeds {
         let faults = Faults::seeded_with_blindness(seed, rate, blind);
         match job_drain_run(&base, &a, &mail, faults) {
-            Ok(n) => injected += n,
+            Ok((n, m)) => {
+                injected += n;
+                seen += m;
+            }
             Err(e) => failures.push(format!("seed {seed}: {e}")),
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
     assert!(injected > seeds, "only {injected} faults injected");
+    // A sweep that asks for unreadable keys must have made some unreadable and
+    // had the code read them: a blind rate that never hits one tests nothing.
+    assert!(
+        blind == 0 || seen > 0,
+        "no unreadable key was ever read as missing in {seeds} seeds at blind rate {blind}"
+    );
 }
 
 /// What the sweep below sees of every update the jobs send to Alice: the
@@ -459,7 +472,7 @@ fn job_time_run(
     a: &Addr,
     contacts: &[(Addr, w::B16, u64)],
     faults: Faults,
-) -> Result<u64, String> {
+) -> Result<(u64, u64), String> {
     let mut world = base.clone();
     let mut seen = Monotonic::of(&world.state(a));
     let latest = contacts
@@ -541,7 +554,11 @@ fn job_time_run(
     }
     // Healed: everything catches up, and a bump that never got through is
     // signed now, with its whole grace still to run.
-    let injected = world.env.faults.take().map_or(0, |f| f.injected.get());
+    let injected = world
+        .env
+        .faults
+        .take()
+        .map_or((0, 0), |f| (f.injected.get(), f.observed.get()));
     if !bumped && !bump(&mut world, &mut seen, 3)? {
         return Err("the bump was never signed on a healed host".into());
     }
@@ -634,17 +651,65 @@ fn the_clock_renewals_and_a_bump_over_a_faulty_host_lose_and_double_nothing() {
     let rate = env_or("JOB_TIME_RATE", 60) as u32;
     let blind = env_or("JOB_TIME_BLIND", 0) as u32;
     let from = env_or("JOB_TIME_FROM", 1);
-    let mut injected = 0;
+    let (mut injected, mut seen) = (0u64, 0u64);
     let mut failures = Vec::new();
     for seed in from..from + seeds {
         let faults = Faults::seeded_with_blindness(seed, rate, blind);
         match job_time_run(&base, &a, &contacts, faults) {
-            Ok(n) => injected += n,
+            Ok((n, m)) => {
+                injected += n;
+                seen += m;
+            }
             Err(e) => failures.push(format!("seed {seed}: {e}")),
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
     assert!(injected > seeds, "only {injected} faults injected");
+    // A sweep that asks for unreadable keys must have made some unreadable and
+    // had the code read them: a blind rate that never hits one tests nothing.
+    assert!(
+        blind == 0 || seen > 0,
+        "no unreadable key was ever read as missing in {seeds} seeds at blind rate {blind}"
+    );
+}
+
+/// Seeds found at 20% faults with unreadable keys (per mille: seed, fault
+/// rate, unreadable rate). The job drain tombstoned a message it had not
+/// stored when the index write's `Conflict` was taken for "already stored".
+const UNREADABLE_INDEX_SEEDS: [(u64, u32, u32); 8] = [
+    (159, 200, 20),
+    (277, 200, 20),
+    (323, 200, 20),
+    (473, 200, 20),
+    (565, 200, 20),
+    (33, 60, 20),
+    (155, 60, 20),
+    (249, 60, 20),
+];
+
+#[test]
+fn a_job_drain_over_an_unreadable_index_never_tombstones_what_it_did_not_store() {
+    let (base, a, mail) = loaded();
+    for (seed, rate, blind) in UNREADABLE_INDEX_SEEDS {
+        let faults = Faults::seeded_with_blindness(seed, rate, blind);
+        if let Err(e) = job_drain_run(&base, &a, &mail, faults) {
+            panic!("seed {seed} at {rate}/{blind}: {e}");
+        }
+    }
+}
+
+/// Seeds found at 20% faults with unreadable keys, where a contact's ledger
+/// entry read as absent and its renewal schedule was deleted for good: after
+/// the host healed its pass was never reissued after the bump.
+#[test]
+fn an_unreadable_ledger_entry_never_costs_a_contact_its_renewals() {
+    let (base, a, contacts) = with_contacts();
+    for seed in [66, 82, 137, 138, 290] {
+        let faults = Faults::seeded_with_blindness(seed, 200, 20);
+        if let Err(e) = job_time_run(&base, &a, &contacts, faults) {
+            panic!("seed {seed}: {e}");
+        }
+    }
 }
 
 /// A routine bump: every contact pass is reissued at its own drawn point of
@@ -2093,10 +2158,13 @@ fn a_contact_whose_renewal_errors_never_stops_the_others() {
     assert!(unknown > 0, "the failure is counted");
 }
 
-/// A stored copy already under a message's id, whatever its bytes, counts
-/// as that message stored: the drain tombstones it and goes on.
+/// A copy under a message's id counts as that message stored only if it
+/// reads back with the content this drain would store (an earlier drain's
+/// copy: `a_message_stored_by_a_lost_drain_is_drained_again`). One with other
+/// content is not known to be the message: it stays in the inbox, untombstoned
+/// and counted, and the rest drain.
 #[test]
-fn a_copy_already_stored_under_the_id_counts_as_stored() {
+fn a_copy_under_the_id_with_other_content_is_not_taken_for_the_message() {
     let mut world = World::new();
     let a = world.identity("alice");
     let b = world.identity("bob");
@@ -2112,9 +2180,13 @@ fn a_copy_already_stored_under_the_id_counts_as_stored() {
     let u = world
         .update(&a, OwnerChange::Drain)
         .expect("the drain goes on");
-    assert_eq!((u.drained, u.full), (2, 0));
+    assert_eq!((u.drained, u.full), (1, 1));
+    let delta: InboxDelta = w::decode(&u.update.clone().unwrap()).unwrap();
+    let tombstoned = delta.owner.iter().flat_map(|o| o.tombstones.keys());
+    assert!(tombstoned.filter(|id| ***id == sealed.id.0).count() == 0);
     world.publish(&a, &u.update.unwrap());
-    assert!(world.state(&a).messages.is_empty());
+    let left: Vec<_> = world.state(&a).messages.keys().copied().collect();
+    assert_eq!(left, [ByteArray::new(sealed.id.0)], "only that message stays");
 }
 
 /// The rotation moves past an inbox only once it is served: an inbox the

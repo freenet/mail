@@ -444,8 +444,11 @@ impl Renewing<'_> {
             return Ok(None);
         };
         let at = v2::item(ItemKind::PassLedger, &me.addr, pass_id.as_slice());
+        // A ledger entry that reads as absent may be an unreadable one: that
+        // is Unknown, never Absent. The contact keeps its schedule and is
+        // asked about again later, on the backoff.
         let Some((generation, mut e)) = v2::load::<LedgerEntry>(s, &at)? else {
-            return Ok(None);
+            return Ok(Some(self.miss(s, &key)));
         };
         if e.revoked {
             return Ok(None);
