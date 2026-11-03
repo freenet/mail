@@ -150,7 +150,7 @@ fn the_widest_valid_state_fits() {
         LIMIT - bytes.len()
     );
     assert!(bytes.len() <= LIMIT);
-    assert!(LIMIT < MAX_INPUT_BYTES);
+    const { assert!(LIMIT < MAX_INPUT_BYTES) };
 }
 
 /// The summary is smaller than a quarter of the state at the other extreme too.
