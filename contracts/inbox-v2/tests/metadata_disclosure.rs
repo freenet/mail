@@ -26,7 +26,10 @@ const T: u64 = 1_800_000_000 / HOUR * HOUR;
 const FAR: u64 = T + 300 * DAY;
 /// Read when the test runs, not included: cargo-mutants builds every test of a
 /// copy of this crate alone, where the file is not.
-const TOML_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/metadata-fields.toml");
+const TOML_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../docs/metadata-fields.toml"
+);
 
 /// The classes of `docs/metadata-fields.toml`, one per row of the plan's table.
 const CLASSES: [&str; 9] = [
