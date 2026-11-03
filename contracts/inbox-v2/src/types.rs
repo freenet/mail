@@ -36,6 +36,35 @@ pub const MAX_INPUT_BYTES: usize = 4 * 1024 * 1024 + 256 * 1024;
 
 const OVER_A_BOUND: &str = "a count over its bound";
 
+/// What the parts of one call hold between them (decision 16): the bounds above
+/// apply to the sum over every part the caller sent, so splitting a load over a
+/// state and a delta does not double what a call can cost.
+#[derive(Default)]
+pub struct CallCounts {
+    messages: usize,
+    revoked: usize,
+    usage: usize,
+    tombstones: usize,
+}
+
+impl CallCounts {
+    /// Counts `part` in, refusing the call once a sum passes its bound.
+    pub fn add(&mut self, part: &InboxDelta) -> Result<(), Malformed> {
+        self.messages += part.messages.len();
+        self.revoked += part.revoked.len();
+        self.usage += part.usage.len();
+        self.tombstones += part.owner.as_ref().map_or(0, |o| o.tombstones.len());
+        if self.messages > MAX_MESSAGES
+            || self.revoked > MAX_REVOKED
+            || self.usage > MAX_USAGE
+            || self.tombstones > MAX_TOMBSTONES
+        {
+            return Err(Malformed(OVER_A_BOUND));
+        }
+        Ok(())
+    }
+}
+
 /// Deserializes a map, refusing it at the entry that takes it past `N`.
 fn bounded<'de, D, K, V, const N: usize>(de: D) -> Result<BTreeMap<K, V>, D::Error>
 where

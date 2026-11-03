@@ -6,7 +6,8 @@
 //! decodes (a state, a delta, a summary) is held to those numbers as it is
 //! decoded: a part over a count is refused at the entry that passes it, and an
 //! input over the byte limit before decoding starts, so nothing is allocated or
-//! verified for what is over.
+//! verified for what is over. The counts also bound a call: the parts the
+//! caller sent are summed (decision 16).
 
 mod common;
 
@@ -169,6 +170,98 @@ fn revocations_usage_and_tombstones_at_their_bounds() {
             ..InboxDelta::default()
         },
         "a count over its bound",
+    );
+}
+
+/// `map` cut in two, the first `n` entries and the rest.
+fn split<K: Ord + Clone, V: Clone>(map: BTreeMap<K, V>, n: usize) -> [BTreeMap<K, V>; 2] {
+    let mut first = map;
+    let rest = first.split_off(&first.keys().nth(n).unwrap().clone());
+    [first, rest]
+}
+
+/// One call carrying `parts` as a state and a delta, as a client may send it.
+fn one_call(parts: [InboxDelta; 2]) -> Result<Vec<u8>, freenet_stdlib::prelude::ContractError> {
+    let w = world();
+    let [state, delta] = parts;
+    let state = InboxState {
+        owner: state.owner.unwrap_or_else(owner),
+        time: w.time(T),
+        revoked: state.revoked,
+        usage: state.usage,
+        messages: state.messages,
+    };
+    let data = UpdateData::StateAndDelta {
+        state: encode(&state).into(),
+        delta: encode(&delta).into(),
+    };
+    apply(&Rules::V1, &w.params, &base(), vec![data])
+}
+
+/// Decision 16: the bounds hold for the whole call, summed over every part the
+/// caller sent, so two parts at their bounds cannot double what one call costs.
+/// The state the contract already holds is not counted: it is valid, so it is
+/// within the bounds by itself.
+#[test]
+fn the_bounds_hold_over_the_whole_call() {
+    let w = world();
+    let pair = |n: usize, cut: usize, put: &dyn Fn(&mut InboxDelta, u64, u64)| {
+        let mut parts = [InboxDelta::default(), InboxDelta::default()];
+        put(&mut parts[0], 0, cut as u64);
+        put(&mut parts[1], cut as u64, n as u64);
+        parts
+    };
+    let msgs = |d: &mut InboxDelta, from: u64, to: u64| {
+        d.messages = messages(to).into_iter().skip(from as usize).collect();
+    };
+    let revs = |d: &mut InboxDelta, from: u64, to: u64| {
+        d.revoked = revocations(to).split_off(&id_of(from));
+    };
+    let uses = |d: &mut InboxDelta, from: u64, to: u64| {
+        d.usage = usage(to).split_off(&id_of(from));
+    };
+    let tombs = |d: &mut InboxDelta, from: u64, to: u64| {
+        let all = tombstones(to);
+        let held = all.into_iter().skip(from as usize).collect();
+        d.owner = Some(w.owner(2 + from, 3, QuarantineMode::Open, held));
+    };
+    let cases: [(&str, usize, &dyn Fn(&mut InboxDelta, u64, u64)); 4] = [
+        ("messages", MAX_MESSAGES, &msgs),
+        ("revocations", MAX_REVOKED, &revs),
+        ("usage entries", MAX_USAGE, &uses),
+        ("tombstones", MAX_TOMBSTONES, &tombs),
+    ];
+    for (what, bound, put) in cases {
+        let half = bound / 2;
+        assert!(
+            one_call(pair(bound, half, put)).is_ok(),
+            "{what}: {bound} over two parts is within the bound"
+        );
+        assert!(
+            one_call(pair(bound + 1, half + 1, put)).is_err(),
+            "{what}: {} over two parts is over the bound",
+            bound + 1
+        );
+    }
+    // Two entries of the call's data are summed the same way.
+    let [a, b] = split(messages(MAX_MESSAGES as u64 + 1), 45);
+    let as_delta = |m| {
+        UpdateData::Delta(
+            encode(&InboxDelta {
+                messages: m,
+                ..InboxDelta::default()
+            })
+            .into(),
+        )
+    };
+    assert!(
+        apply(
+            &Rules::V1,
+            &w.params,
+            &base(),
+            vec![as_delta(a), as_delta(b)]
+        )
+        .is_err()
     );
 }
 

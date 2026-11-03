@@ -20,7 +20,7 @@ pub mod types;
 use freenet_stdlib::prelude::*;
 
 use crate::merge::{Rules, merge};
-use crate::types::{InboxDelta, InboxState, Malformed, decode, encode};
+use crate::types::{CallCounts, InboxDelta, InboxState, Malformed, decode, encode};
 
 /// Version byte of the contract parameters.
 const PARAMS_VERSION: u8 = 2;
@@ -80,34 +80,51 @@ pub fn apply(
     data: Vec<UpdateData<'_>>,
 ) -> Result<Vec<u8>, ContractError> {
     let current = decode::<InboxState>(state).map_err(refused)?;
-    let mut parts: Vec<InboxDelta> = vec![current.into()];
+    let mut parts = Parts {
+        parts: vec![current.into()],
+        // The held state is valid, so within the bounds alone; what the caller
+        // sends is counted together (decision 16).
+        sent: CallCounts::default(),
+    };
     for update in data {
         match update {
-            UpdateData::State(s) => push_state(&mut parts, s.as_ref())?,
-            UpdateData::Delta(d) => push_delta(&mut parts, d.as_ref())?,
+            UpdateData::State(s) => parts.push_state(s.as_ref())?,
+            UpdateData::Delta(d) => parts.push_delta(d.as_ref())?,
             UpdateData::StateAndDelta { state, delta } => {
-                push_state(&mut parts, state.as_ref())?;
-                push_delta(&mut parts, delta.as_ref())?;
+                parts.push_state(state.as_ref())?;
+                parts.push_delta(delta.as_ref())?;
             }
             // Refused rather than ignored: this contract never asks for one.
             _ => return Err(ContractError::InvalidUpdate),
         }
     }
-    let merged = merge(rules, params, parts).map_err(refused)?;
+    let merged = merge(rules, params, parts.parts).map_err(refused)?;
     Ok(encode(&merged))
 }
 
-fn push_state(parts: &mut Vec<InboxDelta>, bytes: &[u8]) -> Result<(), ContractError> {
-    parts.push(decode::<InboxState>(bytes).map_err(refused)?.into());
-    Ok(())
+struct Parts {
+    parts: Vec<InboxDelta>,
+    sent: CallCounts,
 }
 
-fn push_delta(parts: &mut Vec<InboxDelta>, bytes: &[u8]) -> Result<(), ContractError> {
-    // Zero bytes is the protocol's "nothing to send".
-    if !bytes.is_empty() {
-        parts.push(decode::<InboxDelta>(bytes).map_err(refused)?);
+impl Parts {
+    fn push(&mut self, part: InboxDelta) -> Result<(), ContractError> {
+        self.sent.add(&part).map_err(refused)?;
+        self.parts.push(part);
+        Ok(())
     }
-    Ok(())
+
+    fn push_state(&mut self, bytes: &[u8]) -> Result<(), ContractError> {
+        self.push(decode::<InboxState>(bytes).map_err(refused)?.into())
+    }
+
+    fn push_delta(&mut self, bytes: &[u8]) -> Result<(), ContractError> {
+        // Zero bytes is the protocol's "nothing to send".
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        self.push(decode::<InboxDelta>(bytes).map_err(refused)?)
+    }
 }
 
 pub struct Inbox;

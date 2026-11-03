@@ -181,7 +181,8 @@ small caps. Change any rule knowing it cannot be patched after publish.
   an owner record that fails, is refused. So is a part over what a valid state
   can hold (88 messages, 4096 revocations, 1024 usage entries, 4096 tombstones,
   4 MiB plus a 256 KiB margin), as it is decoded and before anything in it is
-  verified (`types::MAX_*`, `tests/bounds.rs`). A message, revocation or usage entry
+  verified, and a call whose parts hold more than those counts between them
+  (`types::MAX_*`, `types::CallCounts`, `tests/bounds.rs`). A message, revocation or usage entry
   that fails is dropped without one, so a sender reads back after an update.
 - **Gates on the rules.** `tests/plausible_mutants.rs` runs 15 wrong-but-plausible
   rules through `src/mutant.rs`, a seam compiled only with the
