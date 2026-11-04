@@ -188,32 +188,99 @@ pub(crate) async fn ensure(addr: Addr) -> Result<(), String> {
         Got::State(s) => Some(s),
         Got::Missing => None,
     };
-    match (has_record, existing) {
-        (true, Some(_)) => Ok(()),
-        (true, None) => {
-            Err("this identity's inbox is not on the network; it will be looked for again".into())
-        }
-        (false, existing) => {
-            let reply = call(Op::CreateInboxV2 {
-                addr,
-                ghost_master: Hash32(super::ghost_master()),
-                existing: existing.map(Into::into),
-            })
-            .await;
-            let state = match reply {
-                Ok(Reply::InboxV2State(s)) => s.into_vec(),
-                Ok(other) => return Err(unexpected(&other).to_string()),
-                // Made by another tab or an earlier load whose answer was lost.
-                Err(CallError::Failed(f))
-                    if matches!(f.code, freenet_mail_protocol::FailureCode::Conflict { .. }) =>
-                {
-                    return Ok(());
-                }
-                Err(e) => return Err(e.to_string()),
-            };
-            net::put(&addr, state).await
-        }
+    if has_record {
+        return republish(addr, existing.is_some()).await;
     }
+    let reply = call(Op::CreateInboxV2 {
+        addr,
+        ghost_master: Hash32(super::ghost_master()),
+        existing: existing.clone().map(Into::into),
+    })
+    .await;
+    let state = match reply {
+        Ok(Reply::InboxV2State(s)) => s.into_vec(),
+        Ok(other) => return Err(unexpected(&other).to_string()),
+        // Made by another tab or an earlier load whose answer was lost.
+        Err(CallError::Failed(f))
+            if matches!(f.code, freenet_mail_protocol::FailureCode::Conflict { .. }) =>
+        {
+            return republish(addr, existing.is_some()).await;
+        }
+        Err(e) => return Err(e.to_string()),
+    };
+    // Kept before the PUT: if the PUT never lands, the delegate has the
+    // record and will not sign a first state again, so a later start
+    // publishes this one.
+    note_unpublished(addr, Some(&state)).await?;
+    net::put(&addr, state).await
+}
+
+/// The identity has an inbox record. If the network has no inbox, publish
+/// the first state this page kept when it made the record (its PUT failed or
+/// never left); once the network has one, forget that state.
+async fn republish(addr: Addr, on_network: bool) -> Result<(), String> {
+    let kept = unpublished(addr).await?;
+    match (on_network, kept) {
+        (true, None) => Ok(()),
+        (true, Some(_)) => note_unpublished(addr, None).await,
+        (false, Some(state)) => net::put(&addr, state).await,
+        (false, None) => Err(
+            "this identity's inbox is not on the network, and this node kept no copy of its \
+             first state to publish; it will be looked for again"
+                .into(),
+        ),
+    }
+}
+
+/// Where the first state waits until it is on the network: a field of the
+/// identity's settings item, which the page may write.
+const UNPUBLISHED_FIELD: &str = "v2_unpublished";
+
+fn settings_item(addr: Addr) -> ItemRef {
+    ItemRef {
+        kind: ItemKind::IdentitySettings,
+        owner: Some(addr),
+        id: Vec::new(),
+    }
+}
+
+fn unpublished_in(body: Option<&[u8]>) -> Option<Vec<u8>> {
+    let v: serde_json::Value = serde_json::from_slice(body?).ok()?;
+    let hex = v.get(UNPUBLISHED_FIELD)?.as_str()?;
+    (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(hex.get(i..i + 2)?, 16).ok())
+        .collect()
+}
+
+async fn unpublished(addr: Addr) -> Result<Option<Vec<u8>>, String> {
+    let item = ops::get_item(settings_item(addr))
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(unpublished_in(item.as_ref().map(|i| i.body.as_slice())))
+}
+
+async fn note_unpublished(addr: Addr, state: Option<&[u8]>) -> Result<(), String> {
+    let hex: Option<String> = state.map(|s| s.iter().map(|b| format!("{b:02x}")).collect());
+    ops::put_item_merged(settings_item(addr), |stored| {
+        let mut value = stored
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok())
+            .filter(serde_json::Value::is_object)
+            .unwrap_or_else(|| serde_json::json!({}));
+        let map = value.as_object_mut().expect("an object");
+        match &hex {
+            Some(h) => {
+                map.insert(UNPUBLISHED_FIELD.into(), serde_json::json!(h));
+            }
+            None => {
+                map.remove(UNPUBLISHED_FIELD)?;
+            }
+        }
+        Some(serde_json::to_vec(&value).expect("JSON encodes"))
+    })
+    .await
+    .map(|_| ())
+    .map_err(|e| format!("the new inbox could not be kept for publishing: {e}"))
 }
 
 /// The node or the page saw `addr`'s state change: drain it again.
@@ -284,7 +351,11 @@ async fn drain(addr: Addr) -> Result<(), String> {
     for _ in 0..16 {
         let bytes = match net::get(&addr, true).await? {
             Got::State(s) => s,
-            Got::Missing => return Err("the inbox is not on the network".into()),
+            // A first PUT whose answer came but whose state went nowhere.
+            Got::Missing => {
+                republish(addr, false).await?;
+                continue;
+            }
         };
         let state: InboxState = w::decode(&bytes)?;
         note_owner(addr, &state).await;

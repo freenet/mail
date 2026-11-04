@@ -67,6 +67,28 @@ fn ensure_makes_one_inbox_and_finds_it_again() {
     assert_eq!(state(&a), s);
 }
 
+/// The first PUT of a new inbox fails after the delegate stored its record:
+/// rejected, or gone with no word. A later start publishes it after all.
+#[test]
+fn an_inbox_whose_first_put_failed_is_published_later() {
+    for (alias, answer) in [
+        ("v2-put-rejected", Err("the contract refused it".to_string())),
+        ("v2-put-lost", Ok(())),
+    ] {
+        let (info, _) = block_on(ops::create_identity(alias.into(), String::new())).unwrap();
+        let a = info.addr;
+        net::offline::lose_next_put(&a, answer.clone());
+        assert_eq!(block_on(owner::ensure(a)).is_ok(), answer.is_ok());
+        assert_eq!(block_on(net::get(&a, false)), Ok(Got::Missing));
+        block_on(owner::ensure(a)).unwrap();
+        assert_eq!(state(&a).owner.quarantine, QuarantineMode::Open, "{alias}");
+        // And it works: mail gets in and is drained.
+        let b = identity(&format!("{alias}-sender"));
+        assert!(block_on(send::send(b, a, &body("after"))).delivered());
+        assert_eq!(drain(a), vec!["after".to_string()]);
+    }
+}
+
 /// First contact lands in the new-contacts queue; the reply then goes by the
 /// pass the first message carried, and so does the next message back.
 #[test]

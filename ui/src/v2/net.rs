@@ -261,6 +261,23 @@ pub(crate) mod offline {
         SLOW.with(|s| s.borrow_mut().insert(id, (gets, Vec::new())));
     }
 
+    thread_local! {
+        /// Tests: the next PUT of an inbox never reaches the network, and
+        /// the page is told this.
+        #[cfg(test)]
+        static LOSE_PUT: RefCell<HashMap<ContractInstanceId, Result<(), String>>> =
+            RefCell::new(HashMap::new());
+    }
+
+    /// Tests: the next PUT of `addr` is not stored; it answers `answer`
+    /// (an error for a rejected or unanswered PUT, `Ok` for one whose
+    /// answer came but whose state went nowhere).
+    #[cfg(test)]
+    pub(crate) fn lose_next_put(addr: &Addr, answer: Result<(), String>) {
+        let id = super::super::instance_id(addr);
+        LOSE_PUT.with(|l| l.borrow_mut().insert(id, answer));
+    }
+
     #[cfg(test)]
     fn held_back(addr: &Addr, delta: &[u8]) -> bool {
         let id = super::super::instance_id(addr);
@@ -324,6 +341,10 @@ pub(crate) mod offline {
 
     pub(crate) async fn put(addr: &Addr, state: Vec<u8>) -> Result<(), String> {
         let id = super::super::instance_id(addr);
+        #[cfg(test)]
+        if let Some(answer) = LOSE_PUT.with(|l| l.borrow_mut().remove(&id)) {
+            return answer;
+        }
         let merged = match STATES.with(|s| s.borrow().get(&id).cloned()) {
             Some(held) => merge(&held, w::decode::<InboxState>(&state)?.into_delta())?,
             None => {
