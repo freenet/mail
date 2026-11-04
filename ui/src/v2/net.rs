@@ -146,15 +146,29 @@ mod node {
         ask_id(super::super::instance_id(addr), kind, request).await
     }
 
-    async fn ask_id(
+    #[cfg(test)]
+    thread_local! {
+        /// Tests: the client requests go to, in place of the node's.
+        static TEST_SENDER: RefCell<Option<crate::api::WebApiRequestClient>> =
+            const { RefCell::new(None) };
+    }
+
+    fn sender() -> Option<crate::api::WebApiRequestClient> {
+        #[cfg(test)]
+        if let Some(s) = TEST_SENDER.with(|t| t.borrow().clone()) {
+            return Some(s);
+        }
+        crate::api::WEB_API_SENDER.get().cloned()
+    }
+
+    /// Hand `request` to the node and wait in its slot. The inbox is known
+    /// only once the node took it.
+    async fn send_request(
         id: ContractInstanceId,
         kind: Kind,
         request: ContractRequest<'static>,
-    ) -> Answer {
-        let mut client = crate::api::WEB_API_SENDER
-            .get()
-            .ok_or("not connected to the node")?
-            .clone();
+    ) -> Result<oneshot::Receiver<Answer>, String> {
+        let mut client = sender().ok_or("not connected to the node")?;
         let (tx, rx) = oneshot::channel();
         WAITING.with(|w| w.borrow_mut().entry((id, kind)).or_default().push(tx));
         if let Err(e) = client.send(request.into()).await {
@@ -164,6 +178,15 @@ mod node {
         // Known only once the node took a request: until then no GET of it,
         // and so no code-bearing one, reached the node.
         KNOWN.with(|k| k.borrow_mut().insert(id));
+        Ok(rx)
+    }
+
+    async fn ask_id(
+        id: ContractInstanceId,
+        kind: Kind,
+        request: ContractRequest<'static>,
+    ) -> Answer {
+        let rx = send_request(id, kind, request).await?;
         use futures::FutureExt;
         let mut rx = rx.fuse();
         let mut timer = gloo_timers::future::TimeoutFuture::new(TIMEOUT_MS).fuse();
@@ -175,17 +198,19 @@ mod node {
 
     /// The inbox's state. `subscribe` also follows its changes (own inboxes).
     pub(crate) async fn get(addr: &Addr, subscribe: bool) -> Answer {
-        let id = super::super::instance_id(addr);
+        let request = get_request(super::super::instance_id(addr), subscribe);
+        ask(addr, Kind::Get, request).await
+    }
+
+    fn get_request(id: ContractInstanceId, subscribe: bool) -> ContractRequest<'static> {
         // The first GET of an inbox asks for its code too: a node applies an
         // UPDATE it sends only to a contract whose code it holds (#191).
-        let first = !known(&id);
-        let request = ContractRequest::Get {
+        ContractRequest::Get {
             key: id,
-            return_contract_code: first,
+            return_contract_code: !known(&id),
             subscribe,
             blocking_subscribe: false,
-        };
-        ask(addr, Kind::Get, request).await
+        }
     }
 
     /// Another contract's state (the Ghost Key vault's pointer record),
@@ -229,14 +254,57 @@ mod node {
     mod tests {
         use super::*;
 
+        fn asks_for_code(request: &ContractRequest<'static>) -> bool {
+            matches!(
+                request,
+                ContractRequest::Get {
+                    return_contract_code: true,
+                    ..
+                }
+            )
+        }
+
         /// A GET the node never took did not fetch the code: the next one
-        /// must still ask for it (#191).
+        /// must still ask for it (#191). With no connection, and with one the
+        /// node closed (the request is refused at the send).
         #[test]
         fn a_get_that_was_never_sent_leaves_the_code_to_fetch() {
             let addr = Addr([0x5c; 24]);
             let id = super::super::super::instance_id(&addr);
             assert!(futures::executor::block_on(get(&addr, false)).is_err());
             assert!(!known(&id), "an unsent GET marked the inbox known");
+
+            let (tx, rx) = futures::channel::mpsc::unbounded();
+            let (responses, _) = futures::channel::mpsc::unbounded();
+            drop(rx);
+            TEST_SENDER.with(|t| {
+                *t.borrow_mut() = Some(crate::api::WebApiRequestClient::for_tests(tx, responses))
+            });
+            let sent =
+                futures::executor::block_on(send_request(id, Kind::Get, get_request(id, false)));
+            TEST_SENDER.with(|t| t.borrow_mut().take());
+            assert!(sent.is_err(), "the closed connection took it");
+            assert!(!known(&id), "a GET the node refused marked the inbox known");
+            assert!(asks_for_code(&get_request(id, false)));
+        }
+
+        /// A GET the node took fetched the code: the next one does not.
+        #[test]
+        fn a_get_the_node_took_marks_the_code_fetched() {
+            let id = super::super::super::instance_id(&Addr([0x5d; 24]));
+            let (tx, mut rx) = futures::channel::mpsc::unbounded();
+            let (responses, _) = futures::channel::mpsc::unbounded();
+            TEST_SENDER.with(|t| {
+                *t.borrow_mut() = Some(crate::api::WebApiRequestClient::for_tests(tx, responses))
+            });
+            let first = get_request(id, false);
+            assert!(asks_for_code(&first));
+            let sent = futures::executor::block_on(send_request(id, Kind::Get, first));
+            TEST_SENDER.with(|t| t.borrow_mut().take());
+            assert!(sent.is_ok());
+            assert!(rx.try_next().unwrap().is_some(), "the node got it");
+            assert!(known(&id));
+            assert!(!asks_for_code(&get_request(id, false)));
         }
     }
 }

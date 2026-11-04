@@ -138,6 +138,14 @@ pub(crate) struct WebApiRequestClient {
 #[derive(Clone, Debug)]
 pub(crate) struct WebApiRequestClient;
 
+#[cfg(all(test, feature = "use-node"))]
+impl WebApiRequestClient {
+    /// A client over channels a test holds the other ends of.
+    pub(crate) fn for_tests(sender: ClientRequester, responses: NodeResponses) -> Self {
+        WebApiRequestClient { sender, responses }
+    }
+}
+
 // The error type is freenet-stdlib's own; boxing it here would only move
 // the size into every caller's `map_err`.
 #[allow(clippy::result_large_err)]
