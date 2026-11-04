@@ -166,6 +166,7 @@ pub(crate) struct Signed {
 /// the default (the vault may then let the user pick another: the result
 /// names the key that signed).
 pub(crate) async fn sign(key: &Key, default: bool, payload: Vec<u8>) -> Result<Signed, Refusal> {
+    let message = payload.clone();
     let request = if default {
         GhostkeyRequest::SignWithDefault { message: payload }
     } else {
@@ -179,7 +180,11 @@ pub(crate) async fn sign(key: &Key, default: bool, payload: Vec<u8>) -> Result<S
             scoped_payload,
             signature,
             certificate_pem,
-        } => proof(scoped_payload, signature, &certificate_pem),
+        } => {
+            let signed = proof(scoped_payload, signature, &certificate_pem)?;
+            answers(&message, &signed)?;
+            Ok(signed)
+        }
         other => Err(unexpected(&other)),
     }
 }
@@ -197,8 +202,11 @@ fn proof(scoped: Vec<u8>, signature: Vec<u8>, pem: &str) -> Result<Signed, Refus
         .try_into()
         .map_err(|_| bad("is malformed"))?;
     let vk = verified.ghost_key().to_bytes();
+    let info = verified
+        .notary_info()
+        .map_err(|_| bad("names no donation"))?;
     Ok(Signed {
-        usd: verified.notary_info().map(|i| i.amount).unwrap_or(0),
+        usd: donation_usd(&info.action, info.amount)?,
         fingerprint: fingerprint(&vk),
         vk,
         proof: GhostProof {
@@ -207,6 +215,49 @@ fn proof(scoped: Vec<u8>, signature: Vec<u8>, pem: &str) -> Result<Signed, Refus
             ghost_sig: ByteArray::new(sig),
         },
     })
+}
+
+/// The tier a certificate's notary line gives: inboxes count only a
+/// donation (`freenet-donation`), whatever the amount.
+fn donation_usd(action: &str, amount: u64) -> Result<u64, Refusal> {
+    if action != "freenet-donation" {
+        return Err(Refusal::Failed(
+            "this Ghost Key is not a donation key, and inboxes accept only those".into(),
+        ));
+    }
+    Ok(amount)
+}
+
+/// Whether `s` answers a request to sign `payload` for this app.
+/// The vault's answers carry no request id, so an answer to an earlier
+/// prompt the user approved late must not pass for this one: the payload
+/// signed must be this one, for this app, under the certificate's key.
+fn answers(payload: &[u8], s: &Signed) -> Result<(), Refusal> {
+    let other = || {
+        Err(Refusal::Failed(
+            "Ghost Key answered another request; send again".into(),
+        ))
+    };
+    let Ok(scoped) =
+        ghostkey_common::from_cbor::<ghostkey_common::ScopedPayload>(&s.proof.scoped_payload)
+    else {
+        return other();
+    };
+    let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(&s.vk) else {
+        return other();
+    };
+    if scoped.payload != payload
+        || scoped.requestor != requestor()
+        || ghostkey_verify::verify_payload_signature(
+            &vk,
+            &s.proof.scoped_payload,
+            s.proof.ghost_sig.as_slice(),
+        )
+        .is_err()
+    {
+        return other();
+    }
+    Ok(())
 }
 
 /// The vault's name for a key: base58 of the first 8 bytes of its BLAKE3.
@@ -245,7 +296,7 @@ pub(crate) fn draft_in_route(hash: &str) -> Option<String> {
     .then(|| id.to_string())
 }
 
-#[cfg(feature = "test-ghost-master")]
+/// This app, as the vault names the requestor of a signature.
 fn requestor() -> ghostkey_common::SignatureRequestor {
     let id: [u8; 32] = bs58::decode(WEBAPP_ID.trim())
         .into_vec()
@@ -707,6 +758,42 @@ pub(crate) mod mock {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// N4: inboxes count only a donation key's tier.
+    #[test]
+    fn only_a_donation_key_has_a_tier() {
+        assert_eq!(donation_usd("freenet-donation", 5).ok(), Some(5));
+        assert!(donation_usd("other-action", 50).is_err());
+    }
+
+    /// S1: an answer is checked against the request: one signed over
+    /// another payload (a late answer to an earlier prompt), with a
+    /// signature that does not verify, or for another requestor is refused.
+    #[cfg(feature = "test-ghost-master")]
+    #[test]
+    fn an_answer_for_another_request_is_refused() {
+        mock::save(&mock::State {
+            keys: vec![8],
+            ..Default::default()
+        });
+        let key = futures::executor::block_on(request_access())
+            .unwrap()
+            .remove(0);
+        let s = futures::executor::block_on(sign(&key, true, b"message 1".to_vec())).unwrap();
+        assert!(answers(b"message 1", &s).is_ok());
+        assert!(answers(b"message 2", &s).is_err(), "another payload");
+        let mut forged = s.clone();
+        forged.proof.ghost_sig = ByteArray::new([7; 64]);
+        assert!(answers(b"message 1", &forged).is_err(), "a bad signature");
+        let mut other = s.clone();
+        let mut scoped: ghostkey_common::ScopedPayload =
+            ghostkey_common::from_cbor(&s.proof.scoped_payload).unwrap();
+        scoped.requestor = ghostkey_common::SignatureRequestor::WebApp(
+            freenet_stdlib::prelude::ContractInstanceId::new([9; 32]),
+        );
+        other.proof.scoped_payload = ByteBuf::from(ghostkey_common::to_cbor(&scoped).unwrap());
+        assert!(answers(b"message 1", &other).is_err(), "another requestor");
+    }
 
     #[test]
     fn the_link_carries_the_app_and_the_draft_route() {

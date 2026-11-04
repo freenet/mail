@@ -1386,7 +1386,8 @@ pub(crate) struct V2Sender {
 }
 
 thread_local! {
-    static V2_SENDERS: RefCell<HashMap<u64, V2Sender>> = RefCell::new(HashMap::new());
+    static V2_SENDERS: RefCell<std::collections::HashMap<u64, V2Sender>> =
+        RefCell::new(std::collections::HashMap::new());
 }
 
 /// A v2 row's sender warnings; with `stranger_note`, also that a sender
