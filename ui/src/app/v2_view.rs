@@ -600,6 +600,7 @@ fn ContactRow(me: Addr, row: contacts::Row) -> Element {
 /// stays enabled, and Ghost Key's answer at send decides.
 #[component]
 fn GhostPanel(
+    to: Addr,
     min_usd: Option<u32>,
     draft_id: String,
     draft_saved: bool,
@@ -622,13 +623,13 @@ fn GhostPanel(
     let mut asking = use_signal(|| false);
     let choose = move |key: ghostkeys::Key, default: Option<String>| {
         let default = default.as_deref() == Some(key.fingerprint.as_str());
-        *GHOST_CHOICE.write() = Some(GhostChoice { key, default });
+        *GHOST_CHOICE.write() = Some((to, GhostChoice { key, default }));
     };
     // The default key is chosen once the keys are known, unless the user
     // chose otherwise.
     use_effect(move || {
         if let Some(Ok((list, default))) = &*keys.read()
-            && GHOST_CHOICE.peek().is_none()
+            && crate::v2::send::ghost_for(GHOST_CHOICE.peek().clone(), &to).is_none()
             && let Some(k) = list
                 .iter()
                 .find(|k| Some(&k.fingerprint) == default.as_ref())
@@ -637,7 +638,7 @@ fn GhostPanel(
             choose(k.clone(), default.clone());
         }
     });
-    let chosen = GHOST_CHOICE.read().clone();
+    let chosen = crate::v2::send::ghost_for(GHOST_CHOICE.read().clone(), &to);
     let usable = match &*presence.read() {
         Some(Ok(p)) => p.usable.to_string(),
         _ => String::new(),
@@ -837,7 +838,7 @@ pub(crate) fn RecipientNote(
                             None => rsx! { "Ghost Key required" },
                         }
                     }
-                    GhostPanel { min_usd, draft_id: draft_id.clone(), draft_saved, save_draft }
+                    GhostPanel { to: to_addr, min_usd, draft_id: draft_id.clone(), draft_saved, save_draft }
                 }
                 span {
                     match held {

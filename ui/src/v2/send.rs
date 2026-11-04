@@ -45,9 +45,18 @@ pub(crate) enum NotDelivered {
     BelowTier { have: u64, need: u32 },
 }
 
-/// The key the compose sheet chose with "Use Ghost Key", read at send.
-pub(crate) static GHOST_CHOICE: dioxus::prelude::GlobalSignal<Option<GhostChoice>> =
+/// The key the compose sheet chose with "Use Ghost Key", and the recipient
+/// it was chosen and disclosed for. Read at send, for that recipient only.
+pub(crate) static GHOST_CHOICE: dioxus::prelude::GlobalSignal<Option<(Addr, GhostChoice)>> =
     dioxus::prelude::Signal::global(|| None);
+
+/// The Ghost Key to send to `to` with: the one chosen for `to`, never one
+/// chosen (and disclosed) for another recipient.
+pub(crate) fn ghost_for(choice: Option<(Addr, GhostChoice)>, to: &Addr) -> Option<GhostChoice> {
+    choice
+        .filter(|(chosen_for, _)| chosen_for == to)
+        .map(|(_, g)| g)
+}
 
 /// The Ghost Key to prove with, for a RequireGhost recipient.
 #[derive(Clone, Debug, PartialEq)]
@@ -424,6 +433,28 @@ pub(crate) fn send_and_record(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// S2: a key chosen (and disclosed) for one recipient is not used for
+    /// another the To field names later.
+    #[test]
+    fn a_ghost_key_chosen_for_one_recipient_is_not_used_for_another() {
+        let (a, b) = (Addr([1; 24]), Addr([2; 24]));
+        let choice = GhostChoice {
+            key: crate::ghostkeys::Key {
+                fingerprint: "k".into(),
+                label: None,
+                usd: Some(5),
+                vk: None,
+            },
+            default: true,
+        };
+        assert_eq!(
+            ghost_for(Some((a, choice.clone())), &a),
+            Some(choice.clone())
+        );
+        assert_eq!(ghost_for(Some((a, choice)), &b), None);
+        assert_eq!(ghost_for(None, &a), None);
+    }
 
     #[test]
     fn every_outcome_says_plainly_what_happened() {

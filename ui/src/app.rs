@@ -6115,7 +6115,7 @@ fn ComposeSheet() -> Element {
                 to_name,
                 to_val,
                 body,
-                crate::v2::send::GHOST_CHOICE.read().clone(),
+                crate::v2::send::ghost_for(crate::v2::send::GHOST_CHOICE.read().clone(), &to_addr),
             );
             delete_draft_now(());
             menu_selection.write().at_new_msg();
