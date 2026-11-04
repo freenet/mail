@@ -6,7 +6,8 @@
 #   (CI feeds it the PR's diff: the names from `git diff --name-only HEAD^1 HEAD`)
 #
 # Every guard runs unless EVENT is pull_request, and on a pull request when
-# a path the guard harness itself depends on changed. Otherwise a guard runs
+# a path the guard harness or the committed artifacts (published-contract/,
+# which the guard scripts read) depends on changed. Otherwise a guard runs
 # when its area's inputs changed, or its own mutated file did.
 #
 # A guard's area is decided by the file its mutation edits. What the guard's
@@ -22,7 +23,7 @@ EVENT="${1:?usage: select-guards.sh EVENT < changed-paths}"
 # What every guard depends on: the scripts and workflows that run them, the
 # toolchain, every Cargo.toml (cargo loads all workspace manifests for any
 # guard) and any cargo config.
-HARNESS='^(scripts/|\.github/|\.githooks/|\.release-freeze$|Cargo\.lock$|rust-toolchain\.toml$|Makefile\.toml$)|(^|/)(\.cargo/|Cargo\.toml$)'
+HARNESS='^(scripts/|published-contract/|\.github/|\.githooks/|\.release-freeze$|Cargo\.lock$|rust-toolchain\.toml$|Makefile\.toml$)|(^|/)(\.cargo/|Cargo\.toml$)'
 area_inputs() {
     case "$1" in
         delegate) echo '^(delegates/mail-delegate/|protocol/|wire-v1/|contracts/inbox-v2/|docs/metadata-fields\.toml$|published-contract/|ui/src/inbox/(crypto_vectors_v1\.txt|kem_fixed_rng\.rs)$|ui/src/app/testdata/)' ;;

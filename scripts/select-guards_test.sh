@@ -33,7 +33,8 @@ select_for schedule README.md
 
 # Only the harness changed (and only a workflow, a lockfile, a toolchain pin, cargo config).
 for p in scripts/check-guards-fail.sh .github/workflows/check-contract-wasm.yml Cargo.lock Cargo.toml \
-    rust-toolchain.toml Makefile.toml contracts/.cargo/config.toml .release-freeze; do
+    rust-toolchain.toml Makefile.toml contracts/.cargo/config.toml .release-freeze \
+    published-contract/candidate/mail_delegate published-contract/README.md; do
     select_for pull_request "$p"
     [ "$(count)" -eq "$total" ] && ok "harness change $p runs every guard" || bad "harness change $p runs every guard"
 done
@@ -78,18 +79,26 @@ if ! (eval "$(sed -n '/^area_of()/,/^}/p' "$SEL")"; area_of new-dir/file.rs) > /
     ok "a mutated file with no area is refused"
 else bad "a mutated file with no area is refused"; fi
 
-# Every area's inputs include the path dependencies of the crates it covers.
-dirs_of() { # manifest -> the repo-relative directories of its path dependencies
+# Every area's inputs include the path-dependency CLOSURE of the crates it covers.
+closure_dirs() { # manifest dir -> the repo-relative directories of its transitive path dependencies
     cargo metadata --no-deps --offline --format-version 1 --manifest-path "$ROOT/$1" \
-        | python3 -c '
+        | python3 -I -c '
 import json, os, sys
-root = sys.argv[1]
-d = json.load(sys.stdin)
-for p in d["packages"]:
-    if os.path.dirname(p["manifest_path"]).endswith(sys.argv[2]):
-        for x in p["dependencies"]:
-            if x.get("path"):
-                print(os.path.relpath(x["path"], root) + "/")
+root = os.path.realpath(sys.argv[1])
+start = os.path.join(root, sys.argv[2])
+pk = {os.path.dirname(p["manifest_path"]): p for p in json.load(sys.stdin)["packages"]}
+if start not in pk:
+    sys.exit("no package at " + sys.argv[2])
+seen, todo = set(), [start]
+while todo:
+    d = todo.pop()
+    for x in pk[d]["dependencies"]:
+        if x.get("path") and x["path"] not in seen:
+            seen.add(x["path"])
+            if x["path"] in pk:
+                todo.append(x["path"])
+for d in sorted(seen):
+    print(os.path.relpath(d, root) + "/")
 ' "$ROOT" "$2"
 }
 covered() { # area manifest dir
@@ -97,54 +106,246 @@ covered() { # area manifest dir
     re="$(sed -n "/^area_inputs()/,/^}/p" "$SEL" | grep -E "^ +$1\)" | sed -E "s/.*echo '(.*)'.*/\1/")"
     while IFS= read -r d; do
         [ -z "$d" ] || printf '%s\n' "${d}x" | grep -qE "$re" || { echo "  $1 does not cover $d"; missing=1; }
-    done < <(dirs_of "$2" "$3")
+    done < <(closure_dirs "$2" "$3")
     return $missing
 }
-covered delegate delegates/mail-delegate/Cargo.toml delegates/mail-delegate && ok "delegate inputs cover its path dependencies" || bad "delegate inputs cover its path dependencies"
-covered ui Cargo.toml ui && ok "ui inputs cover its path dependencies" || bad "ui inputs cover its path dependencies"
-covered protocol Cargo.toml protocol && ok "protocol inputs cover its path dependencies" || bad "protocol inputs cover its path dependencies"
-covered inbox contracts/inbox-v2/Cargo.toml contracts/inbox-v2 && ok "inbox inputs cover its path dependencies" || bad "inbox inputs cover its path dependencies"
+covered delegate delegates/mail-delegate/Cargo.toml delegates/mail-delegate && ok "delegate inputs cover its path-dependency closure" || bad "delegate inputs cover its path-dependency closure"
+covered ui Cargo.toml ui && ok "ui inputs cover its path-dependency closure" || bad "ui inputs cover its path-dependency closure"
+covered protocol Cargo.toml protocol && ok "protocol inputs cover its path-dependency closure" || bad "protocol inputs cover its path-dependency closure"
+covered inbox contracts/inbox-v2/Cargo.toml contracts/inbox-v2 && ok "inbox inputs cover its path-dependency closure" || bad "inbox inputs cover its path-dependency closure"
+# The walk itself is transitive: ui reaches protocol and wire-v1 through the
+# delegate or the contract, so they must appear in ui's closure.
+closure_dirs Cargo.toml ui > "$T/ui.closure"
+grep -qx 'protocol/' "$T/ui.closure" && grep -qx 'delegates/mail-delegate/' "$T/ui.closure" \
+    && ok "the closure walk follows dependencies of dependencies" || bad "the closure walk follows dependencies of dependencies"
 
 # Every file a source reads at build or test time is an input of each area that
-# builds that source. A crate that reads a file outside its own directory (an
-# include_str! of another crate's fixture) is not selected when only that file
-# changes, unless the area lists it. Scans every .rs file for
-# include_str!/include_bytes!/include! of a literal path, and for a
-# concat!(env!("CARGO_MANIFEST_DIR"), "...") path, which is how fs::read and
-# File::open name a file in these crates.
+# builds that source, so a change to only that file selects the area. Fail
+# closed: a read the scan cannot resolve to a literal path is an error naming
+# the file and line, unless it is in the reviewed EXEMPT list below (a CLI
+# argument, an ignored test, a build script); a stale exemption is an error.
+# Detected:
+#   include!/include_str!/include_bytes!, fs::* calls, File::open/create,
+#   Path::new/PathBuf::from(env!("CARGO_MANIFEST_DIR")) with .join("lit"),
+#   and any other use of env!("CARGO_MANIFEST_DIR").
+# A path may be a normal or raw string literal, concat! of literals and
+# env!("CARGO_MANIFEST_DIR"), or a const/static/let defined once in the same
+# file as such. concat!(env!("OUT_DIR"), ...) is accepted when the crate has a
+# build.rs (which is in the area). A path computed at run time from anything
+# else is refused, never guessed. Rust files outside the guarded areas
+# (tools/, common/) are not scanned: no guard builds them.
 area_re() { sed -n "/^area_inputs()/,/^}/p" "$SEL" | grep -E "^ +$1\)" | sed -E "s/.*echo '(.*)'.*/\1/"; }
 for a in delegate inbox protocol ui; do area_re "$a" > "$T/re.$a"; done
 sed -n "s/^HARNESS='\(.*\)'$/\1/p" "$SEL" > "$T/re.harness"
 cat > "$T/reads.py" <<'PY'
 import os, re, sys
-root, tmp = sys.argv[1], sys.argv[2]
+mode, root, tmp = sys.argv[1], sys.argv[2], sys.argv[3]
 res = {a: re.compile(open(f"{tmp}/re.{a}").read().strip()) for a in ("delegate", "inbox", "protocol", "ui")}
 harness = re.compile(open(f"{tmp}/re.harness").read().strip())  # a harness path runs every guard
-inc = re.compile(r'\binclude(?:_str|_bytes)?!\s*\(\s*"([^"]+)"\s*\)')
-man = re.compile(r'concat!\s*\(\s*env!\s*\(\s*"CARGO_MANIFEST_DIR"\s*\)\s*,((?:\s*"[^"]*"\s*,?)+)\)')
+
+# Reviewed reads that name no repository file. (source, site text without whitespace) -> reason.
+EXEMPT = {
+    ("modules/identity-management/src/bin/tool.rs", "fs::read(path)"): "CLI argument, not a repository input",
+    ("modules/mail-local-state/src/bin/tool.rs", "fs::read(path)"): "CLI argument, not a repository input",
+    ("modules/antiflood-tokens/contracts/token-allocation-record/tests/test.rs", 'env!("CARGO_MANIFEST_DIR")'): "#[ignore]d test of a fixture that is not in the repository",
+    ("modules/antiflood-tokens/contracts/token-allocation-record/tests/test.rs", "fs::read(path)"): "#[ignore]d test of a fixture that is not in the repository",
+    ("ui/build.rs", "fs::read_to_string(&container_id_path)"): "reads published-contract/, which runs every guard",
+    ("ui/build.rs", "fs::metadata(path)"): "existence check of the artifacts the includes name (published-contract/)",
+}
+used = set()
+
+STR = r'"(?:\\.|[^"\\])*"'
+RAW = r'r(?P<h>#*)"(?:.|\n)*?"(?P=h)'
+LEX = re.compile(rf'(?P<raw>{RAW})|(?P<str>{STR})|(?P<chr>\'(?:\\[^\']+|[^\'\\\n])\')|(?P<lc>//[^\n]*)|(?P<bc>/\*(?:.|\n)*?\*/)')
+def blank(m): return re.sub(r"[^\n]", " ", m.group(0))
+def clean(text):
+    """(text with comments blanked, text with comments and string contents blanked); same length."""
+    def keep(m):
+        return blank(m) if m.lastgroup in ("lc", "bc") else m.group(0)
+    def mask(m):
+        if m.lastgroup in ("lc", "bc"): return blank(m)
+        g = m.group(0)
+        if m.lastgroup == "str": return g[0] + re.sub(r"[^\n]", "x", g[1:-1]) + g[-1]
+        if m.lastgroup == "raw": return re.sub(r"[^\n]", "x", g)
+        return g
+    return LEX.sub(keep, text), LEX.sub(mask, text)
+
+LIT = re.compile(rf'^\s*(?:{STR}|r(#*)"(?:.|\n)*?"\1)\s*$')
+def litval(s):
+    s = s.strip()
+    m = re.match(r'^r(#*)"((?:.|\n)*)"\1$', s)
+    if m: return m.group(2)
+    return re.sub(r'\\(.)', r'\1', s[1:-1])
+def balanced(t, i):
+    """index just past the paren that closes the one before t[i]; None if unbalanced"""
+    depth = 1
+    while i < len(t):
+        m = LEX.match(t, i)
+        if m: i = m.end(); continue
+        if t[i] in "([{": depth += 1
+        elif t[i] in ")]}":
+            depth -= 1
+            if depth == 0: return i + 1
+        i += 1
+    return None
+def split_top(s):
+    parts, depth, cur, i = [], 0, "", 0
+    while i < len(s):
+        m = LEX.match(s, i)
+        if m: cur += m.group(0); i = m.end(); continue
+        c = s[i]
+        if c in "([{": depth += 1
+        elif c in ")]}": depth -= 1
+        if c == "," and depth == 0: parts.append(cur); cur = ""
+        else: cur += c
+        i += 1
+    if cur.strip(): parts.append(cur)
+    return parts
 def manifest_dir(path):
     d = os.path.dirname(path)
     while d and not os.path.exists(os.path.join(root, d, "Cargo.toml")):
         d = os.path.dirname(d)
     return d
-for src in sys.stdin.read().split():
+CMD = r'env!\s*\(\s*"CARGO_MANIFEST_DIR"\s*\)'
+OUTD = r'env!\s*\(\s*"OUT_DIR"\s*\)'
+F3 = rf'(?:std::path::)?(?:Path::new|PathBuf::from)\s*\(\s*{CMD}\s*\)(?:\s*\.join\s*\(\s*{STR}\s*\))*'
+FORM3 = re.compile(F3)
+
+def resolve(expr, src, text, rel_to, depth=0):
+    """-> a repo-relative path, "GEN" (generated by the crate's build.rs), or None (cannot resolve)."""
+    e = expr.strip().lstrip("&").strip()
+    md = manifest_dir(src)
+    if LIT.match(e):
+        return os.path.normpath(os.path.join(rel_to, litval(e)))
+    m = re.match(r'^concat\s*!\s*\((.*)\)$', e, re.S)
+    if m:
+        parts, base, out = split_top(m.group(1)), None, ""
+        for k, p in enumerate(parts):
+            if k == 0 and re.match(rf'^\s*{CMD}\s*$', p): base = md
+            elif k == 0 and re.match(rf'^\s*{OUTD}\s*$', p):
+                return "GEN" if os.path.exists(os.path.join(root, md, "build.rs")) else None
+            elif LIT.match(p): out += litval(p)
+            else: return None
+        return os.path.normpath(os.path.join(base, out.lstrip("/"))) if base is not None else os.path.normpath(os.path.join(rel_to, out))
+    if FORM3.fullmatch(e):
+        out = "/".join(litval(x) for x in re.findall(STR, e.split(")", 1)[1]))
+        return os.path.normpath(os.path.join(md, out))
+    if depth < 3 and re.match(r"^[A-Za-z_]\w*$", e):
+        defs = re.findall(rf'\b(?:const|static|let)\s+(?:mut\s+)?{e}\b[^=;]*=\s*((?:.|\n)*?);', text)
+        if len(defs) == 1:
+            return resolve(defs[0], src, text, rel_to, depth + 1)
+    return None
+
+# Sites are found in the text with string contents masked to x, so the env
+# names match by length (CARGO_MANIFEST_DIR is 18). A different 18-character
+# name is read as this one and then fails to resolve, which refuses it.
+MCMD = r'env!\s*\(\s*"x{18}"\s*\)'
+MF3 = rf'(?:std::path::)?(?:Path::new|PathBuf::from)\s*\(\s*{MCMD}\s*\)(?:\s*\.join\s*\(\s*{STR}\s*\))*'
+SITE = re.compile(
+    r'\b(?P<inc>include(?:_str|_bytes)?)\s*!\s*\('
+    r'|\b(?P<fs>(?:std::)?fs::(?!write\b|create_dir|remove_|rename\b|set_permissions\b|hard_link\b|soft_link\b|symlink)[\w:]+)\s*\('
+    r'|\b(?P<file>File::(?:open|options|open_buffered))\s*\('
+    r'|\bOpenOptions::new\s*\('
+    rf'|(?P<f3>{MF3})'
+    rf'|(?P<env>{MCMD})'
+    r'|(?P<use>\buse\s+std::fs::(?:\{[^}]*\b(?:read|read_to_string|read_dir|File|OpenOptions)\b|read\b|read_to_string\b|read_dir\b|File\b|OpenOptions\b))')
+
+def scan(src, raw):
+    """-> (refused, uncovered): lists of strings"""
+    text, masked = clean(raw)
     areas = [a for a, r in res.items() if r.match(src)]
-    if not areas:
-        continue
-    lines = open(os.path.join(root, src), encoding="utf-8").read().splitlines()
-    text = "\n".join(l for l in lines if not l.lstrip().startswith("//"))
-    targets = [os.path.normpath(os.path.join(os.path.dirname(src), m)) for m in inc.findall(text)]
-    for m in man.findall(text):
-        lit = "".join(re.findall(r'"([^"]*)"', m))
-        targets.append(os.path.normpath(os.path.join(manifest_dir(src), lit.lstrip("/"))))
-    for t in targets:
+    refused, uncovered, consumed = [], [], []
+    for m in SITE.finditer(masked):
+        if any(a <= m.start() < b for a, b in consumed):
+            continue
+        line = masked.count("\n", 0, m.start()) + 1
+        if m.group("env"):
+            # Another 18-character name is not ours. The manifest dir as the head of a
+            # concat! is checked where the concatenation is read (and refused there if
+            # that read cannot be resolved).
+            if not re.fullmatch(CMD, text[m.start():m.end()]) or re.search(r"concat\s*!\s*\(\s*$", masked[:m.start()]):
+                continue
+        if m.group("f3") or m.group("env") or m.group("use"):
+            end = m.end()
+        else:
+            end = balanced(masked, m.end())
+            if end is None:
+                refused.append(f"{src}:{line}: unbalanced call"); continue
+        consumed.append((m.start(), end))
+        site = text[m.start():end]
+        norm = re.sub(r"\s+", "", site).removeprefix("std::")
+        if (src, norm) in EXEMPT:
+            used.add((src, norm)); continue
+        if m.group("use"):
+            refused.append(f"{src}:{line}: an fs function is imported; call it as fs::name so the scan can see the path")
+            continue
+        if m.group("f3"):
+            target = resolve(site, src, text, manifest_dir(src))
+        elif m.group("env"):
+            target = None
+        else:
+            args = split_top(text[m.end():end - 1])
+            if m.group("inc"):
+                target = resolve(args[0], src, text, os.path.dirname(src)) if len(args) == 1 else None
+            else:
+                target = resolve(args[0], src, text, manifest_dir(src)) if args else None
+        if target is None:
+            refused.append(f"{src}:{line}: cannot resolve the path read by " + re.sub(r"\s+", " ", site)[:90])
+            continue
+        if target == "GEN":
+            continue
         for a in areas:
-            if not res[a].match(t) and not harness.search(t):
-                print(f"  {a}: {src} reads {t}")
+            ways = (target, target + "/") if m.group("f3") else (target,)
+            if not any(res[a].match(w) for w in ways) and not harness.search(target):
+                uncovered.append(f"  {a}: {src}:{line} reads {target}")
+    return refused, uncovered
+
+if mode == "selftest":
+    # (name, source, expected): "ok", "refused" or the uncovered path
+    cases = [
+        ("covered literal", 'include_str!("../../published-contract/wasm/v1/h");', "ok"),
+        ("covered by the ui area", 'include_bytes!("../../protocol/x.bin");', "ok"),
+        ("raw string", 'include_str!(r"../../tools/x");', "tools/x"),
+        ("raw string with hashes", 'include_str!(r#"../../tools/x"#);', "tools/x"),
+        ("concat of literals", 'include_str!(concat!("../../tools/", "x"));', "tools/x"),
+        ("multi-line include", 'include_str!(\n    "../../tools/x"\n);', "tools/x"),
+        ("Path::new(env).join", 'let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("../tools/x");', "tools/x"),
+        ("PathBuf::from(env).join.join", 'let p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("tools/x");', "tools/x"),
+        ("format with the manifest dir", 'let p = format!("{}/x", env!("CARGO_MANIFEST_DIR"));', "refused"),
+        ("fs::read_to_string literal", 'let s = std::fs::read_to_string("../tools/x");', "tools/x"),
+        ("fs::read(concat env)", 'let s = fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../tools/x"));', "tools/x"),
+        ("File::open of a literal", 'let f = File::open("../tools/x");', "tools/x"),
+        ("File::open of a variable", 'let f = File::open(p);', "refused"),
+        ("fs::read of a computed path", 'let s = fs::read(dir.join(name));', "refused"),
+        ("const path then read", 'const P: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../tools/x");\nlet s = fs::read_to_string(P);', "tools/x"),
+        ("macro-built include path", 'include_str!(path_macro!());', "refused"),
+        ("OUT_DIR include", 'include!(concat!(env!("OUT_DIR"), "/x.rs"));', "ok"),
+        ("imported fs function", 'use std::fs::read_to_string;', "refused"),
+        ("block comment", '/* include_str!("../../tools/x") */', "ok"),
+        ("line comment", '// include_str!("../../tools/x")', "ok"),
+        ("string literal text", 'let s = "include_str!(\\"../../tools/x\\")";', "ok"),
+    ]
+    bad = 0
+    for name, src_text, want in cases:
+        refused, uncovered = scan("ui/src/zz_selftest.rs", src_text)
+        got = "refused" if refused else (uncovered[0].split(" reads ")[1] if uncovered else "ok")
+        if got != want:
+            print(f"  selftest {name}: wanted {want}, got {got} {refused or uncovered}"); bad += 1
+    sys.exit(1 if bad else 0)
+
+for src in sys.stdin.read().split():
+    if not any(r.match(src) for r in res.values()):
+        continue
+    refused, uncovered = scan(src, open(os.path.join(root, src), encoding="utf-8").read())
+    for r in refused: print("  REFUSED " + r)
+    for u in uncovered: print(u)
+for k in sorted(set(EXEMPT) - used):
+    print(f"  REFUSED stale exemption {k[0]}: {k[1]} (no such read; remove it)")
 PY
-git -C "$ROOT" ls-files '*.rs' | python3 -I "$T/reads.py" "$ROOT" "$T" | sort -u > "$T/uncovered"
-if [ ! -s "$T/uncovered" ]; then ok "every area lists the files its sources read"
-else cat "$T/uncovered"; bad "every area lists the files its sources read"; fi
+python3 -I "$T/reads.py" selftest "$ROOT" "$T" && ok "the read scan resolves or refuses each form of file read" || bad "the read scan resolves or refuses each form of file read"
+git -C "$ROOT" ls-files '*.rs' | python3 -I "$T/reads.py" scan "$ROOT" "$T" | sort -u > "$T/uncovered"
+if [ ! -s "$T/uncovered" ]; then ok "every area lists the files its sources read, and every read resolves"
+else cat "$T/uncovered"; bad "every area lists the files its sources read, and every read resolves"; fi
 
 # Every guard is selected by a change to its own mutated file alone.
 unselected=0

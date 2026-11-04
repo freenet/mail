@@ -43,6 +43,10 @@ on:
       - '.githooks/**'
       - '.github/workflows/check-contract-wasm.yml'
 
+# Read-only by default; a job that needs more says so at job level.
+permissions:
+  contents: read
+
 jobs:
   changes:
     runs-on: ubuntu-latest
@@ -369,7 +373,10 @@ jobs:
         run: |
           if [ "$EVENT" = pull_request ]; then git diff --no-renames --name-only HEAD^1 HEAD; fi \
             | scripts/select-guards.sh "$EVENT" > "$RUNNER_TEMP/guards.txt"
-          n=$(scripts/check-guards-fail.sh --only "$RUNNER_TEMP/guards.txt" --shard ${{ matrix.shard }}/8 --list | grep -c . || true)
+          # Capture the list first: a failing --list must fail this step, not
+          # read as an empty slice and skip the shard.
+          list=$(scripts/check-guards-fail.sh --only "$RUNNER_TEMP/guards.txt" --shard ${{ matrix.shard }}/8 --list)
+          n=$(grep -c . <<< "$list" || true)
           echo "shard ${{ matrix.shard }}/8 has $n selected guards"
           echo "run=$([ "$n" -gt 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
 
