@@ -172,6 +172,43 @@ fn an_inbox_whose_first_put_failed_is_published_later() {
     }
 }
 
+/// The delegate made the inbox but the page never had its first state to
+/// publish: the `CreateInboxV2` reply was lost, or the tab closed after it
+/// came and before the page kept or sent it. Either way the delegate holds
+/// the record and the page holds nothing. A later start publishes the inbox
+/// from the delegate's record.
+#[test]
+fn an_inbox_whose_create_reply_never_reached_a_page_is_published_later() {
+    for alias in ["v2-reply-lost", "v2-tab-closed"] {
+        let (info, _) = block_on(ops::create_identity(alias.into(), String::new())).unwrap();
+        let a = info.addr;
+        let reply = block_on(crate::mail_delegate::call(
+            freenet_mail_protocol::Op::CreateInboxV2 {
+                addr: a,
+                ghost_master: freenet_mail_protocol::Hash32(super::ghost_master()),
+                existing: None,
+            },
+        ));
+        match alias {
+            // Lost on the way: the page never saw it.
+            "v2-reply-lost" => drop(reply),
+            // Seen, then the tab closed: what it held went with it.
+            _ => assert!(matches!(
+                reply,
+                Ok(freenet_mail_protocol::Reply::InboxV2State(_))
+            )),
+        }
+        assert_eq!(block_on(net::get(&a, false)), Ok(Got::Missing));
+        block_on(owner::ensure(a)).unwrap_or_else(|e| panic!("{alias}: {e}"));
+        let s = state(&a);
+        assert_eq!(s.owner.quarantine, QuarantineMode::Open, "{alias}");
+        // And it works: mail gets in and is drained.
+        let b = identity(&format!("{alias}-sender"));
+        assert!(block_on(send::send(b, a, &body("after"))).delivered());
+        assert_eq!(drain(a), vec!["after".to_string()], "{alias}");
+    }
+}
+
 /// First contact lands in the new-contacts queue; the reply then goes by the
 /// pass the first message carried, and so does the next message back.
 #[test]

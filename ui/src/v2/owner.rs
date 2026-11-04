@@ -208,79 +208,25 @@ pub(crate) async fn ensure(addr: Addr) -> Result<(), String> {
         }
         Err(e) => return Err(e.to_string()),
     };
-    // Kept before the PUT: if the PUT never lands, the delegate has the
-    // record and will not sign a first state again, so a later start
-    // publishes this one.
-    note_unpublished(addr, Some(&state)).await?;
+    // If this PUT never lands (or this tab closes first), the next start finds
+    // the record and no inbox, and publishes it from the delegate's record.
     net::put(&addr, state).await
 }
 
-/// The identity has an inbox record. If the network has no inbox, publish
-/// the first state this page kept when it made the record (its PUT failed or
-/// never left); once the network has one, forget that state.
+/// The identity has an inbox record. If the network has no inbox (the first
+/// PUT failed or never left, or the reply that carried the first state was
+/// lost), the delegate signs it again from its record and it is published.
 async fn republish(addr: Addr, on_network: bool) -> Result<(), String> {
-    let kept = unpublished(addr).await?;
-    match (on_network, kept) {
-        (true, None) => Ok(()),
-        (true, Some(_)) => note_unpublished(addr, None).await,
-        (false, Some(state)) => net::put(&addr, state).await,
-        (false, None) => Err(
-            "this identity's inbox is not on the network, and this node kept no copy of its \
-             first state to publish; it will be looked for again"
-                .into(),
-        ),
+    if on_network {
+        return Ok(());
     }
-}
-
-/// Where the first state waits until it is on the network: a field of the
-/// identity's settings item, which the page may write.
-const UNPUBLISHED_FIELD: &str = "v2_unpublished";
-
-fn settings_item(addr: Addr) -> ItemRef {
-    ItemRef {
-        kind: ItemKind::IdentitySettings,
-        owner: Some(addr),
-        id: Vec::new(),
+    match call(Op::RepublishInboxV2 { addr }).await {
+        Ok(Reply::InboxV2State(s)) => net::put(&addr, s.into_vec()).await,
+        Ok(other) => Err(unexpected(&other).to_string()),
+        Err(e) => Err(format!(
+            "this identity's inbox could not be published again: {e}"
+        )),
     }
-}
-
-fn unpublished_in(body: Option<&[u8]>) -> Option<Vec<u8>> {
-    let v: serde_json::Value = serde_json::from_slice(body?).ok()?;
-    let hex = v.get(UNPUBLISHED_FIELD)?.as_str()?;
-    (0..hex.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(hex.get(i..i + 2)?, 16).ok())
-        .collect()
-}
-
-async fn unpublished(addr: Addr) -> Result<Option<Vec<u8>>, String> {
-    let item = ops::get_item(settings_item(addr))
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(unpublished_in(item.as_ref().map(|i| i.body.as_slice())))
-}
-
-async fn note_unpublished(addr: Addr, state: Option<&[u8]>) -> Result<(), String> {
-    let hex: Option<String> = state.map(|s| s.iter().map(|b| format!("{b:02x}")).collect());
-    ops::put_item_merged(settings_item(addr), |stored| {
-        let mut value = stored
-            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok())
-            .filter(serde_json::Value::is_object)
-            .unwrap_or_else(|| serde_json::json!({}));
-        let map = value.as_object_mut().expect("an object");
-        match &hex {
-            Some(h) => {
-                map.insert(UNPUBLISHED_FIELD.into(), serde_json::json!(h));
-            }
-            None => {
-                map.remove(UNPUBLISHED_FIELD)?;
-            }
-        }
-        Some(serde_json::to_vec(&value).expect("JSON encodes"))
-    })
-    .await
-    .map(|_| ())
-    .map_err(|e| format!("the new inbox could not be kept for publishing: {e}"))
 }
 
 /// The node or the page saw `addr`'s state change: drain it again.
@@ -348,14 +294,18 @@ fn undrained(state: &InboxState) -> bool {
 
 async fn drain(addr: Addr) -> Result<(), String> {
     // A bounded number of rounds; a later change drains the rest.
+    let mut republished = false;
     for _ in 0..16 {
         let bytes = match net::get(&addr, true).await? {
             Got::State(s) => s,
             // A first PUT whose answer came but whose state went nowhere.
-            Got::Missing => {
+            // Once per drain: each one signs a new owner version.
+            Got::Missing if !republished => {
                 republish(addr, false).await?;
+                republished = true;
                 continue;
             }
+            Got::Missing => return Ok(()),
         };
         let state: InboxState = w::decode(&bytes)?;
         note_owner(addr, &state).await;
