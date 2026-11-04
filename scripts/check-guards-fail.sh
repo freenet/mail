@@ -1587,7 +1587,11 @@ if [ "$WASM" -eq 1 ]; then
                 "$STAGE/delegates/mail-delegate/Cargo.toml" release_guard
     elif ! other_shard "release guard: refusals shown on real builds"; then
         GUARDS_RUN=$((GUARDS_RUN + 1))
-        if "$ROOT/scripts/check-release-delegate_test.sh" > "$STAGE/out" 2>&1; then
+        if [ "$ANCHORS" -eq 1 ]; then
+            # It runs a command (real WASM builds) and edits nothing, so it
+            # has no mutation anchor to check; anchors mode builds nothing.
+            echo "skip - release guard: refusals shown on real builds (runs builds; no anchor)"
+        elif "$ROOT/scripts/check-release-delegate_test.sh" > "$STAGE/out" 2>&1; then
             echo "ok - release guard: refusals shown on real builds"
         else
             echo "not ok - release guard tests"
