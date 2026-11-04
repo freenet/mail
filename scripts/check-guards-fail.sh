@@ -320,6 +320,26 @@ dt "inbox v2: an owner version is recorded before it leaves" "$D/inbox_v2.rs" \
     'save(s, item(ItemKind::InboxV2, addr, &[]), &rec, rec_gen)?;' \
     'let _ = (&rec, rec_gen);' \
     a_lost_update_never_reuses_a_version
+dt "inbox v2: another node's higher owner version is noted" "$D/inbox_v2.rs" \
+    'owner.version > rec.max_version
+        ||' 'false
+        ||' \
+    a_higher_owner_version_from_another_node_is_kept_through_a_background_drain
+dt "inbox v2: another node's record at this node's version is noted" "$D/inbox_v2.rs" \
+    '.is_some_and(|mine| mine != owner_digest(owner)))' '.is_some_and(|_| false))' \
+    the_same_owner_version_with_other_bytes_is_another_nodes,a_takeover_sees_the_same_version_signed_by_the_first_node
+dt "inbox v2: each signed owner record is remembered" "$D/inbox_v2.rs" \
+    '        rec.signed_owner = Some(owner_digest(o));' '' \
+    a_higher_owner_version_from_another_node_is_kept_through_a_background_drain
+dt "inbox v2: a takeover remembers the record it signed" "$D/inbox_v2.rs" \
+    '    rec.signed_owner = Some(owner_digest(&owner));' '' \
+    a_takeover_sees_the_same_version_signed_by_the_first_node
+dt "inbox v2: another node's record stays noted" "$D/inbox_v2.rs" \
+    '    if !signed_elsewhere(rec, owner) {
+        return;' '    if !signed_elsewhere(rec, owner) {
+        rec.foreign_seen = None;
+        return;' \
+    a_higher_owner_version_from_another_node_is_kept_through_a_background_drain
 dt "inbox v2: owner_time moves under the guard" "$D/inbox_v2.rs" \
     '.saturating_add(TIME_STEP_MAX)' '.saturating_add(TIME_STEP_MAX * 100)' \
     owner_time_moves_under_the_guard
@@ -1534,8 +1554,9 @@ fi' \
     "not ok - a test publish does not refuse a build with scrub in it" scrub_release_tests
 guard "a test publish refuses a build with scrub" "$STAGE/Makefile.toml" \
     '# Whatever the environment says, a build with scrub never goes here.
-# The probe opt-in is for the harness'"'"'s own nodes, and this publish is not one.
-env -u FREENET_E2E_PROBE_ISO "$ROOT/scripts/check-release-scrub.sh" --absent' \
+# The probe and test-master opt-ins are for the harness'"'"'s own nodes, and this
+# publish is not one.
+env -u FREENET_E2E_PROBE_ISO -u FREENET_TEST_GHOST_ISO "$ROOT/scripts/check-release-scrub.sh" --absent' \
     '' \
     "not ok - a test publish does not refuse a build with scrub in it" scrub_release_tests
 guard "the absent check reads the build" "$STAGE/scripts/check-release-scrub.sh" \

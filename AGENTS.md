@@ -148,6 +148,11 @@ recovery-key codec. Its encoding is pinned per variant in
   per issued pass, the passes it holds and the drained mail; the page may read
   the first two, may delete drained mail, and may never read a held pass. Each
   version and time is recorded before the update carrying it is returned.
+  Decision 25: the record keeps the digest of the owner record it last signed,
+  and every owner update notes (`foreign_seen`) an owner record in the inbox it
+  did not sign, a higher version or its own version with other bytes, before
+  signing anything; nothing clears the note, so the page's "active on another
+  node" warning survives a reload and a background drain that signs first.
   `UpdateInboxV2` drains the state it is given before signing any change, and a
   message is tombstoned only in an update returned after it was stored.
   `SealV2` picks the admission (held pass, owner, quarantine), clamps

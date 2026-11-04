@@ -80,6 +80,15 @@ pub(crate) struct InboxRecordView {
     pub max_version: u64,
     #[serde(default)]
     pub strangers_dropped: u64,
+    /// Decision 25: the delegate saw an owner record it did not sign.
+    #[serde(default)]
+    pub foreign_seen: Option<ForeignSeenView>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+pub(crate) struct ForeignSeenView {
+    pub version: u64,
+    pub at: u64,
 }
 
 /// One ledger entry, as far as the page reads it.

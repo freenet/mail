@@ -225,6 +225,49 @@ pub struct InboxRecord {
     /// pass the record still names: the renew job's backoff for it.
     #[serde(default)]
     pub absent_looks: BTreeMap<B24, u32>,
+    /// Decision 25: an owner record this delegate did not sign was seen in
+    /// the inbox (a higher version, or its own last version with other
+    /// bytes): the identity is active on another node. Signing a newer
+    /// version never clears it.
+    #[serde(default)]
+    pub foreign_seen: Option<ForeignSeen>,
+    /// BLAKE3 of the owner record this delegate signed at `max_version`, to
+    /// tell its own record from another node's at the same version.
+    #[serde(default)]
+    pub signed_owner: Option<B32>,
+}
+
+/// The newest owner record seen that this delegate did not sign.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ForeignSeen {
+    pub version: u64,
+    /// Node time it was first seen.
+    pub at: u64,
+}
+
+fn owner_digest(owner: &w::OwnerRecord) -> B32 {
+    ByteArray::new(*blake3::hash(&w::encode(owner)).as_bytes())
+}
+
+/// Whether `owner`, read from the inbox, is a record this delegate did not
+/// sign (decision 25): a version above the highest it signed, or that
+/// version with bytes other than its own.
+pub fn signed_elsewhere(rec: &InboxRecord, owner: &w::OwnerRecord) -> bool {
+    owner.version > rec.max_version
+        || (owner.version == rec.max_version
+            && rec
+                .signed_owner
+                .is_some_and(|mine| mine != owner_digest(owner)))
+}
+
+/// Note in `rec` an owner record another node signed, if `owner` is one.
+fn note_foreign(rec: &mut InboxRecord, owner: &w::OwnerRecord, now: u64) {
+    if !signed_elsewhere(rec, owner) {
+        return;
+    }
+    let at = rec.foreign_seen.map_or(now, |f| f.at);
+    let version = rec.foreign_seen.map_or(0, |f| f.version).max(owner.version);
+    rec.foreign_seen = Some(ForeignSeen { version, at });
 }
 
 /// A message that carries a pass's newest certificate to its contact.
@@ -436,6 +479,8 @@ pub fn create_inbox(
         invites: BTreeSet::new(),
         pruned_to: None,
         absent_looks: BTreeMap::new(),
+        foreign_seen: None,
+        signed_owner: None,
     };
     let mut state = match existing {
         None => None,
@@ -449,12 +494,15 @@ pub fn create_inbox(
             Some(state)
         }
     };
-    save(s, rec_item, &rec, 0)?;
     let tombstones = state
         .as_ref()
         .map(|st| st.owner.tombstones.clone())
         .unwrap_or_default();
+    // Signed before the record is saved, so the record names it; it leaves
+    // only after the save.
     let owner = sign_owner(&me, &rec, rec.max_version, tombstones);
+    rec.signed_owner = Some(owner_digest(&owner));
+    save(s, rec_item, &rec, 0)?;
     let time = sign_time(&me, rec.max_owner_time);
     let full = match state.take() {
         Some(st) => InboxState { owner, time, ..st },
@@ -1422,6 +1470,8 @@ pub(crate) fn owner_update(
 ) -> Result<(InboxV2Update, usize), Failure> {
     let addr = &me.addr;
     let (rec_gen, mut rec) = record(s, addr)?;
+    // Decision 25, before anything below signs past it.
+    note_foreign(&mut rec, &state.owner, now);
     let drained = drain(s, me, &mut rec, state, limit, from_node)?;
 
     // Built on the latest owner record this delegate signed or was given:
@@ -1603,10 +1653,14 @@ pub(crate) fn owner_update(
         rec.max_owner_time = rec.max_owner_time.max(t);
     }
     rec.tombstones = tombstones.clone();
+    let owner = version.map(|v| sign_owner(me, &rec, v, tombstones));
+    if let Some(o) = &owner {
+        rec.signed_owner = Some(owner_digest(o));
+    }
     // Recorded before anything signed leaves.
     save(s, item(ItemKind::InboxV2, addr, &[]), &rec, rec_gen)?;
     if let Some(v) = version {
-        delta.owner = Some(sign_owner(me, &rec, v, tombstones));
+        delta.owner = owner;
         // C1 fix round 1, S2: a usage entry is signed with the
         // owner version that carries its tombstones, and published with it.
         for (pass_id, (used, expiry)) in &drained.usage {

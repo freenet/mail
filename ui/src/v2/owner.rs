@@ -406,11 +406,13 @@ pub(crate) async fn record(addr: Addr) -> Result<Option<InboxRecordView>, String
     }
 }
 
-/// Whether an owner version in a state is one this node signed: the
-/// delegate records each version before the update carrying it leaves, so
-/// one above its record came from somewhere else (decision 25).
+/// Whether the inbox shows an owner record this node did not sign (decision
+/// 25): the delegate noted one (a higher version, or its own version with
+/// other bytes; the note stays when this node signs past it), or the state
+/// holds a version above any the delegate recorded, which it notes at its
+/// next change.
 pub(crate) fn foreign(state_version: u64, record: &InboxRecordView) -> bool {
-    state_version > record.max_version
+    record.foreign_seen.is_some() || state_version > record.max_version
 }
 
 /// Note what `state` says about the inbox. The record is read AFTER the
@@ -582,5 +584,17 @@ mod tests {
         assert!(!foreign(7, &rec));
         assert!(!foreign(3, &rec));
         assert!(foreign(8, &rec));
+    }
+
+    /// Decision 25 survives this node signing past the other version: the
+    /// delegate's note keeps the warning up, on every load.
+    #[test]
+    fn a_record_that_saw_another_node_keeps_the_warning() {
+        let rec = InboxRecordView {
+            max_version: 9,
+            foreign_seen: Some(super::super::ForeignSeenView { version: 5, at: 1 }),
+            ..Default::default()
+        };
+        assert!(foreign(9, &rec));
     }
 }
