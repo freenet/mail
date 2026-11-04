@@ -305,7 +305,24 @@ pub(crate) async fn ensure(addr: Addr) -> Result<(), String> {
     };
     // If this PUT never lands (or this tab closes first), the next start finds
     // the record and no inbox, and publishes it from the delegate's record.
-    net::put(&addr, state).await
+    publish(addr, state).await
+}
+
+/// PUT a new or republished inbox, and once it lands ask the delegate to run
+/// its jobs: the node holds the contract now, so they subscribe it. The
+/// delegate does not subscribe on its own at create or republish (the node
+/// may not hold the contract yet, and that would be a network fetch that
+/// parks it), so without this, mail that arrives first waits for the next
+/// wake-up. A failed `RunJobs` is only logged: the next wake-up does the same.
+async fn publish(addr: Addr, state: Vec<u8>) -> Result<(), String> {
+    net::put(&addr, state).await?;
+    if let Err(e) = ops::run_jobs().await {
+        crate::log::error(
+            format!("inbox v2: the jobs run after publishing failed: {e}"),
+            None,
+        );
+    }
+    Ok(())
 }
 
 /// The identity has an inbox record. If the network has no inbox (the first
@@ -316,7 +333,7 @@ async fn republish(addr: Addr, on_network: bool) -> Result<(), String> {
         return Ok(());
     }
     match call(Op::RepublishInboxV2 { addr }).await {
-        Ok(Reply::InboxV2State(s)) => net::put(&addr, s.into_vec()).await,
+        Ok(Reply::InboxV2State(s)) => publish(addr, s.into_vec()).await,
         Ok(other) => Err(unexpected(&other).to_string()),
         Err(e) => Err(format!(
             "this identity's inbox could not be published again: {e}"

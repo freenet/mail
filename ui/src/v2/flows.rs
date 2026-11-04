@@ -172,6 +172,39 @@ fn contact_adds_report_what_was_kept() {
     assert!(crate::app::contact_store::v2_notes(&vk).is_none());
 }
 
+/// A new or republished inbox is not subscribed by the delegate until it
+/// runs its jobs, and mail that arrives first would wait for the next
+/// wake-up. So after the page's PUT lands, the page sends `RunJobs` (the node
+/// holds the contract by then, so the jobs subscribe it). A PUT that failed
+/// sends none: there is nothing to subscribe.
+#[test]
+fn the_page_sends_run_jobs_after_each_publish_that_lands() {
+    use crate::mail_delegate::RUN_JOBS_CALLS;
+    let runs = || RUN_JOBS_CALLS.with(std::cell::Cell::get);
+    // The create path.
+    let (info, _) = block_on(ops::create_identity("v2-jobs-create".into(), String::new())).unwrap();
+    let a = info.addr;
+    let before = runs();
+    block_on(owner::ensure(a)).unwrap();
+    assert_eq!(runs(), before + 1, "create: RunJobs after the PUT");
+    // Already published: nothing to do, nothing sent.
+    block_on(owner::ensure(a)).unwrap();
+    assert_eq!(runs(), before + 1, "no publish, no RunJobs");
+    // The republish path, after a first PUT that failed (none sent for it).
+    let (info, _) = block_on(ops::create_identity(
+        "v2-jobs-republish".into(),
+        String::new(),
+    ))
+    .unwrap();
+    let b = info.addr;
+    net::offline::lose_next_put(&b, Err("the contract refused it".to_string()));
+    let before = runs();
+    assert!(block_on(owner::ensure(b)).is_err());
+    assert_eq!(runs(), before, "a PUT that failed sends no RunJobs");
+    block_on(owner::ensure(b)).unwrap();
+    assert_eq!(runs(), before + 1, "republish: RunJobs after the PUT");
+}
+
 /// The first PUT of a new inbox fails after the delegate stored its record:
 /// rejected, or gone with no word. A later start publishes it after all.
 #[test]
