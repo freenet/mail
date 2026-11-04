@@ -453,3 +453,34 @@ jobs:
               exit 1
             fi
           done
+
+  # A scheduled run has no pull request to turn red, so a nightly failure would
+  # reach only the email of whoever last edited the workflow. Open an issue, or
+  # comment on the one already open with this title. Needs the workflow token to
+  # have `issues: write` (granted here at job level; `contents: read` is all the
+  # rest of the workflow uses). A job-level grant works even when the
+  # repository's default token is read-only.
+  report-nightly-failure:
+    needs: [changes, drift-checks, guard-shards, check-drift]
+    if: ${{ always() && github.event_name == 'schedule' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+      contents: read
+    steps:
+      - name: Open or update the nightly failure issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title="Nightly check-contract-wasm run failed"
+          body="The scheduled run failed: $RUN_URL"
+          number="$(gh issue list --state open --search "\"$title\" in:title" --json number,title \
+            --jq "[.[] | select(.title == \"$title\")][0].number // empty")"
+          if [ -n "$number" ]; then
+            gh issue comment "$number" --body "$body"
+          else
+            gh issue create --title "$title" --body "$body"
+          fi

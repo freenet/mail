@@ -20,14 +20,15 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 EVENT="${1:?usage: select-guards.sh EVENT < changed-paths}"
 
 # What every guard depends on: the scripts and workflows that run them, the
-# toolchain and the root manifests, and any cargo config.
-HARNESS='^(scripts/|\.github/|\.githooks/|\.release-freeze$|Cargo\.toml$|Cargo\.lock$|rust-toolchain\.toml$|Makefile\.toml$)|(^|/)\.cargo/'
+# toolchain, every Cargo.toml (cargo loads all workspace manifests for any
+# guard) and any cargo config.
+HARNESS='^(scripts/|\.github/|\.githooks/|\.release-freeze$|Cargo\.lock$|rust-toolchain\.toml$|Makefile\.toml$)|(^|/)(\.cargo/|Cargo\.toml$)'
 area_inputs() {
     case "$1" in
-        delegate) echo '^(delegates/mail-delegate/|protocol/|wire-v1/|contracts/inbox-v2/|published-contract/)' ;;
+        delegate) echo '^(delegates/mail-delegate/|protocol/|wire-v1/|contracts/inbox-v2/|docs/metadata-fields\.toml$|published-contract/|ui/src/inbox/(crypto_vectors_v1\.txt|kem_fixed_rng\.rs)$|ui/src/app/testdata/)' ;;
         inbox) echo '^(contracts/inbox-v2/|docs/metadata-fields\.toml$|published-contract/)' ;;
-        protocol) echo '^protocol/' ;;
-        ui) echo '^(ui/|protocol/|wire-v1/|delegates/mail-delegate/|contracts/inbox-v2/|legacy_[a-z_]+\.toml$|published-contract/|modules/)' ;;
+        protocol) echo '^(protocol/|contracts/inbox-v2/tests/fixtures/vectors\.txt$)' ;;
+        ui) echo '^(ui/|protocol/|wire-v1/|delegates/mail-delegate/|contracts/inbox-v2/|docs/metadata-fields\.toml$|legacy_[a-z_]+\.toml$|published-contract/|modules/)' ;;
         harness) echo '^$' ;; # its inputs are all harness paths
     esac
 }

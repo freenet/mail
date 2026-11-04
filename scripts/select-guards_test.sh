@@ -105,6 +105,63 @@ covered ui Cargo.toml ui && ok "ui inputs cover its path dependencies" || bad "u
 covered protocol Cargo.toml protocol && ok "protocol inputs cover its path dependencies" || bad "protocol inputs cover its path dependencies"
 covered inbox contracts/inbox-v2/Cargo.toml contracts/inbox-v2 && ok "inbox inputs cover its path dependencies" || bad "inbox inputs cover its path dependencies"
 
+# Every file a source reads at build or test time is an input of each area that
+# builds that source. A crate that reads a file outside its own directory (an
+# include_str! of another crate's fixture) is not selected when only that file
+# changes, unless the area lists it. Scans every .rs file for
+# include_str!/include_bytes!/include! of a literal path, and for a
+# concat!(env!("CARGO_MANIFEST_DIR"), "...") path, which is how fs::read and
+# File::open name a file in these crates.
+area_re() { sed -n "/^area_inputs()/,/^}/p" "$SEL" | grep -E "^ +$1\)" | sed -E "s/.*echo '(.*)'.*/\1/"; }
+for a in delegate inbox protocol ui; do area_re "$a" > "$T/re.$a"; done
+sed -n "s/^HARNESS='\(.*\)'$/\1/p" "$SEL" > "$T/re.harness"
+cat > "$T/reads.py" <<'PY'
+import os, re, sys
+root, tmp = sys.argv[1], sys.argv[2]
+res = {a: re.compile(open(f"{tmp}/re.{a}").read().strip()) for a in ("delegate", "inbox", "protocol", "ui")}
+harness = re.compile(open(f"{tmp}/re.harness").read().strip())  # a harness path runs every guard
+inc = re.compile(r'\binclude(?:_str|_bytes)?!\s*\(\s*"([^"]+)"\s*\)')
+man = re.compile(r'concat!\s*\(\s*env!\s*\(\s*"CARGO_MANIFEST_DIR"\s*\)\s*,((?:\s*"[^"]*"\s*,?)+)\)')
+def manifest_dir(path):
+    d = os.path.dirname(path)
+    while d and not os.path.exists(os.path.join(root, d, "Cargo.toml")):
+        d = os.path.dirname(d)
+    return d
+for src in sys.stdin.read().split():
+    areas = [a for a, r in res.items() if r.match(src)]
+    if not areas:
+        continue
+    lines = open(os.path.join(root, src), encoding="utf-8").read().splitlines()
+    text = "\n".join(l for l in lines if not l.lstrip().startswith("//"))
+    targets = [os.path.normpath(os.path.join(os.path.dirname(src), m)) for m in inc.findall(text)]
+    for m in man.findall(text):
+        lit = "".join(re.findall(r'"([^"]*)"', m))
+        targets.append(os.path.normpath(os.path.join(manifest_dir(src), lit.lstrip("/"))))
+    for t in targets:
+        for a in areas:
+            if not res[a].match(t) and not harness.search(t):
+                print(f"  {a}: {src} reads {t}")
+PY
+git -C "$ROOT" ls-files '*.rs' | python3 -I "$T/reads.py" "$ROOT" "$T" | sort -u > "$T/uncovered"
+if [ ! -s "$T/uncovered" ]; then ok "every area lists the files its sources read"
+else cat "$T/uncovered"; bad "every area lists the files its sources read"; fi
+
+# Every guard is selected by a change to its own mutated file alone.
+unselected=0
+while IFS= read -r file; do
+    select_for pull_request "$file" || true
+    while IFS=$'\t' read -r name _; do
+        grep -qxF -- "$name" "$T/sel" || { echo "  $name not selected by $file"; unselected=1; }
+    done < <(awk -F'\t' -v f="$file" '$2 == f' "$T/guards")
+done < <(cut -f2 "$T/guards" | sort -u)
+[ "$unselected" -eq 0 ] && ok "a change to a guard's mutated file selects that guard" || bad "a change to a guard's mutated file selects that guard"
+
+# A manifest of any workspace member changes what cargo loads for every guard.
+for p in common/Cargo.toml tools/v1-node-seed/Cargo.toml ui/Cargo.toml protocol/Cargo.toml; do
+    select_for pull_request "$p"
+    [ "$(count)" -eq "$total" ] && ok "manifest change $p runs every guard" || bad "manifest change $p runs every guard"
+done
+
 # The shards split a selection: every selected guard in exactly one shard, none outside it.
 select_for pull_request ui/src/app.rs
 cp "$T/sel" "$T/ui"
