@@ -584,6 +584,33 @@ fn contact(world: &mut World, owner: &Addr, who: &Addr, vk: &[u8], verified: boo
         .unwrap();
 }
 
+/// `owner`'s page lists `who` as contacts it has a v0.2.x relationship
+/// with (decision 26), as `ui/src/v2/transition.rs` writes them.
+fn list_v1(world: &mut World, owner: &Addr, who: &[Addr]) {
+    let item = ItemRef {
+        kind: ItemKind::IdentitySettings,
+        owner: Some(*owner),
+        id: Vec::new(),
+    };
+    let expected_gen = match world.call_as(owner, Op::GetItem { item: item.clone() }) {
+        Ok(Reply::Item(Some(i))) => Some(i.generation),
+        Ok(Reply::Item(None)) => Some(0),
+        other => panic!("{other:?}"),
+    };
+    let list: Vec<String> = who.iter().map(|a| crate::store::hex(&a.0)).collect();
+    let body = serde_json::json!({ freenet_mail_protocol::V1_CONTACTS_FIELD: list });
+    world
+        .call_as(
+            owner,
+            Op::PutItem {
+                item,
+                body: ByteBuf::from(serde_json::to_vec(&body).unwrap()),
+                expected_gen,
+            },
+        )
+        .unwrap();
+}
+
 /// `from` sends `to` its pass through the queue, as a v0.3.0 client does
 /// for a contact verified in v1.
 fn send_pass(world: &mut World, from: &Addr, to: &Addr) {
@@ -661,6 +688,7 @@ fn a_verified_contacts_pass_is_accepted_and_answered() {
     let b = world.identity_in("bob", 2);
     let bob = info(&mut world, &b);
     contact(&mut world, &a, &b, &bob.vk, true);
+    list_v1(&mut world, &a, &[b]);
     send_pass(&mut world, &b, &a);
     settle(&mut world, &a, &b);
     let rec = world.record(&a);
@@ -681,6 +709,7 @@ fn an_unverified_contact_stays_in_the_queue() {
     let b = world.identity_in("bob", 2);
     let bob = info(&mut world, &b);
     contact(&mut world, &a, &b, &bob.vk, false);
+    list_v1(&mut world, &a, &[b]);
     send_pass(&mut world, &b, &a);
     settle(&mut world, &a, &b);
     let rec = world.record(&a);
@@ -702,6 +731,7 @@ fn only_the_key_that_signed_is_accepted() {
     let carol = info(&mut world, &c);
     // Under Bob's address, Carol's key, verified.
     contact(&mut world, &a, &b, &carol.vk, true);
+    list_v1(&mut world, &a, &[b, c]);
     send_pass(&mut world, &b, &a);
     // Carol, whose own address has no record.
     send_pass(&mut world, &c, &a);
@@ -710,6 +740,45 @@ fn only_the_key_that_signed_is_accepted() {
     let rec = world.record(&a);
     assert!(rec.auto_accepted.is_empty());
     assert!(rec.issued.is_empty());
+}
+
+/// Two identities on one node share the contact store. Carol, verified
+/// and listed by Alice only, writing to Bob's address is left in his queue:
+/// an instant accept would tell her Bob is Alice. Alice accepts her.
+#[test]
+fn an_identity_accepts_only_contacts_it_listed() {
+    let mut world = World::new();
+    let a = world.identity_in("alice", 1);
+    let b = world.identity_in("bob", 1);
+    let c = world.identity_in("carol", 2);
+    let carol = info(&mut world, &c);
+    contact(&mut world, &a, &c, &carol.vk, true);
+    list_v1(&mut world, &a, &[c]);
+    send_pass(&mut world, &c, &b);
+    settle(&mut world, &b, &c);
+    assert!(world.record(&b).auto_accepted.is_empty(), "not Bob's contact");
+    assert_eq!(admission_of(&mut world, &c, &b), SendAdmission::Quarantine);
+    send_pass(&mut world, &c, &a);
+    settle(&mut world, &a, &c);
+    let rec = world.record(&a);
+    assert!(rec.auto_accepted.contains(&serde_bytes::ByteArray::new(c.0)));
+}
+
+/// After the window nothing is accepted without the user, listed or not.
+#[test]
+fn nothing_is_accepted_after_the_window() {
+    let mut world = World::new();
+    let a = world.identity_in("alice", 1);
+    let b = world.identity_in("bob", 2);
+    let bob = info(&mut world, &b);
+    contact(&mut world, &a, &b, &bob.vk, true);
+    list_v1(&mut world, &a, &[b]);
+    world.advance(WINDOW);
+    send_pass(&mut world, &b, &a);
+    settle(&mut world, &a, &b);
+    let rec = world.record(&a);
+    assert!(rec.auto_accepted.is_empty());
+    assert!(!rec.issued.contains_key(&serde_bytes::ByteArray::new(b.0)));
 }
 
 /// Fill `owner`'s pass ledger to its cap with entries no prune can drop
@@ -756,6 +825,7 @@ fn a_full_ledger_leaves_the_stranger_accounting_as_it_was() {
     };
     assert_eq!(tracked(&mut world), (true, true));
     contact(&mut world, &a, &b, &bob.vk, true);
+    list_v1(&mut world, &a, &[b]);
     fill_ledger(&mut world, &a);
     send_pass(&mut world, &b, &a);
     world.change(&a, OwnerChange::Drain);

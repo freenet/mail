@@ -28,6 +28,12 @@ pub const PROTOCOL_VERSION: u16 = 1;
 pub const MAX_RESPONSE_BYTES: usize = 512 * 1024;
 /// Largest body one stored item may have.
 pub const MAX_ITEM_BYTES: usize = 256 * 1024;
+/// Decision 26: the field of an identity's settings item that lists, as
+/// lowercase hex addresses, the contacts it has a v0.2.x relationship with.
+/// The page writes it and sends its transition pass to those; the drain
+/// accepts a verified sender through the queue only if it is listed, and
+/// only during that identity's window.
+pub const V1_CONTACTS_FIELD: &str = "v1_contacts";
 /// Most ciphertexts one `DecryptV1` call may carry.
 pub const MAX_DECRYPT_BATCH: usize = 32;
 /// Most assignment hashes one `SignV1Removal` call may carry.

@@ -1544,7 +1544,11 @@ fn store_opened(
     // Decision 26: a verified contact writing through the queue is accepted
     // here, keyed on the key that signed the inner binding (checked by
     // `sealing::open`), never on a label or any other claim.
-    if quarantine && !contact && verified_contact(s, &opened.sender_vk) {
+    if quarantine
+        && !contact
+        && crate::transition::may_accept(s, rec.v1_window.as_ref(), &me.addr, &sender, now)
+        && verified_contact(s, &opened.sender_vk)
+    {
         contact = auto_accept(s, me, rec, &from, now, rng)?;
     }
     // The way back is kept, but a pass the sender got wrong must not hold

@@ -528,6 +528,13 @@ dt "v1 transition: a listed copy that does not read back is not imported" "$D/tr
             return false;' '        let Some(Some(body)) = read(*kind) else {
             continue;' \
     an_unreadable_kept_copy_blocks_the_removal_of_its_message,an_unreadable_archive_blocks_the_removal_of_its_message
+dt "v1 transition: an identity accepts only the contacts it listed" "$D/inbox_v2.rs" \
+    '        && crate::transition::may_accept(s, rec.v1_window.as_ref(), &me.addr, &sender, now)' \
+    '        && rec.v1_window.is_some()' \
+    an_identity_accepts_only_contacts_it_listed
+dt "v1 transition: nothing is accepted after the window" "$D/transition.rs" \
+    '    window.is_some_and(|w| now < w.ends())' '    window.is_some()' \
+    nothing_is_accepted_after_the_window
 dt "v1 transition: the queue accepts only the verified key that signed" "$D/inbox_v2.rs" \
     '.is_ok_and(|r| r.keys.verified && r.keys.ml_dsa_vk_bytes == sender_vk),' \
     '.is_ok_and(|r| r.keys.verified),' \

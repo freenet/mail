@@ -7,8 +7,11 @@
 //! - **Transition passes** (decision 26). Each contact verified in v1 that
 //!   this identity wrote to or heard from (every verified contact, when the
 //!   page has one identity) is sent this identity's pass through their new
-//!   inbox's queue, once their v2 inbox exists. Their drain accepts it,
-//!   because the key that signed it is one they verified. Sent once: the
+//!   inbox's queue, once their v2 inbox exists. Those contacts are recorded
+//!   in the identity's settings item (`V1_CONTACTS_FIELD`), and its own
+//!   drain accepts through the queue only a verified contact on that list,
+//!   during its window, so the page and the drain use one list. Their drain
+//!   accepts the pass the same way. Sent once: the
 //!   contacts done are listed in the identity's settings item. A contact
 //!   with no v2 inbox yet is tried at the next load; any other outcome
 //!   (their inbox requires a Ghost Key, their queue is full) is the normal
@@ -20,7 +23,7 @@
 //!   the delegate has not yet closed the v0.2.x inbox (a message there is not
 //!   imported yet).
 
-use freenet_mail_protocol::Addr;
+use freenet_mail_protocol::{Addr, V1_CONTACTS_FIELD};
 use freenet_mail_protocol::address::address_of;
 use freenet_stdlib::prelude::{ContractInstanceId, ContractKey, Parameters};
 
@@ -173,8 +176,43 @@ pub(crate) fn pass_targets(
         .collect()
 }
 
-/// Send `me`'s pass to each contact [`pass_targets`] names and the settings
-/// list does not. Returns how many were sent.
+/// Record the contacts [`pass_targets`] names in `me`'s settings item
+/// ([`V1_CONTACTS_FIELD`]), adding to what is there, and return the whole
+/// list. It is the one list both sides use: the page sends its pass to the
+/// contacts on it, and `me`'s drain accepts only those through the queue
+/// (`mail_delegate::transition::may_accept`).
+pub(crate) async fn note_v1_contacts(
+    me: Addr,
+    identities: usize,
+    contacts: &[crate::app::address_book::Contact],
+) -> Result<std::collections::HashSet<String>, String> {
+    let entries: Vec<String> = pass_targets(&me, identities, contacts)
+        .iter()
+        .map(hex)
+        .collect();
+    super::queue::note_listed(me, V1_CONTACTS_FIELD, &entries, SENT_MAX).await?;
+    super::queue::listed(me, V1_CONTACTS_FIELD).await
+}
+
+/// The contacts on `listed` that are still verified and not one of the
+/// page's identities.
+fn pass_to(
+    contacts: &[crate::app::address_book::Contact],
+    listed: &std::collections::HashSet<String>,
+) -> Vec<Addr> {
+    contacts
+        .iter()
+        .filter(|c| c.verified)
+        .filter(|c| {
+            !crate::app::address_book::is_own_fingerprint(&c.ml_dsa_vk_bytes, &c.ml_kem_ek_bytes)
+        })
+        .map(|c| address_of(&c.ml_dsa_vk_bytes))
+        .filter(|a| listed.contains(&hex(a)))
+        .collect()
+}
+
+/// Send `me`'s pass to each contact on its list ([`note_v1_contacts`]) that
+/// the sent list does not name. Returns how many were sent.
 pub(crate) async fn send_passes(me: Addr, identities: usize) -> usize {
     use super::send::{NotDelivered, Outcome};
     let done = match super::queue::listed(me, SENT_FIELD).await {
@@ -207,8 +245,15 @@ pub(crate) async fn send_passes(me: Addr, identities: usize) -> usize {
         contacts.len(),
         done.len()
     ));
+    let listed = match note_v1_contacts(me, identities, &contacts).await {
+        Ok(l) => l,
+        Err(e) => {
+            crate::log::error(format!("transition passes: {e}"), None);
+            return 0;
+        }
+    };
     let mut sent = 0;
-    for to in pass_targets(&me, identities, &contacts) {
+    for to in pass_to(&contacts, &listed) {
         if done.contains(&hex(&to)) {
             continue;
         }
@@ -352,6 +397,54 @@ mod tests {
             vec![address_of(&verified.ml_dsa_vk_bytes)]
         );
         assert!(pass_targets(&me, 2, &contacts).is_empty());
+    }
+
+    /// Decision 26, two identities on one page: the list each writes is
+    /// the one its drain reads (`v1_contact_listed`, the drain's own
+    /// reader), and the one the page sends passes from. Carol wrote to the
+    /// first identity only, so only the first lists her; Dave, verified but
+    /// written to by neither, is on no list.
+    #[cfg(all(feature = "local-delegate", not(feature = "use-node")))]
+    #[test]
+    fn the_page_and_the_drain_use_one_list() {
+        use crate::mail_delegate::ops;
+        use futures::executor::block_on;
+        use mail_delegate::transition::v1_contact_listed;
+        let (a, _) = block_on(ops::create_identity("v1t-one".into(), String::new())).unwrap();
+        let (b, _) = block_on(ops::create_identity("v1t-two".into(), String::new())).unwrap();
+        let mut carol = crate::app::address_book::contact_for_test("carol", 0x41);
+        carol.verified = true;
+        let mut dave = crate::app::address_book::contact_for_test("dave", 0x42);
+        dave.verified = true;
+        let kept = freenet_mail_wire_v1::local_state::KeptMessage {
+            sender_vk: carol.ml_dsa_vk_bytes.clone(),
+            ..Default::default()
+        };
+        crate::local_state::local_mark_read(&crate::local_state::addr_key(&a.addr), 1, kept);
+        let contacts = vec![carol.clone(), dave.clone()];
+        let on_a = block_on(note_v1_contacts(a.addr, 2, &contacts)).unwrap();
+        let on_b = block_on(note_v1_contacts(b.addr, 2, &contacts)).unwrap();
+        let body = |addr: Addr| {
+            let item = freenet_mail_protocol::ItemRef {
+                kind: freenet_mail_protocol::ItemKind::IdentitySettings,
+                owner: Some(addr),
+                id: Vec::new(),
+            };
+            block_on(ops::get_item(item))
+                .unwrap()
+                .map(|i| i.body.to_vec())
+                .unwrap_or_default()
+        };
+        let (c, d) = (
+            address_of(&carol.ml_dsa_vk_bytes),
+            address_of(&dave.ml_dsa_vk_bytes),
+        );
+        assert!(v1_contact_listed(&body(a.addr), &c));
+        assert!(!v1_contact_listed(&body(a.addr), &d));
+        assert!(!v1_contact_listed(&body(b.addr), &c));
+        assert!(!v1_contact_listed(&body(b.addr), &d));
+        assert_eq!(pass_to(&contacts, &on_a), vec![c]);
+        assert!(pass_to(&contacts, &on_b).is_empty());
     }
 
     #[test]

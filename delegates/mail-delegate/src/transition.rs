@@ -34,6 +34,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use freenet_mail_protocol::inbox_v2::B32;
 use freenet_mail_protocol::{
     Addr, Failure, FailureCode, Hash32, ItemKind, ItemRef, MAX_ITEM_BYTES, MAX_REMOVAL_BATCH, Reply,
+    V1_CONTACTS_FIELD,
 };
 use freenet_mail_wire_v1::aft::Tier;
 use freenet_mail_wire_v1::inbox::{InboxSettings, UpdateInbox};
@@ -161,6 +162,38 @@ pub fn end_window_now(s: &mut Space<'_>, owner: &Addr) -> Result<(), Failure> {
 /// no v2 inbox reads as not over.
 pub fn ended(s: &mut Space<'_>, owner: &Addr, now: u64) -> bool {
     matches!(window(s, owner, now), Ok(Some(w)) if now >= w.ends())
+}
+
+/// Whether an identity settings `body` lists `contact` in
+/// [`V1_CONTACTS_FIELD`], as the page writes it.
+pub fn v1_contact_listed(body: &[u8], contact: &Addr) -> bool {
+    let entry = store::hex(&contact.0);
+    serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v.get(V1_CONTACTS_FIELD)?.as_array().cloned())
+        .is_some_and(|list| list.iter().any(|e| e.as_str() == Some(entry.as_str())))
+}
+
+/// Decision 26: whether `owner`'s drain may accept `sender` without the
+/// user. Only during `owner`'s window, and only a contact `owner` itself has
+/// a v0.2.x relationship with (the list its page wrote): the contact store
+/// is shared by every identity of the origin, so a contact verified by one
+/// must not learn, from an accept, which other addresses are the same
+/// person's. A settings item that cannot be read says no.
+pub(crate) fn may_accept(
+    s: &Space<'_>,
+    window: Option<&V1Window>,
+    owner: &Addr,
+    sender: &Addr,
+    now: u64,
+) -> bool {
+    let settings = ItemRef {
+        kind: ItemKind::IdentitySettings,
+        owner: Some(*owner),
+        id: Vec::new(),
+    };
+    window.is_some_and(|w| now < w.ends())
+        && matches!(s.read(&item_rel(&settings)), Ok(Some((_, body))) if v1_contact_listed(&body, sender))
 }
 
 /// Whether every v1 inbox of `owner` that the close has looked at is closed.
