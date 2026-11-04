@@ -203,8 +203,15 @@ test.describe("Inbox v2 (offline)", () => {
     await expect(outcome).toHaveAttribute("data-delivered", "true");
     await expect(outcome).toContainText("bob's new-contacts queue");
 
-    // Bob drains it and replies by pass (alice's message carried one).
+    // Bob drains it into his new-contacts queue, accepts alice (which sends
+    // her a pass), finds it in his inbox, and replies by pass (alice's
+    // message carried one).
     await switchTo(page, "address2");
+    await openAddressSettings(page);
+    const row = page.locator(tid(TID.fmV2QueueRow), { hasText: "first contact" });
+    await row.locator(tid(TID.fmV2QueueAccept)).click({ timeout: 30_000 });
+    await expect(row).toHaveCount(0, { timeout: 30_000 });
+    await closeSettings(page);
     await expect(page.locator(`${tid(TID.fmList)} article`, { hasText: "first contact" })).toBeVisible({
       timeout: 30_000,
     });

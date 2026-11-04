@@ -1416,18 +1416,22 @@ fn route_draft() -> Option<String> {
 
 /// Open the draft the route names once the identity's drafts are loaded,
 /// on load and whenever the route changes, then clear the route.
+static ROUTE_DRAFT: GlobalSignal<Option<String>> = Signal::global(route_draft);
+
 fn draft_route(mut menu_selection: Signal<menu::MenuSelection>) {
-    let mut wanted = use_signal(route_draft);
-    use_hook(move || {
-        #[cfg(target_family = "wasm")]
-        if let Some(window) = web_sys::window() {
-            use wasm_bindgen::{JsCast, closure::Closure};
-            let on_change = Closure::<dyn FnMut()>::new(move || wanted.set(route_draft()));
-            let _ = window
-                .add_event_listener_with_callback("hashchange", on_change.as_ref().unchecked_ref());
-            on_change.forget();
-        }
-    });
+    let mut wanted = ROUTE_DRAFT.signal();
+    // One listener for the page: the signal it sets outlives every view.
+    thread_local!(static LISTENING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) });
+    #[cfg(target_family = "wasm")]
+    if !LISTENING.with(|l| l.replace(true))
+        && let Some(window) = web_sys::window()
+    {
+        use wasm_bindgen::{JsCast, closure::Closure};
+        let on_change = Closure::<dyn FnMut()>::new(move || wanted.set(route_draft()));
+        let _ = window
+            .add_event_listener_with_callback("hashchange", on_change.as_ref().unchecked_ref());
+        on_change.forget();
+    }
     let user = use_context::<Signal<User>>();
     use_effect(move || {
         let _ = crate::local_state::GENERATION.read();
@@ -6546,7 +6550,13 @@ fn ComposeSheet() -> Element {
                             to: to_val.clone(),
                             from: sender_addr,
                             draft_id: draft_id.read().clone(),
-                            draft_saved: autosave_state(*autosave_token.read(), *saved_token.read(), *failed_token.read()) == "saved",
+                            // Offline builds keep drafts only in the page,
+                            // which saves them at once.
+                            draft_saved: if cfg!(feature = "use-node") {
+                                autosave_state(*autosave_token.read(), *saved_token.read(), *failed_token.read()) == "saved"
+                            } else {
+                                *autosave_token.read() > 0
+                            },
                             save_draft: autosave,
                         } }
                     } else if let Some(r) = lookup {

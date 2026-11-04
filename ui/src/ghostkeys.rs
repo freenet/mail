@@ -549,33 +549,46 @@ pub(crate) mod mock {
 
     pub(crate) const STATE_KEY: &str = "fmail-ghostkeys-mock";
 
-    #[cfg(target_family = "wasm")]
-    fn load() -> State {
-        web_sys::window()
-            .and_then(|w| w.local_storage().ok()?)
-            .and_then(|s| s.get_item(STATE_KEY).ok()?)
-            .and_then(|j| serde_json::from_str(&j).ok())
-            .unwrap_or_default()
+    thread_local! {
+        /// The state when the page has no localStorage (a sandboxed frame).
+        static STATE: std::cell::RefCell<State> = std::cell::RefCell::new(State::default());
     }
 
     #[cfg(target_family = "wasm")]
-    fn save(state: &State) {
-        if let Some(s) = web_sys::window().and_then(|w| w.local_storage().ok()?) {
-            let _ = s.set_item(STATE_KEY, &serde_json::to_string(state).expect("encodes"));
+    fn storage() -> Option<web_sys::Storage> {
+        web_sys::window()?.local_storage().ok()?
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    fn storage() -> Option<NoStorage> {
+        None
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    struct NoStorage;
+
+    #[cfg(not(target_family = "wasm"))]
+    impl NoStorage {
+        fn get_item(&self, _: &str) -> Result<Option<String>, ()> {
+            Ok(None)
+        }
+        fn set_item(&self, _: &str, _: &str) -> Result<(), ()> {
+            Ok(())
         }
     }
 
-    #[cfg(not(target_family = "wasm"))]
-    thread_local! {
-        static STATE: std::cell::RefCell<State> = std::cell::RefCell::new(State::default());
-    }
-    #[cfg(not(target_family = "wasm"))]
     fn load() -> State {
-        STATE.with(|s| s.borrow().clone())
+        storage()
+            .and_then(|s| s.get_item(STATE_KEY).ok()?)
+            .and_then(|j| serde_json::from_str(&j).ok())
+            .unwrap_or_else(|| STATE.with(|s| s.borrow().clone()))
     }
-    #[cfg(not(target_family = "wasm"))]
+
     pub(crate) fn save(state: &State) {
         STATE.with(|s| *s.borrow_mut() = state.clone());
+        if let Some(s) = storage() {
+            let _ = s.set_item(STATE_KEY, &serde_json::to_string(state).expect("encodes"));
+        }
     }
 
     fn info(i: usize) -> Option<GhostKeyInfo> {
