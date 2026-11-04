@@ -359,6 +359,13 @@ pub(crate) fn held(identity: Addr, to: Addr) -> PassState {
     }
 }
 
+/// A deleted identity's passes seen: none are held for it any more.
+pub(crate) fn forget_identity(identity: &Addr) {
+    HELD.with(|h| h.borrow_mut().retain(|(i, _)| i != identity));
+    LAPSED.with(|l| l.borrow_mut().retain(|(i, _)| i != identity));
+    bump();
+}
+
 /// The pass this identity issued a contact, from its ledger.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Issued {

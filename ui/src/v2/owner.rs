@@ -13,6 +13,8 @@ use dioxus::prelude::*;
 use freenet_mail_protocol::address::address_of;
 use freenet_mail_protocol::inbox_v2::{self as w, Admission, InboundMessage, InboxState};
 use freenet_mail_protocol::{Addr, Hash32, ItemKind, ItemRef, Op, OwnerChange, Reply, from_cbor};
+#[cfg(test)]
+use freenet_mail_protocol::SendAdmission;
 
 use super::net::{self, Got};
 use super::{InboxRecordView, MailBody};
@@ -258,6 +260,28 @@ pub(crate) async fn another_node_signs_with(addr: Addr, other: Addr) -> Result<(
     HELD.with(|h| h.borrow_mut().remove(&addr));
     refresh(addr).await;
     result
+}
+
+/// Take a deleted identity out of this page's v2 state: its started mark
+/// (so restoring the same key starts a fresh drain), the drain and hold
+/// marks, drained mail and its queue view, status, the rows shown for it,
+/// the routing of its inbox's changes, and what the page saw of its passes.
+/// Without this, restoring the key without a reload would find the identity
+/// "started" and show the old messages.
+pub(crate) fn forget(addr: Addr) {
+    STARTED.with(|s| s.borrow_mut().remove(&addr));
+    BUSY.with(|b| b.borrow_mut().remove(&addr));
+    HELD.with(|h| h.borrow_mut().remove(&addr));
+    ROWS.with(|r| r.borrow_mut().retain(|_, row| row.owner != addr));
+    net::forget_own_route(&addr);
+    super::contacts::forget_identity(&addr);
+    if dioxus::core::Runtime::try_current().is_some() {
+        INBOUND.write().remove(&addr);
+        QUEUED.write().remove(&addr);
+        STATUS.write().remove(&addr);
+    }
+    #[cfg(test)]
+    TEST_STATUS.with(|s| s.borrow_mut().remove(&addr));
 }
 
 /// Tests: what a page that has just loaded knows of `addr`'s inbox.
@@ -636,6 +660,56 @@ pub(crate) fn inbound(addr: &Addr, queued: bool) -> Vec<Inbound> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Deleting an identity clears its v2 page state, so restoring the same
+    /// key without a reload starts cleanly and shows nothing stale.
+    #[test]
+    fn deleting_an_identity_clears_its_v2_page_state() {
+        let (a, other) = (Addr([71; 24]), Addr([72; 24]));
+        for addr in [a, other] {
+            STARTED.with(|s| s.borrow_mut().insert(addr));
+            BUSY.with(|b| b.borrow_mut().insert(addr, true));
+            HELD.with(|h| h.borrow_mut().insert(addr));
+            net::note_own(&addr);
+            set_status(addr, |s| {
+                s.ready = true;
+                s.error = Some("stale".into());
+            });
+            let id = 1000 + u64::from(addr.0[0]);
+            ROWS.with(|r| {
+                r.borrow_mut().insert(
+                    id,
+                    RowRef {
+                        owner: addr,
+                        item_id: vec![1],
+                        generation: 1,
+                    },
+                )
+            });
+        }
+        super::super::contacts::note_send(a, Addr([9; 24]), SendAdmission::Pass, None);
+
+        crate::app::identity_store::forget_everywhere(&a);
+
+        assert!(STARTED.with(|s| !s.borrow().contains(&a)), "STARTED");
+        assert!(BUSY.with(|b| !b.borrow().contains_key(&a)), "BUSY");
+        assert!(HELD.with(|h| !h.borrow().contains(&a)), "HELD");
+        assert!(row(1000 + 71).is_none(), "rows");
+        assert!(!net::is_own(&a), "routing");
+        assert!(!status(&a).ready && status(&a).error.is_none(), "status");
+        assert_eq!(
+            super::super::contacts::held(a, Addr([9; 24])),
+            super::super::contacts::PassState::None,
+            "passes seen"
+        );
+        // Another identity is untouched.
+        assert!(STARTED.with(|s| s.borrow().contains(&other)));
+        assert!(row(1000 + 72).is_some());
+        assert!(net::is_own(&other));
+        assert!(status(&other).ready);
+        // The same key restored starts a fresh drain.
+        assert!(STARTED.with(|s| s.borrow_mut().insert(a)));
+    }
 
     #[test]
     fn a_version_above_the_record_is_another_nodes() {

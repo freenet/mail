@@ -373,6 +373,7 @@ pub(crate) fn forget_everywhere(addr: &freenet_mail_protocol::Addr) {
     crate::local_state::forget_identity(addr);
     crate::local_state::forget_identity_bookkeeping(addr);
     crate::inbox::InboxModel::forget_identity(addr);
+    crate::v2::owner::forget(*addr);
     #[cfg(feature = "use-node")]
     crate::api::forget_inbox_states(addr);
 }

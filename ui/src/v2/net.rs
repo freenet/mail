@@ -38,6 +38,13 @@ fn own(id: &ContractInstanceId) -> Option<Addr> {
     OWN.with(|o| o.borrow().get(id).copied())
 }
 
+/// `addr` is no longer one of this page's identities: its inbox's changes
+/// are not this page's to drain.
+pub(crate) fn forget_own_route(addr: &Addr) {
+    let id = super::instance_id(addr);
+    OWN.with(|o| o.borrow_mut().remove(&id));
+}
+
 /// Whether `addr` is one of this page's identities.
 pub(crate) fn is_own(addr: &Addr) -> bool {
     own(&super::instance_id(addr)).is_some()
