@@ -422,6 +422,16 @@ pub enum Op {
         #[serde(default)]
         reseals: u8,
     },
+    /// `addr`'s inbox signed again from the delegate's record, as a full
+    /// state to PUT under [`inbox_v2::params_bytes`]: for when the network
+    /// has no inbox although the identity has a record (the first PUT, or the
+    /// [`Op::CreateInboxV2`] reply, was lost). The owner record is the next
+    /// version over the record's tombstones and filters, and the time moves
+    /// under the guard; both are recorded before the reply. Answers
+    /// [`Reply::InboxV2State`], or `NotFound` with no record.
+    RepublishInboxV2 {
+        addr: Addr,
+    },
 }
 
 /// Times one message may be sealed again ([`SealedV2::reseal_at`]).

@@ -14,7 +14,7 @@ dt "jobs: the allowlist is the host set" "$STAGE/scripts/delegate-imports-allowl
 ' '' the_import_allowlist_is_the_stdlib_host_set
 dt "jobs: an unknown tag does nothing" "$H" \
     '            None => Vec::new(),
-        }),' '            None => background(env, Trigger::Tick(Tick::Rescan)),
+        }),' '            None => background(env, Trigger::Tick(Tick::Rescan), "wakeup"),
         }),' a_tag_this_build_does_not_know_does_nothing
 
 # ── Ranking ─────────────────────────────────────────────────────────────────
@@ -84,15 +84,16 @@ dt "jobs: a refresh stops at the operations left" "$J" \
     a_refresh_past_the_operation_limit_subscribes_the_best_it_can
 
 # ── One path, and what each trigger does ────────────────────────────────────
-dt "jobs: the node's run is the page's" "$H" 'watch::run(env, trigger).1' \
-    'watch::run(env, Trigger::Tick(Tick::Renew)).1' the_page_and_the_node_store_the_same_bytes
+dt "jobs: the node's run is the page's" "$H" 'let (done, out) = watch::run(env, trigger);' \
+    'let (done, out) = watch::run(env, Trigger::Tick(Tick::Renew));' the_page_and_the_node_store_the_same_bytes
 dt "jobs: a GET answer is a reason to look" "$H" \
     'InboundDelegateMsg::GetContractResponse(r) => {
-            Ok(background(env, contract_trigger(&r.contract_id)?))
+            let trigger = contract_trigger(&r.contract_id)?;
+            Ok(background(env, trigger, "get-answer"))
         }' 'InboundDelegateMsg::GetContractResponse(_) => Ok(Vec::new()),' \
     every_trigger_imports_through_the_watch
-dt "jobs: a run answers no page" "$H" 'watch::run(env, trigger).1' \
-    '{ let (d, mut o) = watch::run(env, trigger); o.push(response_msg(RequestId([0; 16]), Ok(Reply::JobsRun(d)))); o }' \
+dt "jobs: a run answers no page" "$H" 'let (done, out) = watch::run(env, trigger);' \
+    'let (done, mut out) = watch::run(env, trigger); out.push(response_msg(RequestId([0; 16]), Ok(Reply::JobsRun(done))));' \
     a_run_tells_no_page_anything
 dt "jobs: a new identity is recorded" "$H" 'watch::note_origin(&mut *s.env, origin);
             Ok(info(addr, generation, &record))' 'Ok(info(addr, generation, &record))' \

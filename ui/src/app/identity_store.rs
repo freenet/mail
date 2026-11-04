@@ -373,6 +373,7 @@ pub(crate) fn forget_everywhere(addr: &freenet_mail_protocol::Addr) {
     crate::local_state::forget_identity(addr);
     crate::local_state::forget_identity_bookkeeping(addr);
     crate::inbox::InboxModel::forget_identity(addr);
+    crate::v2::owner::forget(*addr);
     #[cfg(feature = "use-node")]
     crate::api::forget_inbox_states(addr);
 }
@@ -843,6 +844,11 @@ pub(crate) async fn load_identities() {
         .iter()
         .map(|i| (crate::local_state::addr_key(&i.addr), i.addr))
         .collect();
+    // Each confirmed identity's v2 inbox: made if missing, then drained and
+    // followed. An unconfirmed one publishes nothing until it is confirmed.
+    for info in infos.iter().filter(|i| i.confirmed) {
+        crate::v2::owner::start(info.addr);
+    }
     let mut loaded = Vec::with_capacity(infos.len());
     for info in infos {
         loaded.push(prepare(info).await);

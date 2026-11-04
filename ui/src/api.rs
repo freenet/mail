@@ -138,6 +138,14 @@ pub(crate) struct WebApiRequestClient {
 #[derive(Clone, Debug)]
 pub(crate) struct WebApiRequestClient;
 
+#[cfg(all(test, feature = "use-node"))]
+impl WebApiRequestClient {
+    /// A client over channels a test holds the other ends of.
+    pub(crate) fn for_tests(sender: ClientRequester, responses: NodeResponses) -> Self {
+        WebApiRequestClient { sender, responses }
+    }
+}
+
 // The error type is freenet-stdlib's own; boxing it here would only move
 // the size into every caller's `map_err`.
 #[allow(clippy::result_large_err)]
@@ -2569,6 +2577,11 @@ pub(crate) async fn node_comms(
         _ab_gen: crate::app::AddressBookGen,
     ) {
         let mut client = WEB_API_SENDER.get().unwrap().clone();
+        // Answers about v2 inboxes go to the calls waiting for them, and
+        // nowhere else.
+        if crate::v2::net::route(&res) {
+            return;
+        }
         let res = match res {
             Ok(r) => r,
             Err(e) => {
@@ -2576,6 +2589,9 @@ pub(crate) async fn node_comms(
                     ErrorKind::RequestError(e) => {
                         // FIXME: handle the different possible errors
                         match e {
+                            RequestError::DelegateError(
+                                freenet_stdlib::client_api::DelegateError::Missing(key),
+                            ) if crate::ghostkeys::takes(key) => crate::ghostkeys::missing(),
                             RequestError::ContractError(ContractError::Update { key, .. }) => {
                                 if let Some(id) = token_rec_to_id.get(key) {
                                     // FIXME: in case this is for a token record which is PENDING_CONFIRMED_ASSIGNMENTS
@@ -3401,6 +3417,9 @@ pub(crate) async fn node_comms(
                 if crate::migration::node::takes_response(&key) =>
             {
                 crate::migration::node::offer_response(&key, &values);
+            }
+            HostResponse::DelegateResponse { key, values } if crate::ghostkeys::takes(&key) => {
+                crate::ghostkeys::response(&values);
             }
             HostResponse::DelegateResponse { key, values }
                 if &key == crate::mail_delegate::node::key() =>

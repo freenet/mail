@@ -782,8 +782,9 @@ script = '''
 set -euo pipefail
 ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
 # Whatever the environment says, a build with scrub never goes here.
-# The probe opt-in is for the harness's own nodes, and this publish is not one.
-env -u FREENET_E2E_PROBE_ISO "$ROOT/scripts/check-release-scrub.sh" --absent
+# The probe and test-master opt-ins are for the harness's own nodes, and this
+# publish is not one.
+env -u FREENET_E2E_PROBE_ISO -u FREENET_TEST_GHOST_ISO "$ROOT/scripts/check-release-scrub.sh" --absent
 contract_id=$(cat "$ROOT/target/webapp/contract-id.txt")
 echo "publishing with test contract id $contract_id"
 # The frozen webapp contract wasm with the test key's parameters.
@@ -1127,6 +1128,71 @@ cd "$ROOT/ui/tests" && \
     FREENET_ISO_GW_LOG_DIR="$ISO_ROOT/gw/logs" \
     FREENET_ISO_PEER_LOG_DIR="$ISO_ROOT/peer/logs" \
     npx playwright test live-node.spec.ts --project=chromium ${extra_args[@]+"${extra_args[@]}"}
+'''
+
+[tasks.test-e2e-inbox-v2]
+description = "Real-node inbox v2 between two nodes: delivery by pass, invite and the new-contacts queue (accepted), RequireGhost with a test Ghost Key master and refused without a proof, revocation, and a drain with every tab closed, which the inbox's notification must do within 2 minutes (when it does not, the run waits up to 18.3 more minutes for the rescan wake-up, to show whether that fallback works, and then fails)"
+script_runner = "bash"
+# The build names the test Ghost Key master (`test-ghost-master`), so its
+# inboxes accept the fixture's keys; build-ui reads FREENET_UI_FEATURES.
+script = '''
+set -euo pipefail
+FREENET_TEST_GHOST_ISO=1 FREENET_UI_FEATURES=test-ghost-master exec cargo make test-e2e-inbox-v2-run
+'''
+
+[tasks.test-e2e-inbox-v2-run]
+description = "The steps of test-e2e-inbox-v2. Run that task: this one builds without the test Ghost Key master"
+dependencies = ["build", "derive-test-contract-id"]
+script_runner = "bash"
+script = '''
+set -euo pipefail
+ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
+if [ -z "${CI:-}" ]; then export FREENET_E2E_ROOT="${FREENET_E2E_ROOT:-$ROOT/target/iso}"; fi
+ISO_ROOT="${FREENET_E2E_ROOT:-$HOME/freenet-mail-iso}"
+# Free ports only: the defaults belong to other nodes on the machine.
+free_port() {
+    python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])'
+}
+export FREENET_ISO_GW_PORT="${FREENET_ISO_GW_PORT:-$(free_port)}"
+export FREENET_ISO_PEER_PORT="${FREENET_ISO_PEER_PORT:-$(free_port)}"
+export FREENET_ISO_GW_NET_PORT="${FREENET_ISO_GW_NET_PORT:-$(free_port)}"
+export FREENET_ISO_PEER_NET_PORT="${FREENET_ISO_PEER_NET_PORT:-$(free_port)}"
+GW_PORT="$FREENET_ISO_GW_PORT"
+KEEP="${FREENET_E2E_KEEP:-0}"
+
+cleanup() {
+    if [ "$KEEP" = "1" ]; then
+        echo "FREENET_E2E_KEEP=1 - leaving iso nodes up at $ISO_ROOT"
+    else
+        bash "$ROOT/scripts/run-isolated-nodes.sh" down
+    fi
+}
+trap cleanup EXIT
+
+bash "$ROOT/scripts/run-isolated-nodes.sh" wipe
+bash "$ROOT/scripts/run-isolated-nodes.sh" up
+FREENET_ISO_GW_PORT="$GW_PORT" cargo make publish-email-iso
+# This build has the test Ghost Key master: the release check must see its
+# marker in the built WASM, or it could not refuse a shipped build that has it.
+refused="$(bash "$ROOT/scripts/check-release-scrub.sh" 2>&1 || true)"
+case "$refused" in
+    *"test Ghost Key master"*) ;;
+    *)
+        echo "error: the release check did not find the test Ghost Key master in the build that has it: $refused" >&2
+        exit 1
+        ;;
+esac
+
+CONTRACT_ID="$(cat "$ROOT/target/webapp/contract-id.txt")"
+BASE_URL="http://127.0.0.1:$GW_PORT/v1/contract/web/$CONTRACT_ID/"
+read -r -a extra_args <<< "${E2E_PLAYWRIGHT_ARGS:-}"
+cd "$ROOT/ui/tests" && \
+    FREENET_INBOX_V2_LIVE=1 \
+    FREENET_EMAIL_BASE_URL="$BASE_URL" \
+    FREENET_ISO_GW_PORT="$GW_PORT" \
+    FREENET_ISO_PEER_PORT="$FREENET_ISO_PEER_PORT" \
+    FREENET_ISO_PEER_LOG_DIR="$ISO_ROOT/peer/logs" \
+    npx playwright test inbox-v2-live.spec.ts --project=chromium ${extra_args[@]+"${extra_args[@]}"}
 '''
 
 [tasks.test-e2e-background]

@@ -131,6 +131,23 @@ ui_migration_tests() {
 ui_notfound_tests() {
     cargo test --manifest-path "$STAGE/Cargo.toml" -p freenet-email-ui --lib notfound_routing
 }
+ui_net_tests() {
+    cargo test --manifest-path "$STAGE/Cargo.toml" -p freenet-email-ui --lib v2::net
+}
+ui_v2_flow_tests() {
+    cargo test --manifest-path "$STAGE/Cargo.toml" -p freenet-email-ui --lib \
+        --no-default-features --features example-data,no-sync v2::flows
+}
+ui_v2_sender_tests() {
+    cargo test --manifest-path "$STAGE/Cargo.toml" -p freenet-email-ui --lib v2_sender_tests
+}
+ui_ghostkeys_node_tests() {
+    cargo test --manifest-path "$STAGE/Cargo.toml" -p freenet-email-ui --lib ghostkeys::node
+}
+ui_v2_unit_tests() {
+    cargo test --manifest-path "$STAGE/Cargo.toml" -p freenet-email-ui --lib \
+        --no-default-features --features example-data,no-sync v2::
+}
 ui_local_tests() {
     cargo test --manifest-path "$STAGE/Cargo.toml" -p freenet-email-ui --lib \
         --no-default-features --features example-data,no-sync identity_store
@@ -194,6 +211,11 @@ baseline "delegate time-driven fault run" time_tests
 baseline "protocol tests" protocol_tests
 baseline "migration tests" ui_migration_tests
 baseline "local-delegate identity tests" ui_local_tests
+baseline "inbox v2 UI network tests" ui_net_tests
+baseline "inbox v2 UI flows" ui_v2_flow_tests
+baseline "inbox v2 UI tests" ui_v2_unit_tests
+baseline "Ghost Key vault requests" ui_ghostkeys_node_tests
+baseline "v2 senders in the list" ui_v2_sender_tests
 baseline "UI background jobs tests" ui_jobs_tests
 baseline "release freeze tests" freeze_tests
 baseline "release scrub tests" scrub_release_tests
@@ -320,6 +342,68 @@ dt "inbox v2: an owner version is recorded before it leaves" "$D/inbox_v2.rs" \
     'save(s, item(ItemKind::InboxV2, addr, &[]), &rec, rec_gen)?;' \
     'let _ = (&rec, rec_gen);' \
     a_lost_update_never_reuses_a_version
+dt "inbox v2: another node's higher owner version is noted" "$D/inbox_v2.rs" \
+    'owner.version > rec.max_version
+        ||' 'false
+        ||' \
+    a_higher_owner_version_from_another_node_is_kept_through_a_background_drain
+dt "inbox v2: another node's record at this node's version is noted" "$D/inbox_v2.rs" \
+    '.is_some_and(|mine| mine != owner_digest(owner)))' '.is_some_and(|_| false))' \
+    the_same_owner_version_with_other_bytes_is_another_nodes,a_takeover_sees_the_same_version_signed_by_the_first_node
+dt "inbox v2: each signed owner record is remembered" "$D/inbox_v2.rs" \
+    '        rec.signed_owner = Some(owner_digest(o));' '' \
+    a_higher_owner_version_from_another_node_is_kept_through_a_background_drain
+dt "inbox v2: a takeover remembers the record it signed" "$D/inbox_v2.rs" \
+    '    rec.signed_owner = Some(owner_digest(&owner));' '' \
+    a_takeover_sees_the_same_version_signed_by_the_first_node
+dt "inbox v2: a republished owner version is recorded before it leaves" "$D/inbox_v2.rs" \
+    '    save(s, rec_item, &rec, rec_gen)?;' '    let _ = (&rec_item, &rec, rec_gen);' \
+    an_inbox_whose_first_state_was_lost_is_signed_again_from_the_record
+dt "inbox v2: a republished owner record is remembered" "$D/inbox_v2.rs" \
+    '    rec.signed_owner = Some(owner_digest(&signed));' '' \
+    an_inbox_whose_first_state_was_lost_is_signed_again_from_the_record
+dt "inbox v2: republishing signs a new version" "$D/inbox_v2.rs" \
+    'let version = next_version(rec.max_version)?;
+    let owner_time' 'let version = rec.max_version;
+    let owner_time' \
+    an_inbox_whose_first_state_was_lost_is_signed_again_from_the_record
+dt "inbox v2: republishing keeps the tombstones" "$D/inbox_v2.rs" \
+    '.retain(|_, t| t.saturating_add(w::WINDOW_BACK) >= owner_time);' '.retain(|_, _| false);' \
+    an_inbox_signed_again_keeps_its_tombstones
+dt "inbox v2: republishing keeps the revocations" "$D/inbox_v2.rs" \
+    'if e.revoked && revocation_live(' 'if false && revocation_live(' \
+    an_inbox_signed_again_keeps_its_revocations
+dt "inbox v2: republishing fails on an unreadable ledger entry" "$D/inbox_v2.rs" \
+    'if crate::handlers::listed_but_unreadable(s, &at)? {' 'if false {' \
+    a_republish_over_an_unreadable_revoked_ledger_entry_fails_closed
+dt "inbox v2: a takeover records the tombstones it took over" "$D/inbox_v2.rs" \
+    '            rec.tombstones = state.owner.tombstones.clone();' '' \
+    a_takeover_signed_again_keeps_the_tombstones_it_took_over
+dt "inbox v2: a takeover records the revocations it took over" "$D/inbox_v2.rs" \
+    '                .values()
+                .map(|r| InheritedRevoked {' '                .values()
+                .filter(|_| false)
+                .map(|r| InheritedRevoked {' \
+    a_takeover_signed_again_keeps_the_revocations_it_took_over
+dt "inbox v2: a takeover's live revocations bump on republish" "$D/inbox_v2.rs" \
+    '    if inherited_live {' '    if false && inherited_live {' \
+    a_takeover_signed_again_keeps_the_revocations_it_took_over
+dt "inbox v2: the note keeps the highest version seen" "$D/inbox_v2.rs" \
+    'let version = rec.foreign_seen.map_or(0, |f| f.version).max(owner.version);' \
+    'let version = owner.version;' \
+    a_note_of_another_node_keeps_its_first_sighting_and_highest_version
+dt "inbox v2: the note keeps when it was first seen" "$D/inbox_v2.rs" \
+    'let at = rec.foreign_seen.map_or(now, |f| f.at);' 'let at = now;' \
+    a_note_of_another_node_keeps_its_first_sighting_and_highest_version
+dt "inbox v2: a record with no digest is not flagged at its own version" "$D/inbox_v2.rs" \
+    '.is_some_and(|mine| mine != owner_digest(owner)))' '.is_none_or(|mine| mine != owner_digest(owner)))' \
+    a_record_with_no_digest_is_not_flagged_at_its_own_version
+dt "inbox v2: another node's record stays noted" "$D/inbox_v2.rs" \
+    '    if !signed_elsewhere(rec, owner) {
+        return;' '    if !signed_elsewhere(rec, owner) {
+        rec.foreign_seen = None;
+        return;' \
+    a_higher_owner_version_from_another_node_is_kept_through_a_background_drain
 dt "inbox v2: owner_time moves under the guard" "$D/inbox_v2.rs" \
     '.saturating_add(TIME_STEP_MAX)' '.saturating_add(TIME_STEP_MAX * 100)' \
     owner_time_moves_under_the_guard
@@ -1157,6 +1241,79 @@ guard "an unconfirmed identity's arm publishes nothing" "$STAGE/ui/src/api.rs" \
                         ));
                         crate::app::identity_store::spawn_detached(async {});' \
     "tests:the_unconfirmed_arm_has_no_publish_in_it" ui_notfound_tests
+guard "inbox v2 UI: an inbox is known only once the node took its GET" "$STAGE/ui/src/v2/net.rs" \
+    '        if let Err(e) = client.send(request.into()).await {' \
+    '        KNOWN.with(|k| k.borrow_mut().insert(turn.key.0));
+        if let Err(e) = client.send(request.into()).await {' \
+    "tests:a_get_that_was_never_sent_leaves_the_code_to_fetch" ui_net_tests
+guard "inbox v2 UI: a start publishes an inbox the network lacks" "$STAGE/ui/src/v2/owner.rs" \
+    '    if on_network {
+        return Ok(());
+    }' '    if on_network || true {
+        return Ok(());
+    }' \
+    "tests:an_inbox_whose_create_reply_never_reached_a_page_is_published_later" ui_v2_flow_tests
+guard "inbox v2 UI: the page warns from the delegate's note of another node" "$STAGE/ui/src/v2/owner.rs" \
+    '            if foreign(state.owner.version, rec) {' \
+    '            if state.owner.version > rec.max_version {' \
+    "tests:another_nodes_record_is_still_warned_about_after_this_node_signs_past_it" ui_v2_flow_tests
+guard "inbox v2 UI: an archive that kept the drained copy says so" "$STAGE/ui/src/v2/owner.rs" \
+    'remove_stored(r).await.map_err(|e| (true, e))' 'remove_stored(r).await.map_err(|e| (false, e))' \
+    "tests:an_archive_that_could_not_remove_the_drained_copy_says_so" ui_v2_flow_tests
+guard "inbox v2 UI: deleting a v2 message removes its kept and archived copies" "$STAGE/ui/src/v2/owner.rs" \
+    '    let r = row(id).ok_or("this message is not loaded")?;
+    crate::local_state::delete_message_after_copies(' \
+    '    let r = row(id).ok_or("this message is not loaded")?;
+    if true {
+        return remove_stored(r).await;
+    }
+    crate::local_state::delete_message_after_copies(' \
+    "tests:a_deleted_v2_message_that_was_read_stays_gone_after_a_reload" ui_v2_flow_tests
+guard "inbox v2 UI: a v2 delete marks the message deleted only after its drained copy went" "$STAGE/ui/src/v2/owner.rs" \
+    '    crate::local_state::delete_message_after_copies(alias, id, async || {
+        remove_stored(r).await.map_err(Into::into)
+    })
+    .await
+    .map_err(|e| e.to_string())' \
+    '    crate::local_state::delete_message(alias, id)
+        .await
+        .map_err(|e| e.to_string())?;
+    remove_stored(r).await' \
+    "tests:a_v2_delete_that_could_not_remove_the_drained_copy_can_be_retried" ui_v2_flow_tests
+guard "inbox v2 UI: a request with no answer keeps its turn for its late answer" "$STAGE/ui/src/v2/net.rs" \
+    '                    if self.owed {' '                    if self.owed && false {' \
+    "tests:a_late_answer_is_the_timed_out_requests_and_the_next_waits_for_it" ui_net_tests
+guard "ghost keys: a vault request with no answer keeps the turn for its late answer" "$STAGE/ui/src/ghostkeys.rs" \
+    '                    *l.borrow_mut() = Some(Owed {
+                        rx: Some(rx),
+                        until,
+                    })' \
+    '                    let _ = (l, rx, until);' \
+    "tests:a_late_vault_answer_is_never_the_next_requests" ui_ghostkeys_node_tests
+guard "inbox v2 UI: an archived v2 message keeps its sender's address" "$STAGE/ui/src/app.rs" \
+    '    crate::address::full_address(label.as_deref(), &from.0)' \
+    '    let _ = (label, from);
+    msg.from.to_string()' \
+    "tests:an_archived_v2_senders_address_resolves_for_a_reply" ui_v2_sender_tests
+guard "inbox v2 UI: a deleted identity's start loop stops" "$STAGE/ui/src/v2/owner.rs" \
+    'Some(g) if STARTED.with(' 'Some(g) if false && STARTED.with(' \
+    "tests:deleting_an_identity_during_startup_stops_its_loop" ui_v2_unit_tests
+guard "inbox v2 UI: a ledger entry that does not decode fails the read" "$STAGE/ui/src/v2/contacts.rs" \
+    '            Ok((PassId(id), entry))
+        })
+        .collect()' \
+    '            Ok((PassId(id), entry))
+        })
+        .filter(Result::is_ok)
+        .collect()' \
+    "tests:an_undecodable_ledger_entry_fails_the_read" ui_v2_unit_tests
+guard "inbox v2 UI: settings that do not decode are not an empty accepted list" "$STAGE/ui/src/v2/queue.rs" \
+    'serde_json::from_slice(body).map_err(|_| unreadable())?;' \
+    'serde_json::from_slice(body).unwrap_or_else(|_| serde_json::json!({}));' \
+    "tests:accepting_over_unreadable_settings_changes_nothing" ui_v2_unit_tests
+guard "inbox v2 UI: a drained message that does not decode is counted" "$STAGE/ui/src/v2/owner.rs" \
+    'let unreadable = items.len() - mail.len();' 'let unreadable = 0;' \
+    "tests:an_undecodable_drained_message_is_counted" ui_v2_unit_tests
 
 ut "a silent predecessor does not delay the list" "$STAGE/ui/src/app/identity_store.rs" \
     '    listing.await;
@@ -1534,8 +1691,9 @@ fi' \
     "not ok - a test publish does not refuse a build with scrub in it" scrub_release_tests
 guard "a test publish refuses a build with scrub" "$STAGE/Makefile.toml" \
     '# Whatever the environment says, a build with scrub never goes here.
-# The probe opt-in is for the harness'"'"'s own nodes, and this publish is not one.
-env -u FREENET_E2E_PROBE_ISO "$ROOT/scripts/check-release-scrub.sh" --absent' \
+# The probe and test-master opt-ins are for the harness'"'"'s own nodes, and this
+# publish is not one.
+env -u FREENET_E2E_PROBE_ISO -u FREENET_TEST_GHOST_ISO "$ROOT/scripts/check-release-scrub.sh" --absent' \
     '' \
     "not ok - a test publish does not refuse a build with scrub in it" scrub_release_tests
 guard "the absent check reads the build" "$STAGE/scripts/check-release-scrub.sh" \

@@ -26,6 +26,29 @@ struct PageEnv {
     /// Tests: the next `n` reads of keys containing the text miss.
     #[cfg(test)]
     misses: std::cell::RefCell<Option<(String, u32)>>,
+    /// Tests: writes and removals of keys containing the text fail.
+    #[cfg(test)]
+    fails: Option<String>,
+}
+
+/// Tests: make every host write and removal of a key containing `text` fail,
+/// as a host refusing them would; `None` ends it.
+#[cfg(test)]
+pub(crate) fn fail_writes_containing(text: Option<&str>) {
+    ENV.with(|e| e.borrow_mut().fails = text.map(str::to_string));
+}
+
+impl PageEnv {
+    #[cfg(test)]
+    fn fails(&self, key: &[u8]) -> bool {
+        self.fails
+            .as_ref()
+            .is_some_and(|t| String::from_utf8_lossy(key).contains(t.as_str()))
+    }
+    #[cfg(not(test))]
+    fn fails(&self, _key: &[u8]) -> bool {
+        false
+    }
 }
 
 /// Tests: make the next `n` host reads of keys containing `text` miss, as a
@@ -52,10 +75,16 @@ impl Env for PageEnv {
         self.secrets.get(key).cloned()
     }
     fn set(&mut self, key: &[u8], value: &[u8]) -> bool {
+        if self.fails(key) {
+            return false;
+        }
         self.secrets.insert(key.to_vec(), value.to_vec());
         true
     }
     fn remove(&mut self, key: &[u8]) -> bool {
+        if self.fails(key) {
+            return false;
+        }
         self.secrets.remove(key).is_some()
     }
     fn host_random(&mut self) -> [u8; 32] {
@@ -77,6 +106,13 @@ thread_local! {
 /// would (the offline build keeps inboxes in memory).
 pub(crate) fn set_contract_state(instance_id: [u8; 32], state: Vec<u8>) {
     ENV.with(|e| e.borrow_mut().contracts.insert(instance_id, state));
+}
+
+/// Tests: the node no longer holds this contract's state, as a node that
+/// never fetched it would not.
+#[cfg(test)]
+pub(crate) fn forget_contract_state(instance_id: [u8; 32]) {
+    ENV.with(|e| e.borrow_mut().contracts.remove(&instance_id));
 }
 
 fn origin() -> Option<MessageOrigin> {

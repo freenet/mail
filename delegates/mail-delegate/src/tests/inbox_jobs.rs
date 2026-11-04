@@ -2451,3 +2451,278 @@ fn an_inbox_the_slice_did_not_reach_comes_first_next_run() {
     run(&mut world, PAGE);
     assert!(left(&world, &second) < w::QUARANTINE_SLOTS, "reached");
 }
+
+/// Alice on this node (`world.env`) and, from her recovery key, on a second
+/// node (`other`); her inbox published by this one. Bob writes from his own.
+fn alice_on_two_nodes() -> (World, MemEnv, Addr, Addr) {
+    let mut world = World::new();
+    let ui_entropy = world.entropy();
+    let Ok(Reply::CreatedIdentity {
+        identity,
+        recovery_key,
+    }) = call(
+        &mut world.env,
+        PROD,
+        Op::CreateIdentity {
+            alias: "alice".into(),
+            description: String::new(),
+            ui_entropy,
+        },
+    )
+    else {
+        panic!("create");
+    };
+    let a = identity.addr;
+    let Ok(Reply::InboxV2State(state)) = call(
+        &mut world.env,
+        PROD,
+        Op::CreateInboxV2 {
+            addr: a,
+            ghost_master: Hash32(world.master),
+            existing: None,
+        },
+    ) else {
+        panic!("inbox");
+    };
+    world.inboxes.insert(a, state.into_vec());
+    let b = world.identity_in("bob", BOB_NODE);
+    let mut other = MemEnv {
+        now: world.env.now,
+        ..MemEnv::default()
+    };
+    call(
+        &mut other,
+        PROD,
+        Op::ImportIdentity {
+            source: ImportSource::RecoveryKey(recovery_key),
+            kind: ImportKind::UserRestore,
+            alias: "alice".into(),
+            description: String::new(),
+        },
+    )
+    .unwrap();
+    (world, other, a, b)
+}
+
+/// The second node takes Alice's inbox over from the network's state and
+/// publishes the version it signs.
+fn other_node_signs(world: &mut World, other: &mut MemEnv, a: &Addr) {
+    let Ok(Reply::InboxV2State(taken)) = call(
+        other,
+        PROD,
+        Op::CreateInboxV2 {
+            addr: *a,
+            ghost_master: Hash32(world.master),
+            existing: Some(ByteBuf::from(world.inboxes[a].clone())),
+        },
+    ) else {
+        panic!("take over");
+    };
+    let merged = apply(
+        &Rules::V1,
+        &world.params(a),
+        &world.inboxes[a],
+        vec![UpdateData::State(
+            WrappedState::new(taken.into_vec()).into(),
+        )],
+    )
+    .expect("the contract accepts the other node's state");
+    world.inboxes.insert(*a, merged);
+}
+
+/// `a`'s takeover by `other`, whose state never lands; returns what `other`
+/// then signs again from its record for a network that has no inbox.
+fn takeover_lost_then_signed_again(world: &mut World, other: &mut MemEnv, a: &Addr) -> Vec<u8> {
+    let Ok(Reply::InboxV2State(_lost)) = call(
+        other,
+        PROD,
+        Op::CreateInboxV2 {
+            addr: *a,
+            ghost_master: Hash32(world.master),
+            existing: Some(ByteBuf::from(world.inboxes[a].clone())),
+        },
+    ) else {
+        panic!("take over");
+    };
+    let Ok(Reply::InboxV2State(again)) = call(other, PROD, Op::RepublishInboxV2 { addr: *a })
+    else {
+        panic!("republish");
+    };
+    let again = again.into_vec();
+    assert!(freenet_email_inbox_v2::is_valid(
+        &Rules::V1,
+        &world.params(a),
+        &again
+    ));
+    again
+}
+
+/// A takeover keeps the deletions it took over: signed again from its
+/// record, the inbox still tombstones mail drained before the takeover.
+#[test]
+fn a_takeover_signed_again_keeps_the_tombstones_it_took_over() {
+    let (mut world, mut other, a, b) = alice_on_two_nodes();
+    let (sealed, landed) = world.send(&b, &a, "drained");
+    assert!(landed);
+    world.change(&a, OwnerChange::Drain);
+    assert!(world.state(&a).owner.tombstones.contains_key(&sealed.id.0));
+    let again = takeover_lost_then_signed_again(&mut world, &mut other, &a);
+    let again: w::InboxState = w::decode(&again).unwrap();
+    assert!(
+        again.owner.tombstones.contains_key(&sealed.id.0),
+        "a deletion from before the takeover"
+    );
+}
+
+/// A takeover has no ledger for the revocations it took over, so signed
+/// again from its record it bumps the epoch with no grace: the revoked pass
+/// is still refused.
+#[test]
+fn a_takeover_signed_again_keeps_the_revocations_it_took_over() {
+    let (mut world, mut other, a, _) = alice_on_two_nodes();
+    let c = world.identity_in("carol", BOB_NODE);
+    let invite = world.issue(&a, None, Some(3));
+    world
+        .call_as(
+            &c,
+            Op::HoldPass {
+                addr: c,
+                pass: invite.clone(),
+            },
+        )
+        .unwrap();
+    let held_back = world.seal(&c, &a, "held back").unwrap();
+    world.change(
+        &a,
+        OwnerChange::Revoke {
+            pass_id: freenet_mail_protocol::PassId(*invite.cert.pass_id),
+        },
+    );
+    let epoch = world.state(&a).owner.pass_epoch;
+    let again = takeover_lost_then_signed_again(&mut world, &mut other, &a);
+    world.inboxes.insert(a, again);
+    let st = world.state(&a);
+    assert_eq!(st.owner.pass_epoch, epoch + 1, "bumped");
+    assert_eq!(st.owner.prev_epoch_until, 0, "no grace");
+    let message: w::Message = w::decode(&held_back.message).unwrap();
+    let delta = InboxDelta {
+        messages: BTreeMap::from([(ByteArray::new(held_back.id.0), message)]),
+        ..InboxDelta::default()
+    };
+    world.publish(&a, &w::encode(&delta));
+    assert!(
+        !w::delivered(&world.state(&a), &held_back.id.0),
+        "the revoked pass is refused"
+    );
+}
+
+/// Decision 25, a higher version: another node signed past this one. The
+/// delegate notes it before its own drain signs past it, so a background
+/// drain that runs first (every tab closed) does not hide it, and a later
+/// version of its own never clears it.
+#[test]
+fn a_higher_owner_version_from_another_node_is_kept_through_a_background_drain() {
+    let (mut world, mut other, a, b) = alice_on_two_nodes();
+    world.send(&b, &a, "before");
+    run(&mut world, Trigger::NodeStarted);
+    assert_eq!(texts(&world.inbound(&a)), ["before"]);
+    assert_eq!(world.record(&a).foreign_seen, None, "its own versions");
+
+    other_node_signs(&mut world, &mut other, &a);
+    let theirs = world.state(&a).owner.version;
+    assert!(theirs > world.record(&a).max_version);
+    world.send(&b, &a, "after");
+    // The node's own run drains first and signs past the other version.
+    run(&mut world, Trigger::NodeStarted);
+    assert_eq!(texts(&world.inbound(&a)).len(), 2, "drained");
+    let rec = world.record(&a);
+    assert!(rec.max_version > theirs, "signed past it");
+    assert_eq!(rec.foreign_seen.map(|f| f.version), Some(theirs));
+    // More of its own versions leave it as it is.
+    world.send(&b, &a, "later");
+    settle(&mut world);
+    assert_eq!(
+        world.record(&a).foreign_seen.map(|f| f.version),
+        Some(theirs)
+    );
+}
+
+/// Decision 25, the same version: both nodes signed one version number
+/// with different records (this node's never landed). Seen as well.
+#[test]
+fn the_same_owner_version_with_other_bytes_is_another_nodes() {
+    let (mut world, mut other, a, _) = alice_on_two_nodes();
+    // This node signs version 2; its update is lost.
+    let lost = world
+        .update(
+            &a,
+            OwnerChange::SetQuarantine(w::QuarantineMode::RequireGhost { min_usd: None }),
+        )
+        .unwrap();
+    let lost: InboxDelta = w::decode(&lost.update.unwrap()).unwrap();
+    let mine = lost.owner.unwrap().version;
+    // The other node, reading version 1, signs version 2 too.
+    other_node_signs(&mut world, &mut other, &a);
+    assert_eq!(world.state(&a).owner.version, mine);
+    assert_eq!(world.record(&a).foreign_seen, None);
+    world.update(&a, OwnerChange::Drain).unwrap();
+    assert_eq!(world.record(&a).foreign_seen.map(|f| f.version), Some(mine));
+}
+
+/// Decision 25 on the node that took the inbox over: its takeover's version
+/// never landed, and the first node signed the same version number with
+/// another record. The taking-over node sees it, from the record it signed
+/// when it took over.
+#[test]
+fn a_takeover_sees_the_same_version_signed_by_the_first_node() {
+    let (mut world, mut other, a, _) = alice_on_two_nodes();
+    // The takeover signs version 2; its PUT never lands.
+    let Ok(Reply::InboxV2State(taken)) = call(
+        &mut other,
+        PROD,
+        Op::CreateInboxV2 {
+            addr: a,
+            ghost_master: Hash32(world.master),
+            existing: Some(ByteBuf::from(world.inboxes[&a].clone())),
+        },
+    ) else {
+        panic!("take over");
+    };
+    let taken: w::InboxState = w::decode(&taken).unwrap();
+    // The first node signs version 2 as well, and that one lands.
+    world.change(
+        &a,
+        OwnerChange::SetQuarantine(w::QuarantineMode::RequireGhost { min_usd: None }),
+    );
+    assert_eq!(world.state(&a).owner.version, taken.owner.version);
+    let ui_entropy = world.entropy();
+    call(
+        &mut other,
+        PROD,
+        Op::UpdateInboxV2 {
+            addr: a,
+            state: ByteBuf::from(world.inboxes[&a].clone()),
+            change: OwnerChange::Drain,
+            ui_entropy,
+        },
+    )
+    .unwrap();
+    let Ok(Reply::Item(Some(item))) = call(
+        &mut other,
+        PROD,
+        Op::GetItem {
+            item: freenet_mail_protocol::ItemRef {
+                kind: freenet_mail_protocol::ItemKind::InboxV2,
+                owner: Some(a),
+                id: Vec::new(),
+            },
+        },
+    ) else {
+        panic!("record");
+    };
+    let rec: v2::InboxRecord = freenet_mail_protocol::from_cbor(&item.body).unwrap();
+    assert_eq!(
+        rec.foreign_seen.map(|f| f.version),
+        Some(taken.owner.version)
+    );
+}

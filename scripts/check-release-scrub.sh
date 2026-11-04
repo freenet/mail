@@ -37,6 +37,12 @@ MARKER="freenet-mail:scrub-built-in"
 # which sets FREENET_E2E_PROBE_ISO=1 for its publish to the harness's own
 # nodes. The variable is read only with --absent.
 PROBE_MARKER="freenet-mail:e2e-probe-built-in"
+# In the WASM only with the `test-ghost-master` feature (ui/src/ghostkeys.rs):
+# inbox parameters name a test Ghost Key master and the page answers its own
+# Ghost Key requests with test keys. No publish takes it except the inbox v2
+# real-node test, which sets FREENET_TEST_GHOST_ISO=1 for its publish to the
+# harness's own nodes. The variable is read only with --absent.
+GHOST_MARKER="freenet-mail:test-ghost-master-built-in"
 
 found=0
 while IFS= read -r -d '' file; do
@@ -44,6 +50,12 @@ while IFS= read -r -d '' file; do
     if grep -a -q -F -- "$PROBE_MARKER" "$file" \
         && ! { [ "$ABSENT" -eq 1 ] && [ "${FREENET_E2E_PROBE_ISO:-}" = "1" ]; }; then
         echo "error: $file has the e2e-probe test instrumentation: it was built with FREENET_UI_FEATURES=e2e-probe." >&2
+        echo "       No publish may carry it. Unset the variable and rebuild." >&2
+        exit 1
+    fi
+    if grep -a -q -F -- "$GHOST_MARKER" "$file" \
+        && ! { [ "$ABSENT" -eq 1 ] && [ "${FREENET_TEST_GHOST_ISO:-}" = "1" ]; }; then
+        echo "error: $file has the test Ghost Key master: it was built with FREENET_UI_FEATURES=test-ghost-master." >&2
         echo "       No publish may carry it. Unset the variable and rebuild." >&2
         exit 1
     fi

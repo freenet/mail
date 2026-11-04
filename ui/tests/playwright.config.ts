@@ -12,6 +12,8 @@ export default defineConfig({
     ...(process.env.FREENET_LEGACY_SEEDED === "1" ? [] : ["legacy-migration.spec.ts"]),
     // Likewise `cargo make test-e2e-background`, which sets this.
     ...(process.env.FREENET_BACKGROUND_PROOF === "1" ? [] : ["background-proof.spec.ts"]),
+    // And `cargo make test-e2e-inbox-v2`.
+    ...(process.env.FREENET_INBOX_V2_LIVE === "1" ? [] : ["inbox-v2-live.spec.ts"]),
   ],
   timeout: 120_000,
   retries: 2,

@@ -405,7 +405,11 @@ test("the delegate's background jobs on a real node", async ({ browser }, testIn
     expect(first.verified, "and verified their signatures").toBe(3);
     expect(notified.verified, "the notification's import verified too").toBe(4);
     expect(woke.imported, "a page's own run had nothing left to import").toBe(0);
-    expect(woke.scanned, "the page run read both identities inboxes").toBe(2);
+    // Each identity has a v1 inbox and, since the page makes one for every
+    // confirmed identity, a v2 inbox; the delegate counts a scan of each
+    // inbox the node holds (`watch.rs`, `inbox_jobs.rs`), and `unknown` 0
+    // below says the node held all four.
+    expect(woke.scanned, "the page run read both identities' v1 and v2 inboxes").toBe(4);
     expect(woke.unknown, "the inboxes were known").toBe(0);
     expect(woke.kept, "the message was kept before any page asked").toBe(5);
     expect(woke.verified, "its signature verified inside the node's WASM").toBe(5);

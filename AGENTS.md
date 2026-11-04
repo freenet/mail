@@ -133,7 +133,12 @@ recovery-key codec. Its encoding is pinned per variant in
   so a node without the Background grant (or too old for it) gets the same
   planner. The page cannot tell whether the node granted Background, so it
   asks every time, and the loop starts once per page however often the
-  identities reload. Built with the `e2e-probe` feature (only `cargo make
+  identities reload. Each run the node starts (not a page's `RunJobs`) logs
+  one line through the host logger, which core writes at info:
+  `mail delegate run: woken_by=<notification|get-answer|node-started|rescan|
+  v1watch|renew|clock> scanned= imported= unknown= remaining=` (`imported`
+  counts v2 messages drained too). Nothing depends on it; the inbox v2 e2e
+  reads it. Built with the `e2e-probe` feature (only `cargo make
   test-e2e-background` does) it publishes its last run as `data-jobs-run`,
   including how long a call sent while the run was out waited (`probe_ms`) and
   the titles of the kept copies. `cargo make test-e2e-background` proves the
@@ -148,6 +153,16 @@ recovery-key codec. Its encoding is pinned per variant in
   per issued pass, the passes it holds and the drained mail; the page may read
   the first two, may delete drained mail, and may never read a held pass. Each
   version and time is recorded before the update carrying it is returned.
+  Decision 25: the record keeps the digest of the owner record it last signed,
+  and every owner update notes (`foreign_seen`) an owner record in the inbox it
+  did not sign, a higher version or its own version with other bytes, before
+  signing anything; nothing clears the note, so the page's "active on another
+  node" warning survives a reload and a background drain that signs first.
+  `RepublishInboxV2` signs the inbox again from the record (the next owner
+  version over its tombstones and filters, a guarded time, both recorded
+  first) for an identity whose record exists while the network has no inbox:
+  the first PUT, or the `CreateInboxV2` reply carrying the first state, was
+  lost, or the tab closed before it was sent.
   `UpdateInboxV2` drains the state it is given before signing any change, and a
   message is tombstoned only in an update returned after it was stored.
   `SealV2` picks the admission (held pass, owner, quarantine), clamps
@@ -234,8 +249,9 @@ guard on a file under a new directory needs an `area_of` entry.
 
 ### Inbox v2
 
-`contracts/inbox-v2` is the next inbox. The UI does not use it yet, and the
-v1 source stays at `contracts/inbox` so the frozen generation stays readable.
+`contracts/inbox-v2` is the next inbox. The UI uses its candidate
+(`ui/src/v2/`, below) alongside v1, and the v1 source stays at
+`contracts/inbox` so the frozen generation stays readable.
 `merge::merge` is the one set of rules: `update_state` calls it, and
 `validate_state` asks whether a state is a fixed point of it. Its numbers are
 in `merge::Rules`, passed as an argument so tests can run the same code with
@@ -290,6 +306,40 @@ small caps. Change any rule knowing it cannot be patched after publish.
   `scripts/build-wasm.sh`; `scripts/check-inbox-candidate.sh` (CI `check-drift`)
   fails unless the committed bytes are what the source builds. Unlike the mail
   delegate, it needs no fault sweeps: a contract has no storage of its own.
+
+### Inbox v2 in the UI
+
+`ui/src/v2/` drives inbox v2 from the page: `owner.rs` makes the identity's
+inbox (`CreateInboxV2`, then a PUT; a start that finds the record but no inbox
+on the network publishes `RepublishInboxV2`'s state), drains it and shows the
+drained mail; `contacts.rs`, `queue.rs` and `send.rs` hold contacts and passes,
+the new-contacts queue and sending (read back after every send, sealed again
+only at `reseal_at`); `net.rs` is the GET, PUT and UPDATE of v2 inboxes;
+`app/v2_view.rs` renders them; `address.rs` and `ghostkeys.rs` are the
+addresses and labels and the Ghost Key requests. Every signature and seal is
+the delegate's.
+
+- **`test-ghost-master`:** inbox parameters name the test Ghost Key master of
+  `contracts/inbox-v2/tests/fixtures/ghost-keys.txt`, and the page answers its
+  own Ghost Key requests with that fixture's keys. `example-data` turns it on,
+  so every offline build has it. A build with it carries the marker
+  `freenet-mail:test-ghost-master-built-in`, and `scripts/check-release-scrub.sh`
+  refuses to publish such a build to production. Never publish an
+  `example-data` build, or one built with `FREENET_UI_FEATURES=test-ghost-master`.
+- **The offline model** (`net.rs`, `offline`): the offline build's inboxes live
+  in the page and merge by a model that checks only what the UI's outcomes need
+  (newest owner version, unions, tombstones, revocation by pass id, the Ghost Key
+  proof, the 16 quarantine slots). It does not check pass signatures,
+  certificate expiry, epochs, the send window or the caps. Those are proven by
+  the contract's own suite and by the delegate's interop tests, which run
+  everything the delegate builds through the contract's `apply` and `is_valid`;
+  an offline UI test never stands as proof of them.
+- **`cargo make test-e2e-inbox-v2`:** two real nodes, the build with
+  `test-ghost-master`: delivery by pass, by invite and through the queue, Open
+  and RequireGhost, revocation, and a drain with every tab of the recipient
+  closed. That drain must come from the inbox's notification within 120 s (read
+  from the peer's log line above). When it does not, the run waits up to 18.3 more minutes for the `rescan`
+  wake-up, so it shows whether that fallback works, and then fails.
 
 The `legacy_*.toml` registries are validated by `ui/build.rs`
 (`freenet-migrate-build`; an empty registry fails the build) and pinned by

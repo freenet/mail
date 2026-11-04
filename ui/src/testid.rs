@@ -198,6 +198,44 @@ pub(crate) const FM_SETTINGS_NAV_ITEM: &str = "fm-settings-nav-item";
 // `data-state` mirrors the bool: "on" / "off".
 pub(crate) const FM_AFT_VERIFIED_SKIP_TOGGLE: &str = "fm-aft-verified-skip-toggle";
 
+// Inbox v2: address, invites, contacts and passes (Settings → Address &
+// contacts), the compose note, the last send's outcome, decision 25.
+pub(crate) const FM_V2_ADDRESS: &str = "fm-v2-address";
+pub(crate) const FM_V2_INBOX_STATE: &str = "fm-v2-inbox-state";
+pub(crate) const FM_V2_INVITE_CREATE: &str = "fm-v2-invite-create";
+pub(crate) const FM_V2_INVITE_TEXT: &str = "fm-v2-invite-text";
+pub(crate) const FM_V2_ADD_INPUT: &str = "fm-v2-add-input";
+pub(crate) const FM_V2_ADD_NAME: &str = "fm-v2-add-name";
+pub(crate) const FM_V2_ADD_SUBMIT: &str = "fm-v2-add-submit";
+pub(crate) const FM_V2_ADD_RESULT: &str = "fm-v2-add-result";
+pub(crate) const FM_V2_LABEL_WARNING: &str = "fm-v2-label-warning";
+pub(crate) const FM_V2_CONTACT_ROW: &str = "fm-v2-contact-row";
+pub(crate) const FM_V2_PASS_HELD: &str = "fm-v2-pass-held";
+pub(crate) const FM_V2_PASS_ISSUED: &str = "fm-v2-pass-issued";
+pub(crate) const FM_V2_REVOKE: &str = "fm-v2-revoke";
+pub(crate) const FM_V2_RECIPIENT_NOTE: &str = "fm-v2-recipient-note";
+pub(crate) const FM_V2_GHOST_BADGE: &str = "fm-v2-ghost-badge";
+pub(crate) const FM_V2_OUTCOME: &str = "fm-v2-outcome";
+pub(crate) const FM_V2_FOREIGN_WARNING: &str = "fm-v2-foreign-warning";
+pub(crate) const FM_V2_QUARANTINE_MODE: &str = "fm-v2-quarantine-mode";
+pub(crate) const FM_V2_GHOST_PANEL: &str = "fm-v2-ghost-panel";
+pub(crate) const FM_V2_GHOST_USE: &str = "fm-v2-ghost-use";
+pub(crate) const FM_V2_GHOST_PICKER: &str = "fm-v2-ghost-picker";
+pub(crate) const FM_V2_GHOST_TIER: &str = "fm-v2-ghost-tier";
+pub(crate) const FM_V2_GHOST_GET: &str = "fm-v2-ghost-get";
+pub(crate) const FM_V2_GHOST_GET_LINK: &str = "fm-v2-ghost-get-link";
+pub(crate) const FM_V2_GHOST_RECHECK: &str = "fm-v2-ghost-recheck";
+pub(crate) const FM_V2_GHOST_DISCLOSURE: &str = "fm-v2-ghost-disclosure";
+pub(crate) const FM_V2_QUEUE: &str = "fm-v2-queue";
+pub(crate) const FM_V2_QUEUE_ROW: &str = "fm-v2-queue-row";
+pub(crate) const FM_V2_QUEUE_ACCEPT: &str = "fm-v2-queue-accept";
+pub(crate) const FM_V2_QUEUE_DROP: &str = "fm-v2-queue-drop";
+pub(crate) const FM_V2_QUEUE_TIP: &str = "fm-v2-queue-tip";
+pub(crate) const FM_V2_QUEUE_DROPPED: &str = "fm-v2-queue-dropped";
+pub(crate) const FM_V2_NOT_CONTACT: &str = "fm-v2-not-contact";
+pub(crate) const FM_V2_QUEUE_PETNAME: &str = "fm-v2-queue-petname";
+pub(crate) const FM_V2_QUEUE_CONFIRM: &str = "fm-v2-queue-confirm";
+
 #[cfg(test)]
 mod tests {
     /// Guard against drift between the Rust constants in this module and
@@ -348,6 +386,41 @@ mod tests {
                 "fmAftVerifiedSkipToggle",
                 super::FM_AFT_VERIFIED_SKIP_TOGGLE,
             ),
+            ("fmV2Address", super::FM_V2_ADDRESS),
+            ("fmV2InboxState", super::FM_V2_INBOX_STATE),
+            ("fmV2InviteCreate", super::FM_V2_INVITE_CREATE),
+            ("fmV2InviteText", super::FM_V2_INVITE_TEXT),
+            ("fmV2AddInput", super::FM_V2_ADD_INPUT),
+            ("fmV2AddName", super::FM_V2_ADD_NAME),
+            ("fmV2AddSubmit", super::FM_V2_ADD_SUBMIT),
+            ("fmV2AddResult", super::FM_V2_ADD_RESULT),
+            ("fmV2LabelWarning", super::FM_V2_LABEL_WARNING),
+            ("fmV2ContactRow", super::FM_V2_CONTACT_ROW),
+            ("fmV2PassHeld", super::FM_V2_PASS_HELD),
+            ("fmV2PassIssued", super::FM_V2_PASS_ISSUED),
+            ("fmV2Revoke", super::FM_V2_REVOKE),
+            ("fmV2RecipientNote", super::FM_V2_RECIPIENT_NOTE),
+            ("fmV2GhostBadge", super::FM_V2_GHOST_BADGE),
+            ("fmV2Outcome", super::FM_V2_OUTCOME),
+            ("fmV2ForeignWarning", super::FM_V2_FOREIGN_WARNING),
+            ("fmV2QuarantineMode", super::FM_V2_QUARANTINE_MODE),
+            ("fmV2GhostPanel", super::FM_V2_GHOST_PANEL),
+            ("fmV2GhostUse", super::FM_V2_GHOST_USE),
+            ("fmV2GhostPicker", super::FM_V2_GHOST_PICKER),
+            ("fmV2GhostTier", super::FM_V2_GHOST_TIER),
+            ("fmV2GhostGet", super::FM_V2_GHOST_GET),
+            ("fmV2GhostGetLink", super::FM_V2_GHOST_GET_LINK),
+            ("fmV2GhostRecheck", super::FM_V2_GHOST_RECHECK),
+            ("fmV2GhostDisclosure", super::FM_V2_GHOST_DISCLOSURE),
+            ("fmV2Queue", super::FM_V2_QUEUE),
+            ("fmV2QueueRow", super::FM_V2_QUEUE_ROW),
+            ("fmV2QueueAccept", super::FM_V2_QUEUE_ACCEPT),
+            ("fmV2QueueDrop", super::FM_V2_QUEUE_DROP),
+            ("fmV2QueueTip", super::FM_V2_QUEUE_TIP),
+            ("fmV2QueueDropped", super::FM_V2_QUEUE_DROPPED),
+            ("fmV2NotContact", super::FM_V2_NOT_CONTACT),
+            ("fmV2QueuePetname", super::FM_V2_QUEUE_PETNAME),
+            ("fmV2QueueConfirm", super::FM_V2_QUEUE_CONFIRM),
         ];
         assert_eq!(
             json.len(),

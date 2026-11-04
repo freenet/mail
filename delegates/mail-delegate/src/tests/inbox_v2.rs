@@ -1000,3 +1000,254 @@ fn a_failed_retry_of_a_create_keeps_the_earlier_entry() {
     };
     assert_eq!(items.len(), 1, "the stored item is no longer listed");
 }
+
+/// `addr`'s inbox signed again from the delegate's record.
+fn republish(world: &mut World, addr: &Addr) -> Result<Vec<u8>, FailureCode> {
+    match world.call_as(addr, Op::RepublishInboxV2 { addr: *addr })? {
+        Reply::InboxV2State(s) => Ok(s.into_vec()),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// The reply to `CreateInboxV2` was lost (or the tab closed before the page
+/// kept or sent it): the delegate has the record, nobody has the state. The
+/// inbox is signed again from the record, at a version above the one the
+/// lost state carried, and that version is recorded as this node's own, so
+/// it is neither signed twice nor taken for another node's (decision 25).
+#[test]
+fn an_inbox_whose_first_state_was_lost_is_signed_again_from_the_record() {
+    let mut world = World::new();
+    let a = create(&mut world.env, PROD, "alice").addr;
+    let Ok(Reply::InboxV2State(lost)) = world.call_as(
+        &a,
+        Op::CreateInboxV2 {
+            addr: a,
+            ghost_master: Hash32(world.master),
+            existing: None,
+        },
+    ) else {
+        panic!("create inbox");
+    };
+    let lost: InboxState = w::decode(&lost).unwrap();
+    world.advance(DAY);
+    let state = republish(&mut world, &a).unwrap();
+    assert!(is_valid(&Rules::V1, &world.params(&a), &state));
+    let first: InboxState = w::decode(&state).unwrap();
+    assert!(first.owner.version > lost.owner.version);
+    assert!(first.time.owner_time > lost.time.owner_time, "time moved");
+    let rec = world.record(&a);
+    assert_eq!(rec.max_version, first.owner.version, "recorded");
+    assert_eq!(rec.max_owner_time, first.time.owner_time, "recorded");
+    world.inboxes.insert(a, state);
+
+    // A drain of it sees this node's own record, and mail gets in and out.
+    let b = world.identity("bob");
+    assert!(world.send(&b, &a, "hi").1);
+    world.change(&a, OwnerChange::Drain);
+    assert_eq!(world.record(&a).foreign_seen, None, "its own record");
+    assert_eq!(world.inbound(&a).len(), 1);
+
+    // Again: a new version every time, never one already signed.
+    let again: InboxState = w::decode(&republish(&mut world, &a).unwrap()).unwrap();
+    assert!(again.owner.version > world.state(&a).owner.version);
+}
+
+/// The network lost an inbox that held drained mail: the state signed again
+/// keeps the record's tombstones, so a peer still holding a drained message
+/// cannot bring it back.
+#[test]
+fn an_inbox_signed_again_keeps_its_tombstones() {
+    let mut world = World::new();
+    let a = world.identity("alice");
+    let b = world.identity("bob");
+    let (sealed, landed) = world.send(&b, &a, "drained");
+    assert!(landed);
+    world.change(&a, OwnerChange::Drain);
+    let held = world.inboxes[&a].clone();
+    let state = republish(&mut world, &a).unwrap();
+    let again: InboxState = w::decode(&state).unwrap();
+    assert!(again.owner.tombstones.contains_key(&sealed.id.0));
+    // A peer's older copy, with the message in it, merges in: still drained.
+    let merged = apply(
+        &Rules::V1,
+        &world.params(&a),
+        &state,
+        vec![UpdateData::State(held.into())],
+    )
+    .expect("the contract merges the old copy");
+    assert!(is_valid(&Rules::V1, &world.params(&a), &merged));
+    let merged: InboxState = w::decode(&merged).unwrap();
+    assert_eq!(merged.owner.version, again.owner.version);
+    assert!(merged.owner.tombstones.contains_key(&sealed.id.0));
+}
+
+/// The network lost an inbox after a pass was revoked: the state signed again
+/// carries the revocation, so mail sealed with that pass (a peer may still
+/// hold some) is refused by the contract.
+#[test]
+fn an_inbox_signed_again_keeps_its_revocations() {
+    let mut world = World::new();
+    let a = world.identity("alice");
+    let c = world.identity("carol");
+    let invite = world.issue(&a, None, Some(3));
+    world
+        .call_as(
+            &c,
+            Op::HoldPass {
+                addr: c,
+                pass: invite.clone(),
+            },
+        )
+        .unwrap();
+    // Sealed before the revocation and held back, as a peer might.
+    let held_back = world.seal(&c, &a, "held back").unwrap();
+    assert_eq!(held_back.admission, SendAdmission::Pass);
+    world.change(
+        &a,
+        OwnerChange::Revoke {
+            pass_id: PassId(*invite.cert.pass_id),
+        },
+    );
+    assert!(world.state(&a).revoked.contains_key(&invite.cert.pass_id));
+
+    world.advance(DAY);
+    let state = republish(&mut world, &a).unwrap();
+    assert!(is_valid(&Rules::V1, &world.params(&a), &state));
+    world.inboxes.insert(a, state);
+    let again = world.state(&a);
+    let r = &again.revoked[&invite.cert.pass_id];
+    assert_eq!(r.epoch, again.owner.pass_epoch, "no bump was needed");
+    let message: w::Message = w::decode(&held_back.message).unwrap();
+    let delta = InboxDelta {
+        messages: BTreeMap::from([(serde_bytes::ByteArray::new(held_back.id.0), message)]),
+        ..InboxDelta::default()
+    };
+    world.publish(&a, &w::encode(&delta));
+    assert!(
+        !w::delivered(&world.state(&a), &held_back.id.0),
+        "the revoked pass is refused"
+    );
+}
+
+/// A revoked pass's ledger entry is listed but cannot be read: a republish
+/// fails as unreadable rather than signing an inbox without that revocation,
+/// and once the entry reads again it carries it. An entry whose deletion did
+/// not finish (its record gone, its `d` marker left) is absent, not unreadable.
+#[test]
+fn a_republish_over_an_unreadable_revoked_ledger_entry_fails_closed() {
+    let mut world = World::new();
+    let a = world.identity("alice");
+    let invite = world.issue(&a, None, Some(3));
+    let pass_id = invite.cert.pass_id;
+    world.change(
+        &a,
+        OwnerChange::Revoke {
+            pass_id: PassId(*pass_id),
+        },
+    );
+    world.advance(DAY);
+    let ledger = ItemRef {
+        kind: ItemKind::PassLedger,
+        owner: Some(a),
+        id: pass_id.to_vec(),
+    };
+    let mut probe = MemEnv::default();
+    let space = Space::new(&mut probe, Origin([world.origin(&a); 32]));
+    let key = String::from_utf8(space.full_key(&item_rel(&ledger))).unwrap();
+    let pending =
+        String::from_utf8(space.full_key(&crate::store::pending_item_rel(&ledger))).unwrap();
+    world.env.faults = Some(Faults::blind(&key));
+    assert_eq!(
+        republish(&mut world, &a).unwrap_err(),
+        FailureCode::Unreadable,
+        "never signed without the revocation"
+    );
+    world.env.faults = None;
+    let state: InboxState = w::decode(&republish(&mut world, &a).unwrap()).unwrap();
+    assert!(state.revoked.contains_key(&pass_id), "readable again");
+
+    // A deletion that removed the record and stopped before the index.
+    let record = world.env.secrets.remove(key.as_bytes());
+    assert!(record.is_some());
+    world
+        .env
+        .secrets
+        .insert(pending.into_bytes(), crate::store::MARKER_DELETING.to_vec());
+    assert!(
+        republish(&mut world, &a).is_ok(),
+        "a deleted entry is absent"
+    );
+}
+
+/// No record, no inbox to sign: an identity without one, and one the page's
+/// origin does not hold, are refused.
+#[test]
+fn republishing_needs_the_identitys_record_in_this_origin() {
+    let mut world = World::new();
+    let a = create(&mut world.env, PROD, "alice").addr;
+    assert_eq!(
+        republish(&mut world, &a).unwrap_err(),
+        FailureCode::NotFound
+    );
+    let b = world.identity("bob");
+    assert!(
+        call(&mut world.env, PROD + 1, Op::RepublishInboxV2 { addr: b }).is_err(),
+        "another origin"
+    );
+}
+
+/// The node-log line of a run the node started, as `ui/tests/inbox-v2-live.spec.ts`
+/// reads it to tell which wake-up drained an inbox with every tab closed.
+#[test]
+fn a_node_started_run_logs_what_woke_it_and_what_it_did() {
+    let done = freenet_mail_protocol::JobsRun {
+        scanned: 2,
+        imported: 1,
+        unknown: 0,
+        remaining: 3,
+    };
+    assert_eq!(
+        crate::handlers::run_line("notification", &done),
+        "mail delegate run: woken_by=notification scanned=2 imported=1 unknown=0 remaining=3"
+    );
+}
+
+/// Decision 25's note keeps when another node was first seen and the
+/// highest version seen: an older foreign record (a page's stale state) does
+/// not lower it, and a newer one raises the version but not the time.
+#[test]
+fn a_note_of_another_node_keeps_its_first_sighting_and_highest_version() {
+    let mut world = World::new();
+    let a = world.identity("alice");
+    let mut rec = world.record(&a);
+    let owner = |v: u64| {
+        let mut o = world.state(&a).owner;
+        o.version = v;
+        o
+    };
+    assert!(rec.max_version < 5);
+    inbox_v2::note_foreign(&mut rec, &owner(10), 100);
+    let seen = |rec: &InboxRecord| rec.foreign_seen.map(|f| (f.version, f.at));
+    assert_eq!(seen(&rec), Some((10, 100)));
+    inbox_v2::note_foreign(&mut rec, &owner(5), 200);
+    assert_eq!(seen(&rec), Some((10, 100)), "an older one lowers nothing");
+    inbox_v2::note_foreign(&mut rec, &owner(12), 300);
+    assert_eq!(seen(&rec), Some((12, 100)), "first seen at 100");
+}
+
+/// A record from before the delegate kept the digest of what it signed has
+/// none: its own version is then not taken for another node's, whatever the
+/// bytes (only a higher version is).
+#[test]
+fn a_record_with_no_digest_is_not_flagged_at_its_own_version() {
+    let mut world = World::new();
+    let a = world.identity("alice");
+    let mut rec = world.record(&a);
+    rec.signed_owner = None;
+    let mut other = world.state(&a).owner;
+    assert_eq!(other.version, rec.max_version);
+    other.quarantine = w::QuarantineMode::RequireGhost { min_usd: None };
+    assert!(!inbox_v2::signed_elsewhere(&rec, &other));
+    other.version += 1;
+    assert!(inbox_v2::signed_elsewhere(&rec, &other));
+}

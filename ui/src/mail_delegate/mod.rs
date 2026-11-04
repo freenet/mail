@@ -151,6 +151,8 @@ thread_local! {
     /// How many times this thread asked for the v1 token-generator
     /// parameters (which carry the signing seed); tests pin who may.
     pub(crate) static V1_AFT_PARAMS_CALLS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    /// How many `RunJobs` this thread sent; tests pin when the page does.
+    pub(crate) static RUN_JOBS_CALLS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
 /// Just the request id of a [`Response`]; the result is skipped unread.
@@ -175,6 +177,10 @@ pub(crate) async fn call(op: Op) -> Result<Reply, CallError> {
     #[cfg(test)]
     if matches!(op, Op::V1AftParams { .. }) {
         V1_AFT_PARAMS_CALLS.with(|c| c.set(c.get() + 1));
+    }
+    #[cfg(test)]
+    if matches!(op, Op::RunJobs) {
+        RUN_JOBS_CALLS.with(|c| c.set(c.get() + 1));
     }
     let timeout = timeout_ms(&op);
     let holds_prompt = consented(&op);

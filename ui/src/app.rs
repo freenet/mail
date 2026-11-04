@@ -36,6 +36,7 @@ pub(crate) mod login;
 mod migration_fixture;
 pub(crate) mod migration_view;
 pub(crate) mod settings;
+pub(crate) mod v2_view;
 
 // In-memory mailbox for offline (`example-data`, `!use-node`) mode.
 // Messages composed via `send_message` are stored here keyed by
@@ -1052,6 +1053,7 @@ impl User {
     pub(crate) fn logout(&mut self) {
         self.logged = false;
         self.active_id = None;
+        crate::v2::send::clear_outcome();
     }
 }
 
@@ -1358,6 +1360,173 @@ fn merge_inbox_list(
         out.push(kept_to_message(mid, kept, read));
     }
     out
+}
+
+/// Whether `id` is a v2 row the list has shown (a refresh replaces them all,
+/// and Archive and Delete go to the delegate's stored copy).
+fn is_v2_row(id: u64) -> bool {
+    crate::v2::owner::row(id).is_some()
+}
+
+/// The mail drained into `addr`'s v2 inbox, as inbox rows. The sender is
+/// shown by petname, else by the label they suggest, else by their address.
+fn v2_rows(addr: &freenet_mail_protocol::Addr, is_read: impl Fn(u64) -> bool) -> Vec<Message> {
+    crate::v2::owner::inbound(addr, false)
+        .into_iter()
+        .map(|m| v2_message(*addr, m, &is_read))
+        .collect()
+}
+
+/// What to tell the user about a v2 row's sender (§5.1): the label
+/// warnings, whoever sent it, and whether it is a saved contact. A pass
+/// says only that they may write here, not who they are.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct V2Sender {
+    pub warnings: Vec<String>,
+    pub contact: bool,
+}
+
+thread_local! {
+    static V2_SENDERS: RefCell<std::collections::HashMap<u64, V2Sender>> =
+        RefCell::new(std::collections::HashMap::new());
+}
+
+/// A v2 row's sender warnings; with `stranger_note`, also that a sender
+/// who is not a saved contact chose the name shown.
+#[component]
+fn V2SenderNotes(
+    id: u64,
+    #[props(default)] stranger_note: bool,
+    #[props(default = true)] warnings: bool,
+) -> Element {
+    if !is_v2_row(id) {
+        return rsx! {};
+    }
+    let _ = crate::v2::contacts::GEN.read();
+    let sender = v2_sender(id);
+    rsx! {
+        if warnings {
+            for w in sender.warnings.iter() {
+                span { class: "warn", "data-testid": testid::FM_V2_LABEL_WARNING, "\u{26a0} {w}" }
+            }
+        }
+        if stranger_note && !sender.contact {
+            span { class: "fp", "data-testid": testid::FM_V2_NOT_CONTACT,
+                "Not in your contacts: this is the name they gave themselves."
+            }
+        }
+    }
+}
+
+/// The signed-in identity's address when `id` is a v2 row.
+fn v2_owner_of(id: u64, user: &User) -> Option<freenet_mail_protocol::Addr> {
+    if !is_v2_row(id) {
+        return None;
+    }
+    user.logged_id().map(|i| i.addr)
+}
+
+/// The sender notes of v2 row `id`.
+pub(crate) fn v2_sender(id: u64) -> V2Sender {
+    V2_SENDERS.with(|s| s.borrow().get(&id).cloned().unwrap_or_default())
+}
+
+fn v2_message(
+    addr: freenet_mail_protocol::Addr,
+    m: crate::v2::owner::Inbound,
+    is_read: impl Fn(u64) -> bool,
+) -> Message {
+    let id = crate::v2::owner::row_id(addr, &m);
+    let (name, warnings) = crate::v2::contacts::sender_name(&m.from, m.body.label.as_deref());
+    let sender = V2Sender {
+        warnings: warnings.iter().map(|w| format!("{name} {w}")).collect(),
+        contact: crate::v2::contacts::by_addr(&m.from).is_some(),
+    };
+    V2_SENDERS.with(|s| s.borrow_mut().insert(id, sender));
+    Message {
+        id,
+        from: name.into(),
+        title: m.body.title.into(),
+        content: m.body.content.into(),
+        read: is_read(id),
+        time: chrono::DateTime::from_timestamp_millis(m.body.time_ms)
+            .unwrap_or_else(chrono::Utc::now),
+        sender_vk: m.sender_vk,
+        // The delegate verified the sender's signature at the drain.
+        signature_valid: true,
+        assignment_hash: m.id,
+        thread_id: m.body.thread_id,
+        in_reply_to: m.body.in_reply_to,
+        quoted_excerpt: m.body.quoted_excerpt,
+    }
+}
+
+/// The draft the page's `#/compose?draft=<id>` route names: the way back
+/// from getting a Ghost Key (§5.5).
+fn route_draft() -> Option<String> {
+    #[cfg(target_family = "wasm")]
+    {
+        let hash = web_sys::window()?.location().hash().ok()?;
+        crate::ghostkeys::draft_in_route(&hash)
+    }
+    #[cfg(not(target_family = "wasm"))]
+    None
+}
+
+/// Open the draft the route names once the identity's drafts are loaded,
+/// on load and whenever the route changes, then clear the route.
+static ROUTE_DRAFT: GlobalSignal<Option<String>> = Signal::global(route_draft);
+
+fn draft_route(mut menu_selection: Signal<menu::MenuSelection>) {
+    let mut wanted = ROUTE_DRAFT.signal();
+    // One listener for the page: the signal it sets outlives every view.
+    thread_local!(static LISTENING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) });
+    #[cfg(target_family = "wasm")]
+    if !LISTENING.with(|l| l.replace(true))
+        && let Some(window) = web_sys::window()
+    {
+        use wasm_bindgen::{JsCast, closure::Closure};
+        let on_change = Closure::<dyn FnMut()>::new(move || wanted.set(route_draft()));
+        let _ = window
+            .add_event_listener_with_callback("hashchange", on_change.as_ref().unchecked_ref());
+        on_change.forget();
+    }
+    let user = use_context::<Signal<User>>();
+    use_effect(move || {
+        let _ = crate::local_state::GENERATION.read();
+        let Some(id) = wanted.read().clone() else {
+            return;
+        };
+        let Some(alias) = user.read().logged_id().map(|i| i.alias.to_string()) else {
+            return;
+        };
+        let Some((_, d)) = crate::local_state::drafts_for(&alias)
+            .into_iter()
+            .find(|(d, _)| *d == id)
+        else {
+            return;
+        };
+        wanted.set(None);
+        #[cfg(target_family = "wasm")]
+        if let Some(window) = web_sys::window() {
+            let _ = window.location().set_hash("");
+        }
+        menu_selection.write().open_draft(menu::ComposePrefill {
+            to: d.to,
+            subject: d.subject,
+            body: d.body,
+            draft_id: Some(id),
+            thread_id: d.thread_id,
+            in_reply_to: d.in_reply_to,
+            quoted_excerpt: d.quoted_excerpt,
+        });
+    });
+}
+
+/// Replace the v2 rows in `emails` with `rows`.
+fn merge_v2_rows(emails: &mut Vec<Message>, rows: Vec<Message>) {
+    emails.retain(|m| !is_v2_row(m.id));
+    emails.extend(rows);
 }
 
 impl From<MessageModel> for Message {
@@ -2815,6 +2984,8 @@ mod menu {
         Aft,
         Inbox,
         Contacts,
+        /// Inbox v2: your address, invites, contacts and their passes.
+        Address,
         Appearance,
         Advanced,
     }
@@ -2827,6 +2998,7 @@ mod menu {
                 Self::Aft => "Anti-Flood (AFT)",
                 Self::Inbox => "Inbox & folders",
                 Self::Contacts => "Contacts",
+                Self::Address => "Address & new contacts",
                 Self::Appearance => "Appearance",
                 Self::Advanced => "Advanced & Diagnostics",
             }
@@ -2842,6 +3014,7 @@ mod menu {
                 Self::Aft => "aft",
                 Self::Inbox => "inbox",
                 Self::Contacts => "contacts",
+                Self::Address => "address",
                 Self::Appearance => "appearance",
                 Self::Advanced => "advanced",
             }
@@ -3213,6 +3386,15 @@ fn UserInbox() -> Element {
     let menu_selection = use_context::<Signal<menu::MenuSelection>>();
     let settings_open = menu_selection.read().settings().is_some();
 
+    // Every confirmed identity's v2 inbox (once per page each): an identity
+    // created or confirmed since the load starts here.
+    for id in use_context::<Signal<User>>().read().identities.iter() {
+        if id.confirmed {
+            crate::v2::owner::start(id.addr);
+        }
+    }
+    draft_route(menu_selection);
+
     let _local_gen = crate::local_state::GENERATION();
     let appearance = crate::local_state::global_settings().appearance;
     let theme_attr = match appearance.theme {
@@ -3537,6 +3719,7 @@ fn Sidebar() -> Element {
                             let mut state = user.write();
                             state.logged = false;
                             state.active_id = None;
+                            crate::v2::send::clear_outcome();
                             // Clear the per-identity message cache so the next
                             // login re-runs `load_example_messages` instead of
                             // hitting the idempotency guard with stale rows.
@@ -3558,6 +3741,10 @@ fn MessageList() -> Element {
     let inbox_data = use_context::<InboxesData>();
     let mut menu_selection = use_context::<Signal<menu::MenuSelection>>();
     let user = use_context::<Signal<User>>();
+    let v2_stored = user.read().logged_id().map_or(0, |id| {
+        crate::v2::owner::inbound(&id.addr, false).len()
+            + crate::v2::owner::inbound(&id.addr, true).len()
+    });
 
     {
         let current_active_id: UserId = user.read().active_id.unwrap();
@@ -3586,6 +3773,14 @@ fn MessageList() -> Element {
                 |id| crate::local_state::is_unread_import(&alias, id),
             );
             crate::log::debug!("active id: {:?}; emails number: {}", id.alias, emails.len());
+        }
+        // v2 mail, with or without a v1 inbox loaded (the offline build has
+        // none).
+        if let Some(id) = user.read().logged_id() {
+            let alias = id.alias.to_string();
+            let rows = v2_rows(&id.addr, |m| crate::local_state::is_read(&alias, m));
+            let inbox = inbox.read();
+            merge_v2_rows(&mut inbox.messages.borrow_mut(), rows);
         }
     }
 
@@ -3684,7 +3879,16 @@ fn MessageList() -> Element {
                 span { class: "list-title", "{folder.label()}" }
                 span { class: "list-count", "{count}" }
             }
+            if let Some(id) = user.read().logged_id() {
+                v2_view::ForeignNodeWarning { addr: id.addr }
+                v2_view::QueueNotice { addr: id.addr }
+                v2_view::LastOutcome { addr: id.addr }
+            }
             div { class: "list-scroll", "data-testid": testid::FM_LIST,
+                // How many drained v2 messages the delegate holds for this
+                // identity: the list hides archived and deleted rows itself,
+                // so this is how a test sees that a copy really went.
+                "data-v2-stored": "{v2_stored}",
                 if matches!(folder, menu::Folder::Archive) {
                     if archived_msgs.is_empty() {
                         div { style: "padding:24px 18px; font-family:'Geist Mono',monospace; font-size:10px; letter-spacing:0.1em; text-transform:uppercase; color:var(--ink4);",
@@ -3915,6 +4119,13 @@ fn MessageList() -> Element {
                             } else {
                                 senders.first().cloned().unwrap_or_default()
                             };
+                            // M1: a v2 sender's label warning shows in the
+                            // list, where mail is read.
+                            let sender_warning = group
+                                .messages
+                                .iter()
+                                .rev()
+                                .find_map(|m| v2_sender(m.id).warnings.first().cloned());
                             let subj = newest.title.clone();
                             let preview = newest.content.clone();
                             let time_short = format_time_short(newest.time);
@@ -3936,6 +4147,14 @@ fn MessageList() -> Element {
                                     onclick: move |_| { menu_selection.write().open_thread(root_id); },
                                     div { class: "ft-group-row1",
                                         span { class: "ft-group-people", "{sender_label}" }
+                                        if let Some(w) = sender_warning {
+                                            span {
+                                                class: "warn",
+                                                "data-testid": testid::FM_V2_LABEL_WARNING,
+                                                title: "{w}",
+                                                "\u{26a0} {w}"
+                                            }
+                                        }
                                         if in_quarantine {
                                             span { class: "badge badge-failed", "unverified" }
                                         }
@@ -4139,6 +4358,14 @@ fn thread_reply_prefill(m: &Message) -> menu::ComposePrefill {
         .then(|| address_book::contact_by_vk(&m.sender_vk))
         .flatten()
         .map(|c| c.local_alias.to_string())
+        // A v2 sender who is not a contact: their address, which the
+        // delegate verified signed the message.
+        .or_else(|| {
+            is_v2_row(m.id).then(|| {
+                let from = freenet_mail_protocol::address::address_of(&m.sender_vk);
+                crate::address::display(&from.0)
+            })
+        })
         .unwrap_or_else(|| m.from.to_string());
     menu::ComposePrefill {
         to,
@@ -4392,7 +4619,7 @@ fn ThreadRowActions(msg: Message, root_id: u64, thread_total: usize) -> Element 
                 "data-testid": testid::FM_ADD_TO_AB,
                 title: "Add sender to address book",
                 onclick: move |_| {
-                    add_sender_to_address_book(import_contact, &add_to_ab_vk, &add_to_ab_from);
+                    add_sender_to_address_book(import_contact, &add_to_ab_vk, &add_to_ab_from, v2_owner_of(id, &user.read()));
                 },
                 "Add to address book"
             }
@@ -4502,6 +4729,7 @@ fn ThreadNested(group: crate::app::threads::ThreadGroup) -> Element {
                                 div { class: "ft-msg-id",
                                     div { class: "ft-msg-namerow",
                                         span { class: "ft-msg-name", "{from}" }
+                                        V2SenderNotes { id, stranger_note: true }
                                         span { class: "{pill_class}", "{pill_label}" }
                                     }
                                 }
@@ -4617,6 +4845,7 @@ fn ThreadCompact(group: crate::app::threads::ThreadGroup) -> Element {
                             }
                             span { class: "ft-face sm", "{from_initial}" }
                             span { class: "ft-cz-name", "{from}" }
+                            V2SenderNotes { id }
                             if !is_open {
                                 span { class: "ft-cz-snippet", "{snippet}" }
                             }
@@ -4627,6 +4856,7 @@ fn ThreadCompact(group: crate::app::threads::ThreadGroup) -> Element {
                         }
                         if is_open {
                             div { class: "ft-cz-open",
+                                V2SenderNotes { id, stranger_note: true, warnings: false }
                                 div { class: "ft-body-text",
                                     {content.split("\n\n").map(|para| rsx! { p { "{para}" } })}
                                 }
@@ -4736,6 +4966,14 @@ fn OpenArchivedMessage(
                     class: "btn btn-secondary",
                     "data-testid": testid::FM_ARCHIVE_DELETE,
                     onclick: move |_| {
+                        // An archived v2 message whose drained copy is still
+                        // stored (the archive could not remove it): that
+                        // copy goes too.
+                        if is_v2_row(msg_id) {
+                            delete_v2_message(&delete_alias, msg_id);
+                            menu_selection.write().at_inbox_list();
+                            return;
+                        }
                         if !delete_alias.is_empty() {
                             crate::local_state::local_delete_message(&delete_alias, msg_id);
                             #[cfg(feature = "use-node")]
@@ -5035,6 +5273,39 @@ fn archive_message(
         in_reply_to: msg.in_reply_to.clone(),
         quoted_excerpt: msg.quoted_excerpt.clone(),
     };
+    // A drained v2 message: its copy is the delegate's, never a v1 inbox's.
+    if is_v2_row(id) && !alias.is_empty() {
+        // Archive's Reply puts `from` in the To field: the shown name alone
+        // (a label, an address prefix) may resolve to nobody.
+        let archived = freenet_mail_wire_v1::local_state::ArchivedMessage {
+            from: v2_reply_address(msg),
+            ..archived
+        };
+        crate::local_state::local_archive_message(alias, id, archived.clone());
+        let (a, undo) = (alias.to_string(), alias.to_string());
+        let _task = dioxus_core::spawn_forever(async move {
+            let store = crate::local_state::archive_message(a, id, archived);
+            let (level, text) = match crate::v2::owner::archive_row(id, store).await {
+                Ok(()) => (crate::toast::ToastLevel::Success, CONFIRM_ARCHIVE.done),
+                Err((stored, e)) => {
+                    crate::log::error(format!("archiving a v2 message: {e}"), None);
+                    if stored {
+                        (
+                            crate::toast::ToastLevel::Warning,
+                            "Archived, but the copy in your inbox could not be removed; it shows \
+                             there too until you delete it.",
+                        )
+                    } else {
+                        crate::local_state::local_unarchive_message(&undo, id);
+                        (crate::toast::ToastLevel::Error, CONFIRM_ARCHIVE.failed)
+                    }
+                }
+            };
+            crate::toast::push_toast_detached(text, level);
+        });
+        post.apply(&mut menu_selection);
+        return;
+    }
     if !alias.is_empty() {
         crate::local_state::local_archive_message(alias, id, archived.clone());
         #[cfg(feature = "use-node")]
@@ -5086,6 +5357,37 @@ fn archive_message(
 /// AND remove the message from the inbox contract — distinct from Archive
 /// because it leaves no trace. Shared between `OpenMessage` and the threaded
 /// per-message action clusters.
+/// What a v2 message's sender is kept as in its archived copy: the name it
+/// showed with the full address (`name@address`), or the bare address when
+/// the name is not a label, so a reply from Archive reaches the sender
+/// whether or not they are a contact.
+fn v2_reply_address(msg: &Message) -> String {
+    let from = freenet_mail_protocol::address::address_of(&msg.sender_vk);
+    let label = crate::address::normalize_label(&msg.from, false)
+        .ok()
+        .map(|l| l.0);
+    crate::address::full_address(label.as_deref(), &from.0)
+}
+
+/// Delete v2 message `id` of `alias`: hidden at once, then every copy is
+/// removed (`v2::owner::delete_row`), in a task that outlives the view.
+fn delete_v2_message(alias: &str, id: u64) {
+    if !alias.is_empty() {
+        crate::local_state::local_delete_message(alias, id);
+    }
+    let alias = alias.to_string();
+    let _task = dioxus_core::spawn_forever(async move {
+        let (level, text) = match crate::v2::owner::delete_row(alias, id).await {
+            Ok(()) => (crate::toast::ToastLevel::Success, CONFIRM_DELETE.done),
+            Err(e) => {
+                crate::log::error(format!("deleting a v2 message: {e}"), None);
+                (crate::toast::ToastLevel::Error, CONFIRM_DELETE.failed)
+            }
+        };
+        crate::toast::push_toast_detached(text, level);
+    });
+}
+
 fn delete_message(
     mut inbox: Signal<InboxView>,
     mut menu_selection: Signal<menu::MenuSelection>,
@@ -5095,6 +5397,13 @@ fn delete_message(
     id: u64,
     post: PostMessageAction,
 ) {
+    // A drained v2 message: every copy goes, the delegate's drained one
+    // included, and nothing in a v1 inbox.
+    if is_v2_row(id) {
+        delete_v2_message(alias, id);
+        post.apply(&mut menu_selection);
+        return;
+    }
     if !alias.is_empty() {
         crate::local_state::local_delete_message(alias, id);
         #[cfg(feature = "use-node")]
@@ -5256,7 +5565,34 @@ fn add_sender_to_address_book(
     mut import_contact: Signal<crate::app::login::ImportContact>,
     sender_vk: &[u8],
     sender_from: &str,
+    v2_owner: Option<freenet_mail_protocol::Addr>,
 ) {
+    // A v2 sender is added as a v2 contact (their address, `V2Notes`), so a
+    // reply by name goes to the v2 inbox with its pass. Never as a v1 one.
+    if let Some(identity) = v2_owner {
+        let (vk, name) = (sender_vk.to_vec(), sender_from.to_string());
+        let _task = dioxus_core::spawn_forever(async move {
+            match crate::v2::contacts::add_sender(identity, &vk, &name).await {
+                Ok(added) => {
+                    crate::toast::push_toast_detached(
+                        if added.own {
+                            "That is one of your own identities: nothing to add.".to_string()
+                        } else {
+                            format!("Added {} to your contacts.", added.name)
+                        },
+                        crate::toast::ToastLevel::Success,
+                    );
+                }
+                Err(e) => {
+                    crate::toast::push_toast_detached(
+                        format!("Could not add the sender: {e}"),
+                        crate::toast::ToastLevel::Error,
+                    );
+                }
+            }
+        });
+        return;
+    }
     // #289: thread the sender's display name (`Message.from`) into the modal
     // so the nickname defaults to it — matching what a reply prefills
     // (`to: Message.from`), so resolution hits the contact's `local_alias`
@@ -5410,6 +5746,7 @@ fn OpenMessage(msg: Message) -> Element {
                     div { class: "sender-orb", "{from_initial}" }
                     div { class: "from-text",
                         span { class: "from-name", "{from}" }
+                        V2SenderNotes { id, stranger_note: true }
                         if !sender_fp_short.is_empty() {
                             span {
                                 class: "from-addr",
@@ -5446,7 +5783,7 @@ fn OpenMessage(msg: Message) -> Element {
                         class: "btn btn-secondary",
                         "data-testid": testid::FM_ADD_TO_AB,
                         onclick: move |_| {
-                            add_sender_to_address_book(import_contact, &add_to_ab_vk, &add_to_ab_from);
+                            add_sender_to_address_book(import_contact, &add_to_ab_vk, &add_to_ab_from, v2_owner_of(id, &user.read()));
                         },
                         "Add to address book"
                     }
@@ -5524,6 +5861,24 @@ const DRAFT_GONE_ELSEWHERE: &str = "This draft was sent or discarded in another 
 /// last one the delegate stored and the last one that failed: `saved`,
 /// `failed` (shown with a retry, never left as `pending`), or `pending`
 /// while a save is still on its way. Exposed as `data-autosave`.
+/// IdentitySettings.auto_sign + signature: append a separator + the
+/// signature block when enabled and the user hasn't already pasted the
+/// signature into the body. Idempotent against re-send/forward.
+fn with_signature(alias: &str, mut content: String) -> String {
+    let id_settings = crate::local_state::identity_settings_for(alias);
+    if id_settings.auto_sign && !id_settings.signature.trim().is_empty() {
+        let sig = id_settings.signature.trim_end();
+        if !content.contains(sig) {
+            if !content.ends_with('\n') {
+                content.push('\n');
+            }
+            content.push_str("\n-- \n");
+            content.push_str(sig);
+        }
+    }
+    content
+}
+
 fn autosave_state(token: u64, saved: u64, failed: u64) -> &'static str {
     if token == 0 {
         "pending"
@@ -5604,6 +5959,8 @@ fn ComposeSheet() -> Element {
     let mut title = use_signal(|| initial_subj.clone());
     let mut content = use_signal(|| initial_body.clone());
     let draft_id = use_signal(|| initial_draft_id.clone());
+    // A key chosen for another message is not this one's.
+    use_hook(|| *crate::v2::send::GHOST_CHOICE.write() = None);
     let thread_id = use_signal(|| initial_thread_id.clone());
     let in_reply_to = use_signal(|| initial_in_reply_to.clone());
     let quoted_excerpt = use_signal(|| initial_quoted_excerpt.clone());
@@ -5815,6 +6172,72 @@ fn ComposeSheet() -> Element {
             return;
         };
         let to_val = to.read().clone();
+        if crate::v2::contacts::is_invite(&to_val) {
+            crate::toast::push_toast(
+                "This is an invite. Add it as a contact (Settings, Address & new contacts), \
+                 then write to them by name.",
+                crate::toast::ToastLevel::Error,
+            );
+            return;
+        }
+        // A v2 recipient (an address in any form, or a v2 contact's name)
+        // goes through the v2 inbox: the delegate seals it, and the outcome
+        // is reported when the inbox is read back.
+        if let Some(to_addr) = crate::v2::contacts::recipient_addr(&to_val) {
+            // The same safeguards as a v1 send: the recipient recorded when
+            // it was chosen, and "Require known key to send".
+            if let Err(message) = crate::v2::send::check_recipient(
+                &to_val,
+                chosen_address.read().as_deref(),
+                *ambiguous_draft.read(),
+                crate::local_state::identity_settings_for(&alias)
+                    .privacy
+                    .verify_on_send,
+                &to_addr,
+            ) {
+                crate::log::error(
+                    format!("couldn't send to `{to_val}`: {message}"),
+                    Some(TryNodeAction::GetAlias),
+                );
+                crate::toast::push_toast(message, crate::toast::ToastLevel::Error);
+                return;
+            }
+            let label = crate::address::normalize_label(&alias, false)
+                .ok()
+                .map(|l| l.0);
+            let body = crate::v2::MailBody {
+                v: 1,
+                label,
+                title: title.read().clone(),
+                content: with_signature(&alias, content.read().clone()),
+                time_ms: chrono::Utc::now().timestamp_millis(),
+                thread_id: Some(
+                    thread_id
+                        .read()
+                        .clone()
+                        .unwrap_or_else(crate::local_state::new_thread_id),
+                ),
+                in_reply_to: in_reply_to.read().clone(),
+                quoted_excerpt: quoted_excerpt.read().clone(),
+            };
+            let typed_label = crate::address::parse_recipient(&to_val)
+                .ok()
+                .and_then(|r| r.label().map(str::to_string));
+            let (to_name, _) = crate::v2::contacts::sender_name(&to_addr, typed_label.as_deref());
+            crate::v2::send::send_and_record(
+                sender_addr,
+                alias.clone(),
+                to_addr,
+                to_name,
+                to_val,
+                body,
+                crate::v2::send::ghost_for(crate::v2::send::GHOST_CHOICE.read().clone(), &to_addr),
+            );
+            delete_draft_now(());
+            menu_selection.write().at_new_msg();
+            crate::toast::push_toast("Sending\u{2026}", crate::toast::ToastLevel::Info);
+            return;
+        }
         // Mail goes to the address recorded when the recipient was chosen
         // (an alias, a clash label or a pasted bs58 inbox address), and is
         // refused if the field now names a different key.
@@ -5871,22 +6294,7 @@ fn ComposeSheet() -> Element {
             }
         };
         let title_val = title.read().clone();
-        let mut content_val = content.read().clone();
-
-        // IdentitySettings.auto_sign + signature: append a separator + the
-        // signature block when enabled and the user hasn't already pasted
-        // the signature into the body. Idempotent against re-send/forward.
-        let id_settings = crate::local_state::identity_settings_for(&alias);
-        if id_settings.auto_sign && !id_settings.signature.trim().is_empty() {
-            let sig = id_settings.signature.trim_end();
-            if !content_val.contains(sig) {
-                if !content_val.ends_with('\n') {
-                    content_val.push('\n');
-                }
-                content_val.push_str("\n-- \n");
-                content_val.push_str(sig);
-            }
-        }
+        let content_val = with_signature(&alias, content.read().clone());
 
         // Derive the recipient's inbox key BEFORE moving `recipient_vk` into
         // `send_message` so we can pair the eventual UpdateResponse back to
@@ -6356,7 +6764,23 @@ fn ComposeSheet() -> Element {
                 {
                     let to_val = to.read().clone();
                     let lookup = recipient_lookup.read().clone();
-                    if let Some(r) = lookup {
+                    if crate::v2::contacts::recipient_addr(&to_val).is_some()
+                        || crate::v2::contacts::is_invite(&to_val)
+                    {
+                        rsx! { v2_view::RecipientNote {
+                            to: to_val.clone(),
+                            from: sender_addr,
+                            draft_id: draft_id.read().clone(),
+                            // Offline builds keep drafts only in the page,
+                            // which saves them at once.
+                            draft_saved: if cfg!(feature = "use-node") {
+                                autosave_state(*autosave_token.read(), *saved_token.read(), *failed_token.read()) == "saved"
+                            } else {
+                                *autosave_token.read() > 0
+                            },
+                            save_draft: autosave,
+                        } }
+                    } else if let Some(r) = lookup {
                         let (badge_class, badge_label): (&str, &str) =
                             if r.is_own {
                                 ("badge badge-trust", "you")
@@ -7589,5 +8013,113 @@ mod archive_order_tests {
         let unknown: crate::DynError =
             Box::new(crate::mail_delegate::CallError::Unknown("no answer".into()));
         assert_eq!(run(Err(unknown)), (Stored::Unknown, false));
+    }
+}
+
+#[cfg(test)]
+mod v2_sender_tests {
+    use super::*;
+    use crate::v2::{MailBody, owner::Inbound};
+
+    fn contact(alias: &str, seed: u8) -> address_book::Contact {
+        address_book::Contact {
+            local_alias: alias.into(),
+            suggested_alias: None,
+            description: String::new(),
+            ml_dsa_vk_bytes: vec![seed; 1952],
+            ml_kem_ek_bytes: vec![seed; 1184],
+            required_tier: freenet_mail_wire_v1::aft::Tier::Day1,
+            max_age_secs: 0,
+            verified: false,
+            inbox_wasm_hash: None,
+        }
+    }
+
+    fn mail(sender_vk: Vec<u8>, label: &str) -> Inbound {
+        Inbound {
+            id: [0x3a; 32],
+            from: freenet_mail_protocol::address::address_of(&sender_vk),
+            sender_vk,
+            admission: freenet_mail_protocol::inbox_v2::KIND_PASS,
+            body: MailBody {
+                v: 1,
+                label: Some(label.into()),
+                title: "hi".into(),
+                content: String::new(),
+                time_ms: 0,
+                thread_id: None,
+                in_reply_to: None,
+                quoted_excerpt: None,
+            },
+            item_id: vec![0x3a; 32],
+            generation: 1,
+        }
+    }
+
+    /// M1: a sender who is not a saved contact (a pass holder all the same)
+    /// labelled like a contact is shown with the warning.
+    /// S5: a stranger can not take the name of one of your own identities
+    /// unflagged either.
+    #[test]
+    fn a_stranger_named_like_an_own_identity_is_flagged() {
+        address_book::clear_for_test();
+        let info = freenet_mail_protocol::IdentityInfo {
+            addr: freenet_mail_protocol::Addr([0x22; 24]),
+            vk: crate::test_util::real_vk_bytes(0x22).into(),
+            ek: vec![0x22; 1184].into(),
+            alias: "work".to_string(),
+            description: String::new(),
+            confirmed: true,
+            generation: 1,
+        };
+        address_book::register_identity(&login::Identity::from_info(&info, UserId::new()));
+        let me = freenet_mail_protocol::Addr([0x11; 24]);
+        let row = v2_message(me, mail(vec![0xef; 1952], "work"), |_| false);
+        let sender = v2_sender(row.id);
+        assert!(
+            sender
+                .warnings
+                .iter()
+                .any(|w| w.contains("looks like your contact \u{201c}work\u{201d}")),
+            "{sender:?}"
+        );
+    }
+
+    /// P2: an archived v2 message keeps a sender a reply reaches. A sender
+    /// who is not a contact shows as their label or an address prefix,
+    /// neither of which resolves; the archived copy holds the address.
+    #[test]
+    fn an_archived_v2_senders_address_resolves_for_a_reply() {
+        address_book::clear_for_test();
+        let me = freenet_mail_protocol::Addr([0x11; 24]);
+        for label in ["stranger", "not a label!"] {
+            let vk = vec![0xe1; 1952];
+            let from = freenet_mail_protocol::address::address_of(&vk);
+            let row = v2_message(me, mail(vk, label), |_| false);
+            let kept = v2_reply_address(&row);
+            assert_eq!(
+                crate::v2::contacts::recipient_addr(&kept),
+                Some(from),
+                "{kept}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_non_contact_named_like_a_contact_is_flagged() {
+        address_book::clear_for_test();
+        address_book::insert_contact(contact("alice", 0xa1)).unwrap();
+        let me = freenet_mail_protocol::Addr([0x11; 24]);
+        let row = v2_message(me, mail(vec![0xee; 1952], "alice"), |_| false);
+        assert_eq!(row.from.as_ref(), "alice");
+        let sender = v2_sender(row.id);
+        assert!(!sender.contact);
+        assert!(
+            sender
+                .warnings
+                .iter()
+                .any(|w| w.contains("looks like your contact")),
+            "{sender:?}"
+        );
     }
 }

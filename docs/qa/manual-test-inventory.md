@@ -27,6 +27,40 @@ manual gap by adding a test, flip status to `auto` and link the test.
   isolated 2-node net (`scripts/run-isolated-nodes.sh`). Run via `cargo
   make test-e2e-real-node`. Cross-node send tests gated on
   `FREENET_LIVE_E2E_SEND=1`.
+- **inbox v2, offline** — `ui/tests/inbox-v2.spec.ts`: address and label
+  parsing and warnings, the Ghost Key badge and its tier coming and going
+  with the recipient's policy and the pass held, first contact through the
+  new-contacts queue and the reply by pass, an invite, the "active on
+  another node" warning (`?v2-foreign-fixture`), archiving and deleting a
+  drained message, a clean console. Runs with the offline suite. Both
+  identities there are your own, so contact rows and revocation are covered
+  by `ui/src/v2/flows.rs` (rust, real delegate) and the iso run below. The
+  offline build keeps nothing across a reload, so that every copy of a
+  deleted or archived message is gone after one is shown by
+  `ui/src/v2/flows.rs`, which reloads the local state from the delegate.
+- **inbox v2, iso** — `ui/tests/inbox-v2-live.spec.ts`, run by `cargo make
+  test-e2e-inbox-v2` (two nodes, free ports, a build with the test Ghost
+  Key master; a few minutes, up to about 25 when the drain waits for the
+  rescan wake-up): the queue and accepting from it, passes both ways, an
+  invite, revocation, RequireGhost refusing a sender with no proof and
+  admitting one with a test-master proof, and a drain with every tab of the
+  recipient closed.
+- **inbox v2 Ghost Key and queue, offline**:
+  `ui/tests/inbox-v2-ghost.spec.ts`: "Use Ghost Key" (consent once per
+  key, the proof admitted by the offline inbox's checks), the picker and a
+  key below the tier, a declined prompt and no key at send, "Get a Ghost
+  Key" (`return_to`, `return_path`, the draft saved first and opened again
+  by the route), and the new-contacts queue (full-queue tip, drop, accept;
+  `?v2-queue-fixture`). The vault is the page's test vault
+  (`test-ghost-master`), set through localStorage `fmail-ghostkeys-mock`.
+  Not covered anywhere: a renewal reaching a contact (pass expiries are
+  day-aligned, decision 17, so a test cannot shorten one; it travels as
+  pass mail does), the real ghostkeys delegate on a node (its signatures
+  name the production webapp, which a test publish is not, and the iso
+  nodes have no vault), the vault's return link through the gateway's
+  frame (the route is proven by setting the hash in the page), and the
+  count of strangers' messages let go past 1024 (shown from the
+  delegate's record, untested in the UI).
 - **liveness** — `ui/tests/production-liveness.spec.ts`. Smoke against
   deployed gateway. Run via `scripts/smoke-test-production.sh`.
 - **rust** — `cargo test -p freenet-email-ui` (and per-crate).
