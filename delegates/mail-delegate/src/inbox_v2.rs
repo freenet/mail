@@ -968,12 +968,14 @@ fn auto_accept(
     now: u64,
     rng: &mut MixRng,
 ) -> Result<bool, Failure> {
-    promote(rec, sender);
     let (pass_id, e) = new_entry(me, rec, Some(*sender), PassClass::Contact, now, rng);
     match new_ledger_entry(s, me, rec, &pass_id, &e, now) {
         Err(f) if f.code == FailureCode::CapReached => return Ok(false),
         other => other?,
     }
+    // Only once the pass exists: a sender left a stranger keeps its mail in
+    // the stranger budget.
+    promote(rec, sender);
     rec.issued.insert(*sender, pass_id);
     rec.due.insert(*sender, now);
     rec.auto_accepted.insert(*sender);

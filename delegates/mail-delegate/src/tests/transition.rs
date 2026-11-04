@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 
 use freenet_mail_protocol::inbox_v2 as w;
 use freenet_mail_protocol::{
-    Addr, IdentityInfo, ItemKind, ItemRef, Op, Reply, SealContent, SendAdmission,
+    Addr, IdentityInfo, ItemKind, ItemRef, Op, OwnerChange, Reply, SealContent, SendAdmission,
 };
 use freenet_mail_wire_v1::aft::Tier;
 use freenet_mail_wire_v1::inbox::{InboxSettings, UpdateInbox, removal_payload, sign_payload};
@@ -633,6 +633,63 @@ fn only_the_key_that_signed_is_accepted() {
     let rec = world.record(&a);
     assert!(rec.auto_accepted.is_empty());
     assert!(rec.issued.is_empty());
+}
+
+/// Fill `owner`'s pass ledger to its cap with entries no prune can drop
+/// (ids whose items are absent are skipped by the prune).
+fn fill_ledger(world: &mut World, owner: &Addr) {
+    world.issue(owner, Some(Addr([0xEE; 24])), None);
+    let origin = Origin([world.origin(owner); 32]);
+    let rel = crate::store::index_rel(ItemKind::PassLedger, Some(owner));
+    let mut s = Space::new(&mut world.env, origin);
+    let (generation, mut ids) = s.index(&rel).unwrap();
+    assert!(generation > 0, "the ledger index exists");
+    let mut i = 0u64;
+    while ids.len() < crate::store::cap(ItemKind::PassLedger) {
+        ids.insert([&i.to_be_bytes()[..], &[0xEE; 8]].concat());
+        i += 1;
+    }
+    let list: Vec<ByteBuf> = ids.into_iter().map(ByteBuf::from).collect();
+    s.write_if(&rel, generation, &freenet_mail_protocol::to_cbor(&list).unwrap())
+        .unwrap();
+}
+
+/// A verified contact arriving while the pass ledger is full stays a
+/// stranger, and its earlier stranger mail stays in the stranger budget:
+/// nothing is promoted until the pass exists.
+#[test]
+fn a_full_ledger_leaves_the_stranger_accounting_as_it_was() {
+    let mut world = World::new();
+    let a = world.identity_in("alice", 1);
+    let b = world.identity_in("bob", 2);
+    let bob = info(&mut world, &b);
+    let (earlier, landed) = world.send(&b, &a, "before he was verified");
+    assert!(landed);
+    world.change(&a, OwnerChange::Drain);
+    let tracked = |world: &mut World| {
+        let rec = world.record(&a);
+        let held = rec
+            .stranger_held
+            .contains_key(&serde_bytes::ByteArray::new(b.0));
+        let listed = rec
+            .strangers
+            .values()
+            .any(|(id, _)| id.into_array() == earlier.id.0);
+        (listed, held)
+    };
+    assert_eq!(tracked(&mut world), (true, true));
+    contact(&mut world, &a, &b, &bob.vk, true);
+    fill_ledger(&mut world, &a);
+    send_pass(&mut world, &b, &a);
+    world.change(&a, OwnerChange::Drain);
+    let rec = world.record(&a);
+    assert!(rec.auto_accepted.is_empty(), "no pass, so not accepted");
+    assert!(!rec.issued.contains_key(&serde_bytes::ByteArray::new(b.0)));
+    assert_eq!(
+        tracked(&mut world),
+        (true, true),
+        "his earlier mail is still a stranger's, and counted"
+    );
 }
 
 fn env_or(name: &str, default: u64) -> u64 {
