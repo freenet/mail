@@ -350,6 +350,10 @@ test.describe("Inbox v2 (offline)", () => {
 
     await switchTo(page, "address2");
     await expect(inboxRow(page, "archive me")).toBeVisible({ timeout: 30_000 });
+    // The delegate's drained copies of bob's mail (the list hides archived
+    // rows itself, so only this shows a copy really went).
+    const list = page.locator(tid(TID.fmList));
+    await expect(list).toHaveAttribute("data-v2-stored", "1");
     const row = await openRow(page, "archive me");
     await row.locator(tid(TID.fmArchive)).dispatchEvent("click");
     await expect(inboxRow(page, "archive me")).toHaveCount(0, { timeout: 30_000 });
@@ -364,6 +368,7 @@ test.describe("Inbox v2 (offline)", () => {
     await switchTo(page, "address2");
     await expect(inboxRow(page, "after archive")).toBeVisible({ timeout: 30_000 });
     await expect(inboxRow(page, "archive me")).toHaveCount(0);
+    await expect(list).toHaveAttribute("data-v2-stored", "1");
 
     await openNav(page);
     await page.locator('[data-testid="fm-folder-archive"]').click();

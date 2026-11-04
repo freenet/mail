@@ -3731,6 +3731,10 @@ fn MessageList() -> Element {
     let inbox_data = use_context::<InboxesData>();
     let mut menu_selection = use_context::<Signal<menu::MenuSelection>>();
     let user = use_context::<Signal<User>>();
+    let v2_stored = user.read().logged_id().map_or(0, |id| {
+        crate::v2::owner::inbound(&id.addr, false).len()
+            + crate::v2::owner::inbound(&id.addr, true).len()
+    });
 
     {
         let current_active_id: UserId = user.read().active_id.unwrap();
@@ -3871,6 +3875,10 @@ fn MessageList() -> Element {
             }
             v2_view::LastOutcome {}
             div { class: "list-scroll", "data-testid": testid::FM_LIST,
+                // How many drained v2 messages the delegate holds for this
+                // identity: the list hides archived and deleted rows itself,
+                // so this is how a test sees that a copy really went.
+                "data-v2-stored": "{v2_stored}",
                 if matches!(folder, menu::Folder::Archive) {
                     if archived_msgs.is_empty() {
                         div { style: "padding:24px 18px; font-family:'Geist Mono',monospace; font-size:10px; letter-spacing:0.1em; text-transform:uppercase; color:var(--ink4);",
