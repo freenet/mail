@@ -14,7 +14,7 @@ dt "jobs: the allowlist is the host set" "$STAGE/scripts/delegate-imports-allowl
 ' '' the_import_allowlist_is_the_stdlib_host_set
 dt "jobs: an unknown tag does nothing" "$H" \
     '            None => Vec::new(),
-        }),' '            None => background(env, Trigger::Tick(Tick::Rescan)),
+        }),' '            None => background(env, Trigger::Tick(Tick::Rescan), "wakeup"),
         }),' a_tag_this_build_does_not_know_does_nothing
 
 # ── Ranking ─────────────────────────────────────────────────────────────────
