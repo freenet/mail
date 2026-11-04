@@ -918,6 +918,19 @@ pub fn is_contact_inbox_key(key: &freenet_stdlib::prelude::ContractKey) -> bool 
     })
 }
 
+/// The user's own identities: (alias, ML-DSA verifying key).
+pub fn own_names() -> Vec<(String, Vec<u8>)> {
+    ADDRESS_BOOK.with(|ab| {
+        ab.borrow()
+            .iter()
+            .filter_map(|(alias, e)| match e {
+                Entry::Own(id) => Some((alias.clone(), id.ml_dsa_vk_bytes())),
+                Entry::Contact(_) => None,
+            })
+            .collect()
+    })
+}
+
 /// All contacts (non-own entries), sorted by alias.
 pub fn all_contacts() -> Vec<Contact> {
     ADDRESS_BOOK.with(|ab| {

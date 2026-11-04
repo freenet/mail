@@ -119,15 +119,14 @@ pub(crate) fn by_addr(addr: &Addr) -> Option<Contact> {
     all().into_iter().find(|(_, a)| a == addr).map(|(c, _)| c)
 }
 
-/// (petname, address) of every contact, v1 or v2, for the label checks: a
-/// name can be mistaken for any of them.
+/// (petname, address) of every contact, v1 or v2, and of the user's own
+/// identities, for the label checks: a name can be mistaken for any of them.
 pub(crate) fn petnames() -> Vec<(String, [u8; 24])> {
     address_book::all_contacts()
         .into_iter()
-        .map(|c| {
-            let a = address_of(&c.ml_dsa_vk_bytes);
-            (c.local_alias.to_string(), a.0)
-        })
+        .map(|c| (c.local_alias.to_string(), c.ml_dsa_vk_bytes))
+        .chain(address_book::own_names())
+        .map(|(name, vk)| (name, address_of(&vk).0))
         .collect()
 }
 

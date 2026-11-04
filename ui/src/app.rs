@@ -7940,8 +7940,36 @@ mod v2_sender_tests {
 
     /// M1: a sender who is not a saved contact (a pass holder all the same)
     /// labelled like a contact is shown with the warning.
+    /// S5: a stranger can not take the name of one of your own identities
+    /// unflagged either.
+    #[test]
+    fn a_stranger_named_like_an_own_identity_is_flagged() {
+        address_book::clear_for_test();
+        let info = freenet_mail_protocol::IdentityInfo {
+            addr: freenet_mail_protocol::Addr([0x22; 24]),
+            vk: crate::test_util::real_vk_bytes(0x22).into(),
+            ek: vec![0x22; 1184].into(),
+            alias: "work".to_string(),
+            description: String::new(),
+            confirmed: true,
+            generation: 1,
+        };
+        address_book::register_identity(&login::Identity::from_info(&info, UserId::new()));
+        let me = freenet_mail_protocol::Addr([0x11; 24]);
+        let row = v2_message(me, mail(vec![0xef; 1952], "work"), |_| false);
+        let sender = v2_sender(row.id);
+        assert!(
+            sender
+                .warnings
+                .iter()
+                .any(|w| w.contains("looks like your contact \u{201c}work\u{201d}")),
+            "{sender:?}"
+        );
+    }
+
     #[test]
     fn a_non_contact_named_like_a_contact_is_flagged() {
+        address_book::clear_for_test();
         address_book::insert_contact(contact("alice", 0xa1)).unwrap();
         let me = freenet_mail_protocol::Addr([0x11; 24]);
         let row = v2_message(me, mail(vec![0xee; 1952], "alice"), |_| false);

@@ -295,6 +295,21 @@ pub(crate) fn skeleton(label: &str) -> String {
     unicode_security::skeleton(label).collect()
 }
 
+/// What two names that can be mistaken for each other share: NFKC and case
+/// folded, letters and digits only (spaces, separators and format characters
+/// go, so a v1 alias like "Bob Smith" that the label rules refuse is still
+/// compared), then the confusable skeleton, folded again.
+fn lookalike_key(name: &str) -> String {
+    let folded: String = name
+        .nfkc()
+        .collect::<String>()
+        .to_lowercase()
+        .nfkc()
+        .filter(|c| c.is_alphanumeric())
+        .collect();
+    skeleton(&folded).to_lowercase()
+}
+
 /// Something about a sender's name the user should see.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum LabelWarning {
@@ -341,12 +356,12 @@ pub(crate) fn name_for(
         .map(str::to_string)
         .or_else(|| incoming.as_ref().map(|l| l.0.clone()));
     if let Some(name) = &shown {
-        let mine = skeleton(&normalize_label(name, true).map(|l| l.0).unwrap_or_default());
+        let mine = lookalike_key(name);
         for (pet, other) in contacts {
             if other == addr {
                 continue;
             }
-            let theirs = skeleton(&normalize_label(pet, true).map(|l| l.0).unwrap_or_default());
+            let theirs = lookalike_key(pet);
             if !mine.is_empty() && mine == theirs {
                 warnings.push(LabelWarning::LooksLike {
                     contact: pet.clone(),
@@ -585,5 +600,29 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(skeleton("a1ice"), skeleton("alice"));
+    }
+
+    /// S5: a petname the label rules refuse (a v1 alias with a space) is
+    /// still compared, with spaces and separators folded away.
+    #[test]
+    fn a_label_like_a_spaced_petname_is_flagged() {
+        let bob = [1; 24];
+        let impostor = [2; 24];
+        let contacts = vec![("Bob Smith".to_string(), bob)];
+        for label in ["bobsmith", "bob_smith", "bob-smith", "b0b.smith"] {
+            let (_, warnings) = name_for(&impostor, None, Some(label), &contacts);
+            assert_eq!(
+                warnings,
+                vec![LabelWarning::LooksLike {
+                    contact: "Bob Smith".into()
+                }],
+                "{label}"
+            );
+        }
+        assert!(
+            name_for(&impostor, None, Some("bobby"), &contacts)
+                .1
+                .is_empty()
+        );
     }
 }
