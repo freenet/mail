@@ -47,6 +47,13 @@ freenet-stdlib = { workspace = true, features = ["net"] }
 # the stdlib line, and two stdlibs can never link.
 freenet-migrate = "=0.8.0"
 uuid = { version = "1.29.0", features = ["v4", "js"] }
+# Inbox v2. The production Ghost Key master that inbox parameters name, from
+# the crate and version the inbox contract pins.
+ghostkey-verify = "=0.1.0"
+blake3 = { workspace = true }
+# Labels (surgery plan 5.1): NFKC, single script, TR39 confusable skeleton.
+unicode-normalization = "0.1.25"
+unicode-security = "0.1.2"
 
 [target.'cfg(target_family = "wasm")'.dependencies]
 getrandom = { workspace = true, features = ["wasm_js"] }

@@ -21,6 +21,7 @@ compile_error!(
 
 extern crate core;
 
+pub(crate) mod address;
 pub(crate) mod aft;
 mod api;
 mod app;
