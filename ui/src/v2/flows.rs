@@ -91,6 +91,35 @@ fn archive_and_delete_remove_the_stored_copy() {
     assert!(drain(b).is_empty());
 }
 
+/// S4: an invite whose certificate is not signed by the inbox it names is
+/// refused before it is held, so it never shows as a pass held.
+#[test]
+fn an_invite_not_signed_by_its_inbox_is_refused() {
+    let (a, b, c) = (
+        identity("v2-forge-a"),
+        identity("v2-forge-b"),
+        identity("v2-forge-c"),
+    );
+    net::offline::forget_own(&b);
+    // This node does not hold B's inbox, so the delegate cannot check the
+    // certificate itself.
+    crate::mail_delegate::local::forget_contract_state(
+        super::instance_id(&b).as_bytes().try_into().unwrap(),
+    );
+    let invite = block_on(contacts::create_invite(c, Some("bob"), 3)).unwrap();
+    let crate::address::Recipient::Invite(mut parsed) =
+        crate::address::parse_recipient(&invite).unwrap()
+    else {
+        panic!("an invite")
+    };
+    // C's certificate, renamed to B's inbox.
+    parsed.pass.cert.recipient = serde_bytes::ByteArray::new(b.0);
+    let forged = crate::address::encode_invite(Some("bob"), parsed.pass);
+    let out = block_on(contacts::add(a, &forged, ""));
+    assert!(out.is_err(), "{out:?}");
+    assert_eq!(contacts::held(a, b), contacts::PassState::None);
+}
+
 /// The first PUT of a new inbox fails after the delegate stored its record:
 /// rejected, or gone with no word. A later start publishes it after all.
 #[test]
@@ -320,6 +349,30 @@ fn a_send_that_never_lands_is_resealed_only_at_reseal_at() {
             "sealed again at {at} ms, before reseal_at {reseal_at} s"
         );
     }
+}
+
+/// The page reads the delegate's decision-25 note under the names the
+/// delegate writes it with.
+#[test]
+fn the_page_reads_the_delegates_note_of_another_node() {
+    let a = identity("v2-note");
+    let item = freenet_mail_protocol::ItemRef {
+        kind: freenet_mail_protocol::ItemKind::InboxV2,
+        owner: Some(a),
+        id: Vec::new(),
+    };
+    let body = block_on(ops::get_item(item)).unwrap().unwrap().body;
+    let mut rec: mail_delegate::inbox_v2::InboxRecord =
+        freenet_mail_protocol::from_cbor(&body).unwrap();
+    assert_eq!(rec.foreign_seen, None);
+    rec.foreign_seen = Some(mail_delegate::inbox_v2::ForeignSeen { version: 7, at: 3 });
+    let view: super::InboxRecordView =
+        freenet_mail_protocol::from_cbor(&freenet_mail_protocol::to_cbor(&rec).unwrap()).unwrap();
+    assert_eq!(
+        view.foreign_seen,
+        Some(super::ForeignSeenView { version: 7, at: 3 })
+    );
+    assert!(owner::foreign(view.max_version, &view));
 }
 
 /// A message to a name or address the UI cannot reach says so, unsent.

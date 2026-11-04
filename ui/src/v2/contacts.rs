@@ -48,6 +48,8 @@ thread_local! {
 pub(crate) struct Resolved {
     pub vk: Vec<u8>,
     pub kem_ek: Vec<u8>,
+    /// The key the inbox's passes are signed with.
+    pub issuer_vk: [u8; 32],
     pub quarantine: w::QuarantineMode,
     /// Messages held in the inbox, not drained yet: public, like the queue
     /// fill.
@@ -78,6 +80,7 @@ pub(crate) fn resolved_from(addr: Addr, bytes: Vec<u8>) -> Result<Resolved, Stri
     Ok(Resolved {
         vk: state.owner.owner_vk.to_vec(),
         kem_ek: state.owner.kem_ek.to_vec(),
+        issuer_vk: *state.owner.issuer_vk,
         quarantine: state.owner.quarantine,
         waiting: state
             .messages
@@ -185,6 +188,9 @@ pub(crate) async fn add(identity: Addr, input: &str, petname: &str) -> Result<Ad
     };
     let resolved = resolve(addr).await?;
     if let Recipient::Invite(invite) = &recipient {
+        // Checked here, against the inbox just read: the delegate checks it
+        // only when its node already holds that inbox.
+        invite_is_theirs(&invite.pass, &resolved)?;
         match call(Op::HoldPass {
             addr: identity,
             pass: invite.pass.clone(),
@@ -251,6 +257,30 @@ pub(crate) async fn add(identity: Addr, input: &str, petname: &str) -> Result<Ad
         invite,
         own: false,
     })
+}
+
+/// Whether `pass` is a pass into the inbox `resolved` was read from: its
+/// certificate signed by that inbox's issuer key, and its secret key the one
+/// the certificate names.
+fn invite_is_theirs(pass: &w::Pass, resolved: &Resolved) -> Result<(), String> {
+    let refuse = || Err("this invite is not from the inbox it names".to_string());
+    let Ok(issuer) = ed25519_dalek::VerifyingKey::from_bytes(&resolved.issuer_vk) else {
+        return refuse();
+    };
+    let sig = ed25519_dalek::Signature::from_bytes(&pass.cert.sig);
+    if issuer
+        .verify_strict(&w::cert_bytes(&pass.cert), &sig)
+        .is_err()
+    {
+        return refuse();
+    }
+    let pass_vk = ed25519_dalek::SigningKey::from_bytes(&pass.pass_sk)
+        .verifying_key()
+        .to_bytes();
+    if pass_vk != *pass.cert.pass_vk {
+        return refuse();
+    }
+    Ok(())
 }
 
 /// Every drained message carried a pass to its sender's inbox, which the

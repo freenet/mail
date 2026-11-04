@@ -79,6 +79,13 @@ pub(crate) fn set_contract_state(instance_id: [u8; 32], state: Vec<u8>) {
     ENV.with(|e| e.borrow_mut().contracts.insert(instance_id, state));
 }
 
+/// Tests: the node no longer holds this contract's state, as a node that
+/// never fetched it would not.
+#[cfg(test)]
+pub(crate) fn forget_contract_state(instance_id: [u8; 32]) {
+    ENV.with(|e| e.borrow_mut().contracts.remove(&instance_id));
+}
+
 fn origin() -> Option<MessageOrigin> {
     Some(MessageOrigin::WebApp(ContractInstanceId::new(ORIGIN)))
 }
