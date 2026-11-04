@@ -7,20 +7,26 @@ import { TID } from "./testids";
 // Alice, Carol and Dave live on the gateway, Bob on the peer, so every
 // message crosses the network:
 //
-//  * first contact through Bob's new-contacts queue (Open), then mail both
-//    ways by the pass each message carried;
+//  * first contact through Bob's new-contacts queue (Open), which Bob
+//    accepts from the queue view (that sends Alice a pass), then mail both
+//    ways by pass;
 //  * an invite letting Carol's first message in by pass;
 //  * revoking Alice's pass: her next message is told the pass lapsed and
 //    goes to the queue, and still lands;
-//  * RequireGhost: Dave, holding no pass, sees the badge with its tier and is
-//    told plainly that nothing landed (delivery WITH a proof is the Ghost Key
-//    flow, which is not in this build);
+//  * RequireGhost under the test Ghost Key master (this build has the
+//    `test-ghost-master` feature, so the page's test vault signs and the
+//    inbox contract on Bob's node checks the proof): Dave, holding no pass,
+//    sees the badge with its tier and is told plainly that nothing landed
+//    without a proof; with "Use Ghost Key" his message lands in Bob's queue,
+//    Bob accepts him, and his next message goes straight in by pass;
 //  * a drain with every tab closed: Carol writes while Bob has no page open,
 //    and Bob's inbox, read from the gateway, empties anyway (the delegate's
 //    own jobs drained it), and Bob finds the message when he opens a page.
 //
 // Not here: a renewal reaching a contact. A contact pass lives 335 to 395
-// days and is renewed at 40 to 60% of that, and nothing shortens it.
+// days and is renewed at 40 to 60% of that, and expiries are day-aligned
+// (decision 17), so a test cannot shorten it. A renewal travels the way the
+// pass mail above does.
 
 const GW = `http://127.0.0.1:${process.env.FREENET_ISO_GW_PORT ?? ""}`;
 const PEER = `http://127.0.0.1:${process.env.FREENET_ISO_PEER_PORT ?? ""}`;
@@ -150,6 +156,18 @@ async function send(page: Page, to: string, subject: string): Promise<Locator> {
   return clickSend(page);
 }
 
+/** `subject` waits in the new-contacts queue; accept its sender. */
+async function accepts(page: Page, subject: string) {
+  await settings(page);
+  const a = app(page);
+  const row = a.locator(`${tid(TID.fmV2QueueRow)}[data-title="${subject}"]`);
+  await expect(row, `${subject} is in the new-contacts queue`).toBeVisible({ timeout: 180_000 });
+  await row.locator(tid(TID.fmV2QueueAccept)).click();
+  await expect(row).toHaveCount(0, { timeout: 240_000 });
+  await expect(a.locator(tid(TID.fmV2Queue))).toContainText("Accepted");
+  await closeSettings(page);
+}
+
 async function sees(page: Page, subject: string) {
   await expect(
     app(page).locator(`${tid(TID.fmList)} article`, { hasText: subject }),
@@ -201,14 +219,14 @@ test("inbox v2 between two nodes", async ({ browser }) => {
     let out = await send(gw, "bob", "q1 first contact");
     await expect(out).toHaveAttribute("data-delivered", "true");
     await expect(out).toContainText("new-contacts queue");
+    await accepts(peer, "q1 first contact");
     await sees(peer, "q1 first contact");
 
-    // 2. Passes: Bob's reply goes by the pass Alice's message carried, and
-    // Alice's next by the one Bob's reply carried.
-    await expect(await addContact(peer, alice, "alice")).toContainText("Added alice");
-    await closeSettings(peer);
-    out = await send(peer, "alice", "p1 reply");
-    await expect(out).toHaveText(/^Delivered to alice\./);
+    // 2. Passes: accepting sent Alice a pass, and kept her as a contact.
+    // Bob's reply goes by the pass Alice's message carried, and Alice's next
+    // by Bob's.
+    out = await send(peer, alice, "p1 reply");
+    await expect(out).toHaveText(/^Delivered to [^ ]+\.$/);
     await sees(gw, "p1 reply");
     out = await send(gw, "bob", "p2 by pass");
     await expect(out).toHaveText(/^Delivered to bob\./);
@@ -245,6 +263,7 @@ test("inbox v2 between two nodes", async ({ browser }) => {
     out = await send(gw, "bob", "r1 after revoke");
     await expect(out).toHaveAttribute("data-delivered", "true");
     await expect(out).toContainText("lapsed");
+    await accepts(peer, "r1 after revoke");
     await sees(peer, "r1 after revoke");
 
     // 5. RequireGhost at $5: Dave holds no pass. The badge shows the tier,
@@ -262,6 +281,25 @@ test("inbox v2 between two nodes", async ({ browser }) => {
     out = await clickSend(gw);
     await expect(out).toHaveAttribute("data-delivered", "false");
     await expect(out).toContainText("only with a Ghost Key");
+
+    // With a Ghost Key: the test vault holds one $5 key this app may not use
+    // yet; "Use Ghost Key" asks once, and the proof gets the message into
+    // Bob's queue on his node. Bob accepts Dave, whose next message goes
+    // straight in.
+    await compose(gw, `bob@${bob}`, "g2 proven");
+    const panel = app(gw).locator(tid(TID.fmV2GhostPanel));
+    await expect(panel).toHaveAttribute("data-usable", "1", { timeout: 120_000 });
+    await panel.locator(tid(TID.fmV2GhostUse)).click();
+    await expect(panel).not.toHaveAttribute("data-chosen", "", { timeout: 60_000 });
+    await expect(panel.locator(tid(TID.fmV2GhostDisclosure))).toBeVisible();
+    out = await clickSend(gw);
+    await expect(out).toHaveAttribute("data-delivered", "true");
+    await expect(out).toContainText("new-contacts queue");
+    await accepts(peer, "g2 proven");
+    await sees(peer, "g2 proven");
+    out = await send(gw, `bob@${bob}`, "g3 by pass");
+    await expect(out).toHaveText(/^Delivered to bob\./);
+    await sees(peer, "g3 by pass");
 
     // 6. Every tab of Bob's closed: Carol writes (her invite's second
     // message), and Bob's own node drains it with no page open.

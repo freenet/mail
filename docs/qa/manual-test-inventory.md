@@ -36,11 +36,28 @@ manual gap by adding a test, flip status to `auto` and link the test.
   and revocation are covered by `ui/src/v2/flows.rs` (rust, real delegate)
   and the iso run below.
 - **inbox v2, iso** — `ui/tests/inbox-v2-live.spec.ts`, run by `cargo make
-  test-e2e-inbox-v2` (two nodes, free ports, about 10 to 25 minutes):
-  queue, passes both ways, invite, revocation, RequireGhost refusing a
-  sender with no proof, and a drain with every tab of the recipient closed.
-  Not covered anywhere yet: Ghost Key proofs (Use / Get a Ghost Key), the
-  quarantine view, and a renewal reaching a contact.
+  test-e2e-inbox-v2` (two nodes, free ports, a build with the test Ghost
+  Key master; a few minutes, up to about 25 when the drain waits for the
+  rescan wake-up): the queue and accepting from it, passes both ways, an
+  invite, revocation, RequireGhost refusing a sender with no proof and
+  admitting one with a test-master proof, and a drain with every tab of the
+  recipient closed.
+- **inbox v2 Ghost Key and queue, offline**:
+  `ui/tests/inbox-v2-ghost.spec.ts`: "Use Ghost Key" (consent once per
+  key, the proof admitted by the offline inbox's checks), the picker and a
+  key below the tier, a declined prompt and no key at send, "Get a Ghost
+  Key" (`return_to`, `return_path`, the draft saved first and opened again
+  by the route), and the new-contacts queue (full-queue tip, drop, accept;
+  `?v2-queue-fixture`). The vault is the page's test vault
+  (`test-ghost-master`), set through localStorage `fmail-ghostkeys-mock`.
+  Not covered anywhere: a renewal reaching a contact (pass expiries are
+  day-aligned, decision 17, so a test cannot shorten one; it travels as
+  pass mail does), the real ghostkeys delegate on a node (its signatures
+  name the production webapp, which a test publish is not, and the iso
+  nodes have no vault), the vault's return link through the gateway's
+  frame (the route is proven by setting the hash in the page), and the
+  count of strangers' messages let go past 1024 (shown from the
+  delegate's record, untested in the UI).
 - **liveness** — `ui/tests/production-liveness.spec.ts`. Smoke against
   deployed gateway. Run via `scripts/smoke-test-production.sh`.
 - **rust** — `cargo test -p freenet-email-ui` (and per-crate).
