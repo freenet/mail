@@ -14,7 +14,8 @@
 //!   (their inbox requires a Ghost Key, their queue is full) is the normal
 //!   one, and the contact is done.
 //! - **Legacy ids** (44 characters). [`resolve_legacy`] reads the v0.2.x
-//!   inbox with its code: the owner's key is in its parameters.
+//!   inbox with its code: the owner's key is in its parameters, and its
+//!   encryption key counts only under the owner's signature.
 //! - **The close.** [`close_pending`] says whether the window is over and
 //!   the delegate has not yet closed the v0.2.x inbox (a message there is not
 //!   imported yet).
@@ -96,11 +97,27 @@ pub(crate) fn legacy_from(id: &[u8; 32], got: &super::net::WithCode) -> Result<L
     struct State {
         #[serde(default)]
         owner_ek_bytes: Vec<u8>,
+        settings: freenet_mail_wire_v1::inbox::InboxSettings,
+        last_update: chrono::DateTime<chrono::Utc>,
+        #[serde(default)]
+        inbox_signature: Vec<u8>,
     }
     let state: State = serde_json::from_slice(&got.state)
         .map_err(|_| "the old inbox could not be read".to_string())?;
     if state.owner_ek_bytes.is_empty() {
         return Err("the old inbox names no encryption key".into());
+    }
+    // The key is in the state, which any node can answer: it is the owner's
+    // only under the owner's signature, which binds it (as the v1 contract
+    // checks).
+    let signed = freenet_mail_wire_v1::inbox::sign_payload(
+        &state.owner_ek_bytes,
+        &state.settings,
+        state.last_update,
+    );
+    if !crate::inbox::verify_message_signature(&signed, &params.pub_key, &state.inbox_signature)
+    {
+        return Err("the old inbox's encryption key is not signed by its owner".into());
     }
     Ok(Legacy {
         vk: params.pub_key,
@@ -345,29 +362,73 @@ mod tests {
         assert_eq!(hashes[1], "Ht8rcMjTpnraRNbzkmDCBFJJfmQGJ8M2iUAGaZimE9Ji");
     }
 
-    fn got(vk: &[u8], hash: &str, ek: &[u8]) -> crate::v2::net::WithCode {
+    /// A v0.2.x inbox state: `ek` signed by `signer`, as the inbox's owner
+    /// signs it.
+    fn signed_state(signer: &ml_dsa::SigningKey<ml_dsa::MlDsa65>, ek: &[u8]) -> Vec<u8> {
+        use freenet_mail_wire_v1::inbox::{Inbox, InboxSettings};
+        let settings = InboxSettings::default();
+        let last_update = chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        let sig = Inbox::sign(signer, ek, &settings, last_update);
+        serde_json::to_vec(&serde_json::json!({
+            "messages": [],
+            "last_update": last_update,
+            "settings": settings,
+            "owner_ek_bytes": ek,
+            "inbox_signature": sig.to_vec(),
+        }))
+        .unwrap()
+    }
+
+    fn got(vk: &[u8], hash: &str, state: Vec<u8>) -> crate::v2::net::WithCode {
         crate::v2::net::WithCode {
             code_hash: hash.to_string(),
             params: serde_json::to_vec(&serde_json::json!({ "pub_key": vk })).unwrap(),
-            state: serde_json::to_vec(&serde_json::json!({ "owner_ek_bytes": ek })).unwrap(),
+            state,
         }
+    }
+
+    fn key(seed: u8) -> (ml_dsa::SigningKey<ml_dsa::MlDsa65>, Vec<u8>) {
+        use ml_dsa::signature::Keypair;
+        let sk = ml_dsa::SigningKey::<ml_dsa::MlDsa65>::from_seed(&[seed; 32].into());
+        let vk = sk.verifying_key().encode().to_vec();
+        (sk, vk)
     }
 
     /// A legacy id resolves to the key in its parameters, only if those
     /// parameters and the code make that id.
     #[test]
     fn a_legacy_id_resolves_to_the_key_that_makes_it() {
-        let vk = vec![3u8; 1952];
+        let (sk, vk) = key(3);
         let hash = v1_code_hashes()[0].clone();
         let id: [u8; 32] = v1_id(&vk, &hash).unwrap().as_bytes().try_into().unwrap();
-        let ok = legacy_from(&id, &got(&vk, &hash, &[4; 1184])).unwrap();
-        assert_eq!((ok.vk, ok.ek.len()), (vk.clone(), 1184));
+        let ok = legacy_from(&id, &got(&vk, &hash, signed_state(&sk, &[4; 1184]))).unwrap();
+        assert_eq!((ok.vk, ok.ek), (vk.clone(), vec![4; 1184]));
         // Another key's parameters: not this id.
-        assert!(legacy_from(&id, &got(&[5; 1952], &hash, &[4; 1184])).is_err());
+        let (other_sk, other_vk) = key(5);
+        let other = got(&other_vk, &hash, signed_state(&other_sk, &[4; 1184]));
+        assert!(legacy_from(&id, &other).is_err());
         // A contract that is not a v0.2.x inbox.
-        let other = crate::v2::CODE_HASH.trim();
-        assert!(legacy_from(&id, &got(&vk, other, &[4; 1184])).is_err());
+        let code = crate::v2::CODE_HASH.trim();
+        assert!(legacy_from(&id, &got(&vk, code, signed_state(&sk, &[4; 1184]))).is_err());
         // No encryption key.
-        assert!(legacy_from(&id, &got(&vk, &hash, &[])).is_err());
+        assert!(legacy_from(&id, &got(&vk, &hash, signed_state(&sk, &[]))).is_err());
+    }
+
+    /// The encryption key is the owner's only if the owner signed it: a
+    /// node that answers with its own key in a genuine inbox's state, or
+    /// with a state another key signed, is refused.
+    #[test]
+    fn a_legacy_inbox_whose_key_the_owner_did_not_sign_is_refused() {
+        let (sk, vk) = key(3);
+        let hash = v1_code_hashes()[0].clone();
+        let id: [u8; 32] = v1_id(&vk, &hash).unwrap().as_bytes().try_into().unwrap();
+        let mut forged: serde_json::Value =
+            serde_json::from_slice(&signed_state(&sk, &[4; 1184])).unwrap();
+        forged["owner_ek_bytes"] = serde_json::json!(vec![6u8; 1184]);
+        let forged = serde_json::to_vec(&forged).unwrap();
+        assert!(legacy_from(&id, &got(&vk, &hash, forged)).is_err());
+        let (mallory, _) = key(7);
+        let theirs = signed_state(&mallory, &[6; 1184]);
+        assert!(legacy_from(&id, &got(&vk, &hash, theirs)).is_err());
     }
 }
