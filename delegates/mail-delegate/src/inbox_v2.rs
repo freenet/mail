@@ -517,6 +517,42 @@ pub fn create_inbox(
     Ok(Reply::InboxV2State(ByteBuf::from(w::encode(&full))))
 }
 
+/// Sign the inbox again from the identity's record, for when the network has
+/// none although the record exists: the first PUT, or the reply that carried
+/// the first state, was lost ([`Op::RepublishInboxV2`]). The owner record is a
+/// new version over the record's tombstones and filters, so it is never a
+/// second record at a version already signed (decision 25 tells those apart by
+/// their bytes); the time moves under the guard. Both are recorded before the
+/// state leaves. Should the network hold the inbox after all, the state merges
+/// into it as an owner change would.
+///
+/// [`Op::RepublishInboxV2`]: freenet_mail_protocol::Op::RepublishInboxV2
+pub fn republish_inbox(s: &mut Space<'_>, addr: &Addr) -> OpResult {
+    let me = me(s, addr)?;
+    let (rec_gen, mut rec) = record(s, addr)?;
+    let now = clock(s)?;
+    let version = next_version(rec.max_version)?;
+    let owner_time = guarded_time(rec.max_owner_time, now);
+    // A tombstone the time moves out of the window guards nothing.
+    rec.tombstones
+        .retain(|_, t| t.saturating_add(w::WINDOW_BACK) >= owner_time);
+    rec.max_version = version;
+    rec.max_owner_time = owner_time;
+    let signed = sign_owner(&me, &rec, version, rec.tombstones.clone());
+    rec.signed_owner = Some(owner_digest(&signed));
+    // Recorded before anything signed leaves.
+    let rec_item = item(ItemKind::InboxV2, addr, &[]);
+    save(s, rec_item, &rec, rec_gen)?;
+    let full = InboxState {
+        owner: signed,
+        time: sign_time(&me, owner_time),
+        revoked: BTreeMap::new(),
+        usage: BTreeMap::new(),
+        messages: BTreeMap::new(),
+    };
+    Ok(Reply::InboxV2State(ByteBuf::from(w::encode(&full))))
+}
+
 // ── Passes ──────────────────────────────────────────────────────────────────
 
 fn cert_of(me: &Me, pass_id: &B16, e: &LedgerEntry) -> w::PassCert {

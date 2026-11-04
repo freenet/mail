@@ -60,18 +60,27 @@ pub fn process(
         // or a GET answer, so nothing durable depends on one beyond the duty
         // a run spends; what they carry is never read.
         InboundDelegateMsg::Lifecycle(LifecycleEvent::NodeStarted { .. }) => {
-            Ok(background(env, Trigger::NodeStarted))
+            Ok(background(env, Trigger::NodeStarted, "node-started"))
         }
         InboundDelegateMsg::WakeupFired { tag } => Ok(match Tick::from_tag(&tag) {
-            Some(tick) => background(env, Trigger::Tick(tick)),
+            // A known tag is one of `Tick::ALL`'s names, so it is text.
+            Some(tick) => background(
+                env,
+                Trigger::Tick(tick),
+                std::str::from_utf8(&tag).unwrap_or("wakeup"),
+            ),
             None => Vec::new(),
         }),
-        InboundDelegateMsg::ContractNotification(n) => {
-            Ok(background(env, contract_trigger(&n.contract_id)?))
-        }
-        InboundDelegateMsg::GetContractResponse(r) => {
-            Ok(background(env, contract_trigger(&r.contract_id)?))
-        }
+        InboundDelegateMsg::ContractNotification(n) => Ok(background(
+            env,
+            contract_trigger(&n.contract_id)?,
+            "notification",
+        )),
+        InboundDelegateMsg::GetContractResponse(r) => Ok(background(
+            env,
+            contract_trigger(&r.contract_id)?,
+            "get-answer",
+        )),
         // Every refresh asks again for every subscription, so the answer is
         // not recorded: a client can send this message, and a belief written
         // from it would let one switch off another's watch.
@@ -85,8 +94,21 @@ pub fn process(
     }
 }
 
-fn background(env: &mut dyn Env, trigger: Trigger) -> Vec<OutboundDelegateMsg> {
-    watch::run(env, trigger).1
+/// A run the node started, and one line in the node's log saying what woke
+/// it and what it did: the only record of a run nobody asked for.
+fn background(env: &mut dyn Env, trigger: Trigger, woken_by: &str) -> Vec<OutboundDelegateMsg> {
+    let (done, out) = watch::run(env, trigger);
+    env.log(&run_line(woken_by, &done));
+    out
+}
+
+/// The log line of a node-started run. `imported` counts v1 imports and v2
+/// messages drained alike.
+pub fn run_line(woken_by: &str, done: &freenet_mail_protocol::JobsRun) -> String {
+    format!(
+        "mail delegate run: woken_by={woken_by} scanned={} imported={} unknown={} remaining={}",
+        done.scanned, done.imported, done.unknown, done.remaining
+    )
 }
 
 fn contract_trigger(id: &ContractInstanceId) -> Result<Trigger, DelegateError> {
@@ -240,6 +262,7 @@ fn handle_request(
             ui_entropy,
         } => inbox_v2::issue_pass(s, &addr, contact, invite, &ui_entropy),
         Op::HoldPass { addr, pass } => inbox_v2::hold_pass(s, &addr, &pass),
+        Op::RepublishInboxV2 { addr } => inbox_v2::republish_inbox(s, &addr),
         Op::SealV2 {
             from,
             to,

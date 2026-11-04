@@ -46,6 +46,7 @@ fn op_name(op: &Op) -> &'static str {
         Op::IssuePass { .. } => "op_issue_pass",
         Op::HoldPass { .. } => "op_hold_pass",
         Op::SealV2 { .. } => "op_seal_v2",
+        Op::RepublishInboxV2 { .. } => "op_republish_inbox_v2",
     }
 }
 
@@ -282,6 +283,7 @@ fn ops() -> Vec<Op> {
             ui_entropy: Entropy([0xD4; 32]),
             reseals: 1,
         },
+        Op::RepublishInboxV2 { addr: a },
     ]
 }
 

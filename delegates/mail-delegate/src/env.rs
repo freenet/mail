@@ -24,6 +24,9 @@ pub trait Env {
     /// The state of a contract this node holds locally (never a network
     /// fetch). `None` means "not held here", not "does not exist".
     fn contract_state(&self, instance_id: &[u8; 32]) -> Option<Vec<u8>>;
+    /// A line in the node's log (core logs it at info, target `contract`).
+    /// Nothing the delegate does depends on it.
+    fn log(&self, _line: &str) {}
 }
 
 impl Env for DelegateCtx {
@@ -56,6 +59,9 @@ impl Env for DelegateCtx {
     }
     fn contract_state(&self, instance_id: &[u8; 32]) -> Option<Vec<u8>> {
         self.get_contract_state(instance_id)
+    }
+    fn log(&self, line: &str) {
+        freenet_stdlib::log::info(line);
     }
 }
 

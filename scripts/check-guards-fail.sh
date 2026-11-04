@@ -334,6 +334,20 @@ dt "inbox v2: each signed owner record is remembered" "$D/inbox_v2.rs" \
 dt "inbox v2: a takeover remembers the record it signed" "$D/inbox_v2.rs" \
     '    rec.signed_owner = Some(owner_digest(&owner));' '' \
     a_takeover_sees_the_same_version_signed_by_the_first_node
+dt "inbox v2: a republished owner version is recorded before it leaves" "$D/inbox_v2.rs" \
+    '    save(s, rec_item, &rec, rec_gen)?;' '    let _ = (&rec_item, &rec, rec_gen);' \
+    an_inbox_whose_first_state_was_lost_is_signed_again_from_the_record
+dt "inbox v2: a republished owner record is remembered" "$D/inbox_v2.rs" \
+    '    rec.signed_owner = Some(owner_digest(&signed));' '' \
+    an_inbox_whose_first_state_was_lost_is_signed_again_from_the_record
+dt "inbox v2: republishing signs a new version" "$D/inbox_v2.rs" \
+    'let version = next_version(rec.max_version)?;
+    let owner_time' 'let version = rec.max_version;
+    let owner_time' \
+    an_inbox_whose_first_state_was_lost_is_signed_again_from_the_record
+dt "inbox v2: republishing keeps the tombstones" "$D/inbox_v2.rs" \
+    '.retain(|_, t| t.saturating_add(w::WINDOW_BACK) >= owner_time);' '.retain(|_, _| false);' \
+    an_inbox_signed_again_keeps_its_tombstones
 dt "inbox v2: another node's record stays noted" "$D/inbox_v2.rs" \
     '    if !signed_elsewhere(rec, owner) {
         return;' '    if !signed_elsewhere(rec, owner) {
