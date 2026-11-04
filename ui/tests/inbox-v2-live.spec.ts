@@ -155,9 +155,12 @@ async function compose(page: Page, to: string, subject: string) {
 
 async function clickSend(page: Page): Promise<Locator> {
   const outcome = app(page).locator(tid(TID.fmV2Outcome));
-  const before = Number((await outcome.getAttribute("data-seq", { timeout: 1_000 }).catch(() => null)) ?? "0");
+  // The outcome shows only for its sender, so another identity has none yet.
+  const seq = async () =>
+    Number((await outcome.getAttribute("data-seq", { timeout: 1_000 }).catch(() => null)) ?? "0");
+  const before = await seq();
   await app(page).locator(tid(TID.fmSend)).click();
-  await expect(outcome).toHaveAttribute("data-seq", String(before + 1), { timeout: 240_000 });
+  await expect.poll(seq, { timeout: 240_000 }).toBeGreaterThan(before);
   return outcome;
 }
 

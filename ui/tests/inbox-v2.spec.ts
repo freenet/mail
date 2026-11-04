@@ -106,11 +106,13 @@ async function compose(page: Page, to: string, subject: string) {
 /** Send what the sheet holds and return the outcome of THIS send. */
 async function clickSend(page: Page): Promise<Locator> {
   const outcome = page.locator(tid(TID.fmV2Outcome));
-  const before = Number((await outcome.getAttribute("data-seq").catch(() => null)) ?? "0");
+  // The outcome shows only for the identity that sent it, so another
+  // identity's page has none yet: the count is the page's, not the identity's.
+  const seq = async () =>
+    Number((await outcome.getAttribute("data-seq", { timeout: 1_000 }).catch(() => null)) ?? "0");
+  const before = await seq();
   await page.locator(tid(TID.fmSend)).click();
-  await expect(outcome).toHaveAttribute("data-seq", String(before + 1), {
-    timeout: 60_000,
-  });
+  await expect.poll(seq, { timeout: 60_000 }).toBeGreaterThan(before);
   return outcome;
 }
 
