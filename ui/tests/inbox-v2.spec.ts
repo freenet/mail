@@ -224,6 +224,22 @@ test.describe("Inbox v2 (offline)", () => {
     outcome = await send(page, `alice@${alice}`, "reply");
     await expect(outcome).toHaveText(/^Delivered to alice\./);
 
+    // Delete removes bob's stored copy, not a v1 inbox row: once his next
+    // mail is drained and the list is read from the delegate again, the
+    // deleted message is still gone.
+    const first = page.locator(`${tid(TID.fmList)} article`, { hasText: "first contact" });
+    await first.click();
+    await page.locator(`${tid(TID.fmThreadContainer)} ${tid(TID.fmDelete)}`).first().click();
+    await expect(first).toHaveCount(0, { timeout: 30_000 });
+    await switchTo(page, "address1");
+    outcome = await send(page, `bob@${bob}`, "after delete");
+    await expect(outcome).toHaveText(/^Delivered to bob\./);
+    await switchTo(page, "address2");
+    await expect(page.locator(`${tid(TID.fmList)} article`, { hasText: "after delete" })).toBeVisible({
+      timeout: 30_000,
+    });
+    await expect(first).toHaveCount(0);
+
     // Requiring a Ghost Key again does not touch alice: she holds bob's
     // pass now, so no badge, and her mail goes straight in.
     await setNewContacts(page, "ghost-5");
