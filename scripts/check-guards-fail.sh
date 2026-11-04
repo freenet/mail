@@ -360,6 +360,9 @@ dt "inbox v2: republishing keeps the tombstones" "$D/inbox_v2.rs" \
 dt "inbox v2: republishing keeps the revocations" "$D/inbox_v2.rs" \
     'if e.revoked && revocation_live(' 'if false && revocation_live(' \
     an_inbox_signed_again_keeps_its_revocations
+dt "inbox v2: republishing fails on an unreadable ledger entry" "$D/inbox_v2.rs" \
+    'if crate::handlers::listed_but_unreadable(s, &at)? {' 'if false {' \
+    a_republish_over_an_unreadable_revoked_ledger_entry_fails_closed
 dt "inbox v2: a takeover records the tombstones it took over" "$D/inbox_v2.rs" \
     '            rec.tombstones = state.owner.tombstones.clone();' '' \
     a_takeover_signed_again_keeps_the_tombstones_it_took_over

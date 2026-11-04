@@ -1129,6 +1129,56 @@ fn an_inbox_signed_again_keeps_its_revocations() {
     );
 }
 
+/// A revoked pass's ledger entry is listed but cannot be read: a republish
+/// fails as unreadable rather than signing an inbox without that revocation,
+/// and once the entry reads again it carries it. An entry whose deletion did
+/// not finish (its record gone, its `d` marker left) is absent, not unreadable.
+#[test]
+fn a_republish_over_an_unreadable_revoked_ledger_entry_fails_closed() {
+    let mut world = World::new();
+    let a = world.identity("alice");
+    let invite = world.issue(&a, None, Some(3));
+    let pass_id = invite.cert.pass_id;
+    world.change(
+        &a,
+        OwnerChange::Revoke {
+            pass_id: PassId(*pass_id),
+        },
+    );
+    world.advance(DAY);
+    let ledger = ItemRef {
+        kind: ItemKind::PassLedger,
+        owner: Some(a),
+        id: pass_id.to_vec(),
+    };
+    let mut probe = MemEnv::default();
+    let space = Space::new(&mut probe, Origin([world.origin(&a); 32]));
+    let key = String::from_utf8(space.full_key(&item_rel(&ledger))).unwrap();
+    let pending =
+        String::from_utf8(space.full_key(&crate::store::pending_item_rel(&ledger))).unwrap();
+    world.env.faults = Some(Faults::blind(&key));
+    assert_eq!(
+        republish(&mut world, &a).unwrap_err(),
+        FailureCode::Unreadable,
+        "never signed without the revocation"
+    );
+    world.env.faults = None;
+    let state: InboxState = w::decode(&republish(&mut world, &a).unwrap()).unwrap();
+    assert!(state.revoked.contains_key(&pass_id), "readable again");
+
+    // A deletion that removed the record and stopped before the index.
+    let record = world.env.secrets.remove(key.as_bytes());
+    assert!(record.is_some());
+    world
+        .env
+        .secrets
+        .insert(pending.into_bytes(), crate::store::MARKER_DELETING.to_vec());
+    assert!(
+        republish(&mut world, &a).is_ok(),
+        "a deleted entry is absent"
+    );
+}
+
 /// No record, no inbox to sign: an identity without one, and one the page's
 /// origin does not hold, are refused.
 #[test]

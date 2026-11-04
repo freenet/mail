@@ -1122,7 +1122,7 @@ fn spend_marker(s: &mut Space<'_>, marker: &str) -> Result<(), Failure> {
 
 /// Whether a listed item whose record reads as absent is unreadable rather
 /// than gone: no create or delete marker explains its absence.
-fn listed_but_unreadable(s: &Space<'_>, item: &ItemRef) -> Result<bool, Failure> {
+pub(crate) fn listed_but_unreadable(s: &Space<'_>, item: &ItemRef) -> Result<bool, Failure> {
     let ix = index_rel(item.kind, item.owner.as_ref());
     if !s.index(&ix)?.1.contains(&item.id) {
         return Ok(false);

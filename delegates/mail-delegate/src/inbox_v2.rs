@@ -649,11 +649,19 @@ fn live_revocations(
     ))?;
     for id in ids {
         let Ok(raw) = <[u8; 16]>::try_from(id.as_slice()) else {
-            continue;
+            return Err(fail(FailureCode::Internal, "a pass ledger id is malformed"));
         };
         let pass_id = ByteArray::new(raw);
         let at = item(ItemKind::PassLedger, &me.addr, &raw);
         let Some((_, e)) = load::<LedgerEntry>(s, &at)? else {
+            // Absent only when a create or delete marker explains it; a
+            // listed entry that does not read may be a live revocation.
+            if crate::handlers::listed_but_unreadable(s, &at)? {
+                return Err(fail(
+                    FailureCode::Unreadable,
+                    "a pass ledger entry could not be read; retry",
+                ));
+            }
             continue;
         };
         if e.revoked && revocation_live(rec, e.max_expiry, e.revoked_epoch, owner_time) {
