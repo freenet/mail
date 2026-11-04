@@ -488,11 +488,19 @@ pub(crate) async fn refresh(addr: Addr) {
     if !first {
         return;
     }
+    // The identity may be deleted, or deleted and restored, while this runs:
+    // after each await the start generation is checked, and a changed one
+    // drops the result (`forget` already cleared the marks this run set).
+    let generation = STARTED.with(|s| s.borrow().get(&addr).copied());
     loop {
-        if let Err(e) = drain(addr).await {
-            crate::log::error(format!("inbox v2: draining failed: {e}"), None);
+        match drain(addr, generation).await {
+            Err(e) if e == STOPPED => return,
+            Err(e) => crate::log::error(format!("inbox v2: draining failed: {e}"), None),
+            Ok(()) => {}
         }
-        load_inbound(addr).await;
+        if !load_inbound_for(addr, generation).await {
+            return;
+        }
         let again = BUSY.with(|b| {
             let mut b = b.borrow_mut();
             let again = b.get(&addr).copied().unwrap_or(false);
@@ -517,11 +525,13 @@ fn undrained(state: &InboxState) -> bool {
         .any(|id| !state.owner.tombstones.contains_key(id))
 }
 
-async fn drain(addr: Addr) -> Result<(), String> {
+async fn drain(addr: Addr, generation: Option<u64>) -> Result<(), String> {
     // A bounded number of rounds; a later change drains the rest.
     let mut republished = false;
     for _ in 0..16 {
-        let bytes = match net::get(&addr, true).await? {
+        let got = net::get(&addr, true).await;
+        checkpoint(addr, generation, "refresh read")?;
+        let bytes = match got? {
             Got::State(s) => s,
             // A first PUT whose answer came but whose state went nowhere.
             // Once per drain: each one signs a new owner version.
@@ -533,13 +543,18 @@ async fn drain(addr: Addr) -> Result<(), String> {
             Got::Missing => return Ok(()),
         };
         let state: InboxState = w::decode(&bytes)?;
-        note_owner(addr, &state).await;
+        note_owner(addr, generation, &state).await;
+        checkpoint(addr, generation, "refresh noted")?;
         if !undrained(&state) {
             return Ok(());
         }
-        let update = update_inbox(addr, bytes, OwnerChange::Drain).await?;
+        let update = update_inbox(addr, bytes, OwnerChange::Drain).await;
+        checkpoint(addr, generation, "refresh signed")?;
+        let update = update?;
         if let Some(delta) = &update.update {
-            net::update(&addr, delta.to_vec()).await?;
+            let sent = net::update(&addr, delta.to_vec()).await;
+            checkpoint(addr, generation, "refresh sent")?;
+            sent?;
         }
         if update.remaining == 0 && update.update.is_none() {
             return Ok(());
@@ -592,8 +607,11 @@ pub(crate) fn foreign(state_version: u64, record: &InboxRecordView) -> bool {
 
 /// Note what `state` says about the inbox. The record is read AFTER the
 /// state, so a version this node signed is already in it.
-async fn note_owner(addr: Addr, state: &InboxState) {
+async fn note_owner(addr: Addr, generation: Option<u64>, state: &InboxState) {
     let rec = record(addr).await;
+    if checkpoint(addr, generation, "refresh record").is_err() {
+        return;
+    }
     let waiting = state
         .messages
         .iter()
@@ -659,15 +677,30 @@ fn parse_inbound(items: &[freenet_mail_protocol::Item]) -> (Vec<Inbound>, usize)
 
 /// Read `addr`'s drained mail from the delegate and show it.
 pub(crate) async fn load_inbound(addr: Addr) {
-    let shown = match read_inbound(addr).await {
+    let generation = STARTED.with(|s| s.borrow().get(&addr).copied());
+    load_inbound_for(addr, generation).await;
+}
+
+/// [`load_inbound`] for a run of start `generation`: false if the identity
+/// was deleted (or restored) meanwhile, and nothing was shown.
+async fn load_inbound_for(addr: Addr, generation: Option<u64>) -> bool {
+    let read = read_inbound(addr).await;
+    if checkpoint(addr, generation, "inbound read").is_err() {
+        return false;
+    }
+    let shown = match read {
         Ok(shown) => shown,
         Err(e) => {
             crate::log::error(format!("inbox v2: listing drained mail failed: {e}"), None);
-            return;
+            return true;
         }
     };
+    let queued = super::queue::queued(addr, &shown).await;
+    if checkpoint(addr, generation, "queue read").is_err() {
+        return false;
+    }
     super::contacts::note_drained(addr, &shown);
-    let queued = match super::queue::queued(addr, &shown).await {
+    let queued = match queued {
         Ok(q) => q,
         Err(e) => {
             // Unknown is not "accepted": hold every stranger's mail back.
@@ -683,6 +716,7 @@ pub(crate) async fn load_inbound(addr: Addr) {
         INBOUND.write().insert(addr, shown);
         QUEUED.write().insert(addr, queued);
     }
+    true
 }
 
 /// Where an inbox row's message is stored: its identity, and the item id and
@@ -947,6 +981,32 @@ mod tests {
         futures::executor::block_on(run(a, new));
         assert!(has_inbox(a), "the restored identity's loop made its inbox");
         assert!(status(&a).ready);
+    }
+
+    /// A refresh running while its identity is deleted and restored drops its
+    /// result: the old drain's state does not come back under the new start.
+    #[cfg(all(feature = "local-delegate", not(feature = "use-node")))]
+    #[test]
+    fn a_refresh_across_a_delete_and_restore_leaves_no_stale_state() {
+        let a = new_identity("v2-refresh-restore");
+        let first = begin(a).unwrap();
+        futures::executor::block_on(run(a, first));
+        assert!(status(&a).ready);
+        let fired = std::rc::Rc::new(std::cell::Cell::new(false));
+        let f = fired.clone();
+        CHECKPOINT.with(|c| {
+            *c.borrow_mut() = Some(Box::new(move |addr, at| {
+                if addr == a && at == "refresh read" && !f.get() {
+                    f.set(true);
+                    forget(a);
+                    begin(a);
+                }
+            }))
+        });
+        futures::executor::block_on(refresh(a));
+        CHECKPOINT.with(|c| c.borrow_mut().take());
+        assert!(fired.get(), "the refresh never reached its checkpoint");
+        assert_eq!(status(&a), Status::default(), "stale status came back");
     }
 
     #[test]
