@@ -4518,8 +4518,11 @@ dependencies = [
 name = "v1-node-seed"
 version = "0.2.7"
 dependencies = [
+ "chrono",
+ "freenet-mail-protocol",
  "freenet-mail-wire-v1",
  "freenet-stdlib 0.12.1",
+ "mail-delegate",
  "serde_json",
  "tokio",
  "tokio-tungstenite",

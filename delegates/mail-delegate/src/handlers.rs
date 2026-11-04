@@ -261,6 +261,7 @@ fn handle_request(
         } => inbox_v2::issue_pass(s, &addr, contact, invite, &ui_entropy),
         Op::HoldPass { addr, pass } => inbox_v2::hold_pass(s, &addr, &pass),
         Op::RepublishInboxV2 { addr } => inbox_v2::republish_inbox(s, &addr),
+        Op::EndV1WindowForTest { addr } => end_v1_window(s, &addr),
         Op::SealV2 {
             from,
             to,
@@ -1606,6 +1607,16 @@ fn v1_aft_params(s: &Space<'_>, addr: &Addr) -> OpResult {
     serde_json::to_vec(&params)
         .map(|b| Reply::AftParams(ByteBuf::from(b)))
         .map_err(|e| fail(FailureCode::Internal, e.to_string()))
+}
+
+#[cfg(feature = "v1-transition")]
+fn end_v1_window(s: &mut Space<'_>, addr: &Addr) -> OpResult {
+    crate::transition::end_window_now(s, addr).map(|()| Reply::Ack { generation: 0 })
+}
+
+#[cfg(not(feature = "v1-transition"))]
+fn end_v1_window(_: &mut Space<'_>, _: &Addr) -> OpResult {
+    Err(fail(FailureCode::Refused, "this build has no test clock"))
 }
 
 #[cfg(not(feature = "v1-transition"))]

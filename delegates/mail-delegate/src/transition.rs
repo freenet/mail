@@ -142,6 +142,20 @@ fn window(s: &mut Space<'_>, owner: &Addr, now: u64) -> Result<Option<V1Window>,
     Ok(Some(w))
 }
 
+/// Tests only (`Op::EndV1WindowForTest`, `v1-transition` builds): move the
+/// window's start back so it ends now. Only ever earlier, and a close
+/// already signed is not touched.
+#[cfg(feature = "v1-transition")]
+pub fn end_window_now(s: &mut Space<'_>, owner: &Addr) -> Result<(), Failure> {
+    let now = s.env.now_secs().unwrap_or(0);
+    window(s, owner, now)?.ok_or_else(|| fail(FailureCode::NotFound, "no v2 inbox"))?;
+    let (generation, mut rec) = v2::record(s, owner)?;
+    if let Some(w) = rec.v1_window.as_mut() {
+        w.start = w.start.min(now.saturating_sub(WINDOW));
+    }
+    v2::save(s, item(ItemKind::InboxV2, owner, &[]), &rec, generation)
+}
+
 /// Whether `owner`'s window is over, starting it if it has none. An error or
 /// no v2 inbox reads as not over.
 pub fn ended(s: &mut Space<'_>, owner: &Addr, now: u64) -> bool {

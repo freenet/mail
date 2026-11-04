@@ -391,6 +391,21 @@ fn an_inbox_closed_already_is_never_signed_again() {
     assert!(closes.values().all(|c| c.done && c.sig.is_empty()));
 }
 
+/// The test clock (`Op::EndV1WindowForTest`) ends the window at once in a
+/// `v1-transition` build, and is refused in any other.
+#[test]
+fn the_test_clock_ends_the_window_only_in_a_transition_build() {
+    let (mut world, a, _, id) = imported_two();
+    let ended = world.call_as(&a, Op::EndV1WindowForTest { addr: a });
+    if cfg!(feature = "v1-transition") {
+        assert!(ended.is_ok());
+        assert_eq!(run_v1(&mut world, &a, id).len(), 2, "closes now");
+    } else {
+        assert_eq!(ended, Err(freenet_mail_protocol::FailureCode::Refused));
+        assert!(run_v1(&mut world, &a, id).is_empty());
+    }
+}
+
 /// An identity with no v2 inbox has no window, and nothing closes.
 #[test]
 fn no_window_without_a_v2_inbox() {

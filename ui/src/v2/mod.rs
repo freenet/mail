@@ -17,6 +17,7 @@ pub(crate) mod net;
 pub(crate) mod owner;
 pub(crate) mod queue;
 pub(crate) mod send;
+pub(crate) mod transition;
 
 use freenet_mail_protocol::Addr;
 use freenet_mail_protocol::inbox_v2;
@@ -90,6 +91,21 @@ pub(crate) struct InboxRecordView {
     /// Decision 25: the delegate saw an owner record it did not sign.
     #[serde(default)]
     pub foreign_seen: Option<ForeignSeenView>,
+    /// The v1 transition window (`transition`).
+    #[serde(default)]
+    pub v1_window: Option<V1WindowView>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub(crate) struct V1WindowView {
+    pub start: u64,
+    #[serde(default)]
+    pub closes: std::collections::BTreeMap<serde_bytes::ByteBuf, V1ClosingView>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+pub(crate) struct V1ClosingView {
+    pub done: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]

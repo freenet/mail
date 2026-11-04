@@ -788,6 +788,7 @@ pub(crate) async fn load_and_report() {
         {
             // Beside the walk, never in front of it or the page.
             spawn_detached(crate::jobs::fallback());
+            spawn_detached(crate::v2::transition::on_load());
             crate::app::migration_view::after_listing(
                 crate::migration::node::NodeLegacy,
                 crate::migration::node::NodeInbox,

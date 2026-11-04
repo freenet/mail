@@ -11,7 +11,11 @@ name = "v1-node-seed"
 path = "src/main.rs"
 
 [dependencies]
+chrono = { workspace = true, features = ["clock"] }
+freenet-mail-protocol = { workspace = true }
 freenet-mail-wire-v1 = { workspace = true }
+# Its v1 encryption and keys, for the transition fixture's inbox.
+mail-delegate = { path = "../../delegates/mail-delegate" }
 freenet-stdlib = { workspace = true, features = ["net"] }
 serde_json = { workspace = true }
 tokio = { version = "1.54.1", features = ["macros", "rt", "time"] }

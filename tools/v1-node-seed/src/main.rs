@@ -13,6 +13,14 @@
 //! `--expect-cleared` fails unless the frozen delegates no longer hold what
 //! was seeded: what the real-node test runs after the app has scrubbed them.
 //!
+//! `v1-node-seed <ws port> --transition <key file>` (the v1 transition test,
+//! `cargo make test-e2e-v1-transition`) seeds as above, then adds a contact
+//! `vbob`, verified, whose seeds are fixed, writes his recovery key to the key
+//! file, and publishes alice's v0.2.x inbox holding one v0.2.7-format message
+//! from him, admitted by the verified-sender exemption (no token).
+//! `v1-node-seed <ws port> --inbox` prints that inbox's message count, tier,
+//! exemption and `last_update` as one JSON line.
+//!
 //! With a capture file it also writes the delegates' own `GetIdentities` and
 //! `GetAll` replies there, as hex lines: the bytes `ui/src/migration/
 //! captured_v0_2_7.txt` holds. Regenerate that file with
@@ -283,16 +291,176 @@ async fn seed(port: &str) -> Result<(), String> {
     Ok(())
 }
 
+// ── The v1 transition fixture ───────────────────────────────────────────────
+
+/// The verified contact's alias and fixed seeds, and the message title the
+/// test looks for.
+const VBOB: &str = "vbob";
+const VBOB_DSA: [u8; 32] = [11; 32];
+const VBOB_KEM: [u8; 64] = [12; 64];
+pub const V1_MESSAGE_TITLE: &str = "sent on v0.2.7 before the move";
+
+fn keys(dsa: [u8; 32], kem: [u8; 64]) -> mail_delegate::crypto::Keys {
+    use freenet_mail_protocol::{DsaSeed, KemSeed};
+    mail_delegate::crypto::Keys::from_seeds(&DsaSeed(dsa), &KemSeed(kem))
+}
+
+fn alice() -> mail_delegate::crypto::Keys {
+    keys([9; 32], [10; 64])
+}
+
+fn inbox_key(vk: &[u8]) -> Result<(ContractContainer, ContractKey), String> {
+    let v1 = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../published-contract/wasm/v1");
+    let code = std::fs::read(v1.join("freenet_email_inbox")).map_err(|e| e.to_string())?;
+    let params: Parameters = freenet_mail_wire_v1::inbox::InboxParams {
+        pub_key: vk.to_vec(),
+    }
+    .try_into()
+    .map_err(|e: serde_json::Error| e.to_string())?;
+    let container = ContractContainer::try_from((code, &params)).map_err(|e| e.to_string())?;
+    let key = container.key();
+    Ok((container, key))
+}
+
+/// Alice's v0.2.x inbox: one message from vbob, sealed and signed as v0.2.7
+/// does, admitted because vbob is a verified sender with the exemption on.
+fn transition_inbox() -> Result<Vec<u8>, String> {
+    use freenet_mail_wire_v1::aft::{Tier, TokenAssignment};
+    use freenet_mail_wire_v1::inbox::{Inbox, InboxSettings, Message, sign_payload};
+    let (me, bob) = (alice(), keys(VBOB_DSA, VBOB_KEM));
+    let plaintext = serde_json::json!({
+        "title": V1_MESSAGE_TITLE,
+        "content": "written to the old address",
+        "from": VBOB,
+        "to": [],
+        "cc": [],
+        "time": "2026-11-01T10:00:00Z",
+    });
+    let ek = mail_delegate::crypto::decode_ek(&me.ek_bytes()).ok_or("alice's key")?;
+    let entropy = freenet_mail_protocol::Entropy([5; 32]);
+    let mut rng = mail_delegate::crypto::MixRng::new("seed", &[6; 32], &entropy);
+    let plaintext = serde_json::to_vec(&plaintext).map_err(|e| e.to_string())?;
+    let content = mail_delegate::crypto::encrypt_v1(&ek, &plaintext, &mut rng);
+    let now = chrono::Utc::now();
+    let message = Message {
+        signature: bob.sign(&content),
+        content,
+        token_assignment: TokenAssignment {
+            tier: Tier::Min10,
+            time_slot: now,
+            generator: Vec::new(),
+            signature: Vec::new(),
+            assignment_hash: [0x77; 32],
+            token_record: ContractInstanceId::new([0; 32]),
+        },
+        sender_vk: bob.vk_bytes(),
+    };
+    let settings = InboxSettings {
+        allow_verified_skip_token: true,
+        verified_senders: [bob.vk_bytes()].into(),
+        ..InboxSettings::default()
+    };
+    let signature = me.sign(&sign_payload(&me.ek_bytes(), &settings, now));
+    Inbox::with_signature(
+        settings,
+        vec![message],
+        now,
+        me.ek_bytes(),
+        signature.into_boxed_slice(),
+    )
+    .serialize()
+    .map_err(|e| e.to_string())
+}
+
+async fn seed_transition(port: &str, key_file: &str) -> Result<(), String> {
+    seed(port).await?;
+    let (identity, _, mut api) = connect(port).await?;
+    let bob = keys(VBOB_DSA, VBOB_KEM);
+    let contact = serde_json::json!({
+        "ml_dsa_vk_bytes": bob.vk_bytes(),
+        "ml_kem_ek_bytes": bob.ek_bytes(),
+        "suggested_alias": VBOB,
+        "verified": true,
+    });
+    let create = IdentityMsg::CreateIdentity {
+        alias: VBOB.into(),
+        key: serde_json::to_vec(&contact).map_err(|e| e.to_string())?,
+        extra: Some("verified in v0.2.7".into()),
+        kind: Some(EntryKind::Contact),
+    };
+    identity.ask(&mut api, identity_message(&create)?).await?;
+    let (contract, key) = inbox_key(&alice().vk_bytes())?;
+    let put = freenet_stdlib::client_api::ContractRequest::Put {
+        contract,
+        state: WrappedState::new(transition_inbox()?),
+        related_contracts: RelatedContracts::default(),
+        subscribe: false,
+        blocking_subscribe: false,
+    };
+    api.send(ClientRequest::ContractOp(put))
+        .await
+        .map_err(|e| e.to_string())?;
+    let answer = tokio::time::timeout(REPLY_TIMEOUT, api.recv())
+        .await
+        .map_err(|_| "no PUT answer in time".to_string())?
+        .map_err(|e| e.to_string())?;
+    println!("published alice's v0.2.x inbox {}: {answer}", key.id());
+    let recovery = freenet_mail_protocol::recovery_key::encode(
+        &freenet_mail_protocol::DsaSeed(VBOB_DSA),
+        &freenet_mail_protocol::KemSeed(VBOB_KEM),
+    );
+    std::fs::write(key_file, recovery).map_err(|e| format!("{key_file}: {e}"))
+}
+
+/// Alice's v0.2.x inbox as the node holds it, as one JSON line.
+async fn show_inbox(port: &str) -> Result<(), String> {
+    let (_, _, mut api) = connect(port).await?;
+    let (_, key) = inbox_key(&alice().vk_bytes())?;
+    let get = freenet_stdlib::client_api::ContractRequest::Get {
+        key: *key.id(),
+        return_contract_code: false,
+        subscribe: false,
+        blocking_subscribe: false,
+    };
+    api.send(ClientRequest::ContractOp(get))
+        .await
+        .map_err(|e| e.to_string())?;
+    let answer = tokio::time::timeout(REPLY_TIMEOUT, api.recv())
+        .await
+        .map_err(|_| "no GET answer in time".to_string())?
+        .map_err(|e| e.to_string())?;
+    let HostResponse::ContractResponse(freenet_stdlib::client_api::ContractResponse::GetResponse {
+        state,
+        ..
+    }) = answer
+    else {
+        return Err(format!("not a GET answer: {answer}"));
+    };
+    let v: serde_json::Value = serde_json::from_slice(state.as_ref()).map_err(|e| e.to_string())?;
+    let line = serde_json::json!({
+        "messages": v["messages"].as_array().map_or(0, Vec::len),
+        "minimum_tier": v["settings"]["minimum_tier"],
+        "exemption": v["settings"]["allow_verified_skip_token"],
+        "last_update": v["last_update"],
+    });
+    println!("{line}");
+    Ok(())
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let Some(port) = std::env::args().nth(1) else {
         eprintln!("usage: v1-node-seed <ws port>");
         std::process::exit(2);
     };
-    let run = if std::env::args().nth(2).as_deref() == Some("--expect-cleared") {
-        expect_cleared(&port).await
-    } else {
-        seed(&port).await
+    let run = match std::env::args().nth(2).as_deref() {
+        Some("--expect-cleared") => expect_cleared(&port).await,
+        Some("--transition") => match std::env::args().nth(3) {
+            Some(file) => seed_transition(&port, &file).await,
+            None => Err("--transition needs a key file".into()),
+        },
+        Some("--inbox") => show_inbox(&port).await,
+        _ => seed(&port).await,
     };
     if let Err(e) = run {
         eprintln!("v1-node-seed: {e}");

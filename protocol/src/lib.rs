@@ -432,6 +432,13 @@ pub enum Op {
     RepublishInboxV2 {
         addr: Addr,
     },
+    /// Tests only: end `addr`'s v1 transition window now, so a real-node
+    /// test can see the close without waiting 90 days. Only builds with the
+    /// `v1-transition` feature do it, which a release refuses; any other
+    /// build answers `Refused`.
+    EndV1WindowForTest {
+        addr: Addr,
+    },
 }
 
 /// Times one message may be sealed again ([`SealedV2::reseal_at`]).
