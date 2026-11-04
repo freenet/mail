@@ -1417,6 +1417,14 @@ fn V2SenderNotes(
     }
 }
 
+/// The signed-in identity's address when `id` is a v2 row.
+fn v2_owner_of(id: u64, user: &User) -> Option<freenet_mail_protocol::Addr> {
+    if !is_v2_row(id) {
+        return None;
+    }
+    user.logged_id().map(|i| i.addr)
+}
+
 /// The sender notes of v2 row `id`.
 pub(crate) fn v2_sender(id: u64) -> V2Sender {
     V2_SENDERS.with(|s| s.borrow().get(&id).cloned().unwrap_or_default())
@@ -4609,7 +4617,7 @@ fn ThreadRowActions(msg: Message, root_id: u64, thread_total: usize) -> Element 
                 "data-testid": testid::FM_ADD_TO_AB,
                 title: "Add sender to address book",
                 onclick: move |_| {
-                    add_sender_to_address_book(import_contact, &add_to_ab_vk, &add_to_ab_from);
+                    add_sender_to_address_book(import_contact, &add_to_ab_vk, &add_to_ab_from, v2_owner_of(id, &user.read()));
                 },
                 "Add to address book"
             }
@@ -5518,7 +5526,30 @@ fn add_sender_to_address_book(
     mut import_contact: Signal<crate::app::login::ImportContact>,
     sender_vk: &[u8],
     sender_from: &str,
+    v2_owner: Option<freenet_mail_protocol::Addr>,
 ) {
+    // A v2 sender is added as a v2 contact (their address, `V2Notes`), so a
+    // reply by name goes to the v2 inbox with its pass. Never as a v1 one.
+    if let Some(identity) = v2_owner {
+        let (vk, name) = (sender_vk.to_vec(), sender_from.to_string());
+        let _task = dioxus_core::spawn_forever(async move {
+            match crate::v2::contacts::add_sender(identity, &vk, &name).await {
+                Ok(added) => {
+                    crate::toast::push_toast_detached(
+                        format!("Added {} to your contacts.", added.name),
+                        crate::toast::ToastLevel::Success,
+                    );
+                }
+                Err(e) => {
+                    crate::toast::push_toast_detached(
+                        format!("Could not add the sender: {e}"),
+                        crate::toast::ToastLevel::Error,
+                    );
+                }
+            }
+        });
+        return;
+    }
     // #289: thread the sender's display name (`Message.from`) into the modal
     // so the nickname defaults to it — matching what a reply prefills
     // (`to: Message.from`), so resolution hits the contact's `local_alias`
@@ -5709,7 +5740,7 @@ fn OpenMessage(msg: Message) -> Element {
                         class: "btn btn-secondary",
                         "data-testid": testid::FM_ADD_TO_AB,
                         onclick: move |_| {
-                            add_sender_to_address_book(import_contact, &add_to_ab_vk, &add_to_ab_from);
+                            add_sender_to_address_book(import_contact, &add_to_ab_vk, &add_to_ab_from, v2_owner_of(id, &user.read()));
                         },
                         "Add to address book"
                     }

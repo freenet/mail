@@ -799,3 +799,30 @@ fn a_v2_send_keeps_the_recorded_recipient_and_the_known_key_rule() {
     net::note_own(&c);
     assert_eq!(send::check_recipient("crc", None, false, true, &c), Ok(()));
 }
+
+/// "Add to address book" on a v2 sender adds a v2 contact, so a reply by
+/// that name goes to the v2 inbox, never a v1 one.
+#[test]
+fn adding_a_v2_sender_makes_a_v2_contact_and_the_reply_goes_by_v2() {
+    let (a, b) = (identity("v2-adds-a"), identity("v2-adds-b"));
+    net::offline::forget_own(&a);
+    assert!(block_on(send::send(a, b, &body("hi"))).delivered());
+    let vk = block_on(contacts::resolve(a)).unwrap().vk;
+    assert!(contacts::by_addr(&a).is_none());
+
+    let added = block_on(contacts::add_sender(b, &vk, "alice")).unwrap();
+    assert_eq!(added.name, "alice");
+    let contact = contacts::by_addr(&a).expect("a v2 contact");
+    assert!(contacts::is_v2(&contact));
+    // The reply goes to alice's v2 inbox.
+    assert_eq!(contacts::recipient_addr("alice"), Some(a));
+    assert!(block_on(send::send(b, a, &body("re: hi"))).delivered());
+    assert_eq!(drain(a), vec!["re: hi".to_string()]);
+
+    // A name that is no valid petname is not used: the address names them.
+    let c = identity("v2-adds-c");
+    net::offline::forget_own(&c);
+    let vk_c = block_on(contacts::resolve(c)).unwrap().vk;
+    let added = block_on(contacts::add_sender(b, &vk_c, "Not A Name!!\u{202e}")).unwrap();
+    assert_eq!(contacts::recipient_addr(&added.name), Some(c));
+}

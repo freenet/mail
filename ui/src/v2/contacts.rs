@@ -278,6 +278,25 @@ pub(crate) async fn add(identity: Addr, input: &str, petname: &str) -> Result<Ad
     })
 }
 
+/// "Add to address book" on a v2 message's sender: `identity` adds them as a
+/// v2 contact (never a v1 one), so a reply by name goes to their v2 inbox.
+/// `name` is the name the row showed; one that is not a valid petname is not
+/// used, and the address names them.
+pub(crate) async fn add_sender(
+    identity: Addr,
+    sender_vk: &[u8],
+    name: &str,
+) -> Result<Added, String> {
+    let name = name.trim();
+    let petname = if address::normalize_label(name, true).is_ok() {
+        name
+    } else {
+        ""
+    };
+    let addr = address_of(sender_vk);
+    add(identity, &address::display(&addr.0), petname).await
+}
+
 /// Whether `pass` is a pass into the inbox `resolved` was read from: its
 /// certificate signed by that inbox's issuer key, and its secret key the one
 /// the certificate names.
