@@ -357,6 +357,21 @@ dt "inbox v2: republishing signs a new version" "$D/inbox_v2.rs" \
 dt "inbox v2: republishing keeps the tombstones" "$D/inbox_v2.rs" \
     '.retain(|_, t| t.saturating_add(w::WINDOW_BACK) >= owner_time);' '.retain(|_, _| false);' \
     an_inbox_signed_again_keeps_its_tombstones
+dt "inbox v2: republishing keeps the revocations" "$D/inbox_v2.rs" \
+    'if e.revoked && revocation_live(' 'if false && revocation_live(' \
+    an_inbox_signed_again_keeps_its_revocations
+dt "inbox v2: a takeover records the tombstones it took over" "$D/inbox_v2.rs" \
+    '            rec.tombstones = state.owner.tombstones.clone();' '' \
+    a_takeover_signed_again_keeps_the_tombstones_it_took_over
+dt "inbox v2: a takeover records the revocations it took over" "$D/inbox_v2.rs" \
+    '                .values()
+                .map(|r| InheritedRevoked {' '                .values()
+                .filter(|_| false)
+                .map(|r| InheritedRevoked {' \
+    a_takeover_signed_again_keeps_the_revocations_it_took_over
+dt "inbox v2: a takeover's live revocations bump on republish" "$D/inbox_v2.rs" \
+    '    if inherited_live {' '    if false && inherited_live {' \
+    a_takeover_signed_again_keeps_the_revocations_it_took_over
 dt "inbox v2: the note keeps the highest version seen" "$D/inbox_v2.rs" \
     'let version = rec.foreign_seen.map_or(0, |f| f.version).max(owner.version);' \
     'let version = owner.version;' \
