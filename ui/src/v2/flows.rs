@@ -686,6 +686,25 @@ fn send_with(a: Addr, b: Addr, title: &str, ghost: Option<send::GhostChoice>) ->
     block_on(send::send_ghost(a, b, content, ghost))
 }
 
+/// The vault signs with another key than the one chosen (the user picked at
+/// its prompt): the message is sealed again with that key, and that is not a
+/// reseal, so the first real send still reports `reseals = 0`.
+#[test]
+fn a_signature_by_another_key_is_not_counted_as_a_reseal() {
+    let (a, b) = (identity("v2-swap-a"), identity("v2-swap-b"));
+    require_ghost(b, Some(1));
+    let chosen = vault(vec![8]);
+    let mut state = crate::ghostkeys::mock::load();
+    state.keys = vec![4, 8];
+    state.default = Some(4);
+    crate::ghostkeys::mock::save(&state);
+    send::SEAL_RESEALS.with(|s| s.borrow_mut().clear());
+    let out = send_with(a, b, "swapped", Some(chosen));
+    assert!(out.delivered(), "{out:?}");
+    let seen = send::SEAL_RESEALS.with(|s| s.borrow().clone());
+    assert_eq!(seen, vec![0, 0], "a key change advanced the reseal count");
+}
+
 /// "Use Ghost Key": the proof the vault signs gets a stranger into a
 /// RequireGhost inbox, and the recipient drains the message. A key below the
 /// tier is told so and nothing is sent.

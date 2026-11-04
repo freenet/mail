@@ -853,7 +853,7 @@ pub(crate) mod mock {
         }
     }
 
-    fn load() -> State {
+    pub(crate) fn load() -> State {
         storage()
             .and_then(|s| s.get_item(STATE_KEY).ok()?)
             .and_then(|j| serde_json::from_str(&j).ok())

@@ -135,6 +135,10 @@ thread_local! {
     #[cfg(test)]
     pub(crate) static SEALS: std::cell::RefCell<Vec<(i64, u64)>> =
         const { std::cell::RefCell::new(Vec::new()) };
+    /// Tests: the `reseals` each seal was asked with.
+    #[cfg(test)]
+    pub(crate) static SEAL_RESEALS: std::cell::RefCell<Vec<u8>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// How many times the inbox is read back after one update before the message
@@ -176,7 +180,11 @@ async fn send_waiting(
     waiting: impl Fn(),
 ) -> Outcome {
     let mut told = false;
-    for reseals in 0..=MAX_RESEALS {
+    let mut reseals = 0u8;
+    // Seals redone only because the vault signed with another key than the
+    // one sealed for: not a reseal of a lost message, so not counted as one.
+    let mut key_changes = 0u8;
+    while reseals <= MAX_RESEALS {
         let state = match net::get(&to, super::contacts::follows(&to)).await {
             Ok(Got::State(s)) => s,
             Ok(Got::Missing) => {
@@ -209,6 +217,8 @@ async fn send_waiting(
             }
         };
         #[cfg(test)]
+        SEAL_RESEALS.with(|s| s.borrow_mut().push(reseals));
+        #[cfg(test)]
         SEALS.with(|s| {
             s.borrow_mut()
                 .push((crate::mail_delegate::ops::now_ms(), sealed.reseal_at))
@@ -225,6 +235,12 @@ async fn send_waiting(
             if signed.vk != vk {
                 // The vault signed with another key (the user picked one at
                 // its prompt): the message names its key, so seal it again.
+                key_changes += 1;
+                if key_changes > MAX_KEY_CHANGES {
+                    return Outcome::NotDelivered(NotDelivered::Unreachable(
+                        "the Ghost Key vault kept signing with a different key".into(),
+                    ));
+                }
                 ghost = Some(GhostChoice {
                     key: crate::ghostkeys::Key {
                         fingerprint: signed.fingerprint,
@@ -281,9 +297,13 @@ async fn send_waiting(
         if wait_for(&to, &sealed.id.0, &delta, sealed.reseal_at).await {
             return delivered;
         }
+        reseals += 1;
     }
     Outcome::NotDelivered(NotDelivered::AfterReseals)
 }
+
+/// How many times one send follows the vault to the key it signed with.
+const MAX_KEY_CHANGES: u8 = 3;
 
 /// The first pause while waiting for a message, and the longest.
 const WAIT_FIRST_MS: u32 = 5_000;
