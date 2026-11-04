@@ -2,9 +2,11 @@
 //!
 //! On a node, every answer reaches the page through the one response loop
 //! (`api::node_comms`), which hands answers for v2 inboxes to [`route`]
-//! before anything else looks at them. A call waits in a slot keyed by the
-//! inbox; no answer in time is an error (the outcome is unknown, never
-//! "absent"), and only a node's `NotFound` is [`Got::Missing`].
+//! before anything else looks at them. Answers carry no request id, so one
+//! request per inbox and kind is out at a time and the next waits its turn;
+//! an answer resolves the request out, and only it. No answer in time is an
+//! error (the outcome is unknown, never "absent"), and only a node's
+//! `NotFound` is [`Got::Missing`].
 //!
 //! The offline build has no node: inboxes live in this page, merged by a
 //! model of the contract's rules (`offline`), enough to show every outcome.
@@ -66,6 +68,7 @@ mod node {
     use futures::channel::oneshot;
 
     /// How long a GET, PUT or UPDATE gets to answer.
+    #[cfg(not(test))]
     const TIMEOUT_MS: u32 = 30_000;
 
     #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -77,10 +80,19 @@ mod node {
 
     type Answer = Result<Got, String>;
 
-    type Waiters = HashMap<(ContractInstanceId, Kind), Vec<oneshot::Sender<Answer>>>;
+    /// One inbox and kind's turn: the request out (its token, and where its
+    /// answer goes once the node took it) and the requests waiting, in order.
+    #[derive(Default)]
+    struct Slot {
+        out: Option<(u64, Option<oneshot::Sender<Answer>>)>,
+        queue: std::collections::VecDeque<(u64, oneshot::Sender<()>)>,
+    }
+
+    type Slots = HashMap<(ContractInstanceId, Kind), Slot>;
 
     thread_local! {
-        static WAITING: RefCell<Waiters> = RefCell::new(HashMap::new());
+        static SLOTS: RefCell<Slots> = RefCell::new(HashMap::new());
+        static NEXT_TOKEN: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
         /// Every v2 inbox this page asked about: what the node says about
         /// them later (a notification of a followed recipient's inbox, a
         /// late answer) is this module's, and nobody else's.
@@ -92,15 +104,109 @@ mod node {
         KNOWN.with(|k| k.borrow().contains(id))
     }
 
+    /// Tests: whether any request for `id` and `kind` is out or waiting.
+    #[cfg(test)]
+    fn waiting(id: &ContractInstanceId, kind: Kind) -> bool {
+        SLOTS.with(|s| s.borrow().contains_key(&(*id, kind)))
+    }
+
+    /// Give `a` to the request out for `id` and `kind`, if one waits for an
+    /// answer. Returns whether one did.
     fn answer(id: &ContractInstanceId, kind: Kind, a: Answer) -> bool {
-        let waiters = WAITING.with(|w| w.borrow_mut().remove(&(*id, kind)));
-        let Some(waiters) = waiters else {
-            return false;
-        };
-        for w in waiters {
-            let _ = w.send(a.clone());
+        let tx = SLOTS.with(|s| {
+            s.borrow_mut()
+                .get_mut(&(*id, kind))
+                .and_then(|slot| slot.out.as_mut())
+                .and_then(|(_, tx)| tx.take())
+        });
+        match tx {
+            Some(tx) => {
+                let _ = tx.send(a);
+                true
+            }
+            None => false,
         }
-        true
+    }
+
+    /// A request's turn in its slot. Dropped (answered, timed out, refused at
+    /// the send, or the call cancelled) it leaves the slot: out of the queue,
+    /// or, if it was out, handing the turn to the next still waiting.
+    struct Turn {
+        key: (ContractInstanceId, Kind),
+        token: u64,
+    }
+
+    impl Turn {
+        /// Wait for the turn: at once if nothing is out, else after every
+        /// request queued before this one.
+        async fn take(id: ContractInstanceId, kind: Kind) -> Turn {
+            let key = (id, kind);
+            let token = NEXT_TOKEN.with(|n| {
+                let t = n.get();
+                n.set(t + 1);
+                t
+            });
+            // From here a cancelled call leaves its place, whichever it holds.
+            let turn = Turn { key, token };
+            let wait = SLOTS.with(|s| {
+                let mut s = s.borrow_mut();
+                let slot = s.entry(key).or_default();
+                if slot.out.is_none() {
+                    slot.out = Some((token, None));
+                    None
+                } else {
+                    let (tx, rx) = oneshot::channel();
+                    slot.queue.push_back((token, tx));
+                    Some(rx)
+                }
+            });
+            if let Some(rx) = wait {
+                // Only a release hands the turn on, and it sets `out` first.
+                let _ = rx.await;
+            }
+            turn
+        }
+
+        /// Where this request's answer will come.
+        fn expect_answer(&self) -> oneshot::Receiver<Answer> {
+            let (tx, rx) = oneshot::channel();
+            SLOTS.with(|s| {
+                if let Some(slot) = s.borrow_mut().get_mut(&self.key)
+                    && let Some((token, out)) = slot.out.as_mut()
+                    && *token == self.token
+                {
+                    *out = Some(tx);
+                }
+            });
+            rx
+        }
+    }
+
+    impl Drop for Turn {
+        fn drop(&mut self) {
+            SLOTS.with(|s| {
+                let mut s = s.borrow_mut();
+                let Some(slot) = s.get_mut(&self.key) else {
+                    return;
+                };
+                if slot.out.as_ref().is_some_and(|(t, _)| *t == self.token) {
+                    slot.out = None;
+                    // The next still waiting goes out; a cancelled one's
+                    // receiver is gone, so it is passed over.
+                    while let Some((next, tx)) = slot.queue.pop_front() {
+                        if tx.send(()).is_ok() {
+                            slot.out = Some((next, None));
+                            break;
+                        }
+                    }
+                } else {
+                    slot.queue.retain(|(t, _)| *t != self.token);
+                }
+                if slot.out.is_none() && slot.queue.is_empty() {
+                    s.remove(&self.key);
+                }
+            });
+        }
     }
 
     /// Take a node answer about a v2 inbox. Returns whether it was one; the
@@ -168,24 +274,41 @@ mod node {
         crate::api::WEB_API_SENDER.get().cloned()
     }
 
-    /// Hand `request` to the node and wait in its slot. The inbox is known
-    /// only once the node took it.
+    /// Hand `request` to the node, holding `turn`. The inbox is known only
+    /// once the node took it.
     async fn send_request(
-        id: ContractInstanceId,
-        kind: Kind,
+        turn: &Turn,
         request: ContractRequest<'static>,
     ) -> Result<oneshot::Receiver<Answer>, String> {
         let mut client = sender().ok_or("not connected to the node")?;
-        let (tx, rx) = oneshot::channel();
-        WAITING.with(|w| w.borrow_mut().entry((id, kind)).or_default().push(tx));
+        let rx = turn.expect_answer();
         if let Err(e) = client.send(request.into()).await {
-            WAITING.with(|w| w.borrow_mut().remove(&(id, kind)));
             return Err(format!("the node did not take the request: {e}"));
         }
         // Known only once the node took a request: until then no GET of it,
         // and so no code-bearing one, reached the node.
-        KNOWN.with(|k| k.borrow_mut().insert(id));
+        KNOWN.with(|k| k.borrow_mut().insert(turn.key.0));
         Ok(rx)
+    }
+
+    #[cfg(not(test))]
+    fn timeout() -> impl std::future::Future<Output = ()> {
+        gloo_timers::future::TimeoutFuture::new(TIMEOUT_MS)
+    }
+
+    #[cfg(test)]
+    thread_local! {
+        /// Tests: the timers running, fired by the test in place of a clock.
+        static TIMERS: RefCell<Vec<oneshot::Sender<()>>> = const { RefCell::new(Vec::new()) };
+    }
+
+    #[cfg(test)]
+    fn timeout() -> impl std::future::Future<Output = ()> {
+        let (tx, rx) = oneshot::channel();
+        TIMERS.with(|t| t.borrow_mut().push(tx));
+        async move {
+            let _ = rx.await;
+        }
     }
 
     async fn ask_id(
@@ -193,10 +316,13 @@ mod node {
         kind: Kind,
         request: ContractRequest<'static>,
     ) -> Answer {
-        let rx = send_request(id, kind, request).await?;
+        // Held until this returns or is dropped: the next request for this
+        // inbox and kind goes out only then.
+        let turn = Turn::take(id, kind).await;
+        let rx = send_request(&turn, request).await?;
         use futures::FutureExt;
         let mut rx = rx.fuse();
-        let mut timer = gloo_timers::future::TimeoutFuture::new(TIMEOUT_MS).fuse();
+        let mut timer = Box::pin(timeout()).fuse();
         futures::select! {
             a = rx => a.unwrap_or_else(|_| Err("no answer".into())),
             _ = timer => Err("the node did not answer in time".into()),
@@ -287,12 +413,181 @@ mod node {
             TEST_SENDER.with(|t| {
                 *t.borrow_mut() = Some(crate::api::WebApiRequestClient::for_tests(tx, responses))
             });
-            let sent =
-                futures::executor::block_on(send_request(id, Kind::Get, get_request(id, false)));
+            let sent = futures::executor::block_on(async {
+                let turn = Turn::take(id, Kind::Get).await;
+                send_request(&turn, get_request(id, false))
+                    .await
+                    .map(|_| ())
+            });
             TEST_SENDER.with(|t| t.borrow_mut().take());
             assert!(sent.is_err(), "the closed connection took it");
             assert!(!known(&id), "a GET the node refused marked the inbox known");
             assert!(asks_for_code(&get_request(id, false)));
+        }
+
+        type Requests = futures::channel::mpsc::UnboundedReceiver<
+            freenet_stdlib::client_api::ClientRequest<'static>,
+        >;
+
+        /// Requests go to a client whose other end the test reads.
+        fn connect() -> Requests {
+            let (tx, rx) = futures::channel::mpsc::unbounded();
+            let (responses, _) = futures::channel::mpsc::unbounded();
+            TEST_SENDER.with(|t| {
+                *t.borrow_mut() = Some(crate::api::WebApiRequestClient::for_tests(tx, responses))
+            });
+            rx
+        }
+
+        fn disconnect() {
+            TEST_SENDER.with(|t| t.borrow_mut().take());
+            TIMERS.with(|t| t.borrow_mut().clear());
+        }
+
+        fn sent(requests: &mut Requests) -> usize {
+            std::iter::from_fn(|| requests.try_recv().ok()).count()
+        }
+
+        fn update_request(addr: &Addr) -> ContractRequest<'static> {
+            ContractRequest::Update {
+                key: super::super::super::key(addr),
+                data: UpdateData::Delta(vec![1].into()),
+            }
+        }
+
+        fn updated(addr: &Addr) -> Result<HostResponse, ClientError> {
+            Ok(HostResponse::ContractResponse(
+                ContractResponse::UpdateResponse {
+                    key: super::super::super::key(addr),
+                    summary: Vec::new().into(),
+                },
+            ))
+        }
+
+        fn update_failed(addr: &Addr) -> Result<HostResponse, ClientError> {
+            Err(ClientError::from(ErrorKind::RequestError(
+                RequestError::ContractError(ContractError::Update {
+                    key: super::super::super::key(addr),
+                    cause: "refused".into(),
+                }),
+            )))
+        }
+
+        type Outcome = std::rc::Rc<RefCell<Option<Answer>>>;
+
+        /// Start an UPDATE of `addr` on `pool`; its answer lands in the result.
+        fn start_update(pool: &futures::executor::LocalPool, addr: Addr) -> Outcome {
+            use futures::task::LocalSpawnExt;
+            let out: Outcome = Default::default();
+            let o = out.clone();
+            pool.spawner()
+                .spawn_local(async move {
+                    let a = ask(&addr, Kind::Update, update_request(&addr)).await;
+                    *o.borrow_mut() = Some(a);
+                })
+                .unwrap();
+            out
+        }
+
+        /// Two UPDATEs of one inbox overlap and the second fails: each is
+        /// told its own outcome. Answers carry no request id, so the second
+        /// goes out only once the first is answered.
+        #[test]
+        fn overlapping_updates_are_each_told_their_own_outcome() {
+            let addr = Addr([0x5e; 24]);
+            let mut requests = connect();
+            let mut pool = futures::executor::LocalPool::new();
+            let first = start_update(&pool, addr);
+            let second = start_update(&pool, addr);
+            pool.run_until_stalled();
+            let first_routed = route(&updated(&addr));
+            pool.run_until_stalled();
+            let second_routed = route(&update_failed(&addr));
+            pool.run_until_stalled();
+            disconnect();
+            assert_eq!(*first.borrow(), Some(Ok(Got::Missing)));
+            assert!(
+                matches!(*second.borrow(), Some(Err(_))),
+                "the second UPDATE failed but was reported {:?}",
+                second.borrow()
+            );
+            assert!(first_routed && second_routed, "each answer was taken");
+            assert_eq!(sent(&mut requests), 2);
+        }
+
+        /// A request whose answer never comes leaves no waiter behind: a
+        /// retry after each timeout finds the slot as the first did, and a
+        /// late answer reaches the request out at the time, never one that
+        /// already gave up.
+        #[test]
+        fn a_timed_out_request_leaves_no_waiter() {
+            let addr = Addr([0x5f; 24]);
+            let id = super::super::super::instance_id(&addr);
+            let mut requests = connect();
+            let mut pool = futures::executor::LocalPool::new();
+            let mut gave_up = Vec::new();
+            for _ in 0..3 {
+                let out = start_update(&pool, addr);
+                pool.run_until_stalled();
+                TIMERS.with(|t| {
+                    t.borrow_mut().drain(..).for_each(|t| {
+                        let _ = t.send(());
+                    })
+                });
+                pool.run_until_stalled();
+                assert!(matches!(*out.borrow(), Some(Err(_))), "timed out");
+                gave_up.push(out);
+            }
+            assert!(
+                !waiting(&id, Kind::Update),
+                "timed-out requests left waiters"
+            );
+            let live = start_update(&pool, addr);
+            pool.run_until_stalled();
+            assert!(
+                route(&updated(&addr)),
+                "the live request took the late answer"
+            );
+            pool.run_until_stalled();
+            disconnect();
+            assert_eq!(sent(&mut requests), 4);
+            assert_eq!(*live.borrow(), Some(Ok(Got::Missing)));
+            assert!(
+                !waiting(&id, Kind::Update),
+                "an answered request left its waiter"
+            );
+            assert!(
+                !answer(&id, Kind::Update, Ok(Got::Missing)),
+                "a later answer found a request to resolve"
+            );
+        }
+
+        /// A call dropped while it waits its turn leaves the queue, and one
+        /// dropped while out hands the turn to the next.
+        #[test]
+        fn a_cancelled_request_gives_up_its_place() {
+            use futures::FutureExt;
+            let addr = Addr([0x60; 24]);
+            let id = super::super::super::instance_id(&addr);
+            let mut requests = connect();
+            let mut out = Box::pin(ask(&addr, Kind::Update, update_request(&addr)));
+            let mut queued = Box::pin(ask(&addr, Kind::Update, update_request(&addr)));
+            assert!(
+                (&mut out).now_or_never().is_none(),
+                "out, waiting for its answer"
+            );
+            assert!((&mut queued).now_or_never().is_none(), "waiting its turn");
+            drop(queued);
+            drop(out);
+            assert!(!waiting(&id, Kind::Update), "cancelled calls left waiters");
+            let mut pool = futures::executor::LocalPool::new();
+            let next = start_update(&pool, addr);
+            pool.run_until_stalled();
+            assert!(route(&update_failed(&addr)));
+            pool.run_until_stalled();
+            disconnect();
+            assert_eq!(sent(&mut requests), 2);
+            assert!(matches!(*next.borrow(), Some(Err(_))));
         }
 
         /// A GET the node took fetched the code: the next one does not.
@@ -306,7 +601,10 @@ mod node {
             });
             let first = get_request(id, false);
             assert!(asks_for_code(&first));
-            let sent = futures::executor::block_on(send_request(id, Kind::Get, first));
+            let sent = futures::executor::block_on(async {
+                let turn = Turn::take(id, Kind::Get).await;
+                send_request(&turn, first).await.map(|_| ())
+            });
             TEST_SENDER.with(|t| t.borrow_mut().take());
             assert!(sent.is_ok());
             assert!(rx.try_recv().is_ok(), "the node got it");
