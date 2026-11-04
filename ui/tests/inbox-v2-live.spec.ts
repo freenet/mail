@@ -1,4 +1,6 @@
 import { test, expect, type BrowserContext, type Page, type FrameLocator, type Locator } from "@playwright/test";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import { APP_NAME } from "./app-name";
 import { TID } from "./testids";
 
@@ -22,6 +24,11 @@ import { TID } from "./testids";
 //  * a drain with every tab closed: Carol writes while Bob has no page open,
 //    and Bob's inbox, read from the gateway, empties anyway (the delegate's
 //    own jobs drained it), and Bob finds the message when he opens a page.
+//    The inbox's notification must wake Bob's delegate and drain it within
+//    NOTIFY_BOUND_MS; which run drained it is read from the peer's log (the
+//    delegate logs each run the node starts, `mail delegate run: woken_by=`).
+//    When the notification does not, the test still waits for the `rescan`
+//    wake-up, so the run shows whether that fallback works, and then fails.
 //
 // Not here: a renewal reaching a contact. A contact pass lives 335 to 395
 // days and is renewed at 40 to 60% of that, and expiries are day-aligned
@@ -33,6 +40,9 @@ const PEER = `http://127.0.0.1:${process.env.FREENET_ISO_PEER_PORT ?? ""}`;
 const BASE_URL = process.env.FREENET_EMAIL_BASE_URL ?? "";
 const CONTRACT_ID = BASE_URL.match(/\/v1\/contract\/web\/([^/]+)\//)?.[1] ?? "";
 const PEER_URL = `${PEER}/v1/contract/web/${CONTRACT_ID}/`;
+const PEER_LOG_DIR = process.env.FREENET_ISO_PEER_LOG_DIR ?? "";
+// The inbox's notification reaches Bob's delegate, which drains at once.
+const NOTIFY_BOUND_MS = 120_000;
 // The delegate's `rescan` wake-up comes every 900 s plus up to 10%.
 const TAB_CLOSED_WAIT_MS = 1_100_000;
 
@@ -192,8 +202,39 @@ async function inboxOf(page: Page, to: string): Promise<{ waiting: number; drain
   await expect(note).toHaveAttribute("data-drained", /\d+/, { timeout: 60_000 });
   const waiting = Number(await note.getAttribute("data-waiting"));
   const drained = Number(await note.getAttribute("data-drained"));
-  await app(page).locator(".sheet-x").click();
+  // Discard, not close: closing keeps the typed draft, and this runs every
+  // few seconds for up to 18 minutes.
+  await sheet.locator(".foot-actions button", { hasText: "Discard" }).click();
+  await expect(sheet).toHaveCount(0);
   return { waiting, drained };
+}
+
+/** The runs Bob's node started, from the peer's log (`mail delegate run:`). */
+function delegateRuns(): string[] {
+  const out: string[] = [];
+  let names: string[] = [];
+  try {
+    names = fs.readdirSync(PEER_LOG_DIR);
+  } catch {
+    return out;
+  }
+  // `freenet.error.*` repeats lines of the main log; read the main log only.
+  for (const name of names.filter((n) => /^freenet\.\d{4}-\d{2}-\d{2}/.test(n)).sort()) {
+    for (const line of fs.readFileSync(path.join(PEER_LOG_DIR, name), "utf8").split("\n")) {
+      const at = line.indexOf("mail delegate run: ");
+      if (at >= 0) out.push(line);
+    }
+  }
+  return out;
+}
+
+/** What woke the first run in `runs` that drained or imported anything. */
+function drainedBy(runs: string[]): string | null {
+  for (const line of runs) {
+    const m = line.match(/woken_by=(\S+) scanned=\d+ imported=(\d+)/);
+    if (m && Number(m[2]) > 0) return m[1];
+  }
+  return null;
 }
 
 test("inbox v2 between two nodes", async ({ browser }) => {
@@ -308,27 +349,64 @@ test("inbox v2 between two nodes", async ({ browser }) => {
     await sees(peer, "g3 by pass");
 
     // 6. Every tab of Bob's closed: Carol writes (her invite's second
-    // message), and Bob's own node drains it with no page open.
+    // message), and Bob's own node drains it with no page open. Bob's page
+    // lists g3 once it is stored, and tombstones it in an update after that:
+    // wait for the inbox to show nothing waiting before closing the tab, so
+    // the tab never closes mid-drain.
+    await expect
+      .poll(async () => (await inboxOf(gw, bob)).waiting, {
+        message: "Bob's page drained everything before it closed",
+        timeout: 120_000,
+        intervals: [2_000],
+      })
+      .toBe(0);
     await peerCtx.close();
     await openIdentity(gw, n.carol);
     const before = await inboxOf(gw, bob);
-    expect(before.waiting, "Bob's page drained everything before it closed").toBe(0);
+    expect(before.waiting).toBe(0);
+    const runsBefore = new Set(delegateRuns());
     out = await send(gw, bob, "t1 while closed");
     await expect(out).toHaveAttribute("data-delivered", "true");
-    // Bob's node may drain at once (its delegate follows the inbox) or at the
-    // next `rescan` wake-up; either way no page of his is open.
-    const deadline = Date.now() + TAB_CLOSED_WAIT_MS;
+    const sentAt = Date.now();
+    const drainedNow = (s: { waiting: number; drained: number }) =>
+      s.drained > before.drained && s.waiting === 0;
+    // The notification: Bob's delegate follows his inbox, so it drains at once.
     let now = before;
-    while (Date.now() < deadline) {
+    while (Date.now() < sentAt + NOTIFY_BOUND_MS) {
       now = await inboxOf(gw, bob);
-      if (now.drained > before.drained && now.waiting === 0) break;
-      await new Promise((r) => setTimeout(r, 15_000));
+      if (drainedNow(now)) break;
+      await new Promise((r) => setTimeout(r, 3_000));
     }
-    console.log(`PROOF tab_closed_drain ${JSON.stringify({ before, after: now })}`);
+    const byNotification = drainedNow(now);
+    // The fallback, its own case: when no notification drained it, the next
+    // `rescan` wake-up must. Waited for so a missed notification still says
+    // whether the fallback works.
+    while (!drainedNow(now) && Date.now() < sentAt + TAB_CLOSED_WAIT_MS) {
+      await new Promise((r) => setTimeout(r, 15_000));
+      now = await inboxOf(gw, bob);
+    }
+    const elapsedMs = Date.now() - sentAt;
+    const runs = delegateRuns().filter((l) => !runsBefore.has(l));
+    const drainPath = drainedBy(runs);
+    console.log(
+      `PROOF tab_closed_drain ${JSON.stringify({
+        before,
+        after: now,
+        elapsed_ms: elapsedMs,
+        within_notify_bound: byNotification,
+        drained_by: drainPath,
+        runs: runs.map((l) => l.slice(l.indexOf("mail delegate run: "))),
+      })}`,
+    );
     expect(now.drained, "Bob's node drained t1 with every tab closed").toBeGreaterThan(
       before.drained,
     );
     expect(now.waiting).toBe(0);
+    expect(drainPath, "the run that drained t1, from the peer's log").not.toBeNull();
+    expect(
+      byNotification && drainPath === "notification",
+      `the inbox's notification drained t1 within ${NOTIFY_BOUND_MS} ms (drained by ${drainPath} after ${elapsedMs} ms)`,
+    ).toBe(true);
     peerCtx = await browser.newContext();
     peer = await open(peerCtx, PEER_URL);
     await openIdentity(peer, n.bob);
