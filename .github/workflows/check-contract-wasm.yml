@@ -234,6 +234,11 @@ jobs:
       # cannot fall out of all of them. It runs no mutation.
       - name: The guard shards cover every guard once
         run: bash scripts/check-guard-shards.sh
+      # A mutation whose anchor moved is a guard that stopped guarding. This
+      # finds them in a minute, before the shards spend an hour finding them
+      # one at a time.
+      - name: Every guard's mutation still applies
+        run: bash scripts/check-guards-fail.sh --anchors
 
       - name: Upload the rebuilt mail-delegate candidate
         if: failure()

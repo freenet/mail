@@ -14,6 +14,8 @@
 #        scripts/check-guards-fail.sh --no-wasm  (skip the WASM rebuilds)
 #        scripts/check-guards-fail.sh --shard I/N  (guards whose index mod N is I)
 #        scripts/check-guards-fail.sh --list     (print the guard names, run none)
+#        scripts/check-guards-fail.sh --anchors  (check every mutation applies exactly
+#                                                 once; build and run nothing)
 # Every shard runs the baselines. A shard with no guard fails.
 # Exit status: 0 = every guard failed as it should, 1 = one did not.
 
@@ -21,11 +23,12 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 WASM=1
-SHARD_I="" SHARD_N="" LIST=0
+SHARD_I="" SHARD_N="" LIST=0 ANCHORS=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --no-wasm) WASM=0 ;;
         --list) LIST=1 ;;
+        --anchors) ANCHORS=1 ;;
         --shard)
             shift
             [[ "${1:-}" =~ ^([0-9]+)/([0-9]+)$ ]] || { echo "usage: --shard I/N" >&2; exit 2; }
@@ -156,7 +159,7 @@ baseline() { # name command...
         failures=$((failures + 1))
     fi
 }
-if [ "$LIST" -eq 0 ]; then
+if [ "$LIST" -eq 0 ] && [ "$ANCHORS" -eq 0 ]; then
 baseline "delegate tests" delegate_tests
 baseline "delegate fault-injection runs" fault_tests
 baseline "delegate unreadable-key runs" blind_tests
@@ -223,6 +226,17 @@ guard() { # name file old new expected command...
         return
     fi
     GUARDS_RUN=$((GUARDS_RUN + 1))
+    if [ "$ANCHORS" -eq 1 ]; then
+        # A mutation that no longer applies is a guard that silently stopped
+        # guarding: find them all here, without building anything.
+        if python3 -c 'import sys; s = open(sys.argv[1]).read(); sys.exit(0 if s.count(sys.argv[2]) == 1 else 1)' "$file" "$old"; then
+            echo "ok - $name: anchor applies once"
+        else
+            echo "not ok - $name: mutation not applied"
+            failures=$((failures + 1))
+        fi
+        return
+    fi
     cp "$file" "$file.orig"
     if ! replace "$file" "$old" "$new"; then
         echo "not ok - $name: mutation not applied"
@@ -527,9 +541,9 @@ dt "inbox v2: a RequireGhost inbox refuses a message with no proof" \
         if proof.cert.len()' \
     a_ghost_key_proof_from_the_fixtures_passes_the_contract
 dt "inbox v2 jobs: a drained message writes no more than an import" "$D/inbox_v2.rs" \
-    'store_inbound(s, me, rec, id, bytes, out)?;' \
+    'store_inbound(s, me, rec, id, &inbound, out)?;' \
     'for i in 0..40 { let _ = s.put(&format!("zz/{i}"), &[0]); }
-        store_inbound(s, me, rec, id, bytes, out)?;' \
+        store_inbound(s, me, rec, id, &inbound, out)?;' \
     a_drained_message_costs_about_what_an_import_does
 dt "inbox v2 jobs: a renewal writes no more than an import" "$D/inbox_jobs.rs" \
     'v2::note_sent(s, me, &pass_id, &sealed.id.0, now, true)?;' \
@@ -1420,7 +1434,14 @@ also() {
     fi
     keep="$(mktemp "$STAGE/also.XXXXXX")"
     cp "$file" "$keep"
-    replace "$file" "$old" "$new"
+    if ! replace "$file" "$old" "$new"; then
+        # The second edit did not apply, so the guard below would test half a
+        # regression: count it as a failure instead of running it.
+        echo "not ok - $*: its second edit did not apply"
+        failures=$((failures + 1))
+        mv "$keep" "$file"
+        return
+    fi
     "$@"
     mv "$keep" "$file"
 }
@@ -1544,5 +1565,13 @@ if [ -n "$SHARD_N" ] && [ -z "${GUARD_ONLY:-}" ] && [ "$GUARDS_RUN" -eq 0 ]; the
     exit 1
 fi
 
+if [ "$ANCHORS" -eq 1 ]; then
+    # Anchors mode built and ran nothing: it shows only that every mutation
+    # still applies, not that any guard fails.
+    [ "$failures" -eq 0 ] || { echo "$failures guard(s) have a mutation that no longer applies"; exit 1; }
+    [ "$GUARDS_RUN" -gt 0 ] || { echo "no guard was checked"; exit 1; }
+    echo "every mutation applies exactly once ($GUARDS_RUN checked; no guard was run)"
+    exit 0
+fi
 [ "$failures" -eq 0 ] || { echo "$failures guard(s) did not fail as they should"; exit 1; }
 echo "every guard fails when what it guards is broken"
