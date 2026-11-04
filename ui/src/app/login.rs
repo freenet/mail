@@ -1351,6 +1351,25 @@ pub(super) fn Identities() -> Element {
             h1 { class: "display lg italic", "Your identities" }
             span { class: "mono-tag", "{aliases_list.len()} on this device" }
         }
+        // First under the header, above everything that arrives later (notices,
+        // the migration report, the rows): a button that moves while the page
+        // loads takes a press that was aimed at it.
+        if !checking {
+            div { style: "display:flex; gap:10px; margin-bottom:18px;",
+                button {
+                    class: "btn btn-secondary",
+                    "data-testid": testid::FM_ID_CREATE,
+                    onclick: move |_| { create_alias_form.write().0 = true; },
+                    "+ Create new identity"
+                }
+                button {
+                    class: "btn btn-ghost",
+                    "data-testid": testid::FM_ID_RESTORE,
+                    onclick: move |_| { import_backup_form.write().0 = true; },
+                    "Restore from backup"
+                }
+            }
+        }
         if needs_repair {
             div {
                 class: "field-help",
@@ -1397,22 +1416,6 @@ pub(super) fn Identities() -> Element {
         super::migration_view::MigrationPanel { identities: migration_targets }
         div { class: "id-list",
             {identities_iter}
-        }
-        if !checking {
-            div { style: "display:flex; gap:10px; margin-top:18px;",
-                button {
-                    class: "btn btn-secondary",
-                    "data-testid": testid::FM_ID_CREATE,
-                    onclick: move |_| { create_alias_form.write().0 = true; },
-                    "+ Create new identity"
-                }
-                button {
-                    class: "btn btn-ghost",
-                    "data-testid": testid::FM_ID_RESTORE,
-                    onclick: move |_| { import_backup_form.write().0 = true; },
-                    "Restore from backup"
-                }
-            }
         }
         p { class: "field-help", style: "margin-top:14px;",
             "Recovery keys are private keys. Keep them in a password manager."

@@ -2563,6 +2563,7 @@ dependencies = [
  "chacha20poly1305",
  "chrono",
  "ciborium",
+ "ed25519-dalek",
  "freenet-mail-protocol",
  "freenet-mail-wire-v1",
  "freenet-migrate",

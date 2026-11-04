@@ -73,7 +73,7 @@ pub(super) fn id_of(message: &[u8]) -> [u8; 16] {
     message_id(&content)
 }
 
-fn deliver(env: &mut MemEnv, to: &IdentityInfo, messages: &[Vec<u8>]) {
+pub(super) fn deliver(env: &mut MemEnv, to: &IdentityInfo, messages: &[Vec<u8>]) {
     env.contracts
         .insert(v1_inbox_id(&to.vk).unwrap(), inbox_of(messages));
 }
@@ -383,7 +383,7 @@ fn scans_rotate_so_every_inbox_is_reached_at_the_per_run_limit() {
     let mut b = Budget::new(NOW);
     let mut reached = std::collections::BTreeSet::new();
     for _ in 0..3 {
-        let p = plan(Trigger::Tick(Tick::Rescan), &targets, &mut b);
+        let p = plan(Trigger::Tick(Tick::Rescan), &targets, &[], &mut b);
         assert_eq!(p.scan.len(), MAX_SCANS_PER_RUN);
         reached.extend(p.scan.iter().map(|t| t.id[0]));
     }
@@ -395,9 +395,9 @@ fn a_node_run_with_no_duty_left_scans_nothing_and_a_page_still_does() {
     let targets = [target(1, 1)];
     let mut b = Budget::new(NOW);
     assert!(b.take_duty(DUTY_BURST_MS - SCAN_COST_MS + 1));
-    let p = plan(Trigger::Tick(Tick::Rescan), &targets, &mut b);
+    let p = plan(Trigger::Tick(Tick::Rescan), &targets, &[], &mut b);
     assert!(p.scan.is_empty());
-    let p = plan(Trigger::RunJobs(Origin([1; 32])), &targets, &mut b);
+    let p = plan(Trigger::RunJobs(Origin([1; 32])), &targets, &[], &mut b);
     assert_eq!(p.scan, targets);
 }
 
@@ -406,14 +406,14 @@ fn a_refresh_past_the_operation_limit_subscribes_the_best_it_can() {
     let targets: Vec<Target> = (1..=10).map(|n| target(n, 1)).collect();
     let mut b = Budget::new(NOW - NOW % 60);
     assert_eq!(b.take_ops(297), 297);
-    let p = plan(Trigger::Tick(Tick::V1Watch), &targets, &mut b);
+    let p = plan(Trigger::Tick(Tick::V1Watch), &targets, &[], &mut b);
     assert_eq!(p.subscribe, [[1; 32], [2; 32], [3; 32]]);
 }
 
 #[test]
 fn each_trigger_does_only_its_jobs_and_a_clock_tick_drains_first() {
     let targets = [target(1, 1)];
-    let local = |t| plan(t, &targets, &mut Budget::new(NOW));
+    let local = |t| plan(t, &targets, &[], &mut Budget::new(NOW));
     let rescan = local(Trigger::Tick(Tick::Rescan));
     assert!(rescan.subscribe.is_empty() && !rescan.fetch_missing);
     assert_eq!(rescan.scan.len(), 1);
@@ -434,15 +434,15 @@ fn each_trigger_does_only_its_jobs_and_a_clock_tick_drains_first() {
 fn a_contract_trigger_scans_only_that_contract_and_keeps_the_rotation() {
     let targets: Vec<Target> = (1..=6).map(|n| target(n, 1)).collect();
     let mut b = Budget::new(NOW);
-    plan(Trigger::Tick(Tick::Rescan), &targets, &mut b);
-    let p = plan(Trigger::Contract([3; 32]), &targets, &mut b);
+    plan(Trigger::Tick(Tick::Rescan), &targets, &[], &mut b);
+    let p = plan(Trigger::Contract([3; 32]), &targets, &[], &mut b);
     assert_eq!(p.scan, [target(3, 1)]);
     assert_eq!(
-        plan(Trigger::Tick(Tick::Rescan), &targets, &mut b).scan[0],
+        plan(Trigger::Tick(Tick::Rescan), &targets, &[], &mut b).scan[0],
         target(5, 1),
         "the rotation goes on from where it was"
     );
-    let none = plan(Trigger::Contract([99; 32]), &targets, &mut b);
+    let none = plan(Trigger::Contract([99; 32]), &targets, &[], &mut b);
     assert!(none.scan.is_empty());
 }
 
@@ -1533,8 +1533,8 @@ fn a_page_run_does_not_use_up_the_operations_of_a_later_refresh() {
     let targets: Vec<Target> = (1..=10).map(|n| target(n, 1)).collect();
     let mut b = Budget::new(NOW - NOW % 60);
     for _ in 0..40 {
-        plan(Trigger::RunJobs(Origin([1; 32])), &targets, &mut b);
+        plan(Trigger::RunJobs(Origin([1; 32])), &targets, &[], &mut b);
     }
-    let p = plan(Trigger::Tick(Tick::V1Watch), &targets, &mut b);
+    let p = plan(Trigger::Tick(Tick::V1Watch), &targets, &[], &mut b);
     assert_eq!(p.subscribe.len(), 10, "all of a page's runs were free");
 }

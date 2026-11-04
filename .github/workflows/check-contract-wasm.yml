@@ -234,6 +234,11 @@ jobs:
       # cannot fall out of all of them. It runs no mutation.
       - name: The guard shards cover every guard once
         run: bash scripts/check-guard-shards.sh
+      # A mutation whose anchor moved is a guard that stopped guarding. This
+      # finds them in a minute, before the shards spend an hour finding them
+      # one at a time.
+      - name: Every guard's mutation still applies
+        run: bash scripts/check-guards-fail.sh --anchors
 
       - name: Upload the rebuilt mail-delegate candidate
         if: failure()
@@ -322,11 +327,11 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.relevant != 'false' }}
     runs-on: ubicloud-standard-8
-    timeout-minutes: 60
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
     steps:
       - uses: actions/checkout@v7
         with:
@@ -377,8 +382,8 @@ jobs:
           cargo install b3sum --version 1.8.5 --locked
           echo "VECTORS_PYTHON=$RUNNER_TEMP/vectors/bin/python3" >> "$GITHUB_ENV"
 
-      - name: Show each mail-delegate guard failing when broken (shard ${{ matrix.shard }}/4)
-        run: bash scripts/check-guards-fail.sh --shard ${{ matrix.shard }}/4
+      - name: Show each mail-delegate guard failing when broken (shard ${{ matrix.shard }}/8)
+        run: bash scripts/check-guards-fail.sh --shard ${{ matrix.shard }}/8
 
   # The required check, by name (a ruleset requires `check-drift`). It
   # reports one result for the drift checks and every guard shard, and

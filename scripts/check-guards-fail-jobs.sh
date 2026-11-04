@@ -101,7 +101,7 @@ dt "jobs: a subscription answer writes nothing" "$H" \
     'InboundDelegateMsg::SubscribeContractResponse(_) => Ok(Vec::new()),' \
     'InboundDelegateMsg::SubscribeContractResponse(_) => { env.set(b"x", b"y"); Ok(Vec::new()) }' \
     a_forged_subscription_answer_does_not_stop_the_next_refresh_asking
-dt "jobs: a page run asks no network" "$W" '            if unprompted && plan.fetch_missing' '            if plan.fetch_missing' \
+dt "jobs: a page run asks no network" "$W" '        if unprompted && plan.fetch_missing && budget.may_ask(&id)' '        if plan.fetch_missing && budget.may_ask(&id)' \
     a_page_run_never_asks_the_network_for_an_inbox_this_node_lacks
 dt "jobs: a page run subscribes only held inboxes" "$W" \
     '.filter(|id| unprompted || held.contains(id))' '.filter(|_| true)' \
@@ -115,9 +115,10 @@ dt "jobs: the backoff stops at a day" "$J" '            .min(MISSING_BACKOFF_MAX
     a_missing_inbox_is_asked_for_at_doubling_intervals_up_to_a_day
 dt "jobs: a refresh waits for the backoff" "$J" '            subscribe.retain(|id| budget.may_ask(id));' '' \
     a_missing_inbox_is_asked_for_at_doubling_intervals_up_to_a_day
-dt "jobs: a success clears the backoff" "$W" '            budget.note_held(&target.id);' '' \
+dt "jobs: a success clears the backoff" "$W" '        budget.note_held(id);' '' \
     a_missing_inbox_found_is_asked_for_at_once_if_it_goes_missing_again
-dt "jobs: a missing inbox is noted" "$W" '                budget.note_missing(target.id);' '' \
+dt "jobs: a missing inbox is noted" "$W" '            budget.note_missing(id);
+            noted.push(id);' '            noted.push(id);' \
     a_missing_inbox_is_asked_for_at_doubling_intervals_up_to_a_day
 dt "jobs: an empty origin gives up its place" "$W" 'if !emptied.is_empty() {' 'if false {' \
     an_origin_with_no_identities_left_gives_up_its_place
@@ -126,8 +127,8 @@ dt "jobs: the hourly tick refreshes" "$J" \
     'Trigger::Tick(Tick::V1Watch) => &[Job::V1Scan],' \
     a_failed_subscription_is_asked_for_again_by_the_next_refresh,each_trigger_does_only_its_jobs_and_a_clock_tick_drains_first
 dt "jobs: a rescan reads" "$J" \
-    'Trigger::Tick(Tick::Rescan) | Trigger::Contract(_) => &[Job::V1Scan, Job::DrainOwn],' \
-    'Trigger::Tick(Tick::Rescan) => &[Job::DrainOwn], Trigger::Contract(_) => &[Job::V1Scan, Job::DrainOwn],' \
+    'Trigger::Tick(Tick::Rescan) => &[Job::V1Scan, Job::DrainOwn, Job::AdvanceClock, Job::Renew],' \
+    'Trigger::Tick(Tick::Rescan) => &[Job::DrainOwn, Job::AdvanceClock, Job::Renew],' \
     a_rescan_recovers_a_dropped_notification
 dt "jobs: a contract trigger is only that contract" "$J" \
     'Trigger::Contract(id) => targets.iter().filter(|t| t.id == id).copied().collect(),' \
@@ -150,8 +151,10 @@ dt "jobs: the watch reads v0.2.x states" "$W" '    content: Vec<u8>,
     content: Vec<u8>,
     #[serde(default)]
     sender_vk' a_captured_v0_2_x_inbox_state_is_read
-dt "jobs: an unread origin list is unknown" "$W" '                done.unknown += 1;
-                return Vec::new();' '                return Vec::new();' \
+dt "jobs: an unread origin list is unknown" "$W" '            let Ok((_, ids)) = listed else {
+                done.unknown += 1;
+                return (Vec::new(), Vec::new());' '            let Ok((_, ids)) = listed else {
+                return (Vec::new(), Vec::new());' \
     an_origin_list_that_cannot_be_read_is_unknown
 
 # ── Notifications ───────────────────────────────────────────────────────────
@@ -246,7 +249,9 @@ dt "jobs: only an unreadable shard skips the tombstone" "$H" \
 dt "jobs: a full store can delete" "$H" \
     '        Err(f) if f.code == FailureCode::CapReached => Ok(()),
         // A shard' '        // A shard' a_store_at_its_budget_can_still_delete
-dt "jobs: an archive counts as held" "$W" 'held.extend(' 'let _ = (' \
+dt "jobs: an archive counts as held" "$W" 'held.extend(
+        s.index(&store::index_rel(ItemKind::Archived' 'let _ = (
+        s.index(&store::index_rel(ItemKind::Archived' \
     an_archived_message_is_not_imported
 dt "jobs: a full shard makes room" "$W" 'if ids.len() >= SEEN_PER_SHARD' 'if false' \
     a_full_shard_of_tombstones_makes_room

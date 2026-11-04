@@ -103,8 +103,8 @@ recovery-key codec. Its encoding is pinned per variant in
   host messages (notification, GET answer, subscription answer) are all
   unauthenticated, so a subscription answer is ignored and every refresh asks
   for every subscription again.
-  `Budget::take_write` and the 60 writes a minute limit were removed with
-  nothing to use them: inbox v2's drain adds both with the writes it makes.
+  Updates a run sends to one contract stop at 60 a minute
+  (`Budget::may_write`).
 - **v1 watch:** reads the inbox from the node's store, never from the message
   that prompted the look. A notification or GET answer is only a reason to
   look, so duplicates and reordering change nothing, and a dropped one is
@@ -140,6 +140,68 @@ recovery-key codec. Its encoding is pinned per variant in
   node-side paths on real nodes (wake-up, notification, cost); CI workflow
   `e2e-background.yml` runs it on a PR that touches the delegate, the protocol
   or the jobs code, and nightly. It is not a required check.
+- **Inbox v2** (`src/inbox_v2.rs`, `src/sealing.rs`; wire types and signed
+  layouts in `protocol/src/inbox_v2.rs`, checked against the contract's byte
+  vectors). The issuer key is derived from the identity's seed, never stored.
+  The delegate keeps per identity an inbox record (highest owner version and
+  `owner_time` it signed, epoch, filters, contact to pass id), a ledger entry
+  per issued pass, the passes it holds and the drained mail; the page may read
+  the first two, may delete drained mail, and may never read a held pass. Each
+  version and time is recorded before the update carrying it is returned.
+  `UpdateInboxV2` drains the state it is given before signing any change, and a
+  message is tombstoned only in an update returned after it was stored.
+  `SealV2` picks the admission (held pass, owner, quarantine), clamps
+  `sent_time` into the recipient's window, and reports a lapsed pass or a full
+  queue; the caller reads the inbox back, since a filtered update is not an
+  error. `src/tests/inbox_v2.rs` runs everything it builds through the
+  contract crate's `apply` and `is_valid` (a dev-dependency only), and
+  `src/tests/inbox_jobs.rs` does the same for the jobs. Two job sweeps run over a
+  faulty host: the drain (`JOB_DRAIN_SEEDS`, `JOB_DRAIN_RATE`, `JOB_DRAIN_BLIND`)
+  and one that moves time, so the clock, every renewal and a bump with its
+  reissues run under faults (`JOB_TIME_SEEDS`, `JOB_TIME_RATE`, `JOB_TIME_BLIND`;
+  about 0.6 s a seed in a release build). `check-guards-fail.sh` runs the time
+  sweep alone, for the guards it backs.
+- **Inbox v2 jobs** (`src/inbox_jobs.rs`, called from `watch::run`, so every
+  trigger takes one path). The drain reads the identity's own inbox from the
+  node's store and goes through the same owner update as `UpdateInboxV2`. The
+  clock is that drain with `AdvanceTime`, once `owner_time` trails the node's
+  clock by 12 hours, a week at most per step (the guard). The renew job sends
+  each contact pass's renewed or reissued certificate at its drawn point as a
+  silent system message through the pass the contact gave us, never through
+  quarantine, whether or not the user writes to that contact; it reads back
+  (the message held or tombstoned in the contact's inbox) and seals it again
+  every 6 hours until it lands. Mail to the contact carries the same
+  certificate and is read back the same way. A contact's inbox is found under
+  our own Ghost Key master. An owner update takes `OWNER_SLOTS` (one message's
+  worth) of the run's message slice, so the per-run drain limit holds whatever
+  the mix. Renewals have their own allowance and do not use the slice: at most
+  `RENEW_PER_RUN` sent and `RENEW_LOOKS_PER_RUN` contacts looked at in a run,
+  each send charged to the duty budget at `RENEW_COST_MS` (one v1 import's
+  worth; the measurement is in the comment on that constant). There is no
+  `RENEW_SLOTS`. A run that no page started has no page entropy: it
+  mixes the host's randomness with a value derived from the identity's seed,
+  the time and the message's purpose.
+- **Strangers (decision 21):** an inbox keeps the newest 1024 drained
+  quarantine messages, stored copies and tombstones both; past that the
+  earliest drained give way (`InboxV2Update.strangers_dropped`, and the running
+  total in the inbox record for the quarantine view to say how many). Contact
+  mail is never removed for it. A message storage refuses stays in the inbox
+  and the drain goes on (`full`), but no change is signed while one is there;
+  past the 4096 tombstones (only contacts can get there) a stored message stays
+  in the inbox until older tombstones expire. A stranger message whose
+  tombstone was given way can come back if a peer still holds it inside the
+  window, and is then drained again as new.
+- **Queued sends (decision 9):** `SealedV2.reseal_at` is when a send still
+  queued must be sealed again from a fresh GET: two days after the earlier of
+  its `sent_time` and the sealing time, when the recipient's window may have
+  moved past it. The contract drops a message outside the window without an
+  error.
+- **Key-only restore:** an identity restored from its recovery key takes its
+  inbox over (`CreateInboxV2` with `existing`) and drains and sends as before,
+  since every key derives from the seed. The pass ledger is gone, so passes
+  issued before the restore cannot be renewed: they lapse at expiry, the
+  contact falls back to quarantine (told plainly) and gets a new pass with the
+  next mail. No epoch bump is forced.
 - **Imports:** a node refuses to instantiate a module that imports a function
   it does not provide. `scripts/check-delegate-imports.sh` (a step of CI
   `check-drift`, so it blocks) compares the candidate's imports to

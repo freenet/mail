@@ -155,10 +155,14 @@ pub fn kind_tag(kind: ItemKind) -> &'static str {
         ItemKind::MigrationJournal => "mj",
         ItemKind::MigrationMarker => "mm",
         ItemKind::LegacyOrphan => "lo",
+        ItemKind::InboxV2 => "v2",
+        ItemKind::PassLedger => "pl",
+        ItemKind::HeldPass => "ps",
+        ItemKind::Inbound => "in",
     }
 }
 
-pub const ALL_KINDS: [ItemKind; 11] = [
+pub const ALL_KINDS: [ItemKind; 15] = [
     ItemKind::Contact,
     ItemKind::Draft,
     ItemKind::Sent,
@@ -170,6 +174,10 @@ pub const ALL_KINDS: [ItemKind; 11] = [
     ItemKind::MigrationJournal,
     ItemKind::MigrationMarker,
     ItemKind::LegacyOrphan,
+    ItemKind::InboxV2,
+    ItemKind::PassLedger,
+    ItemKind::HeldPass,
+    ItemKind::Inbound,
 ];
 
 /// Whether `kind` belongs to an identity, and the id length it takes.
@@ -185,6 +193,10 @@ pub fn shape(kind: ItemKind) -> (bool, usize) {
         ItemKind::GlobalSettings | ItemKind::MigrationJournal => (false, 0),
         ItemKind::MigrationMarker => (false, 32),
         ItemKind::LegacyOrphan => (false, 16),
+        ItemKind::InboxV2 => (true, 0),
+        ItemKind::PassLedger => (true, 16),
+        ItemKind::Inbound => (true, 32),
+        ItemKind::HeldPass => (true, 24),
     }
 }
 
@@ -193,6 +205,19 @@ pub fn shape(kind: ItemKind) -> (bool, usize) {
 /// successor imported them, so an export leaves them out.
 pub fn exported(kind: ItemKind) -> bool {
     !matches!(kind, ItemKind::MigrationJournal | ItemKind::MigrationMarker)
+}
+
+/// What a page may do with items of `kind` through the item operations:
+/// `(read, write, delete)`. The inbox v2 records are the delegate's own: a
+/// page that rewrote them could make it sign an owner version twice or hand
+/// out a pass it never issued, and a held pass is a key, which never leaves.
+pub fn page_access(kind: ItemKind) -> (bool, bool, bool) {
+    match kind {
+        ItemKind::InboxV2 | ItemKind::PassLedger => (true, false, false),
+        ItemKind::HeldPass => (false, false, false),
+        ItemKind::Inbound => (true, false, true),
+        _ => (true, true, true),
+    }
 }
 
 /// Per-kind cap (per owner for identity-owned kinds).
@@ -204,7 +229,11 @@ pub fn cap(kind: ItemKind) -> usize {
         | ItemKind::Kept
         | ItemKind::Archived
         | ItemKind::Flags
-        | ItemKind::LegacyOrphan => MAX_MESSAGES,
+        | ItemKind::LegacyOrphan
+        | ItemKind::PassLedger
+        | ItemKind::Inbound => MAX_MESSAGES,
+        ItemKind::HeldPass => MAX_CONTACTS,
+        ItemKind::InboxV2 => 1,
         ItemKind::IdentitySettings | ItemKind::GlobalSettings | ItemKind::MigrationJournal => 1,
         ItemKind::MigrationMarker => MAX_PREDECESSORS,
     }

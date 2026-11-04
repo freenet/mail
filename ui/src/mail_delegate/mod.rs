@@ -277,6 +277,10 @@ fn reply_name(reply: &Reply) -> &'static str {
         Reply::Continue { .. } => "Continue",
         Reply::CreatedIdentity { .. } => "CreatedIdentity",
         Reply::JobsRun(_) => "JobsRun",
+        Reply::InboxV2State(_) => "InboxV2State",
+        Reply::InboxV2Update(_) => "InboxV2Update",
+        Reply::PassIssued(_) => "PassIssued",
+        Reply::SealedV2(_) => "SealedV2",
     }
 }
 

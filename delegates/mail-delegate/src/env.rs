@@ -264,6 +264,9 @@ pub mod mem {
         pub contracts: BTreeMap<[u8; 32], Vec<u8>>,
         /// Injected host faults (`None` = a perfect host).
         pub faults: Option<Faults>,
+        /// How many writes of each key the host accepted, so a test can see
+        /// a record stored twice (a replaced value looks like one in `secrets`).
+        pub writes: BTreeMap<Vec<u8>, u32>,
     }
 
     impl MemEnv {
@@ -293,6 +296,7 @@ pub mod mem {
                 return false;
             }
             self.secrets.insert(key.to_vec(), value.to_vec());
+            *self.writes.entry(key.to_vec()).or_default() += 1;
             true
         }
         fn remove(&mut self, key: &[u8]) -> bool {

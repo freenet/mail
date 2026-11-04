@@ -65,6 +65,9 @@ pub const MISSING_BACKOFF_FIRST_SECS: u64 = 3_600;
 pub const MISSING_BACKOFF_MAX_SECS: u64 = 86_400;
 /// Inboxes whose backoff is remembered.
 const MAX_MISSING: usize = 256;
+/// Updates one contract may be sent a minute (owner records at most once per
+/// drain, renewals one per contact).
+pub const MAX_WRITES_PER_MINUTE: u32 = 60;
 
 /// The periodic wake-ups, by manifest tag.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -110,8 +113,8 @@ impl Trigger {
     }
 }
 
-/// What a trigger asks for, in order. Only the `V1` jobs do anything in this
-/// version; the others name where inbox v2's work goes.
+/// What a trigger asks for, in order. `crate::inbox_jobs` does the inbox v2
+/// jobs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Job {
     /// Subscribe to the v1 inboxes and, in a run the node starts, ask the
@@ -133,10 +136,28 @@ pub enum Job {
 /// periodic look includes a scan.
 pub fn jobs_for(trigger: Trigger) -> &'static [Job] {
     match trigger {
-        Trigger::NodeStarted => &[Job::V1Refresh, Job::V1Scan, Job::DrainOwn],
-        Trigger::RunJobs(_) => &[Job::V1Refresh, Job::V1Scan, Job::DrainOwn, Job::SendQueued],
+        Trigger::NodeStarted => &[
+            Job::V1Refresh,
+            Job::V1Scan,
+            Job::DrainOwn,
+            Job::AdvanceClock,
+            Job::Renew,
+        ],
+        // A page's run stands in for every wake-up on a node without them.
+        Trigger::RunJobs(_) => &[
+            Job::V1Refresh,
+            Job::V1Scan,
+            Job::DrainOwn,
+            Job::AdvanceClock,
+            Job::Renew,
+            Job::SendQueued,
+        ],
         Trigger::Tick(Tick::V1Watch) => &[Job::V1Refresh, Job::V1Scan],
-        Trigger::Tick(Tick::Rescan) | Trigger::Contract(_) => &[Job::V1Scan, Job::DrainOwn],
+        // The clock and renewals ride on the rescan too: the clock only acts
+        // when `owner_time` lags, and renewals need the runs for throughput.
+        Trigger::Tick(Tick::Rescan) => &[Job::V1Scan, Job::DrainOwn, Job::AdvanceClock, Job::Renew],
+        // A contact's inbox arriving is what a waiting renewal needs.
+        Trigger::Contract(_) => &[Job::V1Scan, Job::DrainOwn, Job::Renew],
         Trigger::Tick(Tick::Renew) => &[Job::Renew],
         Trigger::Tick(Tick::Clock) => &[Job::DrainOwn, Job::AdvanceClock],
     }
@@ -227,6 +248,12 @@ pub struct Budget {
     /// behind it, so a missing inbox is not asked for on every refresh. Cleared
     /// by a scan that finds the inbox.
     missing: Vec<(ContractId, u32, u64)>,
+    /// Updates sent this minute, per contract.
+    #[serde(default)]
+    writes: Vec<(ContractId, u32)>,
+    /// Where the next run's inbox v2 drains start.
+    #[serde(default)]
+    pub(crate) cursor_v2: u32,
 }
 
 impl Budget {
@@ -239,6 +266,8 @@ impl Budget {
             duty_at: now,
             cursor: 0,
             missing: Vec::new(),
+            writes: Vec::new(),
+            cursor_v2: 0,
         }
     }
 
@@ -250,6 +279,7 @@ impl Budget {
         if now.saturating_add(CLOCK_RESET_SECS) < self.duty_at {
             *self = Budget {
                 cursor: self.cursor,
+                cursor_v2: self.cursor_v2,
                 ..Budget::new(now)
             };
             return;
@@ -257,6 +287,7 @@ impl Budget {
         if now / 60 > self.minute {
             self.minute = now / 60;
             self.ops = 0;
+            self.writes.clear();
         }
         if now > self.duty_at {
             let refill = (now - self.duty_at).saturating_mul(DUTY_REFILL_MS_PER_SEC);
@@ -301,6 +332,22 @@ impl Budget {
         let granted = want.min(left);
         self.ops += granted as u32;
         granted
+    }
+
+    /// Whether an update may be sent to `id` this minute.
+    pub fn may_write(&self, id: &ContractId) -> bool {
+        self.writes
+            .iter()
+            .find(|(c, _)| c == id)
+            .is_none_or(|(_, n)| *n < MAX_WRITES_PER_MINUTE)
+    }
+
+    /// Count an update sent to `id`.
+    pub fn take_write(&mut self, id: ContractId) {
+        match self.writes.iter_mut().find(|(c, _)| *c == id) {
+            Some((_, n)) => *n += 1,
+            None => self.writes.push((id, 1)),
+        }
     }
 
     /// Charge `ms` of duty, if that much is left.
@@ -348,8 +395,10 @@ pub struct Plan {
     pub messages: usize,
 }
 
-/// Decide a run, taking what it will use from `budget`.
-pub fn plan(trigger: Trigger, targets: &[Target], budget: &mut Budget) -> Plan {
+/// Decide a run, taking what it will use from `budget`. `v2` are the inbox
+/// v2 contracts worth a subscription (own inboxes, contacts' inboxes a
+/// renewal waits on), already limited to what the trigger covers.
+pub fn plan(trigger: Trigger, targets: &[Target], v2: &[Candidate], budget: &mut Budget) -> Plan {
     let jobs = jobs_for(trigger);
     let unprompted = trigger.is_unprompted();
     let refresh = jobs.contains(&Job::V1Refresh);
@@ -396,6 +445,7 @@ pub fn plan(trigger: Trigger, targets: &[Target], budget: &mut Budget) -> Plan {
                 tier: Tier::V1Inbox,
                 activity: 0,
             })
+            .chain(v2.iter().copied())
             .collect();
         subscribe = rank_subscriptions(&candidates);
         // A node run asks again for an inbox it found missing only once its

@@ -21,6 +21,13 @@ blake3 = { version = "=1.8.7", default-features = false }
 chacha20poly1305 = { version = "=0.11.0", default-features = false, features = ["alloc"] }
 chrono = { version = "=0.4.45", default-features = false, features = ["alloc", "serde"] }
 ciborium = "=0.2.2"
+# Inbox v2's issuer and pass keys. The one dependency not pinned with `=`
+# here: the UI links this crate into its workspace, where the frozen
+# container's types pin =2.1.1, while the contract (a dev-dependency) pins
+# =2.2.0. The delegate's own Cargo.lock holds 2.2.0, and build-wasm.sh builds
+# with --locked, so the shipped WASM is pinned all the same: the test
+# `the_shipped_build_links_the_contracts_ed25519_dalek` fails otherwise.
+ed25519-dalek = { version = "2.1.1", default-features = false }
 freenet-mail-protocol = { path = "../../protocol" }
 freenet-mail-wire-v1 = { path = "../../wire-v1" }
 freenet-migrate = { version = "=0.8.0", default-features = false, features = ["delegate"] }
@@ -33,6 +40,14 @@ serde = { version = "=1.0.229", features = ["derive"] }
 serde_bytes = "=0.11.19"
 serde_json = "=1.0.154"
 sha2 = { version = "=0.11.1", default-features = false }
+
+[dev-dependencies]
+# The interop tests run what the delegate builds through the contract's own
+# validate_state and merge. Tests only: the delegate never links the contract.
+freenet-email-inbox-v2 = { path = "../../contracts/inbox-v2", default-features = false }
+# The type the ghostkey vault signs, to build Ghost Key proofs in tests as the
+# vault does (the contract's tests use the same).
+ghostkey-common = "=0.4.0"
 
 [lib]
 crate-type = ["cdylib", "rlib"]

@@ -39,7 +39,8 @@ use serde::Deserialize;
 use crate::crypto::{self, Keys};
 use crate::env::Env;
 use crate::handlers;
-use crate::jobs::{self, Budget, Target, Trigger};
+use crate::inbox_jobs::{self, Own};
+use crate::jobs::{self, Budget, ContractId, Target, Trigger};
 use crate::store::{self, Origin, Space, seen_rel, seen_rels};
 
 /// The namespace of the delegate's own records. No web app has it: a contract
@@ -88,7 +89,8 @@ pub fn note_seen(s: &mut Space<'_>, owner: &Addr, id: &[u8]) -> Result<(), Failu
 pub fn run(env: &mut dyn Env, trigger: Trigger) -> (JobsRun, Vec<OutboundDelegateMsg>) {
     let now = env.now_secs().unwrap_or(0);
     let mut done = JobsRun::default();
-    let targets = targets(env, trigger, &mut done);
+    let (targets, owns) = targets(env, trigger, now, &mut done);
+    let v2 = inbox_jobs::candidates(trigger, &owns);
     let mut budget = load_budget(env, now);
     let before = budget.clone();
     // A page's run rotates through its own origin's inboxes with a cursor of
@@ -107,7 +109,7 @@ pub fn run(env: &mut dyn Env, trigger: Trigger) -> (JobsRun, Vec<OutboundDelegat
     if let Some(c) = page_cursor {
         budget.cursor = c;
     }
-    let plan = jobs::plan(trigger, &targets, &mut budget);
+    let plan = jobs::plan(trigger, &targets, &v2, &mut budget);
     if let (Some(o), Some(old)) = (page_origin, page_cursor) {
         if budget.cursor != old {
             let _ = Space::new(&mut *env, o).put(PAGE_CURSOR, &budget.cursor.to_le_bytes());
@@ -127,26 +129,36 @@ pub fn run(env: &mut dyn Env, trigger: Trigger) -> (JobsRun, Vec<OutboundDelegat
     let mut noted = Vec::new();
     let mut read = 0;
     let mut left = plan.messages;
+    let mut missing: Vec<ContractId> = Vec::new();
     for target in &plan.scan {
         let mut s = Space::new(&mut *env, target.origin);
         if scan(&mut s, target, now, &mut left, &mut read, &mut done).is_ok() {
             held.push(target.id);
-            budget.note_held(&target.id);
         } else {
             done.unknown += 1;
-            // Only a run the node starts asks the network for an inbox it does
-            // not hold: a page's own read of its inbox does that a moment
-            // later, and this run would stall the page's calls behind it.
-            // Noted whether or not an operation is left for the ask, so the
-            // backoff covers every path that would ask.
-            if unprompted && plan.fetch_missing && budget.may_ask(&target.id) {
-                budget.note_missing(target.id);
-                noted.push(target.id);
-                if budget.take_ops(1) == 1 {
-                    out.push(OutboundDelegateMsg::GetContractRequest(
-                        GetContractRequest::new(ContractInstanceId::new(target.id)),
-                    ));
-                }
+            missing.push(target.id);
+        }
+    }
+    // Inbox v2: drain, clock and renew. Its updates go out with the rest.
+    let v2_done = inbox_jobs::run(env, trigger, &owns, &mut budget, now, &mut left, &mut done);
+    held.extend(v2_done.held);
+    missing.extend(v2_done.missing.iter().filter(|id| !held.contains(id)));
+    for id in &held {
+        budget.note_held(id);
+    }
+    for id in missing {
+        // Only a run the node starts asks the network for an inbox it does
+        // not hold: a page's own read of its inbox does that a moment later,
+        // and this run would stall the page's calls behind it. Noted whether
+        // or not an operation is left for the ask, so the backoff covers
+        // every path that would ask.
+        if unprompted && plan.fetch_missing && budget.may_ask(&id) && !noted.contains(&id) {
+            budget.note_missing(id);
+            noted.push(id);
+            if budget.take_ops(1) == 1 {
+                out.push(OutboundDelegateMsg::GetContractRequest(
+                    GetContractRequest::new(ContractInstanceId::new(id)),
+                ));
             }
         }
     }
@@ -174,7 +186,8 @@ pub fn run(env: &mut dyn Env, trigger: Trigger) -> (JobsRun, Vec<OutboundDelegat
         }
     }
     requests.append(&mut out);
-    let out = requests;
+    let mut out = requests;
+    out.extend(v2_done.out);
     if unprompted {
         budget.charge_messages(plan.messages - left);
         budget.charge_bytes(read);
@@ -185,16 +198,22 @@ pub fn run(env: &mut dyn Env, trigger: Trigger) -> (JobsRun, Vec<OutboundDelegat
     (done, out)
 }
 
-/// The inboxes to watch: each listed origin's identities. An origin that
-/// cannot be listed counts as unknown and is left for the next run.
-fn targets(env: &mut dyn Env, trigger: Trigger, done: &mut JobsRun) -> Vec<Target> {
+/// The inboxes to watch: each listed origin's identities, their v1 inboxes
+/// and their v2 inboxes. An origin that cannot be listed counts as unknown
+/// and is left for the next run.
+fn targets(
+    env: &mut dyn Env,
+    trigger: Trigger,
+    now: u64,
+    done: &mut JobsRun,
+) -> (Vec<Target>, Vec<Own>) {
     let origins: Vec<Origin> = match trigger {
         Trigger::RunJobs(origin) => vec![origin],
         Trigger::NodeStarted | Trigger::Tick(_) | Trigger::Contract(_) => {
             let listed = Space::new(&mut *env, GLOBAL).index(ORIGIN_INDEX);
             let Ok((_, ids)) = listed else {
                 done.unknown += 1;
-                return Vec::new();
+                return (Vec::new(), Vec::new());
             };
             ids.iter()
                 .filter_map(|id| Some(Origin(id.as_slice().try_into().ok()?)))
@@ -202,6 +221,7 @@ fn targets(env: &mut dyn Env, trigger: Trigger, done: &mut JobsRun) -> Vec<Targe
         }
     };
     let mut out = Vec::new();
+    let mut owns = Vec::new();
     let mut emptied = Vec::new();
     for origin in origins {
         let s = Space::new(&mut *env, origin);
@@ -217,6 +237,11 @@ fn targets(env: &mut dyn Env, trigger: Trigger, done: &mut JobsRun) -> Vec<Targe
                 Ok(id) => out.push(Target { origin, addr, id }),
                 Err(_) => done.unknown += 1,
             }
+            match inbox_jobs::own(&s, &addr, now) {
+                Ok(Some(own)) => owns.push(own),
+                Ok(None) => {}
+                Err(_) => done.unknown += 1,
+            }
         }
     }
     // An origin with no identities left gives its place up: a new identity
@@ -224,7 +249,7 @@ fn targets(env: &mut dyn Env, trigger: Trigger, done: &mut JobsRun) -> Vec<Targe
     if !emptied.is_empty() {
         let _ = Space::new(&mut *env, GLOBAL).index_remove_many(ORIGIN_INDEX, &emptied);
     }
-    out
+    (out, owns)
 }
 
 fn load_budget(env: &mut dyn Env, now: u64) -> Budget {
@@ -236,7 +261,7 @@ fn load_budget(env: &mut dyn Env, now: u64) -> Budget {
     budget
 }
 
-fn save_budget(env: &mut dyn Env, budget: &Budget) {
+pub(crate) fn save_budget(env: &mut dyn Env, budget: &Budget) {
     if let Ok(body) = freenet_mail_protocol::to_cbor(budget) {
         let _ = Space::new(env, GLOBAL).put(BUDGET, &body);
     }

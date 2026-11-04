@@ -101,6 +101,20 @@ vectors = [
     ("id_quarantine_undecodable", msgid(2, b"\x00" * 32)),
 ]
 
+
+# Decision 24: each v2 ML-DSA signature has a FIPS 204 context string. Pure
+# ML-DSA (FIPS 204 Algorithm 2) signs M' = 0x00 || len(ctx) as one byte || ctx
+# || M, so these are the bytes in front of the signed layout.
+def mldsa_prefix(ctx):
+    assert len(ctx) <= 255
+    return b"\x00" + bytes([len(ctx)]) + ctx
+
+
+vectors += [
+    ("mldsa_prefix_owner", mldsa_prefix(b"fmail/v2/owner")),
+    ("mldsa_prefix_sealed", mldsa_prefix(b"fmail/v2/sealed")),
+]
+
 # Wire: structs are maps in field order, fixed bytes are byte strings, enums are
 # externally tagged, a unit variant is its name.
 owner = {

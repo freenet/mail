@@ -41,6 +41,11 @@ fn op_name(op: &Op) -> &'static str {
         Op::ListDeletingIdentities => "op_list_deleting_identities",
         Op::RepairIndex { .. } => "op_repair_index",
         Op::RunJobs => "op_run_jobs",
+        Op::CreateInboxV2 { .. } => "op_create_inbox_v2",
+        Op::UpdateInboxV2 { .. } => "op_update_inbox_v2",
+        Op::IssuePass { .. } => "op_issue_pass",
+        Op::HoldPass { .. } => "op_hold_pass",
+        Op::SealV2 { .. } => "op_seal_v2",
     }
 }
 
@@ -64,6 +69,10 @@ fn reply_name(reply: &Reply) -> &'static str {
         Reply::Continue { .. } => "reply_continue",
         Reply::CreatedIdentity { .. } => "reply_created_identity",
         Reply::JobsRun(_) => "reply_jobs_run",
+        Reply::InboxV2State(_) => "reply_inbox_v2_state",
+        Reply::InboxV2Update(_) => "reply_inbox_v2_update",
+        Reply::PassIssued(_) => "reply_pass_issued",
+        Reply::SealedV2(_) => "reply_sealed_v2",
     }
 }
 
@@ -95,6 +104,10 @@ fn kind_name(kind: &ItemKind) -> &'static str {
         ItemKind::MigrationJournal => "kind_migration_journal",
         ItemKind::MigrationMarker => "kind_migration_marker",
         ItemKind::LegacyOrphan => "kind_legacy_orphan",
+        ItemKind::InboxV2 => "kind_inbox_v2",
+        ItemKind::PassLedger => "kind_pass_ledger",
+        ItemKind::HeldPass => "kind_held_pass",
+        ItemKind::Inbound => "kind_inbound",
     }
 }
 
@@ -138,6 +151,22 @@ fn identity() -> IdentityInfo {
         description: "d".into(),
         confirmed: true,
         generation: 7,
+    }
+}
+
+fn pass() -> inbox_v2::Pass {
+    use serde_bytes::ByteArray;
+    inbox_v2::Pass {
+        cert: inbox_v2::PassCert {
+            recipient: ByteArray::new([0xA1; 24]),
+            pass_id: ByteArray::new([0x22; 16]),
+            pass_vk: ByteArray::new([0x33; 32]),
+            epoch: 1,
+            expiry: 86_400,
+            class: inbox_v2::PassClass::Invite { max_messages: 3 },
+            sig: ByteArray::new([0x44; 64]),
+        },
+        pass_sk: ByteArray::new([0x55; 32]),
     }
 }
 
@@ -221,6 +250,38 @@ fn ops() -> Vec<Op> {
             kind: Some(ItemKind::Draft),
             owner: Some(a),
         },
+        Op::CreateInboxV2 {
+            addr: a,
+            ghost_master: Hash32([0x88; 32]),
+            existing: Some(b(&[0])),
+        },
+        Op::UpdateInboxV2 {
+            addr: a,
+            state: b(&[1]),
+            change: OwnerChange::Revoke {
+                pass_id: PassId([0x22; 16]),
+            },
+            ui_entropy: Entropy([0xC3; 32]),
+        },
+        Op::IssuePass {
+            addr: a,
+            contact: Some(Addr([0xB1; 24])),
+            invite: Some(3),
+            ui_entropy: Entropy([0xC3; 32]),
+        },
+        Op::HoldPass {
+            addr: a,
+            pass: pass(),
+        },
+        Op::SealV2 {
+            from: a,
+            to: Addr([0xB1; 24]),
+            to_state: b(&[2]),
+            content: SealContent::Mail(b(b"hi")),
+            ghost_vk: Some(Hash32([0x33; 32])),
+            ui_entropy: Entropy([0xD4; 32]),
+            reseals: 1,
+        },
     ]
 }
 
@@ -279,6 +340,26 @@ fn replies() -> Vec<Reply> {
             identity: identity(),
             recovery_key: "fmail-key-1:x".into(),
         },
+        Reply::InboxV2State(b(&[6])),
+        Reply::InboxV2Update(InboxV2Update {
+            update: Some(b(&[7])),
+            drained: 1,
+            remaining: 2,
+            full: 3,
+            strangers_dropped: 4,
+            change: ChangeOutcome::WaitsForStorage,
+            passes_not_kept: 5,
+        }),
+        Reply::PassIssued(pass()),
+        Reply::SealedV2(SealedV2 {
+            message: b(&[8]),
+            id: Hash32([0x99; 32]),
+            sent_time: 3600,
+            admission: SendAdmission::Quarantine,
+            ghost_payload: Some(b(&[9])),
+            notice: Some(SendNotice::QueueFull),
+            reseal_at: 7200,
+        }),
     ]
 }
 
@@ -321,6 +402,10 @@ fn samples() -> Vec<(String, Vec<u8>)> {
         ItemKind::MigrationJournal,
         ItemKind::MigrationMarker,
         ItemKind::LegacyOrphan,
+        ItemKind::InboxV2,
+        ItemKind::PassLedger,
+        ItemKind::HeldPass,
+        ItemKind::Inbound,
     ] {
         out.push((kind_name(&kind).to_string(), enc(&kind)));
     }
@@ -375,7 +460,30 @@ fn samples() -> Vec<(String, Vec<u8>)> {
         }),
     };
     out.push(("response".into(), enc(&response)));
+    for change in [
+        OwnerChange::Drain,
+        OwnerChange::AdvanceTime,
+        OwnerChange::SetQuarantine(inbox_v2::QuarantineMode::RequireGhost { min_usd: Some(5) }),
+        OwnerChange::BumpEpoch { emergency: true },
+    ] {
+        out.push((change_name(&change).into(), enc(&change)));
+    }
+    out.push(("seal_pass_update".into(), enc(&SealContent::PassUpdate)));
+    out.push(("admission_pass".into(), enc(&SendAdmission::Pass)));
+    out.push(("admission_owner".into(), enc(&SendAdmission::Owner)));
+    out.push(("notice_pass_lapsed".into(), enc(&SendNotice::PassLapsed)));
+    out.push(("notice_pass_full".into(), enc(&SendNotice::PassFull)));
     out
+}
+
+fn change_name(change: &OwnerChange) -> &'static str {
+    match change {
+        OwnerChange::Drain => "change_drain",
+        OwnerChange::AdvanceTime => "change_advance_time",
+        OwnerChange::SetQuarantine(_) => "change_set_quarantine",
+        OwnerChange::Revoke { .. } => "change_revoke",
+        OwnerChange::BumpEpoch { .. } => "change_bump_epoch",
+    }
 }
 
 mod erased {

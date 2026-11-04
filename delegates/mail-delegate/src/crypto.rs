@@ -44,10 +44,33 @@ impl Keys {
         self.kem.encapsulation_key().to_bytes().to_vec()
     }
 
+    /// A v1 signature: the empty context, as v0.2.x signs and verifies.
     pub fn sign(&self, msg: &[u8]) -> Vec<u8> {
         let sig: ml_dsa::Signature<MlDsa65> = Signer::sign(&self.dsa, msg);
         sig.encode().to_vec()
     }
+
+    /// A v2 signature, under one of the v2 contexts (decision 24), so it
+    /// never verifies as a v1 signature or as another v2 layout's.
+    pub fn sign_v2(&self, ctx: &[u8], msg: &[u8]) -> Vec<u8> {
+        self.dsa
+            .expanded_key()
+            .sign_deterministic(msg, ctx)
+            .expect("the v2 contexts are under 256 bytes")
+            .encode()
+            .to_vec()
+    }
+}
+
+/// Whether `signature` is `vk`'s v2 signature over `content` under `ctx`.
+pub fn verify_v2(ctx: &[u8], content: &[u8], vk: &[u8], signature: &[u8]) -> bool {
+    let Ok(encoded) = EncodedVerifyingKey::<MlDsa65>::try_from(vk) else {
+        return false;
+    };
+    let Ok(signature) = ml_dsa::Signature::<MlDsa65>::try_from(signature) else {
+        return false;
+    };
+    VerifyingKey::<MlDsa65>::decode(&encoded).verify_with_context(content, ctx, &signature)
 }
 
 /// A CSPRNG that is secure if EITHER input is: BLAKE3 in XOF mode over the
@@ -200,6 +223,45 @@ mod tests {
     fn signatures_match_the_v0_2_x_bytes() {
         let keys = vector_keys();
         assert_eq!(keys.sign(SIGNED_MSG), field(VECTORS, "dsa_sig"));
+    }
+
+    /// Decision 24: a v2 signature is made under its context, framed as
+    /// FIPS 204 frames it (the prefixes are the contract's vectors), and
+    /// verifies under no other context, the empty v1 one included.
+    #[test]
+    fn v2_signatures_are_separated_by_context() {
+        use freenet_mail_protocol::inbox_v2::{OWNER_SIG_CONTEXT, SEALED_SIG_CONTEXT};
+        const LAYOUTS: &str =
+            include_str!("../../../contracts/inbox-v2/tests/fixtures/vectors.txt");
+        let keys = vector_keys();
+        let vk = keys.vk_bytes();
+        let msg = b"fmail/sealed/v1 and the rest";
+        let contexts = [
+            (OWNER_SIG_CONTEXT, "mldsa_prefix_owner"),
+            (SEALED_SIG_CONTEXT, "mldsa_prefix_sealed"),
+            (&b""[..], ""),
+        ];
+        for (ctx, prefix) in contexts {
+            let sig = if ctx.is_empty() {
+                keys.sign(msg)
+            } else {
+                keys.sign_v2(ctx, msg)
+            };
+            for (other, _) in contexts {
+                let ok = if other.is_empty() {
+                    verify_v1(msg, &vk, &sig)
+                } else {
+                    verify_v2(other, msg, &vk, &sig)
+                };
+                assert_eq!(ok, other == ctx, "{ctx:?} under {other:?}");
+            }
+            if !prefix.is_empty() {
+                let framed = [field(LAYOUTS, prefix).as_slice(), msg].concat();
+                let decoded = VerifyingKey::<MlDsa65>::decode(&vk.as_slice().try_into().unwrap());
+                let sig = ml_dsa::Signature::<MlDsa65>::try_from(sig.as_slice()).unwrap();
+                assert!(decoded.verify_internal(&framed, &sig), "{prefix}");
+            }
+        }
     }
 
     #[test]

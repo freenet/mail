@@ -392,10 +392,13 @@ fn every_owner_field_is_signed() {
 fn another_keys_owner_record_is_not_this_inbox() {
     let w = world();
     let other = ml_dsa::SigningKey::<ml_dsa::MlDsa65>::from_seed(&[8u8; 32].into());
-    use ml_dsa::signature::{Keypair, Signer as _};
+    use ml_dsa::signature::Keypair;
     let mut forged = owner(3);
     forged.owner_vk = ByteBuf::from(other.verifying_key().encode().to_vec());
-    let sig: ml_dsa::Signature<ml_dsa::MlDsa65> = other.sign(&owner_bytes(&w.params.addr, &forged));
+    let sig = other
+        .expanded_key()
+        .sign_deterministic(&owner_bytes(&w.params.addr, &forged), OWNER_SIG_CONTEXT)
+        .unwrap();
     forged.sig = ByteBuf::from(sig.encode().to_vec());
     let raw = w.raw(forged, w.time(T), [], [], []);
     assert_eq!(
@@ -404,12 +407,39 @@ fn another_keys_owner_record_is_not_this_inbox() {
     );
 }
 
+/// An owner record is signed under its own ML-DSA context: a signature over
+/// the same bytes with the empty context (what v1 signs) or with the sealed
+/// binding's context is not an owner signature.
+#[test]
+fn an_owner_signature_outside_the_owner_context_does_not_verify() {
+    let w = world();
+    // The context-free bytes are what `ml_dsa`'s `Signer` signs.
+    for ctx in [&b""[..], &b"fmail/v2/sealed"[..]] {
+        let mut forged = owner(3);
+        let sig = w
+            .dsa
+            .expanded_key()
+            .sign_deterministic(&owner_bytes(&w.params.addr, &forged), ctx)
+            .unwrap();
+        forged.sig = ByteBuf::from(sig.encode().to_vec());
+        let raw = w.raw(forged, w.time(T), [], [], []);
+        assert_eq!(
+            merge(&Rules::V1, &w.params, vec![raw.into()]),
+            Err(Malformed("owner signature")),
+            "context {ctx:?}"
+        );
+    }
+}
+
 #[test]
 fn an_owner_signature_for_another_address_does_not_verify() {
     let w = world();
     let mut forged = owner(3);
-    let sig: ml_dsa::Signature<ml_dsa::MlDsa65> =
-        ml_dsa::signature::Signer::sign(&w.dsa, &owner_bytes(&[0xAB; 24], &forged));
+    let sig = w
+        .dsa
+        .expanded_key()
+        .sign_deterministic(&owner_bytes(&[0xAB; 24], &forged), OWNER_SIG_CONTEXT)
+        .unwrap();
     forged.sig = ByteBuf::from(sig.encode().to_vec());
     let raw = w.raw(forged, w.time(T), [], [], []);
     assert_eq!(

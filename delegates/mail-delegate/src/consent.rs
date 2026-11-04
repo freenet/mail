@@ -363,6 +363,10 @@ fn prompt_text(s: &Space<'_>, op: &Op) -> String {
                 ItemKind::IdentitySettings | ItemKind::GlobalSettings => "settings",
                 ItemKind::MigrationJournal | ItemKind::MigrationMarker => "migration records",
                 ItemKind::LegacyOrphan => "unmatched older mail",
+                ItemKind::InboxV2 => "inbox records",
+                ItemKind::PassLedger => "issued passes",
+                ItemKind::HeldPass => "held passes",
+                ItemKind::Inbound => "received mail",
             };
             let whose = owner
                 .as_ref()

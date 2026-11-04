@@ -160,6 +160,29 @@ fn signed_layouts() {
     );
 }
 
+/// Decision 24: the owner record's ML-DSA signature carries the context
+/// string, framed as FIPS 204 frames it. A signature the merge accepts
+/// verifies, with no context added by the library, over the vector's prefix
+/// followed by the layout.
+#[test]
+fn the_owner_signature_context() {
+    let prefix = expected("mldsa_prefix_owner");
+    let ctx_len = usize::from(prefix[1]);
+    assert_eq!(prefix[0], 0, "pure ML-DSA");
+    assert_eq!(&prefix[2..], OWNER_SIG_CONTEXT);
+    assert_eq!(ctx_len, OWNER_SIG_CONTEXT.len());
+
+    let dsa = ml_dsa::SigningKey::<ml_dsa::MlDsa65>::from_seed(&[7u8; 32].into());
+    let vk = ml_dsa::signature::Keypair::verifying_key(&dsa);
+    let layout = owner_bytes(&ADDR, &owner(QuarantineMode::Open));
+    let sig = dsa
+        .expanded_key()
+        .sign_deterministic(&layout, OWNER_SIG_CONTEXT)
+        .unwrap();
+    assert!(vk.verify_internal(&[prefix.as_slice(), &layout].concat(), &sig));
+    assert!(!vk.verify_internal(&[&[0u8, 0][..], &layout].concat(), &sig));
+}
+
 #[test]
 fn message_ids() {
     let pass = Admission::Pass {

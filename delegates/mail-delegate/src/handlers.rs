@@ -17,6 +17,7 @@ use serde_bytes::ByteBuf;
 use crate::consent;
 use crate::crypto::{self, Keys, MixRng};
 use crate::env::Env;
+use crate::inbox_v2;
 use crate::jobs::{Tick, Trigger};
 use crate::store::{
     self, ALL_KINDS, IDENTITY_INDEX, MAX_IDENTITIES, Origin, Space, fail, identity_rel, index_rel,
@@ -75,6 +76,9 @@ pub fn process(
         // not recorded: a client can send this message, and a belief written
         // from it would let one switch off another's watch.
         InboundDelegateMsg::SubscribeContractResponse(_) => Ok(Vec::new()),
+        // An update a job sent: what landed is read back from the contract's
+        // state, never from this answer, which a client can forge.
+        InboundDelegateMsg::UpdateContractResponse(_) => Ok(Vec::new()),
         _ => Err(DelegateError::Other(
             "the mail delegate accepts only application messages and prompt answers".into(),
         )),
@@ -202,14 +206,58 @@ fn handle_request(
             owner,
             after,
             limit,
-        } => list_items(s, kind, owner, after.as_ref().map(|a| a.as_slice()), limit),
-        Op::GetItem { item } => get_item(s, item),
+        } => page_may(kind, 0)
+            .and_then(|()| list_items(s, kind, owner, after.as_ref().map(|a| a.as_slice()), limit)),
+        Op::GetItem { item } => page_may(item.kind, 0).and_then(|()| get_item(s, item)),
         Op::PutItem {
             item,
             body,
             expected_gen,
-        } => put_item(s, item, body.into_vec(), expected_gen),
-        Op::DeleteItem { item, expected_gen } => delete_item(s, item, expected_gen),
+        } => page_may(item.kind, 1).and_then(|()| put_item(s, item, body.into_vec(), expected_gen)),
+        Op::DeleteItem { item, expected_gen } => {
+            page_may(item.kind, 2).and_then(|()| delete_item(s, item, expected_gen))
+        }
+        Op::CreateInboxV2 {
+            addr,
+            ghost_master,
+            existing,
+        } => inbox_v2::create_inbox(
+            s,
+            &addr,
+            &ghost_master,
+            existing.as_deref().map(|b| b.as_slice()),
+        ),
+        Op::UpdateInboxV2 {
+            addr,
+            state,
+            change,
+            ui_entropy,
+        } => inbox_v2::update_inbox(s, &addr, &state, change, &ui_entropy),
+        Op::IssuePass {
+            addr,
+            contact,
+            invite,
+            ui_entropy,
+        } => inbox_v2::issue_pass(s, &addr, contact, invite, &ui_entropy),
+        Op::HoldPass { addr, pass } => inbox_v2::hold_pass(s, &addr, &pass),
+        Op::SealV2 {
+            from,
+            to,
+            to_state,
+            content,
+            ghost_vk,
+            ui_entropy,
+            reseals,
+        } => inbox_v2::seal_v2(
+            s,
+            &from,
+            &to,
+            &to_state,
+            content,
+            ghost_vk,
+            &ui_entropy,
+            reseals,
+        ),
         Op::DecryptV1 { addr, ciphertexts } => decrypt_v1(s, &addr, ciphertexts),
         Op::SealV1Message {
             addr,
@@ -234,6 +282,20 @@ fn handle_request(
             .map(|()| Reply::Deleted),
     };
     Ok(respond(id, result))
+}
+
+/// Whether a page may use the item operations on `kind`: `what` 0 reads, 1
+/// writes, 2 deletes ([`store::page_access`]).
+fn page_may(kind: ItemKind, what: usize) -> Result<(), Failure> {
+    let (read, write, delete) = store::page_access(kind);
+    if [read, write, delete][what] {
+        Ok(())
+    } else {
+        Err(fail(
+            FailureCode::Refused,
+            "the delegate keeps these records itself",
+        ))
+    }
 }
 
 /// The page's way to run the jobs: the path a run the node starts takes,
@@ -1112,6 +1174,9 @@ pub fn put_item(
         ));
     }
     let marker = pending_rel(&item);
+    // An entry already listed belongs to an earlier create, whose record may
+    // be stored and only unreadable now: a failure here must not unlist it.
+    let listed_before = current.is_none() && s.index(&ix)?.1.contains(&item.id);
     if current.is_none() {
         // Claim the index slot first; it enforces the per-kind cap. The
         // marker lets a listing free the slot if the write below fails and
@@ -1142,6 +1207,10 @@ pub fn put_item(
             Ok(Reply::Ack { generation })
         }
         Err(e) => {
+            if listed_before {
+                // The create marker stays: the entry may have no record.
+                return Err(partial(e));
+            }
             if current.is_none() {
                 if retried(|| s.index_remove(&ix, &item.id)).is_ok() {
                     let _ = s.del(&marker);
@@ -1154,7 +1223,7 @@ pub fn put_item(
     }
 }
 
-fn delete_item(s: &mut Space<'_>, item: ItemRef, expected_gen: u64) -> OpResult {
+pub(crate) fn delete_item(s: &mut Space<'_>, item: ItemRef, expected_gen: u64) -> OpResult {
     check_item(s, &item)?;
     let rel = item_rel(&item);
     let ix = index_rel(item.kind, item.owner.as_ref());
@@ -1417,7 +1486,8 @@ struct AssignmentHash {
 ///
 /// - strictly ascending, distinct hashes (the contract accepts any order);
 /// - hashes of messages in this identity's v1 inbox as held on this node;
-/// - never a payload that could alias an authority payload.
+/// - never a payload that could alias an authority payload, or that begins
+///   with the v2 layouts' domain.
 ///
 /// A sender does choose its message's hash: v0.2.x hashes one encryption of
 /// the message and stores another, so the hash is not bound to the stored
@@ -1429,6 +1499,9 @@ struct AssignmentHash {
 /// chooses, but the ML-KEM ciphertext after it spans about 34 chunks that
 /// the attacker cannot steer (only re-roll), so they ascend with probability
 /// about 1/34!, roughly 2^-128. Raw ascending bytes decrypt to nothing.
+/// The prefix of every inbox v2 signed layout.
+const V2_DOMAIN: &[u8] = b"fmail/";
+
 fn sign_v1_removal(s: &Space<'_>, addr: &Addr, hashes: &[Hash32]) -> OpResult {
     use freenet_mail_wire_v1::inbox::{STATE_UPDATE, removal_payload};
     if hashes.is_empty() || hashes.len() > MAX_REMOVAL_BATCH {
@@ -1472,6 +1545,14 @@ fn sign_v1_removal(s: &Space<'_>, addr: &Addr, hashes: &[Hash32]) -> OpResult {
         return Err(fail(
             FailureCode::Refused,
             "payload aliases an inbox authority payload",
+        ));
+    }
+    // Every v2 signed layout begins with this domain. v2 ML-DSA signatures
+    // are domain-separated by context (decision 24); this is a second layer.
+    if payload.starts_with(V2_DOMAIN) {
+        return Err(fail(
+            FailureCode::Refused,
+            "payload aliases a v2 signed layout",
         ));
     }
     Ok(Reply::Signature(ByteBuf::from(keys.sign(&payload))))

@@ -777,6 +777,10 @@ pub(crate) fn list_name(kind: ItemKind) -> &'static str {
         ItemKind::IdentitySettings | ItemKind::GlobalSettings => "settings",
         ItemKind::MigrationJournal | ItemKind::MigrationMarker => "migration records",
         ItemKind::LegacyOrphan => "unmatched older mail",
+        ItemKind::InboxV2 => "inbox records",
+        ItemKind::PassLedger => "issued passes",
+        ItemKind::HeldPass => "held passes",
+        ItemKind::Inbound => "received mail",
     }
 }
 

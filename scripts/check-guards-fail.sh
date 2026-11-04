@@ -14,6 +14,8 @@
 #        scripts/check-guards-fail.sh --no-wasm  (skip the WASM rebuilds)
 #        scripts/check-guards-fail.sh --shard I/N  (guards whose index mod N is I)
 #        scripts/check-guards-fail.sh --list     (print the guard names, run none)
+#        scripts/check-guards-fail.sh --anchors  (check every mutation applies exactly
+#                                                 once; build and run nothing)
 # Every shard runs the baselines. A shard with no guard fails.
 # Exit status: 0 = every guard failed as it should, 1 = one did not.
 
@@ -21,11 +23,12 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 WASM=1
-SHARD_I="" SHARD_N="" LIST=0
+SHARD_I="" SHARD_N="" LIST=0 ANCHORS=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --no-wasm) WASM=0 ;;
         --list) LIST=1 ;;
+        --anchors) ANCHORS=1 ;;
         --shard)
             shift
             [[ "${1:-}" =~ ^([0-9]+)/([0-9]+)$ ]] || { echo "usage: --shard I/N" >&2; exit 2; }
@@ -66,17 +69,41 @@ D="$STAGE/delegates/mail-delegate/src"
 # it and the guards it backs run it alone.
 FAULT_RUN=invariants_hold_over_a_host_that_misses_reads_and_refuses_writes
 BLIND_RUN=invariants_hold_while_a_key_stays_unreadable
+# The inbox v2 sweep that moves time (clock, renewals, a bump) takes about 40 s
+# in a debug build, so it too runs alone, for the guards it backs.
+TIME_RUN=the_clock_renewals_and_a_bump_over_a_faulty_host_lose_and_double_nothing
+# The delegate's tests link the inbox v2 contract as a dev-dependency, over the
+# delegate's lockfile. Built in the target dir the contract's own runs use, the
+# two builds of the contract crate collide and the tests stop compiling, so the
+# delegate gets a target dir of its own.
+DELEGATE_TARGET="$ROOT/target/guards-cargo-delegate"
 delegate_tests() {
+    CARGO_TARGET_DIR="$DELEGATE_TARGET" \
     cargo test --manifest-path "$STAGE/delegates/mail-delegate/Cargo.toml" --features v1-transition \
-        -- --skip "$FAULT_RUN" --skip "$BLIND_RUN"
+        -- --skip "$FAULT_RUN" --skip "$BLIND_RUN" --skip "$TIME_RUN"
 }
 fault_tests() {
+    CARGO_TARGET_DIR="$DELEGATE_TARGET" \
     cargo test --manifest-path "$STAGE/delegates/mail-delegate/Cargo.toml" --features v1-transition \
         -- --exact "tests::faults::$FAULT_RUN"
 }
+# A sweep that asks for unreadable keys fails if none was ever read as missing.
+# Run with a blind rate, a few seeds, as the long sweeps are.
+blind_assert_tests() {
+    DRAIN_SEEDS=30 DRAIN_RATE=60 DRAIN_BLIND=200 \
+    CARGO_TARGET_DIR="$DELEGATE_TARGET" \
+    cargo test --manifest-path "$STAGE/delegates/mail-delegate/Cargo.toml" --features v1-transition \
+        -- --exact tests::inbox_v2::a_drain_over_a_faulty_host_never_tombstones_what_it_did_not_store
+}
 blind_tests() {
+    CARGO_TARGET_DIR="$DELEGATE_TARGET" \
     cargo test --manifest-path "$STAGE/delegates/mail-delegate/Cargo.toml" --features v1-transition \
         -- --exact "tests::faults::$BLIND_RUN"
+}
+time_tests() {
+    CARGO_TARGET_DIR="$DELEGATE_TARGET" \
+    cargo test --manifest-path "$STAGE/delegates/mail-delegate/Cargo.toml" --features v1-transition \
+        -- --exact "tests::inbox_jobs::$TIME_RUN"
 }
 protocol_tests() {
     cargo test --manifest-path "$STAGE/Cargo.toml" -p freenet-mail-protocol
@@ -100,6 +127,9 @@ candidate_check() { "$STAGE/scripts/check-delegate-candidate.sh"; }
 inbox_candidate_check() { "$STAGE/scripts/check-inbox-candidate.sh"; }
 inbox_rule_tests() {
     cargo test --manifest-path "$STAGE/contracts/inbox-v2/Cargo.toml" --test canonical --test rules
+}
+inbox_tamper_tests() {
+    cargo test --manifest-path "$STAGE/contracts/inbox-v2/Cargo.toml" --test tamper
 }
 inbox_plausible_tests() {
     cargo test --manifest-path "$STAGE/contracts/inbox-v2/Cargo.toml" \
@@ -129,10 +159,11 @@ baseline() { # name command...
         failures=$((failures + 1))
     fi
 }
-if [ "$LIST" -eq 0 ]; then
+if [ "$LIST" -eq 0 ] && [ "$ANCHORS" -eq 0 ]; then
 baseline "delegate tests" delegate_tests
 baseline "delegate fault-injection runs" fault_tests
 baseline "delegate unreadable-key runs" blind_tests
+baseline "delegate time-driven fault run" time_tests
 baseline "protocol tests" protocol_tests
 baseline "migration tests" ui_migration_tests
 baseline "local-delegate identity tests" ui_local_tests
@@ -195,6 +226,17 @@ guard() { # name file old new expected command...
         return
     fi
     GUARDS_RUN=$((GUARDS_RUN + 1))
+    if [ "$ANCHORS" -eq 1 ]; then
+        # A mutation that no longer applies is a guard that silently stopped
+        # guarding: find them all here, without building anything.
+        if python3 -c 'import sys; s = open(sys.argv[1]).read(); sys.exit(0 if s.count(sys.argv[2]) == 1 else 1)' "$file" "$old"; then
+            echo "ok - $name: anchor applies once"
+        else
+            echo "not ok - $name: mutation not applied"
+            failures=$((failures + 1))
+        fi
+        return
+    fi
     cp "$file" "$file.orig"
     if ! replace "$file" "$old" "$new"; then
         echo "not ok - $name: mutation not applied"
@@ -219,6 +261,7 @@ guard() { # name file old new expected command...
 }
 
 dt() { guard "$1" "$2" "$3" "$4" "tests:$5" delegate_tests; }
+tt() { guard "$1" "$2" "$3" "$4" "tests:$TIME_RUN" time_tests; }
 
 dt "origin gate refuses delegate callers" "$D/handlers.rs" \
     'Some(MessageOrigin::Delegate(_)) => Err(DelegateError::Other(' \
@@ -230,6 +273,323 @@ dt "creation returns the new identity's own recovery key" "$D/handlers.rs" \
     the_recovery_key_comes_back_on_creation_only
 dt "compare-and-swap refuses a stale writer" "$D/handlers.rs" \
     'Some(g) => g == current_gen,' 'Some(_) => true,' cas_refuses_a_stale_writer_and_accepts_the_current_one
+dt "inbox v2: a message is tombstoned only once stored" "$D/inbox_v2.rs" \
+    '                    out.unstored.insert(*id);
+                    continue;
+                }
+            }' '                    out.unstored.insert(*id);
+                }
+            }' \
+    a_refused_store_tombstones_nothing,a_drain_over_a_faulty_host_never_tombstones_what_it_did_not_store,a_job_drain_over_a_faulty_host_never_tombstones_what_it_did_not_store
+dt "inbox v2: an owner version is recorded before it leaves" "$D/inbox_v2.rs" \
+    'save(s, item(ItemKind::InboxV2, addr, &[]), &rec, rec_gen)?;' \
+    'let _ = (&rec, rec_gen);' \
+    a_lost_update_never_reuses_a_version
+dt "inbox v2: owner_time moves under the guard" "$D/inbox_v2.rs" \
+    '.saturating_add(TIME_STEP_MAX)' '.saturating_add(TIME_STEP_MAX * 100)' \
+    owner_time_moves_under_the_guard
+dt "inbox v2: pass expiries are whole days" "$D/inbox_v2.rs" \
+    'e.expiry = ceil_day(now + lifetime);' 'e.expiry = now + lifetime;' \
+    pass_timing_is_coarse_and_spread,a_full_round_runs_through_the_contract
+dt "inbox v2: the sender's binding names the message" "$D/sealing.rs" \
+    '    if !crypto::verify_v2(' '    if false && !crypto::verify_v2(' \
+    a_restamped_copy_does_not_open
+dt "a failed retry of a create keeps the earlier entry" "$D/handlers.rs" \
+    'if listed_before {' 'if false && listed_before {' \
+    a_failed_retry_of_a_create_keeps_the_earlier_entry
+dt "inbox v2: a pass that cannot be kept does not hold mail back" "$D/inbox_v2.rs" \
+    'Err(f) if f.code == FailureCode::BadInput => {}' 'Err(f) if false => drop(f),' \
+    a_bad_reply_pass_does_not_hold_mail_in_the_inbox
+dt "inbox v2: the sender's binding is signed under its context" "$D/sealing.rs" \
+    '        w::SEALED_SIG_CONTEXT,
+        &binding,' '        &[],
+        &binding,' a_v1_signature_over_an_inner_binding_does_not_open
+dt "inbox v2: an owner record is read under its context" "$D/inbox_v2.rs" \
+    '            w::OWNER_SIG_CONTEXT,
+            &w::owner_bytes(&to.0, o),' '            &[],
+            &w::owner_bytes(&to.0, o),' an_owner_record_without_the_v2_context_is_refused
+dt "inbox v2: the v1 removal signer refuses v2 layouts" "$D/handlers.rs" \
+    'if payload.starts_with(V2_DOMAIN) {' 'if false {' the_v1_removal_signer_refuses_v2_layouts
+dt "inbox v2: a Ghost Key is kept only with a checked proof" "$D/inbox_v2.rs" \
+    'let ghost_vk = body.ghost_vk.filter(|_| ghost_proven);' 'let ghost_vk = body.ghost_vk;' \
+    an_unproven_ghost_key_is_not_kept
+dt "inbox v2: a page's Ghost Key proof counts only as the node holds it" "$D/inbox_v2.rs" \
+    'owner_update(s, &me, &state, change, now, &mut rng, DRAIN_BATCH, false)' \
+    'owner_update(s, &me, &state, change, now, &mut rng, DRAIN_BATCH, true)' \
+    a_page_state_admission_is_checked_before_it_counts
+dt "inbox v2: a page's invite use is checked before it counts" "$D/inbox_v2.rs" \
+    '&& issued_here(me, m, cert, msg_sig)' '&& (issued_here(me, m, cert, msg_sig) || true)' \
+    a_page_state_admission_is_checked_before_it_counts
+dt "inbox v2: another pass id is held beside the first" "$D/inbox_v2.rs" \
+    '            held.push(pass.clone());' '            held = vec![pass.clone()];' \
+    a_reissued_pass_is_used_after_a_revoke_in_either_order
+dt "inbox v2: strangers' passes share the stranger budget" "$D/inbox_v2.rs" \
+    'rec.stranger_held.insert(recipient, rec.stranger_seq);' 'let _ = recipient;' \
+    strangers_never_crowd_out_a_new_correspondents_pass
+dt "inbox v2: held passes full is reported" "$D/inbox_v2.rs" \
+    '                    return Ok(false);' '                    return Ok(true);' \
+    a_full_set_of_held_passes_is_reported
+dt "inbox v2: a held certificate is checked" "$D/inbox_v2.rs" \
+    '.and_then(|m| held_issuer(s, m, &pass.cert.recipient))' '.and_then(|_| None::<VerifyingKey>)' \
+    held_certificates_are_checked_and_never_shadow_a_genuine_pass
+dt "inbox v2: a page's state must verify" "$D/inbox_v2.rs" \
+    '    let state = their_state(&me.addr, bytes)?;' \
+    '    let state: InboxState = w::decode(bytes).map_err(|e| fail(FailureCode::BadInput, e))?;' \
+    a_page_state_must_verify_and_versions_never_wrap
+dt "inbox v2: an owner version never wraps" "$D/inbox_v2.rs" \
+    '    v.checked_add(1).ok_or_else(|| {' '    Some(v.wrapping_add(1)).ok_or_else(|| {' \
+    a_page_state_must_verify_and_versions_never_wrap
+dt "inbox v2 jobs: a pass never seen delivered is never pushed" "$D/inbox_jobs.rs" \
+    'if e.delivered == 0 {' 'if false {' a_sealed_message_never_sent_sends_nothing
+dt "inbox v2: zero page entropy is refused" "$D/inbox_v2.rs" \
+    'if entropy.0 == [0; 32] {' 'if false {' v2_operations_refuse_zero_entropy
+dt "inbox v2: the page cannot write the delegate's records" "$D/store.rs" \
+    'ItemKind::InboxV2 | ItemKind::PassLedger => (true, false, false),' \
+    'ItemKind::InboxV2 | ItemKind::PassLedger => (true, true, true),' \
+    the_page_cannot_rewrite_inbox_records_or_read_held_passes
+dt "inbox v2 jobs: a renewal reaches a contact never written to" "$D/inbox_jobs.rs" \
+    'self.done.out.push(update(id, w::encode(&delta)));' 'let _ = (id, &delta);' \
+    a_renewal_reaches_a_contact_who_is_never_written_to
+dt "inbox v2 jobs: a renewal never goes through quarantine" "$D/inbox_jobs.rs" \
+    'if sealed.admission != SendAdmission::Pass {' 'if false {' \
+    a_renewal_never_goes_through_quarantine
+dt "inbox v2 jobs: a renewal not seen to land is sent again" "$D/inbox_jobs.rs" \
+    '&& now < p.at + v2::RESEND_AFTER' '&& true' \
+    a_renewal_that_does_not_land_is_sent_again
+dt "inbox v2 jobs: mail carrying a renewal is read back" "$D/inbox_v2.rs" \
+    'note_sent(s, &me, &reply_pass, &sealed.id.0, now, false)?;' 'let _ = &reply_pass;' \
+    a_renewal_never_goes_through_quarantine
+dt "inbox v2 jobs: the clock drains first" "$D/inbox_jobs.rs" \
+    'let limit = left.saturating_sub(OWNER_SLOTS).min(v2::DRAIN_BATCH);' 'let limit = 0;' \
+    the_clock_advances_owner_time_after_draining
+dt "inbox v2 jobs: a bump reissues at points of the grace" "$D/inbox_v2.rs" \
+    '*due = (*due).min(at);' 'let _ = at;' \
+    a_bump_reissues_each_pass_at_its_own_point_of_the_grace
+dt "inbox v2: strangers keep only the newest" "$D/inbox_v2.rs" \
+    'while rec.strangers.len() > STRANGERS_KEPT {' 'while rec.strangers.len() > STRANGERS_KEPT * 100 {' \
+    strangers_give_way_earliest_first_and_never_a_contact
+dt "inbox v2: a stranger given way leaves the tombstones" "$D/inbox_v2.rs" \
+    '        tombstones.remove(id);' '        let _ = id;' \
+    strangers_give_way_earliest_first_and_never_a_contact
+dt "inbox v2: a sealed message says when to seal again" "$D/inbox_v2.rs" \
+    '.saturating_sub(TIME_LEAD_MAX + skew + RESEAL_MARGIN)' '.saturating_sub(0)' \
+    a_send_queued_past_two_days_is_sealed_again
+dt "inbox v2: a reseal keeps a margin for a stale clock" "$D/inbox_v2.rs" \
+    '.max(now + RESEAL_MARGIN);' '.max(now);' reseal_has_a_margin_and_a_limit
+dt "inbox v2: a message is resealed a bounded number of times" "$D/inbox_v2.rs" \
+    'if reseals > freenet_mail_protocol::MAX_RESEALS {' 'if false {' \
+    reseal_has_a_margin_and_a_limit
+dt "inbox v2: a Ghost Key claim waits for the node's copy" "$D/inbox_v2.rs" \
+    'if claimed && !proven.contains(id) {' 'if false {' \
+    a_message_stored_by_a_lost_drain_is_drained_again,a_page_state_admission_is_checked_before_it_counts
+dt "inbox v2: only a copy that decodes as this message counts as stored" "$D/inbox_v2.rs" \
+    '    (copy.id == *id).then_some((generation, copy))' '    Some((generation, copy))' \
+    only_a_copy_that_reads_back_as_this_message_counts_as_stored
+dt "inbox v2: a stored copy lacking a proven Ghost Key is upgraded" "$D/inbox_v2.rs" \
+    '                if copy.ghost_vk.is_none() && msg.ghost_vk.is_some() {' \
+    '                if false {' \
+    a_drain_that_proves_the_ghost_key_upgrades_the_copy_and_tombstones
+dt "inbox v2: mail is a contact's by its sender" "$D/inbox_v2.rs" \
+    'let contact = is_contact(s, me, rec, &from)?;' 'let contact = false;' \
+    contact_mail_is_never_in_the_stranger_budget,a_contacts_quarantine_mail_is_never_evicted_as_a_strangers
+dt "inbox v2: a stranger written to leaves the stranger budget" "$D/inbox_v2.rs" \
+    'rec.strangers.retain(|_, (_, from)| *from != Some(*sender));' 'let _ = sender;' \
+    contact_mail_is_never_in_the_stranger_budget
+dt "inbox v2: invites have their own cap" "$D/inbox_v2.rs" \
+    '            if rec.invites.len() >= MAX_INVITES {
+                return Err(' '            if false {
+                return Err(' invites_never_fill_the_pass_ledger
+dt "inbox v2: the ledger is pruned as time moves" "$D/inbox_v2.rs" \
+    'prune_ledger(s, me, &mut rec, t, Some(PRUNE_PER_CALL))?;' 'let _ = PRUNE_PER_CALL;' \
+    the_ledger_is_pruned_as_time_moves
+dt "inbox v2: dead held passes give way at the cap" "$D/inbox_v2.rs" \
+    '} else if pruned || prune_held(s, &me.addr)? == 0 {' '} else if true {' \
+    dead_held_passes_give_way_at_the_cap
+dt "inbox v2: owner changes keep a job's tombstones" "$D/inbox_v2.rs" \
+    'rec.tombstones = tombstones.clone();' 'let _ = &rec.tombstones;' \
+    a_stale_page_state_keeps_what_a_job_tombstoned
+dt "inbox v2: full storage blocks only the changes that drop unstored mail" "$D/inbox_v2.rs" \
+    'if hit.iter().any(|id| drained.unstored.contains(*id)) {' 'if !drained.unstored.is_empty() {' \
+    full_storage_blocks_only_the_changes_that_drop_unstored_mail
+dt "inbox v2: the clock moves as far as keeps undrained mail" "$D/inbox_v2.rs" \
+    'let t = want.min(time_bound.max(held_time));' \
+    'let t = if time_bound < want { held_time } else { want };' \
+    the_clock_advances_owner_time_after_draining
+dt "inbox v2 jobs: the clock and renewals ride on the rescan" "$D/jobs.rs" \
+    'Trigger::Tick(Tick::Rescan) => &[Job::V1Scan, Job::DrainOwn, Job::AdvanceClock, Job::Renew],' \
+    'Trigger::Tick(Tick::Rescan) => &[Job::V1Scan, Job::DrainOwn],' \
+    the_clock_runs_on_rescan_whatever_the_slice,renewals_after_a_bump_keep_pace_with_the_budget
+dt "inbox v2 jobs: one contact's failed renewal never stops the others" "$D/inbox_jobs.rs" \
+    '                Err(_) => {
+                    self.failed += 1;' '                Err(f) if f.code != FailureCode::Refused => return Err(f),
+                Err(_) => {
+                    self.failed += 1;' \
+    a_contact_whose_renewal_errors_never_stops_the_others
+dt "inbox v2 jobs: a vanished contact backs off" "$D/inbox_jobs.rs" \
+    '.saturating_mul(1 << misses.saturating_sub(1).min(16))' '.saturating_mul(1)' \
+    a_vanished_contact_backs_off
+dt "inbox v2 jobs: the rotation moves only past a served inbox" "$D/inbox_jobs.rs" \
+    'return !(drain && pending) && serve(s, budget);' 'return serve(s, budget);' \
+    an_inbox_the_slice_did_not_reach_comes_first_next_run
+dt "inbox v2: the Ghost Key payload is what the contract checks" "$D/inbox_v2.rs" \
+    'ghost_payload = Some(ByteBuf::from(w::ghost_admit_bytes(' 'ghost_payload = Some(ByteBuf::from(w::owner_msg_bytes(' \
+    a_ghost_key_proof_from_the_fixtures_passes_the_contract
+dt "inbox v2 jobs: updates stop at the per-minute limit" "$D/jobs.rs" \
+    '.is_none_or(|(_, n)| *n < MAX_WRITES_PER_MINUTE)' '.is_none_or(|_| true)' \
+    updates_to_one_contract_stop_at_the_minute_limit
+BUMPS=the_2048th_live_revocation_bumps_the_epoch_and_the_2047th_does_not
+FULL_SET=a_full_revoked_set_bumps_the_epoch_with_no_grace
+dt "inbox v2: the 2048th revocation bumps (not the 2049th)" "$D/inbox_v2.rs" \
+    '!state.revoked.contains_key(&key) && this_epoch + 1 >= BUMP_AT_REVOCATIONS' \
+    '!state.revoked.contains_key(&key) && this_epoch >= BUMP_AT_REVOCATIONS' "$BUMPS"
+dt "inbox v2: the 2047th revocation does not bump" "$D/inbox_v2.rs" \
+    '!state.revoked.contains_key(&key) && this_epoch + 1 >= BUMP_AT_REVOCATIONS' \
+    '!state.revoked.contains_key(&key) && this_epoch + 2 >= BUMP_AT_REVOCATIONS' "$BUMPS"
+dt "inbox v2: the routine bump at the revocation count exists" "$D/inbox_v2.rs" \
+    '!state.revoked.contains_key(&key) && this_epoch + 1 >= BUMP_AT_REVOCATIONS' \
+    'false && this_epoch + 1 >= BUMP_AT_REVOCATIONS' "$BUMPS"
+dt "inbox v2: a full revoked set bumps" "$D/inbox_v2.rs" \
+    '    if state.revoked.len() >= w::MAX_REVOKED {
+        bump(rec' \
+    '    if false {
+        bump(rec' "$FULL_SET"
+dt "inbox v2: a full set is full at exactly its size" "$D/inbox_v2.rs" \
+    '    if state.revoked.len() >= w::MAX_REVOKED {
+        bump(rec' \
+    '    if state.revoked.len() > w::MAX_REVOKED {
+        bump(rec' "$FULL_SET"
+dt "inbox v2: an emergency bump opens no grace" "$D/inbox_v2.rs" \
+    'rec.reissue_grace = if emergency { 0 } else { EPOCH_GRACE };' \
+    'rec.reissue_grace = EPOCH_GRACE;' "$FULL_SET"
+dt "inbox v2: an emergency bump keeps no previous epoch" "$D/inbox_v2.rs" \
+    '    rec.prev_epoch_until = if emergency {
+        0' \
+    '    rec.prev_epoch_until = if emergency {
+        owner_time.max(now) + EPOCH_GRACE' "$FULL_SET"
+tt "inbox v2 jobs: a created record is never written over" "$D/handlers.rs" \
+    '        None => current.is_none(),
+        Some(g) => g == current_gen,' \
+    '        None => true,
+        Some(g) => g == current_gen,'
+tt "inbox v2 jobs: a bump's reissues are scheduled" "$D/inbox_v2.rs" \
+    '            let due = rec.due.entry(contact).or_insert(at);
+            *due = (*due).min(at);' \
+    '            let _ = (contact, at);'
+tt "inbox v2 jobs: a reissue moves the pass to the new epoch" "$D/inbox_v2.rs" \
+    '    e.epoch = rec.pass_epoch;
+    start_term(e, now, rng);' \
+    '    start_term(e, now, rng);'
+tt "inbox v2 jobs: the clock runs on the rescan" "$D/inbox_jobs.rs" \
+    'if clock && now >= state.time.owner_time.saturating_add(v2::CLOCK_LAG) {' \
+    'if clock && false {'
+tt "inbox v2 jobs: a drained message is tombstoned only once stored" "$D/inbox_v2.rs" \
+    '                    out.unstored.insert(*id);
+                    continue;
+                }
+            }' '                    out.unstored.insert(*id);
+                }
+            }'
+dt "inbox v2 jobs: the owner update takes a slot of the run's slice" "$D/inbox_jobs.rs" \
+    'pub const OWNER_SLOTS: usize = 1;' 'pub const OWNER_SLOTS: usize = 0;' \
+    a_run_drains_exactly_its_slice_less_the_owner_updates_share
+dt "inbox v2 jobs: a drain stops at the run's slice" "$D/inbox_jobs.rs" \
+    'let limit = left.saturating_sub(OWNER_SLOTS).min(v2::DRAIN_BATCH);' \
+    'let limit = v2::DRAIN_BATCH;' \
+    a_run_drains_exactly_its_slice_less_the_owner_updates_share
+dt "inbox v2 jobs: a drain waits when the contract's minute is spent" "$D/inbox_jobs.rs" \
+    '    if !budget.may_write(&own.id) {
+        return false;
+    }' '' the_jobs_stop_updating_a_contract_at_the_minute_limit
+dt "inbox v2 jobs: a renewal waits when the contact's minute is spent" "$D/inbox_jobs.rs" \
+    '        if !self.budget.may_write(&id) {
+            return Ok(Some(now + 60));
+        }' '' the_jobs_stop_updating_a_contract_at_the_minute_limit
+dt "inbox v2 jobs: a run sends four renewals" "$D/inbox_jobs.rs" \
+    'pub const RENEW_PER_RUN: usize = 4;' 'pub const RENEW_PER_RUN: usize = 5;' \
+    a_run_sends_at_most_its_renewals_and_the_next_run_the_next
+dt "inbox v2 jobs: a run sends no fewer than four renewals" "$D/inbox_jobs.rs" \
+    'pub const RENEW_PER_RUN: usize = 4;' 'pub const RENEW_PER_RUN: usize = 3;' \
+    a_run_sends_at_most_its_renewals_and_the_next_run_the_next
+dt "inbox v2 jobs: a run looks at sixteen contacts" "$D/inbox_jobs.rs" \
+    'pub const RENEW_LOOKS_PER_RUN: usize = 16;' 'pub const RENEW_LOOKS_PER_RUN: usize = 17;' \
+    a_run_looks_at_no_more_contacts_than_its_looks
+dt "inbox v2 jobs: due contacts are served oldest first" "$D/inbox_jobs.rs" \
+    '        due.sort_unstable();
+' '' due_contacts_are_served_oldest_first
+dt "inbox v2 jobs: finding a contact's inbox starts its backoff over" "$D/inbox_jobs.rs" \
+    '            e.misses = 0;
+            changed = true;' '            changed = true;' \
+    a_contact_that_comes_back_starts_the_backoff_over
+dt "inbox v2 jobs: a contact that admits no pass of ours is asked again in a day" "$D/inbox_v2.rs" \
+    'pub const NO_PASS_RETRY: u64 = DAY;' 'pub const NO_PASS_RETRY: u64 = DAY + 3600;' \
+    a_contact_whose_renewal_fails_never_stops_the_others
+dt "inbox v2 jobs: a refused renewal is a wait, not a failure" "$D/inbox_jobs.rs" \
+    'Err(f) if f.code == FailureCode::Refused => return Ok(Some(now + v2::NO_PASS_RETRY)),' \
+    'Err(f) if false => return Ok(Some(now + v2::NO_PASS_RETRY)),' \
+    a_contact_whose_renewal_fails_never_stops_the_others
+dt "inbox v2: what a drain of a page's own state returns is accepted by the contract" "$D/inbox_v2.rs" \
+    '            .sign_v2(w::OWNER_SIG_CONTEXT, &w::owner_bytes(&me.addr.0, &owner)),' \
+    '            .sign_v2(&[], &w::owner_bytes(&me.addr.0, &owner)),' \
+    strangers_never_crowd_out_a_new_correspondents_pass,a_page_state_admission_is_checked_before_it_counts
+dt "inbox v2: a RequireGhost inbox refuses a message with no proof" \
+    "$STAGE/contracts/inbox-v2/src/merge.rs" \
+    '        let proof = proof?;
+        if proof.cert.len()' \
+    '        let Some(proof) = proof else {
+            return Some(Slot::Quarantine { ghost: None });
+        };
+        if proof.cert.len()' \
+    a_ghost_key_proof_from_the_fixtures_passes_the_contract
+dt "inbox v2 jobs: a drained message writes no more than an import" "$D/inbox_v2.rs" \
+    'store_inbound(s, me, rec, id, &inbound, out)?;' \
+    'for i in 0..40 { let _ = s.put(&format!("zz/{i}"), &[0]); }
+        store_inbound(s, me, rec, id, &inbound, out)?;' \
+    a_drained_message_costs_about_what_an_import_does
+dt "inbox v2 jobs: a renewal writes no more than an import" "$D/inbox_jobs.rs" \
+    'v2::note_sent(s, me, &pass_id, &sealed.id.0, now, true)?;' \
+    'for i in 0..40 { let _ = s.put(&format!("zz/{i}"), &[0]); }
+        v2::note_sent(s, me, &pass_id, &sealed.id.0, now, true)?;' \
+    a_drained_message_costs_about_what_an_import_does
+dt "inbox v2: the address is the vector's" "$STAGE/protocol/src/address.rs" \
+    'pub const ADDRESS_CONTEXT: &str = "freenet-mail address v1";' \
+    'pub const ADDRESS_CONTEXT: &str = "freenet-mail address v2";' \
+    the_vector_key_has_the_vectors_address_and_check
+dt "inbox v2: the address check is the vector's" \
+    "$STAGE/contracts/inbox-v2/src/signed.rs" \
+    'const ADDRESS_CHECK_CONTEXT: &str = "freenet-mail address check v1";' \
+    'const ADDRESS_CHECK_CONTEXT: &str = "freenet-mail address check v2";' \
+    the_vector_key_has_the_vectors_address_and_check
+dt "inbox v2: the state the delegate encodes is the vector's" \
+    "$STAGE/protocol/src/inbox_v2.rs" \
+    '    pub time: TimeAttestation,
+    pub revoked: BTreeMap<B16, Revocation>,
+    pub usage: BTreeMap<B16, PassUsage>,' \
+    '    pub time: TimeAttestation,
+    pub usage: BTreeMap<B16, PassUsage>,
+    pub revoked: BTreeMap<B16, Revocation>,' \
+    a_state_the_delegate_encodes_has_the_vectors_summary
+dt "inbox v2: a proof's tag comes from the key the sender bound" "$D/sealing.rs" \
+    'Admission::Quarantine { ghost: Some(_) } => (KIND_QUARANTINE, ghost_vk?.to_vec()),' \
+    'Admission::Quarantine { ghost: Some(_) } => (KIND_QUARANTINE, vec![0x33; 32]),' \
+    a_quarantine_message_with_an_undecodable_proof_has_the_vectors_id
+dt "inbox v2: a Conflict stores nothing until the copy reads back" "$D/inbox_v2.rs" \
+    '                let Some((generation, copy)) = stored_copy(s, &me.addr, id) else {
+                    return Err(f);' \
+    '                let Some((generation, copy)) = stored_copy(s, &me.addr, id) else {
+                    return Ok(());' \
+    a_copy_under_the_id_with_other_content_is_not_taken_for_the_message,a_drain_over_an_unreadable_index_never_tombstones_what_it_did_not_store,a_job_drain_over_an_unreadable_index_never_tombstones_what_it_did_not_store
+dt "inbox v2 jobs: an unreadable ledger entry keeps the contact's schedule" "$D/inbox_jobs.rs" \
+    '            return Ok(Some(now + backoff(looks)));' \
+    '            return Ok(None);' \
+    an_unreadable_ledger_entry_never_costs_a_contact_its_renewals
+dt "inbox v2 jobs: a missing ledger entry backs off across runs" "$D/inbox_jobs.rs" \
+    '            return Ok(Some(now + backoff(looks)));' \
+    '            return Ok(Some(now + backoff(1 + 0 * looks)));' \
+    a_missing_ledger_entry_backs_off_across_runs
+guard "inbox v2: a sweep whose unreadable keys never fire fails" "$D/env.rs" \
+    'self.blinded.borrow().is_none() && self.roll(self.blind_rate)' \
+    'self.blinded.borrow().is_none() && self.roll(self.blind_rate) && false' \
+    "tests:a_drain_over_a_faulty_host_never_tombstones_what_it_did_not_store" blind_assert_tests
 dt "origins get separate namespaces" "$D/store.rs" \
     'format!("o/{}/", hex(&origin.0))' '{ let _ = origin; "o/shared/".to_string() }' \
     origins_and_kinds_never_share_a_key,a_foreign_origin_can_neither_read_nor_change_another_namespace
@@ -1074,7 +1434,14 @@ also() {
     fi
     keep="$(mktemp "$STAGE/also.XXXXXX")"
     cp "$file" "$keep"
-    replace "$file" "$old" "$new"
+    if ! replace "$file" "$old" "$new"; then
+        # The second edit did not apply, so the guard below would test half a
+        # regression: count it as a failure instead of running it.
+        echo "not ok - $*: its second edit did not apply"
+        failures=$((failures + 1))
+        mv "$keep" "$file"
+        return
+    fi
     "$@"
     mv "$keep" "$file"
 }
@@ -1198,5 +1565,13 @@ if [ -n "$SHARD_N" ] && [ -z "${GUARD_ONLY:-}" ] && [ "$GUARDS_RUN" -eq 0 ]; the
     exit 1
 fi
 
+if [ "$ANCHORS" -eq 1 ]; then
+    # Anchors mode built and ran nothing: it shows only that every mutation
+    # still applies, not that any guard fails.
+    [ "$failures" -eq 0 ] || { echo "$failures guard(s) have a mutation that no longer applies"; exit 1; }
+    [ "$GUARDS_RUN" -gt 0 ] || { echo "no guard was checked"; exit 1; }
+    echo "every mutation applies exactly once ($GUARDS_RUN checked; no guard was run)"
+    exit 0
+fi
 [ "$failures" -eq 0 ] || { echo "$failures guard(s) did not fail as they should"; exit 1; }
 echo "every guard fails when what it guards is broken"
