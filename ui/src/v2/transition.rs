@@ -23,8 +23,8 @@
 //!   the delegate has not yet closed the v0.2.x inbox (a message there is not
 //!   imported yet).
 
-use freenet_mail_protocol::{Addr, V1_CONTACTS_FIELD, V1_DISCARD_FIELD};
 use freenet_mail_protocol::address::address_of;
+use freenet_mail_protocol::{Addr, V1_CONTACTS_FIELD, V1_DISCARD_FIELD};
 use freenet_stdlib::prelude::{ContractInstanceId, ContractKey, Parameters};
 
 use super::InboxRecordView;
@@ -156,8 +156,7 @@ pub(crate) fn legacy_from(id: &[u8; 32], got: &super::net::WithCode) -> Result<L
         &state.settings,
         state.last_update,
     );
-    if !crate::inbox::verify_message_signature(&signed, &params.pub_key, &state.inbox_signature)
-    {
+    if !crate::inbox::verify_message_signature(&signed, &params.pub_key, &state.inbox_signature) {
         return Err("the old inbox's encryption key is not signed by its owner".into());
     }
     Ok(Legacy {

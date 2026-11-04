@@ -33,8 +33,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use freenet_mail_protocol::inbox_v2::B32;
 use freenet_mail_protocol::{
-    Addr, Failure, FailureCode, Hash32, ItemKind, ItemRef, MAX_ITEM_BYTES, MAX_REMOVAL_BATCH, Reply,
-    V1_CONTACTS_FIELD, V1_DISCARD_FIELD,
+    Addr, Failure, FailureCode, Hash32, ItemKind, ItemRef, MAX_ITEM_BYTES, MAX_REMOVAL_BATCH,
+    Reply, V1_CONTACTS_FIELD, V1_DISCARD_FIELD,
 };
 use freenet_mail_wire_v1::aft::Tier;
 use freenet_mail_wire_v1::inbox::{InboxSettings, UpdateInbox};
@@ -321,8 +321,10 @@ pub fn close(
     let keys = Keys::from_seeds(&record.dsa, &record.kem);
     // The copies the indexes list: one listed that reads as absent is a
     // copy the host lost or could not read, never no copy.
-    let listed = [ItemKind::Kept, ItemKind::Archived]
-        .map(|kind| s.index(&store::index_rel(kind, Some(owner))).map(|(_, ids)| ids));
+    let listed = [ItemKind::Kept, ItemKind::Archived].map(|kind| {
+        s.index(&store::index_rel(kind, Some(owner)))
+            .map(|(_, ids)| ids)
+    });
     let listed = match listed {
         [Ok(kept), Ok(archived)] => Some([kept, archived]),
         _ => None,

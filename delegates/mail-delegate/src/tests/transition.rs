@@ -337,7 +337,12 @@ fn an_unreadable_archive_blocks_the_removal_of_its_message() {
             },
         )
         .unwrap();
-    let generation = match world.call_as(&a, Op::GetItem { item: at(ItemKind::Kept) }) {
+    let generation = match world.call_as(
+        &a,
+        Op::GetItem {
+            item: at(ItemKind::Kept),
+        },
+    ) {
         Ok(Reply::Item(Some(i))) => i.generation,
         other => panic!("{other:?}"),
     };
@@ -823,12 +828,18 @@ fn an_identity_accepts_only_contacts_it_listed() {
     list_v1(&mut world, &a, &[c]);
     send_pass(&mut world, &c, &b);
     settle(&mut world, &b, &c);
-    assert!(world.record(&b).auto_accepted.is_empty(), "not Bob's contact");
+    assert!(
+        world.record(&b).auto_accepted.is_empty(),
+        "not Bob's contact"
+    );
     assert_eq!(admission_of(&mut world, &c, &b), SendAdmission::Quarantine);
     send_pass(&mut world, &c, &a);
     settle(&mut world, &a, &c);
     let rec = world.record(&a);
-    assert!(rec.auto_accepted.contains(&serde_bytes::ByteArray::new(c.0)));
+    assert!(
+        rec.auto_accepted
+            .contains(&serde_bytes::ByteArray::new(c.0))
+    );
 }
 
 /// After the window nothing is accepted without the user, listed or not.
@@ -863,8 +874,12 @@ fn fill_ledger(world: &mut World, owner: &Addr) {
         i += 1;
     }
     let list: Vec<ByteBuf> = ids.into_iter().map(ByteBuf::from).collect();
-    s.write_if(&rel, generation, &freenet_mail_protocol::to_cbor(&list).unwrap())
-        .unwrap();
+    s.write_if(
+        &rel,
+        generation,
+        &freenet_mail_protocol::to_cbor(&list).unwrap(),
+    )
+    .unwrap();
 }
 
 /// A verified contact arriving while the pass ledger is full stays a
