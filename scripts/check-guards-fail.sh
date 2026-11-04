@@ -459,7 +459,8 @@ dt "inbox v2: an owner version never wraps" "$D/inbox_v2.rs" \
     '    v.checked_add(1).ok_or_else(|| {' '    Some(v.wrapping_add(1)).ok_or_else(|| {' \
     a_page_state_must_verify_and_versions_never_wrap
 dt "inbox v2 jobs: a pass never seen delivered is never pushed" "$D/inbox_jobs.rs" \
-    'if e.delivered == 0 {' 'if false {' a_sealed_message_never_sent_sends_nothing
+    'if e.delivered == 0 && !rec.auto_accepted.contains(&key) {' 'if false {' \
+    a_sealed_message_never_sent_sends_nothing
 dt "inbox v2: zero page entropy is refused" "$D/inbox_v2.rs" \
     'if entropy.0 == [0; 32] {' 'if false {' v2_operations_refuse_zero_entropy
 dt "inbox v2: the page cannot write the delegate's records" "$D/store.rs" \
@@ -509,11 +510,25 @@ dt "inbox v2: a stored copy lacking a proven Ghost Key is upgraded" "$D/inbox_v2
     '                if false {' \
     a_drain_that_proves_the_ghost_key_upgrades_the_copy_and_tombstones
 dt "inbox v2: mail is a contact's by its sender" "$D/inbox_v2.rs" \
-    'let contact = is_contact(s, me, rec, &from)?;' 'let contact = false;' \
+    'let mut contact = is_contact(s, me, rec, &from)?;' 'let mut contact = false;' \
     contact_mail_is_never_in_the_stranger_budget,a_contacts_quarantine_mail_is_never_evicted_as_a_strangers
 dt "inbox v2: a stranger written to leaves the stranger budget" "$D/inbox_v2.rs" \
     'rec.strangers.retain(|_, (_, from)| *from != Some(*sender));' 'let _ = sender;' \
     contact_mail_is_never_in_the_stranger_budget
+dt "v1 transition: the closing settings are signed once" "$D/transition.rs" \
+    '            save_closing(s, owner, id, c.clone())?;' '            let _ = &c;' \
+    the_close_waits_for_the_window_and_is_signed_once
+dt "v1 transition: a copy that does not read back is not imported" "$D/transition.rs" \
+    '            continue;
+        };
+        let matches' '            return true;
+        };
+        let matches' \
+    an_unreadable_kept_copy_blocks_the_removal_of_its_message
+dt "v1 transition: the queue accepts only the verified key that signed" "$D/inbox_v2.rs" \
+    '.is_ok_and(|r| r.keys.verified && r.keys.ml_dsa_vk_bytes == sender_vk),' \
+    '.is_ok_and(|r| r.keys.verified),' \
+    only_the_key_that_signed_is_accepted
 dt "inbox v2: invites have their own cap" "$D/inbox_v2.rs" \
     '            if rec.invites.len() >= MAX_INVITES {
                 return Err(' '            if false {
