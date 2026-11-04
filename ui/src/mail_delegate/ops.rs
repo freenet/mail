@@ -603,11 +603,26 @@ pub(crate) async fn run_jobs() -> Result<freenet_mail_protocol::JobsRun, CallErr
     }
 }
 
+#[cfg(not(target_family = "wasm"))]
+thread_local! {
+    /// Native builds (tests) do not wait: a pause moves this thread's clock
+    /// on instead, so code that waits for a time reaches it at once.
+    static PAUSED_MS: std::cell::Cell<i64> = const { std::cell::Cell::new(0) };
+}
+
 pub(crate) async fn pause_ms(ms: u32) {
     #[cfg(target_family = "wasm")]
     gloo_timers::future::TimeoutFuture::new(ms).await;
     #[cfg(not(target_family = "wasm"))]
-    let _ = ms;
+    PAUSED_MS.with(|p| p.set(p.get() + i64::from(ms)));
+}
+
+/// The page's clock, in milliseconds. Natively it includes every pause.
+pub(crate) fn now_ms() -> i64 {
+    let now = chrono::Utc::now().timestamp_millis();
+    #[cfg(not(target_family = "wasm"))]
+    let now = now + PAUSED_MS.with(std::cell::Cell::get);
+    now
 }
 
 #[cfg(all(test, feature = "local-delegate", not(feature = "use-node")))]

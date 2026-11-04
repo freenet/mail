@@ -238,6 +238,38 @@ fn an_owner_version_this_node_did_not_sign_is_seen() {
     assert!(owner::foreign(state(&a).owner.version, &rec()));
 }
 
+/// An update that shows up only after the read-backs is waited for, never
+/// sealed again before its `reseal_at`: one message lands, not two.
+#[test]
+fn a_slow_update_is_waited_for_and_not_sealed_twice() {
+    let (a, b) = (identity("v2-slow-a"), identity("v2-slow-b"));
+    // Past the read-backs, and past many later looks.
+    net::offline::slow_updates(&b, 40);
+    let out = block_on(send::send(a, b, &body("slow")));
+    assert!(out.delivered(), "{out:?}");
+    assert_eq!(state(&b).messages.len(), 1, "sealed again before reseal_at");
+}
+
+/// An update that never shows up is sealed again only at its `reseal_at`
+/// (two days on), and reported after the last reseal.
+#[test]
+fn a_send_that_never_lands_is_resealed_only_at_reseal_at() {
+    let (a, b) = (identity("v2-lost-a"), identity("v2-lost-b"));
+    net::offline::slow_updates(&b, u32::MAX);
+    send::SEALS.with(|s| s.borrow_mut().clear());
+    let out = block_on(send::send(a, b, &body("lost")));
+    assert_eq!(out, Outcome::NotDelivered(NotDelivered::AfterReseals));
+    let seals = send::SEALS.with(|s| s.borrow().clone());
+    assert_eq!(seals.len(), usize::from(freenet_mail_protocol::MAX_RESEALS) + 1);
+    for pair in seals.windows(2) {
+        let ((_, reseal_at), (at, _)) = (pair[0], pair[1]);
+        assert!(
+            at >= i64::try_from(reseal_at).unwrap() * 1_000,
+            "sealed again at {at} ms, before reseal_at {reseal_at} s"
+        );
+    }
+}
+
 /// A message to a name or address the UI cannot reach says so, unsent.
 #[test]
 fn an_address_with_no_inbox_is_reported() {

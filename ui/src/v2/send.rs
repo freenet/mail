@@ -122,6 +122,10 @@ pub(crate) static LAST_OUTCOME: dioxus::prelude::GlobalSignal<Option<(u32, Strin
 
 thread_local! {
     static SENDS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    /// Tests: when each seal happened (page ms) and its `reseal_at`.
+    #[cfg(test)]
+    pub(crate) static SEALS: std::cell::RefCell<Vec<(i64, u64)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// How many times the inbox is read back after one update before the message
@@ -148,8 +152,21 @@ pub(crate) async fn send_ghost(
     from: Addr,
     to: Addr,
     content: SealContent,
-    mut ghost: Option<GhostChoice>,
+    ghost: Option<GhostChoice>,
 ) -> Outcome {
+    send_waiting(from, to, content, ghost, || {}).await
+}
+
+/// [`send_ghost`], calling `waiting` once if the message is not in their
+/// inbox after the first read-backs and the page keeps looking for it.
+async fn send_waiting(
+    from: Addr,
+    to: Addr,
+    content: SealContent,
+    mut ghost: Option<GhostChoice>,
+    waiting: impl Fn(),
+) -> Outcome {
+    let mut told = false;
     for reseals in 0..=MAX_RESEALS {
         let state = match net::get(&to, true).await {
             Ok(Got::State(s)) => s,
@@ -182,6 +199,11 @@ pub(crate) async fn send_ghost(
                 )));
             }
         };
+        #[cfg(test)]
+        SEALS.with(|s| {
+            s.borrow_mut()
+                .push((crate::mail_delegate::ops::now_ms(), sealed.reseal_at))
+        });
         let mut message: Message = match w::decode(&sealed.message) {
             Ok(m) => m,
             Err(e) => return Outcome::NotDelivered(NotDelivered::Unreachable(e)),
@@ -216,19 +238,20 @@ pub(crate) async fn send_ghost(
                 ghost: Some(signed.proof),
             };
         }
-        let delta = InboxDelta {
+        let delta = w::encode(&InboxDelta {
             messages: [(ByteArray::new(sealed.id.0), message)].into(),
             ..Default::default()
-        };
-        if let Err(e) = net::update(&to, w::encode(&delta)).await {
+        });
+        if let Err(e) = net::update(&to, delta.clone()).await {
             crate::log::error(format!("inbox v2: the update was refused: {e}"), None);
         }
+        let delivered = Outcome::Delivered {
+            admission: sealed.admission,
+            notice: sealed.notice,
+        };
         if read_back(&to, &sealed.id.0).await {
             super::contacts::note_send(from, to, sealed.admission, sealed.notice);
-            return Outcome::Delivered {
-                admission: sealed.admission,
-                notice: sealed.notice,
-            };
+            return delivered;
         }
         super::contacts::note_send(from, to, sealed.admission, sealed.notice);
         // Sealing again cannot make room in a full queue or a full pass.
@@ -237,8 +260,42 @@ pub(crate) async fn send_ghost(
             Some(SendNotice::PassFull) => return Outcome::NotDelivered(NotDelivered::PassFull),
             _ => {}
         }
+        // Decision 9: the update may still land, so this message is looked
+        // for (and sent again, the same message) until its `reseal_at`, and
+        // only then sealed anew. Sealing earlier could land both.
+        if !told {
+            told = true;
+            waiting();
+        }
+        if wait_for(&to, &sealed.id.0, &delta, sealed.reseal_at).await {
+            return delivered;
+        }
     }
     Outcome::NotDelivered(NotDelivered::AfterReseals)
+}
+
+/// The first pause while waiting for a message, and the longest.
+const WAIT_FIRST_MS: u32 = 5_000;
+const WAIT_MAX_MS: u32 = 600_000;
+
+/// Look for message `id` in `to`'s inbox until `reseal_at` (seconds), sending
+/// `delta` (the same message) again before each look in case an update was
+/// lost. Whether it landed.
+async fn wait_for(to: &Addr, id: &[u8; 32], delta: &[u8], reseal_at: u64) -> bool {
+    let until_ms = i64::try_from(reseal_at.saturating_mul(1_000)).unwrap_or(i64::MAX);
+    let mut pause = WAIT_FIRST_MS;
+    while crate::mail_delegate::ops::now_ms() < until_ms {
+        crate::mail_delegate::ops::pause_ms(pause).await;
+        pause = pause.saturating_mul(2).min(WAIT_MAX_MS);
+        let _ = net::update(to, delta.to_vec()).await;
+        if let Ok(Got::State(bytes)) = net::get(to, true).await
+            && let Ok(state) = w::decode(&bytes)
+            && w::delivered(&state, id)
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn refused(e: crate::ghostkeys::Refusal) -> Outcome {
@@ -329,7 +386,17 @@ pub(crate) fn send_and_record(
             crate::log::local_state_failure("save sent message", e);
         }
         let content = SealContent::Mail(body.encode().into());
-        let outcome = send_ghost(from, to, content, ghost).await;
+        let waiting_name = to_name.clone();
+        let outcome = send_waiting(from, to, content, ghost, move || {
+            crate::toast::push_toast_detached(
+                format!(
+                    "Sent to {waiting_name}, but not in their inbox yet. This page keeps \
+                     checking while it is open; Sent shows it as pending until then."
+                ),
+                crate::toast::ToastLevel::Warning,
+            );
+        })
+        .await;
         let state = if outcome.delivered() {
             DeliveryState::Delivered
         } else {

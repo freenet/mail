@@ -246,6 +246,58 @@ pub(crate) mod offline {
 
     thread_local! {
         static STATES: RefCell<HashMap<ContractInstanceId, Vec<u8>>> = RefCell::new(HashMap::new());
+        /// Tests: updates to an inbox held back until that many more GETs
+        /// of it, as on a slow network.
+        #[cfg(test)]
+        static SLOW: RefCell<HashMap<ContractInstanceId, (u32, Vec<Vec<u8>>)>> =
+            RefCell::new(HashMap::new());
+    }
+
+    /// Tests: hold every update to `addr` back, and apply them once `gets`
+    /// GETs of it were answered while one waited.
+    #[cfg(test)]
+    pub(crate) fn slow_updates(addr: &Addr, gets: u32) {
+        let id = super::super::instance_id(addr);
+        SLOW.with(|s| s.borrow_mut().insert(id, (gets, Vec::new())));
+    }
+
+    #[cfg(test)]
+    fn held_back(addr: &Addr, delta: &[u8]) -> bool {
+        let id = super::super::instance_id(addr);
+        SLOW.with(|s| match s.borrow_mut().get_mut(&id) {
+            Some((_, held)) => {
+                held.push(delta.to_vec());
+                true
+            }
+            None => false,
+        })
+    }
+
+    /// Tests: count a GET against the held updates, and apply them once due.
+    #[cfg(test)]
+    fn tick(addr: &Addr) {
+        let id = super::super::instance_id(addr);
+        let due = SLOW.with(|s| {
+            let mut s = s.borrow_mut();
+            let (left, held) = s.get_mut(&id)?;
+            if held.is_empty() {
+                return None;
+            }
+            *left = left.saturating_sub(1);
+            if *left > 0 {
+                return None;
+            }
+            s.remove(&id).map(|(_, h)| h)
+        });
+        for delta in due.unwrap_or_default() {
+            let held = STATES.with(|s| s.borrow().get(&id).cloned());
+            if let Some(held) = held
+                && let Ok(d) = w::decode::<InboxDelta>(&delta)
+                && let Ok(merged) = merge(&held, d)
+            {
+                store(addr, merged);
+            }
+        }
     }
 
     fn store(addr: &Addr, bytes: Vec<u8>) {
@@ -263,6 +315,8 @@ pub(crate) mod offline {
 
     pub(crate) async fn get(addr: &Addr, _subscribe: bool) -> Result<Got, String> {
         let id = super::super::instance_id(addr);
+        #[cfg(test)]
+        tick(addr);
         Ok(STATES
             .with(|s| s.borrow().get(&id).cloned())
             .map_or(Got::Missing, Got::State))
@@ -286,6 +340,10 @@ pub(crate) mod offline {
         let held = STATES
             .with(|s| s.borrow().get(&id).cloned())
             .ok_or("no such inbox")?;
+        #[cfg(test)]
+        if held_back(addr, &delta) {
+            return Ok(());
+        }
         let merged = merge(&held, w::decode::<InboxDelta>(&delta)?)?;
         store(addr, merged);
         Ok(())
