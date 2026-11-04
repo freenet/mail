@@ -15,7 +15,8 @@
 //! **Nothing is lost.** The v1 contract checks every message it holds
 //! against the new settings, and the node refuses an update whose outcome is
 //! invalid, so the messages go first, in a `RemoveMessages` signed on each
-//! attempt. Only a message this identity has as mail is removed: a kept or
+//! attempt. Removal then settings: two updates, each counted against the
+//! inbox's writes a minute, so the settings can follow on a later run. Only a message this identity has as mail is removed: a kept or
 //! archived copy that reads back and holds the same title and text as the
 //! message decrypts to, or a deletion by the user (a tombstone or a deleted
 //! flag, for a message that could have been kept). A message that never

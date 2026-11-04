@@ -226,6 +226,33 @@ fn the_close_waits_for_the_window_and_is_signed_once() {
     assert_eq!(kept_ids(&mut world, &a).len(), 2);
 }
 
+/// The close's two updates each count against the inbox's 60 a minute. With
+/// 59 already sent only the removal goes; the settings follow in a later
+/// minute, still under the one signature.
+#[test]
+fn the_close_keeps_to_the_write_budget() {
+    let (mut world, a, me, id) = imported_two();
+    world.advance(WINDOW);
+    let now = world.env.now.unwrap();
+    let mut budget = crate::jobs::Budget::new(now);
+    for _ in 0..crate::jobs::MAX_WRITES_PER_MINUTE - 1 {
+        budget.take_write(id);
+    }
+    watch::save_budget(&mut world.env, &budget);
+    let first = run_v1(&mut world, &a, id);
+    assert_eq!(first.len(), 1, "only the 60th update");
+    assert!(matches!(
+        serde_json::from_slice(&first[0]).unwrap(),
+        UpdateInbox::RemoveMessages { .. }
+    ));
+    assert_eq!(land(&mut world, &me, id, &first), 0);
+    world.advance(60);
+    let next = run_v1(&mut world, &a, id);
+    assert_eq!(settings_sigs(&next).len(), 1, "the settings, a minute on");
+    assert_eq!(land(&mut world, &me, id, &next), 0);
+    assert!(is_closed(&settings_of(&world, id)));
+}
+
 /// A message that arrives after the last import is not removed: the
 /// settings the run sent are refused by the node, and the next run imports
 /// it and closes, with the same signature.

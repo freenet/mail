@@ -142,7 +142,13 @@ pub fn run(env: &mut dyn Env, trigger: Trigger) -> (JobsRun, Vec<OutboundDelegat
                 if !target.legacy && budget.may_write(&target.id) {
                     match transition::close(&mut s, &target.addr, &target.id, &state, now) {
                         Ok(updates) => {
+                            // Each update counts. The removal goes first, so
+                            // when only one fits the settings wait for a
+                            // later run.
                             for u in updates {
+                                if !budget.may_write(&target.id) {
+                                    break;
+                                }
                                 budget.take_write(target.id);
                                 closes.push(OutboundDelegateMsg::UpdateContractRequest(
                                     UpdateContractRequest::new(
