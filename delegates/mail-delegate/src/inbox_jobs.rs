@@ -487,7 +487,9 @@ impl Renewing<'_> {
         // page sealed, which it may never have sent: it is read back for
         // while that mail could still land, and nothing is sent for it, so
         // composing to someone never makes this node write to them.
-        if e.delivered == 0 {
+        // A contact accepted by the drain (decision 26) is sent its pass as
+        // a manual accept would.
+        if e.delivered == 0 && !rec.auto_accepted.contains(&key) {
             if state.is_none() && e.pending.is_some() {
                 self.done.missing.push(id);
             }

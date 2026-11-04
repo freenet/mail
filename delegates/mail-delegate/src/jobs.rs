@@ -169,6 +169,9 @@ pub struct Target {
     pub origin: Origin,
     pub addr: Addr,
     pub id: ContractId,
+    /// An inbox of an earlier v1 generation, probed read-only during the
+    /// transition window. Ranked after every other subscription.
+    pub legacy: bool,
 }
 
 /// A subscription's rank class, strongest first.
@@ -181,6 +184,8 @@ pub enum Tier {
     V1Inbox,
     /// Contacts' inboxes, for key refresh (inbox v2).
     Contact,
+    /// v1 inboxes of an earlier generation (`Target::legacy`).
+    V1Legacy,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -442,7 +447,11 @@ pub fn plan(trigger: Trigger, targets: &[Target], v2: &[Candidate], budget: &mut
             .map(|t| Candidate {
                 id: t.id,
                 origin: t.origin,
-                tier: Tier::V1Inbox,
+                tier: if t.legacy {
+                    Tier::V1Legacy
+                } else {
+                    Tier::V1Inbox
+                },
                 activity: 0,
             })
             .chain(v2.iter().copied())

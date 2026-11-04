@@ -25,6 +25,7 @@ pub mod inbox_v2;
 pub mod jobs;
 pub mod sealing;
 pub mod store;
+pub mod transition;
 pub mod watch;
 
 #[cfg(test)]
