@@ -204,9 +204,7 @@ mod node {
             if let Some(tx) = slot.tx.take() {
                 return Some(Some(tx));
             }
-            if slot.late_until.is_none() {
-                return None;
-            }
+            slot.late_until?;
             slot.release();
             if slot.idle() {
                 s.remove(&key);

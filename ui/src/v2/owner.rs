@@ -350,7 +350,9 @@ pub(crate) fn forget_status(addr: Addr) {
     set_status(addr, |s| *s = Status::default());
 }
 
-/// Make sure `addr` has a v2 inbox on the network, held and followed.
+/// Make sure `addr` has a v2 inbox on the network, held and followed, with
+/// no start loop to stop (tests).
+#[cfg(all(test, not(feature = "use-node")))]
 pub(crate) async fn ensure(addr: Addr) -> Result<(), String> {
     ensure_for(addr, None).await
 }
