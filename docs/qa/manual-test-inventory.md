@@ -31,10 +31,13 @@ manual gap by adding a test, flip status to `auto` and link the test.
   parsing and warnings, the Ghost Key badge and its tier coming and going
   with the recipient's policy and the pass held, first contact through the
   new-contacts queue and the reply by pass, an invite, the "active on
-  another node" warning (`?v2-foreign-fixture`), a clean console. Runs with
-  the offline suite. Both identities there are your own, so contact rows
-  and revocation are covered by `ui/src/v2/flows.rs` (rust, real delegate)
-  and the iso run below.
+  another node" warning (`?v2-foreign-fixture`), archiving and deleting a
+  drained message, a clean console. Runs with the offline suite. Both
+  identities there are your own, so contact rows and revocation are covered
+  by `ui/src/v2/flows.rs` (rust, real delegate) and the iso run below. The
+  offline build keeps nothing across a reload, so that every copy of a
+  deleted or archived message is gone after one is shown by
+  `ui/src/v2/flows.rs`, which reloads the local state from the delegate.
 - **inbox v2, iso** — `ui/tests/inbox-v2-live.spec.ts`, run by `cargo make
   test-e2e-inbox-v2` (two nodes, free ports, a build with the test Ghost
   Key master; a few minutes, up to about 25 when the drain waits for the

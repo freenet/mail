@@ -1284,8 +1284,11 @@ guard "inbox v2 UI: a request with no answer keeps its turn for its late answer"
     '                    if self.owed {' '                    if self.owed && false {' \
     "tests:a_late_answer_is_the_timed_out_requests_and_the_next_waits_for_it" ui_net_tests
 guard "ghost keys: a vault request with no answer keeps the turn for its late answer" "$STAGE/ui/src/ghostkeys.rs" \
-    '                LATE.with(|l| *l.borrow_mut() = Some(Owed { rx: Some(rx), until }));' \
-    '                let _ = (rx, until);' \
+    '                    *l.borrow_mut() = Some(Owed {
+                        rx: Some(rx),
+                        until,
+                    })' \
+    '                    let _ = (l, rx, until);' \
     "tests:a_late_vault_answer_is_never_the_next_requests" ui_ghostkeys_node_tests
 guard "inbox v2 UI: an archived v2 message keeps its sender's address" "$STAGE/ui/src/app.rs" \
     '    crate::address::full_address(label.as_deref(), &from.0)' \

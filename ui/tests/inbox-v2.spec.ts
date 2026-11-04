@@ -389,6 +389,35 @@ test.describe("Inbox v2 (offline)", () => {
     expect(errors).toEqual([]);
   });
 
+  test("deleting a drained v2 message that was opened removes its stored copy", async ({
+    page,
+  }) => {
+    const errors = watchConsole(page);
+    await page.goto("/");
+    await waitForApp(page);
+    await selectIdentity(page, "address2");
+    const bob = await myAddress(page);
+    const invite = await inviteOf(page);
+    await switchTo(page, "address1");
+    await expect(await addContact(page, invite)).toContainText("the invite is kept");
+    await closeSettings(page);
+    await expect(await send(page, bob, "delete me")).toHaveAttribute("data-delivered", "true");
+
+    await switchTo(page, "address2");
+    await expect(inboxRow(page, "delete me")).toBeVisible({ timeout: 30_000 });
+    const list = page.locator(tid(TID.fmList));
+    await expect(list).toHaveAttribute("data-v2-stored", "1");
+    // Opened first, so its read mark is written, then deleted.
+    const row = await openRow(page, "delete me");
+    await row.locator(tid(TID.fmDelete)).dispatchEvent("click");
+    await expect(inboxRow(page, "delete me")).toHaveCount(0, { timeout: 30_000 });
+    await expect(list).toHaveAttribute("data-v2-stored", "0", { timeout: 30_000 });
+    await expect(page.getByText("Deleted", { exact: true }).first()).toBeVisible({
+      timeout: 30_000,
+    });
+    expect(errors).toEqual([]);
+  });
+
   test("a lookalike sender who is not a contact is flagged in the list and the message", async ({
     page,
   }) => {
