@@ -518,13 +518,16 @@ dt "inbox v2: a stranger written to leaves the stranger budget" "$D/inbox_v2.rs"
 dt "v1 transition: the closing settings are signed once" "$D/transition.rs" \
     '            save_closing(s, owner, id, c.clone())?;' '            let _ = &c;' \
     the_close_waits_for_the_window_and_is_signed_once
-dt "v1 transition: a copy that does not read back is not imported" "$D/transition.rs" \
-    '            continue;
-        };
-        let matches' '            return true;
-        };
-        let matches' \
-    an_unreadable_kept_copy_blocks_the_removal_of_its_message
+dt "v1 transition: a message with no copy is not imported" "$D/transition.rs" \
+    '        if !ids.contains(&id[..]) {
+            continue;' '        if !ids.contains(&id[..]) {
+            return true;' \
+    a_message_too_large_to_keep_stays
+dt "v1 transition: a listed copy that does not read back is not imported" "$D/transition.rs" \
+    '        let Some(Some(body)) = read(*kind) else {
+            return false;' '        let Some(Some(body)) = read(*kind) else {
+            continue;' \
+    an_unreadable_kept_copy_blocks_the_removal_of_its_message,an_unreadable_archive_blocks_the_removal_of_its_message
 dt "v1 transition: the queue accepts only the verified key that signed" "$D/inbox_v2.rs" \
     '.is_ok_and(|r| r.keys.verified && r.keys.ml_dsa_vk_bytes == sender_vk),' \
     '.is_ok_and(|r| r.keys.verified),' \

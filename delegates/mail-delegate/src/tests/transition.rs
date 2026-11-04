@@ -312,6 +312,56 @@ fn an_unreadable_kept_copy_blocks_the_removal_of_its_message() {
     assert!(is_closed(&settings_of(&world, id)));
 }
 
+/// An archived message whose archive cannot be read stays: archiving
+/// deleted its kept copy and left a tombstone, which is not the user
+/// deleting the mail, so the tombstone must not stand in for the copy.
+#[test]
+fn an_unreadable_archive_blocks_the_removal_of_its_message() {
+    let (mut world, a, me, id) = imported_two();
+    let one = id_of(&serde_json::to_vec(&held(&me, "one", 1)).unwrap());
+    let at = |kind| ItemRef {
+        kind,
+        owner: Some(a),
+        id: one.to_vec(),
+    };
+    let archived = serde_json::json!({
+        "from": "bob", "title": "one", "content": "body of one", "archived_at": 0,
+    });
+    world
+        .call_as(
+            &a,
+            Op::PutItem {
+                item: at(ItemKind::Archived),
+                body: ByteBuf::from(serde_json::to_vec(&archived).unwrap()),
+                expected_gen: Some(0),
+            },
+        )
+        .unwrap();
+    let generation = match world.call_as(&a, Op::GetItem { item: at(ItemKind::Kept) }) {
+        Ok(Reply::Item(Some(i))) => i.generation,
+        other => panic!("{other:?}"),
+    };
+    world
+        .call_as(
+            &a,
+            Op::DeleteItem {
+                item: at(ItemKind::Kept),
+                expected_gen: generation,
+            },
+        )
+        .unwrap();
+    world.advance(WINDOW);
+    let rel = item_rel(&at(ItemKind::Archived));
+    let key = Space::new(&mut world.env, Origin([PROD; 32])).full_key(&rel);
+    world.env.faults = Some(Faults::blind(&String::from_utf8(key).unwrap()));
+    let out = run_v1(&mut world, &a, id);
+    assert_eq!(out.len(), 1, "no settings while a message stays");
+    let UpdateInbox::RemoveMessages { ids, .. } = serde_json::from_slice(&out[0]).unwrap() else {
+        panic!("a removal");
+    };
+    assert_eq!(ids, vec![[2; 32]], "the archived one stays");
+}
+
 /// A copy that reads back but is not this message (another title) is not
 /// proof of an import either.
 #[test]

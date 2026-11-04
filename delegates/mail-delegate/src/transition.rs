@@ -29,7 +29,7 @@
 //! Earlier v1 generations (`handlers::V1_LEGACY_INBOX_CODE_HASHES`) are read
 //! during the window and never written.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use freenet_mail_protocol::inbox_v2::B32;
 use freenet_mail_protocol::{
@@ -258,10 +258,21 @@ pub fn close(
     }
     let (_, record) = handlers::require_identity(s, owner)?;
     let keys = Keys::from_seeds(&record.dsa, &record.kem);
+    // The copies the indexes list: one listed that reads as absent is a
+    // copy the host lost or could not read, never no copy.
+    let listed = [ItemKind::Kept, ItemKind::Archived]
+        .map(|kind| s.index(&store::index_rel(kind, Some(owner))).map(|(_, ids)| ids));
+    let listed = match listed {
+        [Ok(kept), Ok(archived)] => Some([kept, archived]),
+        _ => None,
+    };
     let mut remove = Vec::new();
     let mut stays = 0usize;
     for m in &inbox.messages {
-        if imported(s, owner, &keys, m, now) {
+        if listed
+            .as_ref()
+            .is_some_and(|l| imported(s, owner, &keys, l, m, now))
+        {
             remove.push(Hash32(m.token_assignment.assignment_hash));
         } else {
             stays += 1;
@@ -312,7 +323,14 @@ fn kind_item(kind: ItemKind, owner: &Addr, id: [u8; 16]) -> ItemRef {
 
 /// Whether `m` is this identity's mail already, so removing it from the v1
 /// inbox loses nothing. Anything that cannot be read says no.
-fn imported(s: &Space<'_>, owner: &Addr, keys: &Keys, m: &Message, now: u64) -> bool {
+fn imported(
+    s: &Space<'_>,
+    owner: &Addr,
+    keys: &Keys,
+    listed: &[BTreeSet<Vec<u8>>; 2],
+    m: &Message,
+    now: u64,
+) -> bool {
     let id = crate::watch::message_id(&m.content);
     let plain = crypto::decrypt_v1(&keys.kem, &m.content)
         .and_then(|p| serde_json::from_slice::<Plain>(&p).ok());
@@ -327,12 +345,13 @@ fn imported(s: &Space<'_>, owner: &Addr, keys: &Keys, m: &Message, now: u64) -> 
             .as_ref()
             .is_some_and(|p| p.title == title && p.content == content)
     };
-    for kind in [ItemKind::Kept, ItemKind::Archived] {
-        let Some(found) = read(kind) else {
-            return false;
-        };
-        let Some(body) = found else {
+    for (kind, ids) in [ItemKind::Kept, ItemKind::Archived].iter().zip(listed) {
+        if !ids.contains(&id[..]) {
             continue;
+        }
+        // Listed, so a copy that does not read back is unreadable.
+        let Some(Some(body)) = read(*kind) else {
+            return false;
         };
         let matches = match kind {
             ItemKind::Kept => serde_json::from_slice::<KeptMessage>(&body)
