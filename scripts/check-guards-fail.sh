@@ -131,6 +131,13 @@ ui_migration_tests() {
 ui_notfound_tests() {
     cargo test --manifest-path "$STAGE/Cargo.toml" -p freenet-email-ui --lib notfound_routing
 }
+ui_net_tests() {
+    cargo test --manifest-path "$STAGE/Cargo.toml" -p freenet-email-ui --lib v2::net
+}
+ui_v2_flow_tests() {
+    cargo test --manifest-path "$STAGE/Cargo.toml" -p freenet-email-ui --lib \
+        --no-default-features --features example-data,no-sync v2::flows
+}
 ui_local_tests() {
     cargo test --manifest-path "$STAGE/Cargo.toml" -p freenet-email-ui --lib \
         --no-default-features --features example-data,no-sync identity_store
@@ -194,6 +201,8 @@ baseline "delegate time-driven fault run" time_tests
 baseline "protocol tests" protocol_tests
 baseline "migration tests" ui_migration_tests
 baseline "local-delegate identity tests" ui_local_tests
+baseline "inbox v2 UI network tests" ui_net_tests
+baseline "inbox v2 UI flows" ui_v2_flow_tests
 baseline "UI background jobs tests" ui_jobs_tests
 baseline "release freeze tests" freeze_tests
 baseline "release scrub tests" scrub_release_tests
@@ -348,6 +357,16 @@ dt "inbox v2: republishing signs a new version" "$D/inbox_v2.rs" \
 dt "inbox v2: republishing keeps the tombstones" "$D/inbox_v2.rs" \
     '.retain(|_, t| t.saturating_add(w::WINDOW_BACK) >= owner_time);' '.retain(|_, _| false);' \
     an_inbox_signed_again_keeps_its_tombstones
+dt "inbox v2: the note keeps the highest version seen" "$D/inbox_v2.rs" \
+    'let version = rec.foreign_seen.map_or(0, |f| f.version).max(owner.version);' \
+    'let version = owner.version;' \
+    a_note_of_another_node_keeps_its_first_sighting_and_highest_version
+dt "inbox v2: the note keeps when it was first seen" "$D/inbox_v2.rs" \
+    'let at = rec.foreign_seen.map_or(now, |f| f.at);' 'let at = now;' \
+    a_note_of_another_node_keeps_its_first_sighting_and_highest_version
+dt "inbox v2: a record with no digest is not flagged at its own version" "$D/inbox_v2.rs" \
+    '.is_some_and(|mine| mine != owner_digest(owner)))' '.is_none_or(|mine| mine != owner_digest(owner)))' \
+    a_record_with_no_digest_is_not_flagged_at_its_own_version
 dt "inbox v2: another node's record stays noted" "$D/inbox_v2.rs" \
     '    if !signed_elsewhere(rec, owner) {
         return;' '    if !signed_elsewhere(rec, owner) {
@@ -1191,6 +1210,25 @@ guard "an unconfirmed identity's arm publishes nothing" "$STAGE/ui/src/api.rs" \
                         ));
                         crate::app::identity_store::spawn_detached(async {});' \
     "tests:the_unconfirmed_arm_has_no_publish_in_it" ui_notfound_tests
+guard "inbox v2 UI: an inbox is known only once the node took its GET" "$STAGE/ui/src/v2/net.rs" \
+    '        if let Err(e) = client.send(request.into()).await {' \
+    '        KNOWN.with(|k| k.borrow_mut().insert(id));
+        if let Err(e) = client.send(request.into()).await {' \
+    "tests:a_get_that_was_never_sent_leaves_the_code_to_fetch" ui_net_tests
+guard "inbox v2 UI: a start publishes an inbox the network lacks" "$STAGE/ui/src/v2/owner.rs" \
+    '    if on_network {
+        return Ok(());
+    }' '    if on_network || true {
+        return Ok(());
+    }' \
+    "tests:an_inbox_whose_create_reply_never_reached_a_page_is_published_later" ui_v2_flow_tests
+guard "inbox v2 UI: the page warns from the delegate's note of another node" "$STAGE/ui/src/v2/owner.rs" \
+    '            if foreign(state.owner.version, rec) {' \
+    '            if state.owner.version > rec.max_version {' \
+    "tests:another_nodes_record_is_still_warned_about_after_this_node_signs_past_it" ui_v2_flow_tests
+guard "inbox v2 UI: an archive that kept the drained copy says so" "$STAGE/ui/src/v2/owner.rs" \
+    'remove_stored(r).await.map_err(|e| (true, e))' 'remove_stored(r).await.map_err(|e| (false, e))' \
+    "tests:an_archive_that_could_not_remove_the_drained_copy_says_so" ui_v2_flow_tests
 
 ut "a silent predecessor does not delay the list" "$STAGE/ui/src/app/identity_store.rs" \
     '    listing.await;

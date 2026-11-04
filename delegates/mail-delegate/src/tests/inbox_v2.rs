@@ -1113,3 +1113,43 @@ fn a_node_started_run_logs_what_woke_it_and_what_it_did() {
         "mail delegate run: woken_by=notification scanned=2 imported=1 unknown=0 remaining=3"
     );
 }
+
+/// Decision 25's note keeps when another node was first seen and the
+/// highest version seen: an older foreign record (a page's stale state) does
+/// not lower it, and a newer one raises the version but not the time.
+#[test]
+fn a_note_of_another_node_keeps_its_first_sighting_and_highest_version() {
+    let mut world = World::new();
+    let a = world.identity("alice");
+    let mut rec = world.record(&a);
+    let owner = |v: u64| {
+        let mut o = world.state(&a).owner;
+        o.version = v;
+        o
+    };
+    assert!(rec.max_version < 5);
+    inbox_v2::note_foreign(&mut rec, &owner(10), 100);
+    let seen = |rec: &InboxRecord| rec.foreign_seen.map(|f| (f.version, f.at));
+    assert_eq!(seen(&rec), Some((10, 100)));
+    inbox_v2::note_foreign(&mut rec, &owner(5), 200);
+    assert_eq!(seen(&rec), Some((10, 100)), "an older one lowers nothing");
+    inbox_v2::note_foreign(&mut rec, &owner(12), 300);
+    assert_eq!(seen(&rec), Some((12, 100)), "first seen at 100");
+}
+
+/// A record from before the delegate kept the digest of what it signed has
+/// none: its own version is then not taken for another node's, whatever the
+/// bytes (only a higher version is).
+#[test]
+fn a_record_with_no_digest_is_not_flagged_at_its_own_version() {
+    let mut world = World::new();
+    let a = world.identity("alice");
+    let mut rec = world.record(&a);
+    rec.signed_owner = None;
+    let mut other = world.state(&a).owner;
+    assert_eq!(other.version, rec.max_version);
+    other.quarantine = w::QuarantineMode::RequireGhost { min_usd: None };
+    assert!(!inbox_v2::signed_elsewhere(&rec, &other));
+    other.version += 1;
+    assert!(inbox_v2::signed_elsewhere(&rec, &other));
+}

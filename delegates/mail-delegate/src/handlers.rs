@@ -71,16 +71,14 @@ pub fn process(
             ),
             None => Vec::new(),
         }),
-        InboundDelegateMsg::ContractNotification(n) => Ok(background(
-            env,
-            contract_trigger(&n.contract_id)?,
-            "notification",
-        )),
-        InboundDelegateMsg::GetContractResponse(r) => Ok(background(
-            env,
-            contract_trigger(&r.contract_id)?,
-            "get-answer",
-        )),
+        InboundDelegateMsg::ContractNotification(n) => {
+            let trigger = contract_trigger(&n.contract_id)?;
+            Ok(background(env, trigger, "notification"))
+        }
+        InboundDelegateMsg::GetContractResponse(r) => {
+            let trigger = contract_trigger(&r.contract_id)?;
+            Ok(background(env, trigger, "get-answer"))
+        }
         // Every refresh asks again for every subscription, so the answer is
         // not recorded: a client can send this message, and a belief written
         // from it would let one switch off another's watch.

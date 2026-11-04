@@ -261,7 +261,7 @@ pub fn signed_elsewhere(rec: &InboxRecord, owner: &w::OwnerRecord) -> bool {
 }
 
 /// Note in `rec` an owner record another node signed, if `owner` is one.
-fn note_foreign(rec: &mut InboxRecord, owner: &w::OwnerRecord, now: u64) {
+pub(crate) fn note_foreign(rec: &mut InboxRecord, owner: &w::OwnerRecord, now: u64) {
     if !signed_elsewhere(rec, owner) {
         return;
     }
