@@ -184,7 +184,7 @@ async fn send_waiting(
                     "there is no inbox at this address on the network".into(),
                 ));
             }
-            Err(e) => return Outcome::NotDelivered(NotDelivered::Unreachable(e)),
+            Err(e) => return Outcome::NotDelivered(NotDelivered::Unreachable(e.to_string())),
         };
         let need = match w::decode::<w::InboxState>(&state).map(|s| s.owner.quarantine) {
             Ok(w::QuarantineMode::RequireGhost { min_usd }) => Some(min_usd.unwrap_or(0)),
@@ -251,8 +251,10 @@ async fn send_waiting(
             messages: [(ByteArray::new(sealed.id.0), message)].into(),
             ..Default::default()
         });
+        // Neither a refusal nor an unknown outcome decides: the read-back does.
         if let Err(e) = net::update(&to, delta.clone()).await {
-            crate::log::error(format!("inbox v2: the update was refused: {e}"), None);
+            let to = crate::address::display(&to.0);
+            crate::log::error(format!("inbox v2: the update to {to}: {e}"), None);
         }
         let delivered = Outcome::Delivered {
             admission: sealed.admission,

@@ -138,6 +138,9 @@ ui_v2_flow_tests() {
     cargo test --manifest-path "$STAGE/Cargo.toml" -p freenet-email-ui --lib \
         --no-default-features --features example-data,no-sync v2::flows
 }
+ui_ghostkeys_node_tests() {
+    cargo test --manifest-path "$STAGE/Cargo.toml" -p freenet-email-ui --lib ghostkeys::node
+}
 ui_v2_unit_tests() {
     cargo test --manifest-path "$STAGE/Cargo.toml" -p freenet-email-ui --lib \
         --no-default-features --features example-data,no-sync v2::
@@ -208,6 +211,7 @@ baseline "local-delegate identity tests" ui_local_tests
 baseline "inbox v2 UI network tests" ui_net_tests
 baseline "inbox v2 UI flows" ui_v2_flow_tests
 baseline "inbox v2 UI tests" ui_v2_unit_tests
+baseline "Ghost Key vault requests" ui_ghostkeys_node_tests
 baseline "UI background jobs tests" ui_jobs_tests
 baseline "release freeze tests" freeze_tests
 baseline "release scrub tests" scrub_release_tests
@@ -1272,6 +1276,13 @@ guard "inbox v2 UI: a v2 delete marks the message deleted only after its drained
         .map_err(|e| e.to_string())?;
     remove_stored(r).await' \
     "tests:a_v2_delete_that_could_not_remove_the_drained_copy_can_be_retried" ui_v2_flow_tests
+guard "inbox v2 UI: a request with no answer keeps its turn for its late answer" "$STAGE/ui/src/v2/net.rs" \
+    '                    if self.owed {' '                    if self.owed && false {' \
+    "tests:a_late_answer_is_the_timed_out_requests_and_the_next_waits_for_it" ui_net_tests
+guard "ghost keys: a vault request with no answer keeps the turn for its late answer" "$STAGE/ui/src/ghostkeys.rs" \
+    '                LATE.with(|l| *l.borrow_mut() = Some(Owed { rx: Some(rx), until }));' \
+    '                let _ = (rx, until);' \
+    "tests:a_late_vault_answer_is_never_the_next_requests" ui_ghostkeys_node_tests
 guard "inbox v2 UI: a ledger entry that does not decode fails the read" "$STAGE/ui/src/v2/contacts.rs" \
     '            Ok((PassId(id), entry))
         })

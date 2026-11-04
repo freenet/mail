@@ -256,7 +256,7 @@ pub(crate) async fn another_node_signs_with(addr: Addr, other: Addr) -> Result<(
         net::offline::store_unannounced(&addr, theirs.clone());
         let update = update_inbox(addr, theirs, OwnerChange::Drain).await?;
         let delta = update.update.ok_or("the drain signed nothing")?;
-        net::update(&addr, delta.to_vec()).await
+        net::update(&addr, delta.to_vec()).await.map_err(Into::into)
     }
     .await;
     HELD.with(|h| h.borrow_mut().remove(&addr));

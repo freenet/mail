@@ -488,14 +488,107 @@ mod node {
         Ok(key)
     }
 
+    /// How long a request that got no answer in time (or whose caller
+    /// stopped waiting) keeps the vault's turn, waiting for its late answer.
+    const LATE_MS: i64 = 5 * 60_000;
+
+    thread_local! {
+        /// The answer still owed to a request that stopped waiting, and until
+        /// when it is waited for. Answers carry no request id, so the next
+        /// request is sent only once this one's answer came (and is dropped)
+        /// or its wait is over.
+        static LATE: RefCell<Option<Owed>> = const { RefCell::new(None) };
+    }
+
+    /// An answer owed to a request. Dropped unanswered (timed out, or the
+    /// call cancelled), it is left in [`LATE`] for the next request to wait on.
+    struct Owed {
+        rx: Option<oneshot::Receiver<Answer>>,
+        until: i64,
+    }
+
+    impl Drop for Owed {
+        fn drop(&mut self) {
+            if let Some(rx) = self.rx.take() {
+                let until = self.until;
+                LATE.with(|l| {
+                    *l.borrow_mut() = Some(Owed {
+                        rx: Some(rx),
+                        until,
+                    })
+                });
+            }
+        }
+    }
+
+    fn now_ms() -> i64 {
+        crate::mail_delegate::ops::now_ms()
+    }
+
+    #[cfg(not(test))]
+    fn timer(ms: i64) -> impl std::future::Future<Output = ()> {
+        gloo_timers::future::TimeoutFuture::new(u32::try_from(ms.max(0)).unwrap_or(u32::MAX))
+    }
+
+    #[cfg(test)]
+    thread_local! {
+        /// Tests: the timers running, fired by the test.
+        static TIMERS: RefCell<Vec<oneshot::Sender<()>>> = const { RefCell::new(Vec::new()) };
+        /// Tests: the client requests go to.
+        static TEST_SENDER: RefCell<Option<crate::api::WebApiRequestClient>> =
+            const { RefCell::new(None) };
+    }
+
+    #[cfg(test)]
+    fn timer(_ms: i64) -> impl std::future::Future<Output = ()> {
+        let (tx, rx) = oneshot::channel();
+        TIMERS.with(|t| t.borrow_mut().push(tx));
+        async move {
+            let _ = rx.await;
+        }
+    }
+
+    fn sender() -> Option<crate::api::WebApiRequestClient> {
+        #[cfg(test)]
+        if let Some(s) = TEST_SENDER.with(|t| t.borrow().clone()) {
+            return Some(s);
+        }
+        crate::api::WEB_API_SENDER.get().cloned()
+    }
+
+    /// Wait out a request that stopped waiting: for its answer (dropped:
+    /// it is not this request's) or the end of its wait, whichever is first.
+    async fn wait_for_late() {
+        use futures::FutureExt;
+        let Some(mut late) = LATE.with(|l| l.borrow_mut().take()) else {
+            return;
+        };
+        let Some(rx) = late.rx.as_mut() else {
+            return;
+        };
+        let mut timer = Box::pin(timer(late.until - now_ms())).fuse();
+        let answered = futures::select! {
+            _ = rx.fuse() => true,
+            _ = timer => now_ms() >= late.until,
+        };
+        if answered {
+            // Answered or given up: owed no longer.
+            late.rx = None;
+            WAITER.with(|w| w.borrow_mut().take());
+        }
+        // Not over (a timer fired early): `late` goes back to LATE on drop,
+        // and the caller waits again.
+    }
+
     #[cfg_attr(feature = "test-ghost-master", allow(dead_code))]
     pub(super) async fn ask(request: GhostkeyRequest, prompts: bool) -> Answer {
         let lock = ONE_AT_A_TIME.with(Rc::clone);
         let _turn = lock.lock().await;
+        while LATE.with(|l| l.borrow().is_some()) {
+            wait_for_late().await;
+        }
         let key = delegate_key().await?;
         let bytes = ghostkey_common::to_cbor(&request).map_err(Refusal::Failed)?;
-        let (tx, rx) = oneshot::channel();
-        WAITER.with(|w| *w.borrow_mut() = Some(tx));
         let message = DelegateRequest::ApplicationMessages {
             key,
             params: Parameters::from(Vec::<u8>::new()),
@@ -503,24 +596,156 @@ mod node {
                 ApplicationMessage::new(bytes),
             )],
         };
-        let mut client = crate::api::WEB_API_SENDER
-            .get()
-            .ok_or_else(|| Refusal::Failed("not connected to the node".into()))?
-            .clone();
+        let mut client =
+            sender().ok_or_else(|| Refusal::Failed("not connected to the node".into()))?;
+        let (tx, rx) = oneshot::channel();
+        WAITER.with(|w| *w.borrow_mut() = Some(tx));
         if let Err(e) = client.send(message.into()).await {
             WAITER.with(|w| w.borrow_mut().take());
             return Err(Refusal::Failed(e.to_string()));
         }
-        use futures::FutureExt;
-        let mut rx = rx.fuse();
-        let ms = if prompts { PROMPT_MS } else { QUICK_MS };
-        let mut timer = gloo_timers::future::TimeoutFuture::new(ms).fuse();
-        let answer = futures::select! {
-            a = rx => a.unwrap_or_else(|_| Err(Refusal::Failed("no answer".into()))),
-            _ = timer => Err(Refusal::Failed("no answer in time".into())),
+        // From here its answer is owed: a timeout or a cancelled call leaves
+        // it for the next request to wait on.
+        let mut owed = Owed {
+            rx: Some(rx),
+            until: now_ms(),
         };
-        WAITER.with(|w| w.borrow_mut().take());
-        answer
+        use futures::FutureExt;
+        let ms = if prompts { PROMPT_MS } else { QUICK_MS };
+        let mut timer = Box::pin(timer(i64::from(ms))).fuse();
+        let got = {
+            let rx = owed.rx.as_mut().expect("just set").fuse();
+            futures::pin_mut!(rx);
+            futures::select! {
+                a = rx => Some(a),
+                _ = timer => None,
+            }
+        };
+        owed.until = now_ms() + LATE_MS;
+        match got {
+            Some(a) => {
+                owed.rx = None;
+                a.unwrap_or_else(|_| Err(Refusal::Failed("no answer".into())))
+            }
+            None => Err(Refusal::Failed(
+                "the Ghost Key vault did not answer in time, so whether it acted is unknown".into(),
+            )),
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use freenet_stdlib::client_api::ClientRequest;
+
+        type Requests = futures::channel::mpsc::UnboundedReceiver<ClientRequest<'static>>;
+
+        fn connect() -> Requests {
+            let (tx, rx) = futures::channel::mpsc::unbounded();
+            let (responses, _) = futures::channel::mpsc::unbounded();
+            TEST_SENDER.with(|t| {
+                *t.borrow_mut() = Some(crate::api::WebApiRequestClient::for_tests(tx, responses))
+            });
+            KEY.with(|k| *k.borrow_mut() = Some(key_for([7; 32])));
+            rx
+        }
+
+        fn fire() {
+            TIMERS.with(|t| {
+                t.borrow_mut().drain(..).for_each(|t| {
+                    let _ = t.send(());
+                })
+            });
+        }
+
+        fn answer(r: &GhostkeyResponse) {
+            let payload = ghostkey_common::to_cbor(r).unwrap();
+            response(&[OutboundDelegateMsg::ApplicationMessage(
+                ApplicationMessage::new(payload),
+            )]);
+        }
+
+        type Out = Rc<RefCell<Option<Answer>>>;
+
+        fn start(pool: &futures::executor::LocalPool) -> Out {
+            use futures::task::LocalSpawnExt;
+            let out: Out = Default::default();
+            let o = out.clone();
+            pool.spawner()
+                .spawn_local(async move {
+                    *o.borrow_mut() = Some(ask(GhostkeyRequest::HasIdentity, false).await);
+                })
+                .unwrap();
+            out
+        }
+
+        fn sent(requests: &mut Requests) -> usize {
+            std::iter::from_fn(|| requests.try_recv().ok()).count()
+        }
+
+        /// Class C: request A times out and is told so as unknown; B waits.
+        /// A's late answer is A's and is dropped; only then is B sent, and
+        /// B gets its own answer. The wait for a late answer is bounded.
+        #[test]
+        fn a_late_vault_answer_is_never_the_next_requests() {
+            let mut requests = connect();
+            let mut pool = futures::executor::LocalPool::new();
+            let a = start(&pool);
+            pool.run_until_stalled();
+            fire();
+            pool.run_until_stalled();
+            assert!(
+                matches!(&*a.borrow(), Some(Err(Refusal::Failed(e))) if e.contains("unknown")),
+                "{:?}",
+                a.borrow()
+            );
+            let b = start(&pool);
+            pool.run_until_stalled();
+            assert_eq!(sent(&mut requests), 1, "B waits for A's answer");
+            answer(&GhostkeyResponse::NoIdentityAvailable);
+            pool.run_until_stalled();
+            assert!(
+                b.borrow().is_none(),
+                "A's answer resolved B: {:?}",
+                b.borrow()
+            );
+            assert_eq!(sent(&mut requests), 1, "B goes out after A's answer");
+            answer(&GhostkeyResponse::Error {
+                message: "own".into(),
+            });
+            pool.run_until_stalled();
+            assert!(
+                matches!(&*b.borrow(), Some(Ok(GhostkeyResponse::Error { .. }))),
+                "{:?}",
+                b.borrow()
+            );
+
+            // C times out and its answer never comes: D goes out only once
+            // the wait is over, not when a timer fires early.
+            let c = start(&pool);
+            pool.run_until_stalled();
+            fire();
+            pool.run_until_stalled();
+            assert!(c.borrow().is_some());
+            let d = start(&pool);
+            pool.run_until_stalled();
+            fire();
+            pool.run_until_stalled();
+            assert_eq!(sent(&mut requests), 1, "C sent, D still waiting");
+            futures::executor::block_on(crate::mail_delegate::ops::pause_ms(LATE_MS as u32));
+            fire();
+            pool.run_until_stalled();
+            assert_eq!(sent(&mut requests), 1, "D sent once the wait is over");
+            answer(&GhostkeyResponse::Error {
+                message: "own".into(),
+            });
+            pool.run_until_stalled();
+            assert!(matches!(
+                &*d.borrow(),
+                Some(Ok(GhostkeyResponse::Error { .. }))
+            ));
+            TEST_SENDER.with(|t| t.borrow_mut().take());
+        }
     }
 }
 

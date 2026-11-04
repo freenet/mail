@@ -691,7 +691,7 @@ pub(crate) use items::{
     save_sent, set_sent_delivery_state,
 };
 // Only the node build finds stranded sends to presume failed.
-#[cfg(test)]
+#[cfg(all(test, not(feature = "use-node")))]
 pub(crate) use items::mark_read;
 #[cfg_attr(not(feature = "use-node"), allow(unused_imports))]
 pub(crate) use items::presume_sent_failed;
