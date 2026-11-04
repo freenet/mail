@@ -217,6 +217,34 @@ recovery-key codec. Its encoding is pinned per variant in
   issued before the restore cannot be renewed: they lapse at expiry, the
   contact falls back to quarantine (told plainly) and gets a new pass with the
   next mail. No epoch bump is forced.
+- **The v1 transition** (`src/transition.rs`, decisions 26 to 28). The window
+  is 90 days from when the identity's v2 inbox is made (a migrated identity
+  gets one once confirmed), kept in its inbox record. While it is open the
+  watch also reads the earlier v1 generations (`V1_LEGACY_INBOX_CODE_HASHES`,
+  the `legacy_inbox.toml` rows, pinned by a test) that this node holds; the
+  page asks the network for them. Nothing writes to those. Every v1 message
+  is keyed by `blake3(ciphertext)[..16]`, whichever inbox holds it. At the
+  end the current v1 inbox is closed, from the watch, one update at a time:
+  a signed `RemoveMessages` for each message that is this identity's mail (a
+  kept or archived copy that reads back with the same title and text, or the
+  user's tombstone or deleted flag for one that could have been kept, or one
+  no key decrypts), then `ModifySettings` to `Day365` with the exemption off,
+  sent only once nothing else is left: core validates the outcome and the v1
+  contract checks every held message against the new settings. The settings
+  are signed once and recorded before they leave; later attempts resend the
+  same bytes, and a state at or past that `last_update` ends it. Anything
+  that cannot be read stays and keeps the close pending (the inbox view says
+  so). A message too large to keep never leaves, so its inbox stays open.
+  `Op::EndV1WindowForTest` ends a window now in a `v1-transition` build only
+  (the real-node test's clock); any other build refuses it.
+- **Verified contacts through the queue (decision 26):** the drain accepts a
+  quarantined message whose sealing key (checked by `sealing::open`) is the
+  key of a contact record marked verified at that key's address: it issues
+  a contact pass as a manual accept would, and the renew job delivers it
+  (`InboxRecord::auto_accepted`). A label or any other claim plays no part.
+  The page sends each verified contact this identity's pass through their
+  queue once their v2 inbox exists (`ui/src/v2/transition.rs`), so a v0.3.0
+  contact can write to the new inbox by pass.
 - **Imports:** a node refuses to instantiate a module that imports a function
   it does not provide. `scripts/check-delegate-imports.sh` (a step of CI
   `check-drift`, so it blocks) compares the candidate's imports to
@@ -340,6 +368,16 @@ the delegate's.
   closed. That drain must come from the inbox's notification within 120 s (read
   from the peer's log line above). When it does not, the run waits up to 18.3 more minutes for the `rescan`
   wake-up, so it shows whether that fallback works, and then fails.
+- **Legacy ids:** `contacts::add` takes a 44-character v0.2.x id by reading
+  that inbox with its code (`transition::resolve_legacy`): the key is in the
+  parameters, which must make that id. A new contact added this way is
+  unverified; one already in the address book keeps its verification.
+- **`cargo make test-e2e-v1-transition`:** two real nodes. `tools/v1-node-seed
+  --transition` gives the gateway a v0.2.7 user with a verified contact and a
+  v1 inbox holding one message from him. Proves the message is imported once,
+  the contact (restored on the peer) gets her pass through his queue and
+  writes back by it, and the close at the end of the window (the test clock)
+  is signed once.
 
 The `legacy_*.toml` registries are validated by `ui/build.rs`
 (`freenet-migrate-build`; an empty registry fails the build) and pinned by

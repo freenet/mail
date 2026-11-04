@@ -179,8 +179,8 @@ pub struct Target {
 pub enum Tier {
     /// The owner's own inboxes (inbox v2).
     Own,
-    /// v0.2.x inboxes. Inbox v2 stops offering these when their 90-day window
-    /// closes.
+    /// v0.2.x inboxes of the current generation. Watched after the window
+    /// too: a closed inbox still admits a sender with a year token.
     V1Inbox,
     /// Contacts' inboxes, for key refresh (inbox v2).
     Contact,

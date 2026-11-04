@@ -634,3 +634,93 @@ fn only_the_key_that_signed_is_accepted() {
     assert!(rec.auto_accepted.is_empty());
     assert!(rec.issued.is_empty());
 }
+
+fn env_or(name: &str, default: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
+/// The close over a host that misses reads, refuses writes and loses keys
+/// for good (`CLOSE_SEEDS`, `CLOSE_RATE`, `CLOSE_BLIND`, per mille): however
+/// the runs go, the settings are signed at most once, and every message
+/// removed from the v1 inbox has a kept copy that reads back once the host is
+/// healthy. A message arrives part way, while the faults are on.
+#[test]
+fn the_close_over_a_faulty_host_signs_once_and_removes_only_kept_mail() {
+    let seeds = env_or("CLOSE_SEEDS", 40);
+    let rate = env_or("CLOSE_RATE", 60) as u32;
+    let blind = env_or("CLOSE_BLIND", 20) as u32;
+    let mut closed = 0;
+    for seed in 1..=seeds {
+        let (mut world, a, me, id) = imported_two();
+        world.advance(WINDOW - 600);
+        world.env.faults = Some(Faults::seeded_with_blindness(seed, rate, blind));
+        let mut sigs = std::collections::BTreeSet::new();
+        let mut removed = std::collections::BTreeSet::new();
+        for step in 0..12 {
+            if step == 3 {
+                let mut v: serde_json::Value =
+                    serde_json::from_slice(&world.env.contracts[&id]).unwrap();
+                v["messages"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(held(&me, "late", 3));
+                world
+                    .env
+                    .contracts
+                    .insert(id, serde_json::to_vec(&v).unwrap());
+            }
+            world.advance(300);
+            let out = run_v1(&mut world, &a, id);
+            sigs.extend(settings_sigs(&out));
+            for u in &out {
+                if let UpdateInbox::RemoveMessages { ids, .. } = serde_json::from_slice(u).unwrap()
+                {
+                    removed.extend(ids);
+                }
+            }
+            land(&mut world, &me, id, &out);
+        }
+        // Healthy again: the close finishes, still under the one signature.
+        world.env.faults = None;
+        for _ in 0..4 {
+            world.advance(300);
+            let out = run_v1(&mut world, &a, id);
+            sigs.extend(settings_sigs(&out));
+            for u in &out {
+                if let UpdateInbox::RemoveMessages { ids, .. } = serde_json::from_slice(u).unwrap()
+                {
+                    removed.extend(ids);
+                }
+            }
+            land(&mut world, &me, id, &out);
+        }
+        assert!(sigs.len() <= 1, "seed {seed}: signed {} times", sigs.len());
+        let titles = [(1u8, "one"), (2, "two"), (3, "late")];
+        for (n, title) in titles {
+            if !removed.contains(&[n; 32]) {
+                continue;
+            }
+            let mid = id_of(&serde_json::to_vec(&held(&me, title, n)).unwrap());
+            let item = ItemRef {
+                kind: ItemKind::Kept,
+                owner: Some(a),
+                id: mid.to_vec(),
+            };
+            assert!(
+                matches!(
+                    world.call_as(&a, Op::GetItem { item }),
+                    Ok(Reply::Item(Some(_)))
+                ),
+                "seed {seed}: `{title}` was removed with no kept copy"
+            );
+        }
+        if is_closed(&settings_of(&world, id)) {
+            closed += 1;
+        }
+    }
+    // A key lost for good can keep an inbox open; most close.
+    assert!(closed * 2 > seeds, "only {closed} of {seeds} closed");
+}
