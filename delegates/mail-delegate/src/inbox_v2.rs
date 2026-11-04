@@ -235,6 +235,20 @@ pub struct InboxRecord {
     /// tell its own record from another node's at the same version.
     #[serde(default)]
     pub signed_owner: Option<B32>,
+    /// The revocations of an inbox taken over (`CreateInboxV2` with
+    /// `existing`), which have no ledger entry here: their highest epoch and
+    /// largest expiry. A set can be larger than a record may be, so it is not
+    /// kept; while any of it may still be live, a republish bumps the epoch
+    /// with no grace instead ([`republish_inbox`]).
+    #[serde(default)]
+    pub inherited_revoked: Option<InheritedRevoked>,
+}
+
+/// See [`InboxRecord::inherited_revoked`].
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InheritedRevoked {
+    pub epoch: u32,
+    pub expiry: u64,
 }
 
 /// The newest owner record seen that this delegate did not sign.
@@ -481,6 +495,7 @@ pub fn create_inbox(
         absent_looks: BTreeMap::new(),
         foreign_seen: None,
         signed_owner: None,
+        inherited_revoked: None,
     };
     let mut state = match existing {
         None => None,
@@ -491,16 +506,25 @@ pub fn create_inbox(
             rec.pass_epoch = state.owner.pass_epoch;
             rec.prev_epoch_until = state.owner.prev_epoch_until;
             rec.quarantine = state.owner.quarantine;
+            // Every owner change, and a republish, builds on these.
+            rec.tombstones = state.owner.tombstones.clone();
+            rec.inherited_revoked = state
+                .revoked
+                .values()
+                .map(|r| InheritedRevoked {
+                    epoch: r.epoch,
+                    expiry: r.expiry,
+                })
+                .reduce(|a, b| InheritedRevoked {
+                    epoch: a.epoch.max(b.epoch),
+                    expiry: a.expiry.max(b.expiry),
+                });
             Some(state)
         }
     };
-    let tombstones = state
-        .as_ref()
-        .map(|st| st.owner.tombstones.clone())
-        .unwrap_or_default();
     // Signed before the record is saved, so the record names it; it leaves
     // only after the save.
-    let owner = sign_owner(&me, &rec, rec.max_version, tombstones);
+    let owner = sign_owner(&me, &rec, rec.max_version, rec.tombstones.clone());
     rec.signed_owner = Some(owner_digest(&owner));
     save(s, rec_item, &rec, 0)?;
     let time = sign_time(&me, rec.max_owner_time);
@@ -523,8 +547,11 @@ pub fn create_inbox(
 /// new version over the record's tombstones and filters, so it is never a
 /// second record at a version already signed (decision 25 tells those apart by
 /// their bytes); the time moves under the guard. Both are recorded before the
-/// state leaves. Should the network hold the inbox after all, the state merges
-/// into it as an owner change would.
+/// state leaves. It carries every revocation still live at its time, signed
+/// again from the ledger, so a revoked pass stays refused; one a takeover
+/// inherited has no ledger entry, and while one may be live the epoch is
+/// bumped with no grace instead. Should the network hold the inbox after all,
+/// the state merges into it as an owner change would.
 ///
 /// [`Op::RepublishInboxV2`]: freenet_mail_protocol::Op::RepublishInboxV2
 pub fn republish_inbox(s: &mut Space<'_>, addr: &Addr) -> OpResult {
@@ -536,6 +563,30 @@ pub fn republish_inbox(s: &mut Space<'_>, addr: &Addr) -> OpResult {
     // A tombstone the time moves out of the window guards nothing.
     rec.tombstones
         .retain(|_, t| t.saturating_add(w::WINDOW_BACK) >= owner_time);
+    let inherited_live = rec
+        .inherited_revoked
+        .is_some_and(|r| revocation_live(&rec, r.expiry, r.epoch, owner_time));
+    if inherited_live {
+        // A taken-over revocation this delegate cannot sign again: an
+        // emergency bump stops every pass of the epochs it may revoke, so
+        // none of them is needed.
+        let mut rng = background_rng(s, &me, "republish-bump", now, &[]);
+        bump(&mut rec, owner_time, now, true, &mut rng);
+        // Every contact pass is reissued at once (no grace).
+        for contact in rec.issued.keys().copied().collect::<Vec<_>>() {
+            let due = rec.due.entry(contact).or_insert(now);
+            *due = (*due).min(now);
+        }
+    }
+    if rec
+        .inherited_revoked
+        .is_some_and(|r| !revocation_live(&rec, r.expiry, r.epoch, owner_time))
+    {
+        rec.inherited_revoked = None;
+    }
+    // The ledger holds at most `MAX_MESSAGES` (4096) entries, so this is
+    // never more than a state holds.
+    let revoked = live_revocations(s, &me, &rec, owner_time)?;
     rec.max_version = version;
     rec.max_owner_time = owner_time;
     let signed = sign_owner(&me, &rec, version, rec.tombstones.clone());
@@ -546,11 +597,73 @@ pub fn republish_inbox(s: &mut Space<'_>, addr: &Addr) -> OpResult {
     let full = InboxState {
         owner: signed,
         time: sign_time(&me, owner_time),
-        revoked: BTreeMap::new(),
+        revoked,
         usage: BTreeMap::new(),
         messages: BTreeMap::new(),
     };
     Ok(Reply::InboxV2State(ByteBuf::from(w::encode(&full))))
+}
+
+/// The oldest pass epoch the inbox admits at `owner_time` (decision 18).
+fn oldest_epoch(rec: &InboxRecord, owner_time: u64) -> u32 {
+    if owner_time < rec.prev_epoch_until {
+        rec.pass_epoch.saturating_sub(1)
+    } else {
+        rec.pass_epoch
+    }
+}
+
+/// Whether the contract keeps a revocation of `expiry` and `epoch` at
+/// `owner_time`: the opposite of what [`prunable`] lets a revoked ledger
+/// entry go on.
+fn revocation_live(rec: &InboxRecord, expiry: u64, epoch: u32, owner_time: u64) -> bool {
+    expiry.saturating_add(w::WINDOW_BACK) > owner_time && epoch >= oldest_epoch(rec, owner_time)
+}
+
+fn sign_revocation(me: &Me, pass_id: &B16, expiry: u64, epoch: u32) -> w::Revocation {
+    let sig = me
+        .issuer
+        .sign(&w::revocation_bytes(&me.addr.0, pass_id, expiry, epoch));
+    w::Revocation {
+        pass_id: *pass_id,
+        expiry,
+        epoch,
+        sig: ByteArray::new(sig.to_bytes()),
+    }
+}
+
+/// Every revocation the inbox must carry at `owner_time`. The ledger keeps
+/// what each revocation signs (its largest expiry and its epoch), so each is
+/// signed again from there. A ledger entry that cannot be read fails the
+/// call: a missing revocation would let the pass back in.
+fn live_revocations(
+    s: &mut Space<'_>,
+    me: &Me,
+    rec: &InboxRecord,
+    owner_time: u64,
+) -> Result<BTreeMap<B16, w::Revocation>, Failure> {
+    let mut out = BTreeMap::new();
+    let (_, ids) = s.index(&crate::store::index_rel(
+        ItemKind::PassLedger,
+        Some(&me.addr),
+    ))?;
+    for id in ids {
+        let Ok(raw) = <[u8; 16]>::try_from(id.as_slice()) else {
+            continue;
+        };
+        let pass_id = ByteArray::new(raw);
+        let at = item(ItemKind::PassLedger, &me.addr, &raw);
+        let Some((_, e)) = load::<LedgerEntry>(s, &at)? else {
+            continue;
+        };
+        if e.revoked && revocation_live(rec, e.max_expiry, e.revoked_epoch, owner_time) {
+            out.insert(
+                pass_id,
+                sign_revocation(me, &pass_id, e.max_expiry, e.revoked_epoch),
+            );
+        }
+    }
+    Ok(out)
 }
 
 // ── Passes ──────────────────────────────────────────────────────────────────
@@ -830,11 +943,7 @@ fn new_ledger_entry(
 /// A contact's current pass stays until it is dead: the renew job reissues
 /// it after a bump.
 fn prunable(rec: &InboxRecord, pass_id: &B16, e: &LedgerEntry, owner_time: u64) -> bool {
-    let oldest = if owner_time < rec.prev_epoch_until {
-        rec.pass_epoch.saturating_sub(1)
-    } else {
-        rec.pass_epoch
-    };
+    let oldest = oldest_epoch(rec, owner_time);
     let dead = e.max_expiry.saturating_add(w::WINDOW_BACK) <= owner_time;
     let current = e
         .issued_for
@@ -1457,18 +1566,7 @@ fn revoke(
         rec.due.remove(&contact);
     }
     rec.issued.retain(|_, id| *id != key);
-    let sig = me.issuer.sign(&w::revocation_bytes(
-        &me.addr.0,
-        &pass_id.0,
-        e.max_expiry,
-        rec.pass_epoch,
-    ));
-    Ok(w::Revocation {
-        pass_id: key,
-        expiry: e.max_expiry,
-        epoch: rec.pass_epoch,
-        sig: ByteArray::new(sig.to_bytes()),
-    })
+    Ok(sign_revocation(me, &key, e.max_expiry, rec.pass_epoch))
 }
 
 pub fn update_inbox(

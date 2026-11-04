@@ -1081,6 +1081,54 @@ fn an_inbox_signed_again_keeps_its_tombstones() {
     assert!(merged.owner.tombstones.contains_key(&sealed.id.0));
 }
 
+/// The network lost an inbox after a pass was revoked: the state signed again
+/// carries the revocation, so mail sealed with that pass (a peer may still
+/// hold some) is refused by the contract.
+#[test]
+fn an_inbox_signed_again_keeps_its_revocations() {
+    let mut world = World::new();
+    let a = world.identity("alice");
+    let c = world.identity("carol");
+    let invite = world.issue(&a, None, Some(3));
+    world
+        .call_as(
+            &c,
+            Op::HoldPass {
+                addr: c,
+                pass: invite.clone(),
+            },
+        )
+        .unwrap();
+    // Sealed before the revocation and held back, as a peer might.
+    let held_back = world.seal(&c, &a, "held back").unwrap();
+    assert_eq!(held_back.admission, SendAdmission::Pass);
+    world.change(
+        &a,
+        OwnerChange::Revoke {
+            pass_id: PassId(*invite.cert.pass_id),
+        },
+    );
+    assert!(world.state(&a).revoked.contains_key(&invite.cert.pass_id));
+
+    world.advance(DAY);
+    let state = republish(&mut world, &a).unwrap();
+    assert!(is_valid(&Rules::V1, &world.params(&a), &state));
+    world.inboxes.insert(a, state);
+    let again = world.state(&a);
+    let r = &again.revoked[&invite.cert.pass_id];
+    assert_eq!(r.epoch, again.owner.pass_epoch, "no bump was needed");
+    let message: w::Message = w::decode(&held_back.message).unwrap();
+    let delta = InboxDelta {
+        messages: BTreeMap::from([(serde_bytes::ByteArray::new(held_back.id.0), message)]),
+        ..InboxDelta::default()
+    };
+    world.publish(&a, &w::encode(&delta));
+    assert!(
+        !w::delivered(&world.state(&a), &held_back.id.0),
+        "the revoked pass is refused"
+    );
+}
+
 /// No record, no inbox to sign: an identity without one, and one the page's
 /// origin does not hold, are refused.
 #[test]

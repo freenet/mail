@@ -2530,6 +2530,92 @@ fn other_node_signs(world: &mut World, other: &mut MemEnv, a: &Addr) {
     world.inboxes.insert(*a, merged);
 }
 
+/// `a`'s takeover by `other`, whose state never lands; returns what `other`
+/// then signs again from its record for a network that has no inbox.
+fn takeover_lost_then_signed_again(world: &mut World, other: &mut MemEnv, a: &Addr) -> Vec<u8> {
+    let Ok(Reply::InboxV2State(_lost)) = call(
+        other,
+        PROD,
+        Op::CreateInboxV2 {
+            addr: *a,
+            ghost_master: Hash32(world.master),
+            existing: Some(ByteBuf::from(world.inboxes[a].clone())),
+        },
+    ) else {
+        panic!("take over");
+    };
+    let Ok(Reply::InboxV2State(again)) = call(other, PROD, Op::RepublishInboxV2 { addr: *a })
+    else {
+        panic!("republish");
+    };
+    let again = again.into_vec();
+    assert!(freenet_email_inbox_v2::is_valid(
+        &Rules::V1,
+        &world.params(a),
+        &again
+    ));
+    again
+}
+
+/// A takeover keeps the deletions it took over: signed again from its
+/// record, the inbox still tombstones mail drained before the takeover.
+#[test]
+fn a_takeover_signed_again_keeps_the_tombstones_it_took_over() {
+    let (mut world, mut other, a, b) = alice_on_two_nodes();
+    let (sealed, landed) = world.send(&b, &a, "drained");
+    assert!(landed);
+    world.change(&a, OwnerChange::Drain);
+    assert!(world.state(&a).owner.tombstones.contains_key(&sealed.id.0));
+    let again = takeover_lost_then_signed_again(&mut world, &mut other, &a);
+    let again: w::InboxState = w::decode(&again).unwrap();
+    assert!(
+        again.owner.tombstones.contains_key(&sealed.id.0),
+        "a deletion from before the takeover"
+    );
+}
+
+/// A takeover has no ledger for the revocations it took over, so signed
+/// again from its record it bumps the epoch with no grace: the revoked pass
+/// is still refused.
+#[test]
+fn a_takeover_signed_again_keeps_the_revocations_it_took_over() {
+    let (mut world, mut other, a, _) = alice_on_two_nodes();
+    let c = world.identity_in("carol", BOB_NODE);
+    let invite = world.issue(&a, None, Some(3));
+    world
+        .call_as(
+            &c,
+            Op::HoldPass {
+                addr: c,
+                pass: invite.clone(),
+            },
+        )
+        .unwrap();
+    let held_back = world.seal(&c, &a, "held back").unwrap();
+    world.change(
+        &a,
+        OwnerChange::Revoke {
+            pass_id: freenet_mail_protocol::PassId(*invite.cert.pass_id),
+        },
+    );
+    let epoch = world.state(&a).owner.pass_epoch;
+    let again = takeover_lost_then_signed_again(&mut world, &mut other, &a);
+    world.inboxes.insert(a, again);
+    let st = world.state(&a);
+    assert_eq!(st.owner.pass_epoch, epoch + 1, "bumped");
+    assert_eq!(st.owner.prev_epoch_until, 0, "no grace");
+    let message: w::Message = w::decode(&held_back.message).unwrap();
+    let delta = InboxDelta {
+        messages: BTreeMap::from([(ByteArray::new(held_back.id.0), message)]),
+        ..InboxDelta::default()
+    };
+    world.publish(&a, &w::encode(&delta));
+    assert!(
+        !w::delivered(&world.state(&a), &held_back.id.0),
+        "the revoked pass is refused"
+    );
+}
+
 /// Decision 25, a higher version: another node signed past this one. The
 /// delegate notes it before its own drain signs past it, so a background
 /// drain that runs first (every tab closed) does not hide it, and a later
