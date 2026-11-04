@@ -210,6 +210,12 @@ test.describe("Inbox v2 (offline)", () => {
     await openAddressSettings(page);
     const row = page.locator(tid(TID.fmV2QueueRow), { hasText: "first contact" });
     await row.locator(tid(TID.fmV2QueueAccept)).click({ timeout: 30_000 });
+    // Accepting asks for a name: prefilled with the label alice gave, and
+    // editable; nothing is saved until it is confirmed.
+    const petname = row.locator(tid(TID.fmV2QueuePetname));
+    await expect(petname).toHaveValue("address1");
+    await petname.fill("alice");
+    await row.locator(tid(TID.fmV2QueueConfirm)).click();
     await expect(row).toHaveCount(0, { timeout: 30_000 });
     await closeSettings(page);
     await expect(page.locator(`${tid(TID.fmList)} article`, { hasText: "first contact" })).toBeVisible({

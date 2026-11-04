@@ -287,7 +287,9 @@ test.describe("Inbox v2: Ghost Key and the new-contacts queue (offline)", () => 
     await expect(rows).toHaveCount(15, { timeout: 30_000 });
     await expect(rows.and(page.locator('[data-title="queued 0"]'))).toHaveCount(0);
     // Accepted: the sender's messages move to the inbox.
-    await rows.and(page.locator('[data-title="queued 1"]')).locator(tid(TID.fmV2QueueAccept)).click();
+    const accepted = rows.and(page.locator('[data-title="queued 1"]'));
+    await accepted.locator(tid(TID.fmV2QueueAccept)).click();
+    await accepted.locator(tid(TID.fmV2QueueConfirm)).click();
     await expect(rows).toHaveCount(0, { timeout: 60_000 });
     await expect(page.locator(tid(TID.fmV2Queue))).toContainText("Accepted");
     await closeSettings(page);

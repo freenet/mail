@@ -460,7 +460,7 @@ fn the_queue_holds_strangers_until_accepted_or_dropped() {
     let mail = block_on(owner::read_inbound(b)).unwrap();
     assert_eq!(mail.len(), 1);
 
-    let said = block_on(super::queue::accept(b, &by_title("accept me"))).unwrap();
+    let said = block_on(super::queue::accept(b, &by_title("accept me"), "alice")).unwrap();
     assert!(said.starts_with("Accepted"), "{said}");
     assert!(block_on(super::queue::queued(b, &mail)).unwrap().is_empty());
     // a drains the pass b sent, and writes by pass.
@@ -484,4 +484,49 @@ fn the_queue_holds_strangers_until_accepted_or_dropped() {
         .map(|m| m.body.title.as_str())
         .collect();
     assert_eq!(titles, vec!["after revoke"]);
+}
+
+/// M2: accepting asks for a petname, so the stranger's own label is never
+/// saved as one silently; a name that is, or looks like, another contact's
+/// is flagged before saving; and a differing label still shows as differing.
+#[test]
+fn accepting_saves_the_petname_given_and_flags_lookalikes() {
+    use crate::address::LabelWarning;
+    let (a, b, c) = (
+        identity("v2-pet-a"),
+        identity("v2-pet-b"),
+        identity("v2-pet-c"),
+    );
+    block_on(contacts::add(b, &crate::address::display(&c.0), "mary")).unwrap();
+    assert!(send_with(a, b, "hello", None).delivered());
+    drain(b);
+    let m = block_on(owner::read_inbound(b)).unwrap().remove(0);
+    assert_eq!(m.body.label.as_deref(), Some("sender"));
+
+    for lookalike in ["mary", "rnary"] {
+        let warnings = super::queue::petname_warnings(&m, lookalike);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| matches!(w, LabelWarning::LooksLike { contact } if contact == "mary")),
+            "{lookalike}: {warnings:?}"
+        );
+    }
+    assert!(
+        !super::queue::petname_warnings(&m, "andy")
+            .iter()
+            .any(|w| matches!(w, LabelWarning::LooksLike { .. }))
+    );
+
+    block_on(super::queue::accept(b, &m, "andy")).unwrap();
+    let saved = contacts::by_addr(&a).expect("a contact now");
+    assert_eq!(&*saved.local_alias, "andy");
+    let (name, warnings) = contacts::sender_name(&a, Some("sender"));
+    assert_eq!(name, "andy");
+    assert!(
+        warnings
+            .iter()
+            .any(|w| matches!(w, LabelWarning::DiffersFromPetname { .. })),
+        "{warnings:?}"
+    );
 }

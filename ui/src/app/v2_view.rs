@@ -302,6 +302,8 @@ fn QueueView(me: Addr) -> Element {
     let count = waiting.len();
     let mut busy = use_signal(|| false);
     let mut said = use_signal(|| None::<Result<String, String>>);
+    // The row being accepted, and the petname typed for it.
+    let mut asking = use_signal(|| None::<([u8; 32], String)>);
     let tip = match status.quarantine {
         Some(QuarantineMode::Open) if status.queue_was_full => Some(
             "Your new-contacts queue filled up, so some strangers' messages may have been \
@@ -354,19 +356,35 @@ fn QueueView(me: Addr) -> Element {
                                 strong { "{m.body.title}" }
                                 div { style: "white-space: pre-wrap; font-size: 12px;", "{m.body.content}" }
                             }
-                            button {
-                                class: "fm-btn-primary",
-                                "data-testid": testid::FM_V2_QUEUE_ACCEPT,
-                                disabled: *busy.read(),
-                                onclick: move |_| {
-                                    let m = for_accept.clone();
-                                    busy.set(true);
-                                    spawn(async move {
-                                        said.set(Some(crate::v2::queue::accept(me, &m).await));
-                                        busy.set(false);
-                                    });
-                                },
-                                "Accept"
+                            if asking.read().as_ref().is_some_and(|(id, _)| *id == m.id) {
+                                PetnameForm { me, m: for_accept.clone(), asking, busy, said }
+                            } else {
+                                button {
+                                    class: "fm-btn-primary",
+                                    "data-testid": testid::FM_V2_QUEUE_ACCEPT,
+                                    disabled: *busy.read(),
+                                    onclick: move |_| {
+                                        let m = for_accept.clone();
+                                        // A saved contact keeps the name it has.
+                                        if contacts::by_addr(&m.from).is_some() {
+                                            busy.set(true);
+                                            spawn(async move {
+                                                said.set(Some(crate::v2::queue::accept(me, &m, "").await));
+                                                busy.set(false);
+                                            });
+                                            return;
+                                        }
+                                        let prefill = m
+                                            .body
+                                            .label
+                                            .as_deref()
+                                            .and_then(|l| address::normalize_label(l, true).ok())
+                                            .map(|l| l.0)
+                                            .unwrap_or_default();
+                                        asking.set(Some((m.id, prefill)));
+                                    },
+                                    "Accept"
+                                }
                             }
                             button {
                                 class: "fm-btn-secondary",
@@ -391,6 +409,93 @@ fn QueueView(me: Addr) -> Element {
                 Some(Ok(t)) => rsx! { div { class: "info", style: "padding: 8px 16px;", "{t}" } },
                 Some(Err(e)) => rsx! { div { class: "err", style: "padding: 8px 16px;", "Not done: {e}" } },
                 None => rsx! {},
+            }
+        }
+    }
+}
+
+/// Accepting a stranger (M2): the name to save them under, prefilled with
+/// the label they gave and editable, with what is wrong with it shown before
+/// anything is saved. Their label never becomes a petname unseen.
+#[component]
+fn PetnameForm(
+    me: Addr,
+    m: crate::v2::owner::Inbound,
+    asking: Signal<Option<([u8; 32], String)>>,
+    busy: Signal<bool>,
+    said: Signal<Option<Result<String, String>>>,
+) -> Element {
+    let typed = asking
+        .read()
+        .as_ref()
+        .map(|(_, p)| p.clone())
+        .unwrap_or_default();
+    let invalid = match typed.trim() {
+        "" => None,
+        p => address::normalize_label(p, true)
+            .err()
+            .map(|e| e.to_string()),
+    };
+    let taken = contacts::petnames()
+        .iter()
+        .any(|(p, a)| p == typed.trim() && *a != m.from.0);
+    let warnings = crate::v2::queue::petname_warnings(&m, &typed);
+    let shown = match typed.trim() {
+        "" => address::display(&m.from.0)[..8].to_string(),
+        p => p.to_string(),
+    };
+    let blocked = *busy.read() || invalid.is_some() || taken;
+    rsx! {
+        div { style: "width: 100%; display: flex; flex-direction: column; gap: 6px;",
+            label { style: "font-size: 12px;",
+                "Save them as (your name for them; theirs is only a suggestion):"
+            }
+            input {
+                class: "fm-input",
+                "data-testid": testid::FM_V2_QUEUE_PETNAME,
+                value: "{typed}",
+                placeholder: "{shown}",
+                oninput: move |ev| {
+                    let id = m.id;
+                    asking.set(Some((id, ev.value())));
+                },
+            }
+            if let Some(e) = &invalid {
+                div { class: "err", "That name {e}." }
+            }
+            if taken {
+                div { class: "err", "data-testid": testid::FM_V2_LABEL_WARNING,
+                    "You already have a contact called \u{201c}{typed.trim()}\u{201d}. Choose another name."
+                }
+            }
+            for w in warnings.iter() {
+                div { class: "warn", "data-testid": testid::FM_V2_LABEL_WARNING, "{shown} {w}" }
+            }
+            div { style: "display: flex; gap: 8px;",
+                button {
+                    class: "fm-btn-primary",
+                    "data-testid": testid::FM_V2_QUEUE_CONFIRM,
+                    disabled: blocked,
+                    onclick: {
+                        let m = m.clone();
+                        let typed = typed.clone();
+                        move |_| {
+                            let (m, typed) = (m.clone(), typed.clone());
+                            busy.set(true);
+                            spawn(async move {
+                                said.set(Some(crate::v2::queue::accept(me, &m, &typed).await));
+                                asking.set(None);
+                                busy.set(false);
+                            });
+                        }
+                    },
+                    if warnings.is_empty() { "Save and accept" } else { "Accept anyway" }
+                }
+                button {
+                    class: "fm-btn-secondary",
+                    onclick: move |_| asking.set(None),
+                    "Cancel"
+                }
             }
         }
     }

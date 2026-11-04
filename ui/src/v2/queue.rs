@@ -97,7 +97,24 @@ pub(crate) async fn queued(addr: Addr, mail: &[Inbound]) -> Result<HashSet<[u8; 
 /// Accept `m`'s sender: send them a pass, so their mail goes straight to the
 /// inbox, keep them as a contact, and move every message of theirs waiting
 /// here to the inbox. Returns what to tell the user.
-pub(crate) async fn accept(identity: Addr, m: &Inbound) -> Result<String, String> {
+/// What to flag about saving `m`'s sender as `petname` (M2): a name that is,
+/// or can be mistaken for, another contact's, and their own label when it
+/// differs. Shown before Accept saves anything.
+pub(crate) fn petname_warnings(m: &Inbound, petname: &str) -> Vec<crate::address::LabelWarning> {
+    let petname = petname.trim();
+    if petname.is_empty() {
+        return Vec::new();
+    }
+    let (_, warnings) = crate::address::name_for(
+        &m.from.0,
+        Some(petname),
+        m.body.label.as_deref(),
+        &contacts::petnames(),
+    );
+    warnings
+}
+
+pub(crate) async fn accept(identity: Addr, m: &Inbound, petname: &str) -> Result<String, String> {
     let (name, _) = contacts::sender_name(&m.from, m.body.label.as_deref());
     let outcome = super::send::send_content(identity, m.from, SealContent::PassUpdate).await;
     if !outcome.delivered() {
@@ -113,16 +130,32 @@ pub(crate) async fn accept(identity: Addr, m: &Inbound) -> Result<String, String
     let mut said = format!("Accepted {name}: their mail now goes straight to your inbox.");
     if contacts::by_addr(&m.from).is_none() {
         let address = crate::address::display(&m.from.0);
+        // The petname the user gave, never their label unasked (M2): with
+        // none, the start of their address. Their label is kept beside it,
+        // so a label that differs keeps showing as differing.
+        let petname = match petname.trim() {
+            "" => address[..8].to_string(),
+            p => p.to_string(),
+        };
         let labelled = m.body.label.as_ref().map(|l| format!("{l}@{address}"));
         let added = match labelled {
-            Some(input) => match contacts::add(identity, &input, "").await {
+            Some(input) => match contacts::add(identity, &input, &petname).await {
                 Ok(a) => Ok(a),
-                Err(_) => contacts::add(identity, &address, "").await,
+                Err(_) => contacts::add(identity, &address, &petname).await,
             },
-            None => contacts::add(identity, &address, "").await,
+            None => contacts::add(identity, &address, &petname).await,
         };
-        if let Err(e) = added {
-            said.push_str(&format!(" They could not be added to your contacts: {e}"));
+        match added {
+            Ok(a) => {
+                said = format!(
+                    "Accepted {}: their mail now goes straight to your inbox.",
+                    a.name
+                );
+                for w in &a.warnings {
+                    said.push_str(&format!(" Note: {} {w}.", a.name));
+                }
+            }
+            Err(e) => said.push_str(&format!(" They could not be added to your contacts: {e}")),
         }
     }
     owner::load_inbound(identity).await;

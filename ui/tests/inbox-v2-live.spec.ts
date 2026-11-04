@@ -156,13 +156,19 @@ async function send(page: Page, to: string, subject: string): Promise<Locator> {
   return clickSend(page);
 }
 
-/** `subject` waits in the new-contacts queue; accept its sender. */
-async function accepts(page: Page, subject: string) {
+/**
+ * `subject` waits in the new-contacts queue; accept its sender. A sender who
+ * is not a contact yet is saved under the name the form suggests.
+ */
+async function accepts(page: Page, subject: string, contact = false) {
   await settings(page);
   const a = app(page);
   const row = a.locator(`${tid(TID.fmV2QueueRow)}[data-title="${subject}"]`);
   await expect(row, `${subject} is in the new-contacts queue`).toBeVisible({ timeout: 180_000 });
   await row.locator(tid(TID.fmV2QueueAccept)).click();
+  if (!contact) {
+    await row.locator(tid(TID.fmV2QueueConfirm)).click();
+  }
   await expect(row).toHaveCount(0, { timeout: 240_000 });
   await expect(a.locator(tid(TID.fmV2Queue))).toContainText("Accepted");
   await closeSettings(page);
@@ -263,7 +269,7 @@ test("inbox v2 between two nodes", async ({ browser }) => {
     out = await send(gw, "bob", "r1 after revoke");
     await expect(out).toHaveAttribute("data-delivered", "true");
     await expect(out).toContainText("lapsed");
-    await accepts(peer, "r1 after revoke");
+    await accepts(peer, "r1 after revoke", true);
     await sees(peer, "r1 after revoke");
 
     // 5. RequireGhost at $5: Dave holds no pass. The badge shows the tier,
