@@ -90,7 +90,7 @@ pub(crate) fn start(addr: Addr) {
 }
 
 /// Make sure `addr` has a v2 inbox on the network, held and followed.
-async fn ensure(addr: Addr) -> Result<(), String> {
+pub(crate) async fn ensure(addr: Addr) -> Result<(), String> {
     net::note_own(&addr);
     let record = ItemRef {
         kind: ItemKind::InboxV2,

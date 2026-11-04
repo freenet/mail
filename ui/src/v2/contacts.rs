@@ -178,7 +178,10 @@ pub(crate) async fn add(identity: Addr, input: &str, petname: &str) -> Result<Ad
         notes.invited.push(identity.0);
     }
     contact_store::set_v2_notes(&resolved.vk, notes);
-    let contact = match by_addr(&addr) {
+    // A contact already in the address book (v1 or v2: the address is the
+    // key either way) is kept as it is, now reached through its v2 inbox.
+    let existing = address_book::contact_by_vk(&resolved.vk);
+    let contact = match existing.clone() {
         Some(existing) => existing,
         None => Contact {
             local_alias: name.as_str().into(),
@@ -192,7 +195,13 @@ pub(crate) async fn add(identity: Addr, input: &str, petname: &str) -> Result<Ad
             inbox_wasm_hash: Some(super::CODE_HASH.trim().to_string()),
         },
     };
-    contact_store::accept(contact)?;
+    if existing.is_none() {
+        address_book::insert_contact(contact.clone())?;
+    }
+    // Stored before reporting success, so "added" means it is kept.
+    contact_store::save(&contact)
+        .await
+        .map_err(|e| format!("it could not be saved: {e}"))?;
     if matches!(recipient, Recipient::Invite(_)) {
         HELD.with(|h| h.borrow_mut().insert((identity, addr)));
     }

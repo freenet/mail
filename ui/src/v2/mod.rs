@@ -4,6 +4,8 @@
 //! plainly what happened.
 
 pub(crate) mod contacts;
+#[cfg(all(test, feature = "local-delegate", not(feature = "use-node")))]
+mod flows;
 pub(crate) mod net;
 pub(crate) mod owner;
 pub(crate) mod send;
