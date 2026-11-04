@@ -146,17 +146,19 @@ mod node {
         kind: Kind,
         request: ContractRequest<'static>,
     ) -> Answer {
-        KNOWN.with(|k| k.borrow_mut().insert(id));
-        let (tx, rx) = oneshot::channel();
-        WAITING.with(|w| w.borrow_mut().entry((id, kind)).or_default().push(tx));
         let mut client = crate::api::WEB_API_SENDER
             .get()
             .ok_or("not connected to the node")?
             .clone();
+        let (tx, rx) = oneshot::channel();
+        WAITING.with(|w| w.borrow_mut().entry((id, kind)).or_default().push(tx));
         if let Err(e) = client.send(request.into()).await {
             WAITING.with(|w| w.borrow_mut().remove(&(id, kind)));
             return Err(format!("the node did not take the request: {e}"));
         }
+        // Known only once the node took a request: until then no GET of it,
+        // and so no code-bearing one, reached the node.
+        KNOWN.with(|k| k.borrow_mut().insert(id));
         use futures::FutureExt;
         let mut rx = rx.fuse();
         let mut timer = gloo_timers::future::TimeoutFuture::new(TIMEOUT_MS).fuse();
@@ -216,6 +218,21 @@ mod node {
             data: UpdateData::Delta(delta.into()),
         };
         ask(addr, Kind::Update, request).await.map(|_| ())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// A GET the node never took did not fetch the code: the next one
+        /// must still ask for it (#191).
+        #[test]
+        fn a_get_that_was_never_sent_leaves_the_code_to_fetch() {
+            let addr = Addr([0x5c; 24]);
+            let id = super::super::super::instance_id(&addr);
+            assert!(futures::executor::block_on(get(&addr, false)).is_err());
+            assert!(!known(&id), "an unsent GET marked the inbox known");
+        }
     }
 }
 
