@@ -1393,15 +1393,21 @@ thread_local! {
 /// A v2 row's sender warnings; with `stranger_note`, also that a sender
 /// who is not a saved contact chose the name shown.
 #[component]
-fn V2SenderNotes(id: u64, #[props(default)] stranger_note: bool) -> Element {
+fn V2SenderNotes(
+    id: u64,
+    #[props(default)] stranger_note: bool,
+    #[props(default = true)] warnings: bool,
+) -> Element {
     if !is_v2_row(id) {
         return rsx! {};
     }
     let _ = crate::v2::contacts::GEN.read();
     let sender = v2_sender(id);
     rsx! {
-        for w in sender.warnings.iter() {
-            span { class: "warn", "data-testid": testid::FM_V2_LABEL_WARNING, "\u{26a0} {w}" }
+        if warnings {
+            for w in sender.warnings.iter() {
+                span { class: "warn", "data-testid": testid::FM_V2_LABEL_WARNING, "\u{26a0} {w}" }
+            }
         }
         if stranger_note && !sender.contact {
             span { class: "fp", "data-testid": testid::FM_V2_NOT_CONTACT,
@@ -4705,7 +4711,7 @@ fn ThreadNested(group: crate::app::threads::ThreadGroup) -> Element {
                                 div { class: "ft-msg-id",
                                     div { class: "ft-msg-namerow",
                                         span { class: "ft-msg-name", "{from}" }
-                                        V2SenderNotes { id }
+                                        V2SenderNotes { id, stranger_note: true }
                                         span { class: "{pill_class}", "{pill_label}" }
                                     }
                                 }
@@ -4832,6 +4838,7 @@ fn ThreadCompact(group: crate::app::threads::ThreadGroup) -> Element {
                         }
                         if is_open {
                             div { class: "ft-cz-open",
+                                V2SenderNotes { id, stranger_note: true, warnings: false }
                                 div { class: "ft-body-text",
                                     {content.split("\n\n").map(|para| rsx! { p { "{para}" } })}
                                 }

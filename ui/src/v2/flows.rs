@@ -2,6 +2,11 @@
 //! build runs it in the page) and the offline inboxes: what the page does is
 //! what it does on a node, minus the network. On real nodes the same flows
 //! run in `ui/tests/inbox-v2-live.spec.ts`.
+//!
+//! The offline inboxes are a model that checks only what the UI needs (see
+//! `net::offline`): no pass signature, expiry, epoch, send window or cap is
+//! checked here. Those are the contract's own suite's and the delegate's
+//! interop tests'. Nothing in this module covers them.
 
 use freenet_mail_protocol::inbox_v2::{self as w, InboxState, QuarantineMode};
 use freenet_mail_protocol::{Addr, OwnerChange, SendAdmission, SendNotice};
@@ -89,6 +94,26 @@ fn archive_and_delete_remove_the_stored_copy() {
     assert!(block_on(owner::read_inbound(b)).unwrap().is_empty());
     // Gone for good: the inbox tombstoned them, so a drain brings nothing back.
     assert!(drain(b).is_empty());
+}
+
+/// An archive whose copy was stored but whose drained copy the delegate
+/// could not remove says so (`(true, _)`: the page tells the user it still
+/// shows in the inbox), and the drained copy is still there.
+#[test]
+fn an_archive_that_could_not_remove_the_drained_copy_says_so() {
+    let (a, b) = (identity("v2-arch-a"), identity("v2-arch-b"));
+    assert!(block_on(send::send(a, b, &body("keep me"))).delivered());
+    drain(b);
+    let mail = block_on(owner::read_inbound(b)).unwrap();
+    let id = owner::row_id(b, &mail[0]);
+    crate::mail_delegate::local::fail_writes_containing(Some("/in/"));
+    let out = block_on(owner::archive_row(id, async { Ok(()) }));
+    crate::mail_delegate::local::fail_writes_containing(None);
+    let Err((stored, e)) = out else {
+        panic!("archived although the copy could not be removed")
+    };
+    assert!(stored, "the archived copy was stored: {e}");
+    assert_eq!(block_on(owner::read_inbound(b)).unwrap().len(), 1);
 }
 
 /// S4: an invite whose certificate is not signed by the inbox it names is
@@ -372,12 +397,35 @@ fn an_owner_version_this_node_did_not_sign_is_seen() {
     let rec = || block_on(owner::record(a)).unwrap().unwrap();
     assert!(state(&a).owner.version > 1);
     assert!(!owner::foreign(state(&a).owner.version, &rec()));
-    // Another node signing for the same identity publishes a higher
-    // version (the offline inboxes do not check signatures).
+    // A higher version than this node signed: the page's own compare (the
+    // record unsigned here, which the offline inboxes do not check; the
+    // signed case through the delegate is the test below).
     let mut other = state(&a);
     other.owner.version = rec().max_version + 5;
     block_on(net::put(&a, w::encode(&other))).unwrap();
     assert!(owner::foreign(state(&a).owner.version, &rec()));
+}
+
+/// Decision 25 through the delegate: another node's signed record lands, the
+/// delegate's drain notes it and signs past it, and a page loaded after that
+/// (nothing in memory, the version compare false) still warns, from the
+/// delegate's note alone.
+#[test]
+fn another_nodes_record_is_still_warned_about_after_this_node_signs_past_it() {
+    let (a, b) = (identity("v2-d25-a"), identity("v2-d25-b"));
+    owner::forget_status(a);
+    block_on(owner::another_node_signs_with(a, b)).unwrap();
+    let rec = block_on(owner::record(a)).unwrap().unwrap();
+    let seen = rec.foreign_seen.expect("the delegate noted it");
+    let now = state(&a).owner.version;
+    assert!(now > seen.version, "signed past it");
+    assert!(!(now > rec.max_version), "the version compare says nothing");
+    assert_eq!(drain(a), vec!["while another node signed".to_string()]);
+    // A reload: the page starts with nothing and reads the inbox again.
+    owner::forget_status(a);
+    block_on(owner::ensure(a)).unwrap();
+    block_on(owner::refresh(a));
+    assert!(owner::status(&a).foreign_version);
 }
 
 /// An update that shows up only after the read-backs is waited for, never

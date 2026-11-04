@@ -119,6 +119,41 @@ async function send(page: Page, to: string, subject: string): Promise<Locator> {
   return clickSend(page);
 }
 
+/** A new identity, made from the identity list. */
+async function createIdentity(page: Page, alias: string) {
+  if (await page.locator(tid(TID.fmApp)).isVisible().catch(() => false)) {
+    await openNav(page);
+    await page.locator(tid(TID.fmLogout)).click();
+  }
+  await page.locator(tid(TID.fmIdCreate)).click();
+  await page.locator(tid(TID.fmCreateAliasInput)).fill(alias);
+  await page.locator(tid(TID.fmCreateSubmit)).click();
+  await page.locator(tid(TID.fmCreateConfirm)).click();
+  await expect(page.locator(`${tid(TID.fmIdRow)}[data-alias="${alias}"]`)).toBeVisible({
+    timeout: 30_000,
+  });
+}
+
+/** `owner`'s invite, made in its address settings. */
+async function inviteOf(page: Page): Promise<string> {
+  await openAddressSettings(page);
+  await page.locator(tid(TID.fmV2InviteCreate)).click();
+  const invite = (await page.locator(tid(TID.fmV2InviteText)).inputValue()).trim();
+  await closeSettings(page);
+  return invite;
+}
+
+const inboxRow = (page: Page, subject: string) =>
+  page.locator(`${tid(TID.fmList)} article`, { hasText: subject });
+
+/** Open `subject`'s conversation and return its message row. */
+async function openRow(page: Page, subject: string): Promise<Locator> {
+  await inboxRow(page, subject).click();
+  const container = page.locator(tid(TID.fmThreadContainer));
+  await container.waitFor({ state: "attached", timeout: 10_000 });
+  return container.locator(tid(TID.fmThreadRow), { hasText: subject }).first();
+}
+
 /** Collects console errors and page errors, to assert a clean console. */
 function watchConsole(page: Page): string[] {
   const errors: string[] = [];
@@ -284,13 +319,116 @@ test.describe("Inbox v2 (offline)", () => {
   });
 
   test("an identity active on another node is warned about", async ({ page }) => {
+    // The fixture: another node signs a record for the identity (with its
+    // keys), and this node's delegate drains the inbox and signs past it
+    // before the page reads it, so the warning can come only from the
+    // delegate's note, not from comparing versions.
     await page.goto("/?v2-foreign-fixture");
     await waitForApp(page);
     await selectIdentity(page, "address1");
+    // The message the fixture's drain stored: the delegate did see it.
+    await expect(inboxRow(page, "while another node signed")).toBeVisible({ timeout: 30_000 });
     await expect(page.locator(tid(TID.fmV2ForeignWarning))).toContainText(
       "active on another node",
       { timeout: 30_000 },
     );
+  });
+
+  test("archiving a drained v2 message keeps it out of the inbox and in Archive", async ({
+    page,
+  }) => {
+    const errors = watchConsole(page);
+    await page.goto("/");
+    await waitForApp(page);
+    await selectIdentity(page, "address2");
+    const bob = await myAddress(page);
+    const invite = await inviteOf(page);
+    await switchTo(page, "address1");
+    await expect(await addContact(page, invite)).toContainText("the invite is kept");
+    await closeSettings(page);
+    await expect(await send(page, bob, "archive me")).toHaveAttribute("data-delivered", "true");
+
+    await switchTo(page, "address2");
+    await expect(inboxRow(page, "archive me")).toBeVisible({ timeout: 30_000 });
+    const row = await openRow(page, "archive me");
+    await row.locator(tid(TID.fmArchive)).dispatchEvent("click");
+    await expect(inboxRow(page, "archive me")).toHaveCount(0, { timeout: 30_000 });
+
+    // Its drained copy is gone from the delegate: once the next message is
+    // drained and the list is read from the delegate again, it stays out.
+    await switchTo(page, "address1");
+    await expect(await send(page, bob, "after archive")).toHaveAttribute(
+      "data-delivered",
+      "true",
+    );
+    await switchTo(page, "address2");
+    await expect(inboxRow(page, "after archive")).toBeVisible({ timeout: 30_000 });
+    await expect(inboxRow(page, "archive me")).toHaveCount(0);
+
+    await openNav(page);
+    await page.locator('[data-testid="fm-folder-archive"]').click();
+    await expect(
+      page.locator(tid(TID.fmArchiveCard), { hasText: "archive me" }),
+    ).toBeVisible();
+    expect(errors).toEqual([]);
+  });
+
+  test("a lookalike sender who is not a contact is flagged in the list and the message", async ({
+    page,
+  }) => {
+    const errors = watchConsole(page);
+    await page.goto("/");
+    await waitForApp(page);
+    // A third identity whose name looks like the saved contact alice-example.
+    await createIdentity(page, "a1ice-example");
+    await selectIdentity(page, "address2");
+    const bob = await myAddress(page);
+    const invite = await inviteOf(page);
+    await switchTo(page, "a1ice-example");
+    await expect(await addContact(page, invite)).toContainText("the invite is kept");
+    await closeSettings(page);
+    await expect(await send(page, bob, "from a lookalike")).toHaveAttribute(
+      "data-delivered",
+      "true",
+    );
+
+    // address1 writes first contact, and bob accepts it under the name it
+    // gave, which looks like nobody else's. (Every identity here is the
+    // page's own, so none can be saved as a contact: the contact side of the
+    // note is not reachable offline.)
+    await switchTo(page, "address1");
+    await expect(await send(page, `bob@${bob}`, "from address1")).toHaveAttribute(
+      "data-delivered",
+      "true",
+    );
+    await switchTo(page, "address2");
+    await openAddressSettings(page);
+    const queued = page.locator(tid(TID.fmV2QueueRow), { hasText: "from address1" });
+    await queued.locator(tid(TID.fmV2QueueAccept)).click({ timeout: 30_000 });
+    await expect(queued.locator(tid(TID.fmV2QueuePetname))).toHaveValue("address1");
+    await queued.locator(tid(TID.fmV2QueueConfirm)).click();
+    await expect(queued).toHaveCount(0, { timeout: 30_000 });
+    await closeSettings(page);
+
+    // The stranger: warned about in the list, and in the open message,
+    // which also says they are not a contact.
+    const stranger = inboxRow(page, "from a lookalike");
+    await expect(stranger.locator(tid(TID.fmV2LabelWarning))).toContainText(
+      "looks like your contact",
+      { timeout: 30_000 },
+    );
+    let row = await openRow(page, "from a lookalike");
+    await expect(row.locator(tid(TID.fmV2LabelWarning))).toContainText("looks like your contact");
+    await expect(row.locator(tid(TID.fmV2NotContact))).toBeVisible();
+
+    // A name like nobody else's: no warning, in the list or the message.
+    const plain = inboxRow(page, "from address1");
+    await expect(plain).toBeVisible({ timeout: 30_000 });
+    await expect(plain.locator(tid(TID.fmV2LabelWarning))).toHaveCount(0);
+    row = await openRow(page, "from address1");
+    await expect(row).toBeVisible();
+    await expect(row.locator(tid(TID.fmV2LabelWarning))).toHaveCount(0);
+    expect(errors).toEqual([]);
   });
 
   test("without the fixture there is no such warning", async ({ page }) => {

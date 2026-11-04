@@ -302,7 +302,7 @@ mod node {
             let sent = futures::executor::block_on(send_request(id, Kind::Get, first));
             TEST_SENDER.with(|t| t.borrow_mut().take());
             assert!(sent.is_ok());
-            assert!(rx.try_next().unwrap().is_some(), "the node got it");
+            assert!(rx.try_recv().is_ok(), "the node got it");
             assert!(known(&id));
             assert!(!asks_for_code(&get_request(id, false)));
         }
@@ -310,6 +310,17 @@ mod node {
 }
 
 /// The offline build's inboxes, in this page.
+///
+/// The model checks only what the UI's outcomes need: the newest owner
+/// version, unions, tombstones, revocation by pass id, the Ghost Key proof and
+/// the 16 quarantine slots. It does not check pass signatures, certificate
+/// expiry, epochs (`prev_epoch_until`), the send window, `per_invite`, the
+/// per-Ghost-Key cap or the 88-message cap, and it keeps the first of two
+/// messages with one id. Those are proven by the contract's own suite and by
+/// the delegate's interop tests (`delegates/mail-delegate/src/tests/inbox_v2.rs`
+/// runs everything the delegate builds through the contract's `apply` and
+/// `is_valid`), so an offline test passing says nothing about them. A test
+/// here must not claim to cover them.
 #[cfg(not(feature = "use-node"))]
 pub(crate) mod offline {
     use super::*;
@@ -514,20 +525,18 @@ pub(crate) mod offline {
         Ok(w::encode(&filter(s)))
     }
 
-    /// Offline builds' fixture for decision 25: publish `addr`'s owner record
-    /// at a version this page's delegate never signed, as a second node
-    /// signing for the same identity would.
-    #[cfg(feature = "example-data")]
-    pub(crate) fn publish_foreign_version(addr: &Addr) {
+    /// The decision-25 fixture (`owner::another_node_signs`): `addr`'s inbox
+    /// becomes `bytes`, as another node's update would make it, without
+    /// telling this page.
+    #[cfg(any(test, feature = "example-data"))]
+    pub(crate) fn store_unannounced(addr: &Addr, bytes: Vec<u8>) {
         let id = super::super::instance_id(addr);
-        let Some(held) = STATES.with(|s| s.borrow().get(&id).cloned()) else {
-            return;
-        };
-        let Ok(mut s) = w::decode::<InboxState>(&held) else {
-            return;
-        };
-        s.owner.version += 1_000;
-        store(addr, w::encode(&s));
+        #[cfg(feature = "local-delegate")]
+        crate::mail_delegate::local::set_contract_state(
+            id.as_bytes().try_into().expect("32 bytes"),
+            bytes.clone(),
+        );
+        STATES.with(|s| s.borrow_mut().insert(id, bytes));
     }
 
     /// The contract's checks on a Ghost Key proof (decision 1): the pinned

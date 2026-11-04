@@ -64,13 +64,26 @@ thread_local! {
     static HELD: RefCell<HashSet<Addr>> = RefCell::new(HashSet::new());
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Tests with no Dioxus runtime: the status the page would show.
+    static TEST_STATUS: RefCell<HashMap<Addr, Status>> = RefCell::new(HashMap::new());
+}
+
 fn set_status(addr: Addr, f: impl FnOnce(&mut Status)) {
     if dioxus::core::Runtime::try_current().is_some() {
         f(STATUS.write().entry(addr).or_default());
+        return;
     }
+    #[cfg(test)]
+    TEST_STATUS.with(|s| f(s.borrow_mut().entry(addr).or_default()));
 }
 
 pub(crate) fn status(addr: &Addr) -> Status {
+    #[cfg(test)]
+    if dioxus::core::Runtime::try_current().is_none() {
+        return TEST_STATUS.with(|s| s.borrow().get(addr).cloned().unwrap_or_default());
+    }
     STATUS.read().get(addr).cloned().unwrap_or_default()
 }
 
@@ -97,7 +110,7 @@ pub(crate) fn start(addr: Addr) {
                         target_family = "wasm"
                     ))]
                     if fixture("v2-foreign-fixture") {
-                        net::offline::publish_foreign_version(&addr);
+                        another_node_signs(addr).await;
                     }
                     #[cfg(all(
                         feature = "example-data",
@@ -169,6 +182,88 @@ async fn fill_queue(addr: Addr) {
     }
     HELD.with(|h| h.borrow_mut().remove(&addr));
     refresh(addr).await;
+}
+
+/// Offline builds' decision-25 fixture: another node signs for `addr`, and
+/// this node's delegate signs past it before the page reads the inbox, so
+/// the warning can come only from the delegate's note (`foreign_seen`),
+/// never from comparing versions. While `addr` is held, the next identity
+/// started here writes to it; "another node" (the same identity's keys,
+/// from its recovery key, as a restored copy would hold them) signs the
+/// owner record 1000 versions on over that state; the delegate drains it,
+/// noting the record, and its update signs a version past it.
+#[cfg(all(
+    feature = "example-data",
+    not(feature = "use-node"),
+    target_family = "wasm"
+))]
+async fn another_node_signs(addr: Addr) {
+    thread_local!(static SIGNED: RefCell<HashSet<Addr>> = RefCell::new(HashSet::new()));
+    if !SIGNED.with(|s| s.borrow_mut().insert(addr)) {
+        return;
+    }
+    let other = loop {
+        let ready = STARTED.with(|s| s.borrow().iter().copied().find(|a| *a != addr));
+        if let Some(o) = ready.filter(|o| status(o).ready) {
+            break o;
+        }
+        ops::pause_ms(200).await;
+    };
+    if let Err(e) = another_node_signs_with(addr, other).await {
+        crate::log::error(
+            format!("inbox v2: the foreign-node fixture failed: {e}"),
+            None,
+        );
+    }
+}
+
+/// [`another_node_signs`], with `other` the identity that writes.
+#[cfg(all(not(feature = "use-node"), any(test, feature = "example-data")))]
+pub(crate) async fn another_node_signs_with(addr: Addr, other: Addr) -> Result<(), String> {
+    HELD.with(|h| h.borrow_mut().insert(addr));
+    let result = async {
+        let body = MailBody {
+            v: 1,
+            label: None,
+            title: "while another node signed".into(),
+            content: "from the foreign-node fixture".into(),
+            time_ms: chrono::Utc::now().timestamp_millis(),
+            thread_id: None,
+            in_reply_to: None,
+            quoted_excerpt: None,
+        };
+        let content = freenet_mail_protocol::SealContent::Mail(body.encode().into());
+        super::send::send_content(other, addr, content).await;
+        let key = ops::export_recovery_key(addr)
+            .await
+            .map_err(|e| e.to_string())?;
+        let (dsa, kem) =
+            freenet_mail_protocol::recovery_key::decode(key.as_str()).map_err(|e| e.to_string())?;
+        let keys = mail_delegate::crypto::Keys::from_seeds(&dsa, &kem);
+        let Got::State(bytes) = net::get(&addr, false).await? else {
+            return Err("no inbox".into());
+        };
+        let mut state: InboxState = w::decode(&bytes)?;
+        state.owner.version += 1_000;
+        state.owner.sig = keys
+            .sign_v2(w::OWNER_SIG_CONTEXT, &w::owner_bytes(&addr.0, &state.owner))
+            .into();
+        let theirs = w::encode(&state);
+        net::offline::store_unannounced(&addr, theirs.clone());
+        let update = update_inbox(addr, theirs, OwnerChange::Drain).await?;
+        let delta = update.update.ok_or("the drain signed nothing")?;
+        net::update(&addr, delta.to_vec()).await
+    }
+    .await;
+    HELD.with(|h| h.borrow_mut().remove(&addr));
+    refresh(addr).await;
+    result
+}
+
+/// Tests: what a page that has just loaded knows of `addr`'s inbox.
+#[cfg(all(test, not(feature = "use-node")))]
+pub(crate) fn forget_status(addr: Addr) {
+    set_status(addr, |s| *s = Status::default());
 }
 
 /// Make sure `addr` has a v2 inbox on the network, held and followed.
