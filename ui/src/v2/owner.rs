@@ -10,11 +10,11 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
 use dioxus::prelude::*;
+#[cfg(test)]
+use freenet_mail_protocol::SendAdmission;
 use freenet_mail_protocol::address::address_of;
 use freenet_mail_protocol::inbox_v2::{self as w, Admission, InboundMessage, InboxState};
 use freenet_mail_protocol::{Addr, Hash32, ItemKind, ItemRef, Op, OwnerChange, Reply, from_cbor};
-#[cfg(test)]
-use freenet_mail_protocol::SendAdmission;
 
 use super::net::{self, Got};
 use super::{InboxRecordView, MailBody};

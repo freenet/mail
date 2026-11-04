@@ -748,3 +748,54 @@ fn accepting_saves_the_petname_given_and_flags_lookalikes() {
         "{warnings:?}"
     );
 }
+
+/// A v2 send passes the safeguards a v1 send does: the recorded recipient
+/// binding, and "Require known key to send".
+#[test]
+fn a_v2_send_keeps_the_recorded_recipient_and_the_known_key_rule() {
+    use crate::app::address_book;
+    let (a, b, c) = (
+        identity("v2-cr-a"),
+        identity("v2-cr-b"),
+        identity("v2-cr-c"),
+    );
+    net::offline::forget_own(&b);
+    net::offline::forget_own(&c);
+    block_on(contacts::add(a, &crate::address::display(&b.0), "crb")).unwrap();
+    block_on(contacts::add(a, &crate::address::display(&c.0), "crc")).unwrap();
+    let chosen_b = address_book::address_choice("crb").expect("crb is chosen");
+
+    // Chosen and typed agree: sent.
+    assert_eq!(
+        send::check_recipient("crb", Some(&chosen_b), false, false, &b),
+        Ok(())
+    );
+    // A reopened draft recorded crb, and the field now names crc: refused.
+    let err = send::check_recipient("crc", Some(&chosen_b), false, false, &c).unwrap_err();
+    assert!(err.contains("different key"), "{err}");
+    // The recorded address is crb's, but the address to send to is another.
+    assert!(send::check_recipient("crb", Some(&chosen_b), false, false, &c).is_err());
+    // Require known key to send: an unverified contact, or a stranger, is refused.
+    assert!(send::check_recipient("crb", Some(&chosen_b), false, true, &b).is_err());
+    let stranger = Addr([77; 24]);
+    assert!(
+        send::check_recipient(
+            &crate::address::display(&stranger.0),
+            None,
+            false,
+            true,
+            &stranger
+        )
+        .is_err()
+    );
+    // Verified: sent. An own identity needs no verification.
+    let mut contact = contacts::by_addr(&b).unwrap();
+    contact.verified = true;
+    address_book::insert_contact(contact).unwrap();
+    assert_eq!(
+        send::check_recipient("crb", Some(&chosen_b), false, true, &b),
+        Ok(())
+    );
+    net::note_own(&c);
+    assert_eq!(send::check_recipient("crc", None, false, true, &c), Ok(()));
+}

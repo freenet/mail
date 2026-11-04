@@ -356,6 +356,39 @@ async fn read_back(to: &Addr, id: &[u8; 32]) -> bool {
     false
 }
 
+/// The safeguards a send to a v1 recipient passes, for a v2 recipient `to`:
+/// mail goes to the address recorded when the recipient was chosen (a draft
+/// whose name now names another key is refused, not sent to the new key), and
+/// "Require known key to send" refuses a contact the user has not verified.
+pub(crate) fn check_recipient(
+    typed: &str,
+    chosen: Option<&str>,
+    ambiguous: bool,
+    verify_on_send: bool,
+    to: &Addr,
+) -> Result<(), String> {
+    use crate::app::address_book;
+    let named = address_book::lookup(typed).or_else(|| address_book::lookup_by_bs58(typed));
+    let (verified, own) = if chosen.is_some() || ambiguous || named.is_some() {
+        let recipient = address_book::resolve_for_send(typed, chosen, ambiguous)?;
+        if freenet_mail_protocol::address::address_of(&recipient.ml_dsa_vk_bytes) != *to {
+            return Err(format!(
+                "\"{typed}\" is not the address this message was addressed to. \
+                 Retype the recipient to choose again."
+            ));
+        }
+        (recipient.verified, recipient.is_own)
+    } else {
+        (false, false)
+    };
+    if verify_on_send && !verified && !own && !net::is_own(to) {
+        return Err(format!(
+            "Recipient `{typed}` is not verified. Verify the fingerprint in Contacts before sending."
+        ));
+    }
+    Ok(())
+}
+
 /// Send `body` and record it in Sent, its delivery state set by the outcome,
 /// which is also told to the user.
 pub(crate) fn send_and_record(

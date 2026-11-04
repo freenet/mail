@@ -6110,6 +6110,24 @@ fn ComposeSheet() -> Element {
         // goes through the v2 inbox: the delegate seals it, and the outcome
         // is reported when the inbox is read back.
         if let Some(to_addr) = crate::v2::contacts::recipient_addr(&to_val) {
+            // The same safeguards as a v1 send: the recipient recorded when
+            // it was chosen, and "Require known key to send".
+            if let Err(message) = crate::v2::send::check_recipient(
+                &to_val,
+                chosen_address.read().as_deref(),
+                *ambiguous_draft.read(),
+                crate::local_state::identity_settings_for(&alias)
+                    .privacy
+                    .verify_on_send,
+                &to_addr,
+            ) {
+                crate::log::error(
+                    format!("couldn't send to `{to_val}`: {message}"),
+                    Some(TryNodeAction::GetAlias),
+                );
+                crate::toast::push_toast(message, crate::toast::ToastLevel::Error);
+                return;
+            }
             let label = crate::address::normalize_label(&alias, false)
                 .ok()
                 .map(|l| l.0);
