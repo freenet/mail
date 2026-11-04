@@ -338,8 +338,7 @@ the delegate's.
   `test-ghost-master`: delivery by pass, by invite and through the queue, Open
   and RequireGhost, revocation, and a drain with every tab of the recipient
   closed. That drain must come from the inbox's notification within 120 s (read
-  from the peer's log line above); about four minutes all told when it does.
-  When it does not, the run waits up to 18.3 more minutes for the `rescan`
+  from the peer's log line above). When it does not, the run waits up to 18.3 more minutes for the `rescan`
   wake-up, so it shows whether that fallback works, and then fails.
 
 The `legacy_*.toml` registries are validated by `ui/build.rs`

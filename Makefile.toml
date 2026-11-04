@@ -1131,7 +1131,7 @@ cd "$ROOT/ui/tests" && \
 '''
 
 [tasks.test-e2e-inbox-v2]
-description = "Real-node inbox v2 between two nodes: delivery by pass, invite and the new-contacts queue (accepted), RequireGhost with a test Ghost Key master and refused without a proof, revocation, and a drain with every tab closed, which the inbox's notification must do within 2 minutes (about 3 minutes when it passes; when the notification misses it waits up to 18.3 more minutes for the rescan wake-up, to show the fallback, then fails)"
+description = "Real-node inbox v2 between two nodes: delivery by pass, invite and the new-contacts queue (accepted), RequireGhost with a test Ghost Key master and refused without a proof, revocation, and a drain with every tab closed, which the inbox's notification must do within 2 minutes (when it does not, the run waits up to 18.3 more minutes for the rescan wake-up, to show whether that fallback works, and then fails)"
 script_runner = "bash"
 # The build names the test Ghost Key master (`test-ghost-master`), so its
 # inboxes accept the fixture's keys; build-ui reads FREENET_UI_FEATURES.
