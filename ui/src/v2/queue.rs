@@ -94,9 +94,6 @@ pub(crate) async fn queued(addr: Addr, mail: &[Inbound]) -> Result<HashSet<[u8; 
         .collect())
 }
 
-/// Accept `m`'s sender: send them a pass, so their mail goes straight to the
-/// inbox, keep them as a contact, and move every message of theirs waiting
-/// here to the inbox. Returns what to tell the user.
 /// What to flag about saving `m`'s sender as `petname` (M2): a name that is,
 /// or can be mistaken for, another contact's, and their own label when it
 /// differs. Shown before Accept saves anything.
@@ -114,6 +111,9 @@ pub(crate) fn petname_warnings(m: &Inbound, petname: &str) -> Vec<crate::address
     warnings
 }
 
+/// Accept `m`'s sender: send them a pass, so their mail goes straight to the
+/// inbox, keep them as a contact under `petname`, and move every message of
+/// theirs waiting here to the inbox. Returns what to tell the user.
 pub(crate) async fn accept(identity: Addr, m: &Inbound, petname: &str) -> Result<String, String> {
     let (name, _) = contacts::sender_name(&m.from, m.body.label.as_deref());
     let outcome = super::send::send_content(identity, m.from, SealContent::PassUpdate).await;
