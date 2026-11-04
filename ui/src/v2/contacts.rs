@@ -61,7 +61,7 @@ pub(crate) struct Resolved {
 /// key must hash to the address. The delegate checks the signatures again
 /// before it seals anything to it.
 pub(crate) async fn resolve(addr: Addr) -> Result<Resolved, String> {
-    let bytes = match net::get(&addr, true).await? {
+    let bytes = match net::get(&addr, follows(&addr)).await? {
         Got::State(s) => s,
         Got::Missing => {
             return Err("there is no inbox at this address on the network (yet)".into());
@@ -86,6 +86,14 @@ pub(crate) fn resolved_from(addr: Addr, bytes: Vec<u8>) -> Result<Resolved, Stri
             .count(),
         drained: state.owner.tombstones.len(),
     })
+}
+
+/// Whether a GET of `addr`'s inbox also follows it: only this node's own
+/// inboxes and saved contacts' (as the jobs rank them). A lookup of, or a
+/// send to, anyone else is a plain GET, so this node does not keep telling
+/// its neighbours it is interested in a stranger's inbox.
+pub(crate) fn follows(addr: &Addr) -> bool {
+    net::is_own(addr) || by_addr(addr).is_some()
 }
 
 /// Whether `contact` is reached through its v2 inbox.

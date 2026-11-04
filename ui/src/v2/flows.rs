@@ -486,6 +486,26 @@ fn the_queue_holds_strangers_until_accepted_or_dropped() {
     assert_eq!(titles, vec!["after revoke"]);
 }
 
+/// Only this node's own inboxes and saved contacts' are followed: looking up
+/// or writing to anyone else is a plain GET, so neighbours are not told of
+/// an ongoing interest in a stranger's inbox.
+#[test]
+fn writing_to_a_non_contact_follows_nothing() {
+    let (a, b) = (identity("v2-sub-a"), identity("v2-sub-b"));
+    net::offline::forget_own(&b);
+    block_on(contacts::resolve(b)).unwrap();
+    assert!(block_on(send::send(a, b, &body("hello"))).delivered());
+    assert!(
+        !net::offline::subscribed(&b),
+        "a stranger's inbox was followed"
+    );
+    // Once b is a contact, its inbox is followed.
+    block_on(contacts::add(a, &crate::address::display(&b.0), "bob")).unwrap();
+    assert!(block_on(send::send(a, b, &body("again"))).delivered());
+    assert!(net::offline::subscribed(&b));
+    assert!(net::offline::subscribed(&a), "an own inbox is followed");
+}
+
 /// M2: accepting asks for a petname, so the stranger's own label is never
 /// saved as one silently; a name that is, or looks like, another contact's
 /// is flagged before saving; and a differing label still shows as differing.

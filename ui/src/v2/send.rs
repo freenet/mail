@@ -168,7 +168,7 @@ async fn send_waiting(
 ) -> Outcome {
     let mut told = false;
     for reseals in 0..=MAX_RESEALS {
-        let state = match net::get(&to, true).await {
+        let state = match net::get(&to, super::contacts::follows(&to)).await {
             Ok(Got::State(s)) => s,
             Ok(Got::Missing) => {
                 return Outcome::NotDelivered(NotDelivered::Unreachable(
@@ -288,7 +288,7 @@ async fn wait_for(to: &Addr, id: &[u8; 32], delta: &[u8], reseal_at: u64) -> boo
         crate::mail_delegate::ops::pause_ms(pause).await;
         pause = pause.saturating_mul(2).min(WAIT_MAX_MS);
         let _ = net::update(to, delta.to_vec()).await;
-        if let Ok(Got::State(bytes)) = net::get(to, true).await
+        if let Ok(Got::State(bytes)) = net::get(to, super::contacts::follows(to)).await
             && let Ok(state) = w::decode(&bytes)
             && w::delivered(&state, id)
         {
@@ -337,7 +337,7 @@ async fn read_back(to: &Addr, id: &[u8; 32]) -> bool {
         if attempt > 0 {
             crate::mail_delegate::ops::pause_ms(READ_BACK_PAUSE_MS).await;
         }
-        if let Ok(Got::State(bytes)) = net::get(to, true).await
+        if let Ok(Got::State(bytes)) = net::get(to, super::contacts::follows(to)).await
             && let Ok(state) = w::decode(&bytes)
             && w::delivered(&state, id)
         {

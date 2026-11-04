@@ -38,6 +38,11 @@ fn own(id: &ContractInstanceId) -> Option<Addr> {
     OWN.with(|o| o.borrow().get(id).copied())
 }
 
+/// Whether `addr` is one of this page's identities.
+pub(crate) fn is_own(addr: &Addr) -> bool {
+    own(&super::instance_id(addr)).is_some()
+}
+
 #[cfg(feature = "use-node")]
 pub(crate) use node::{get, get_id, put, route, update};
 #[cfg(not(feature = "use-node"))]
@@ -269,6 +274,28 @@ pub(crate) mod offline {
             RefCell::new(HashMap::new());
     }
 
+    thread_local! {
+        /// Tests: every inbox a GET asked to follow.
+        #[cfg(test)]
+        static SUBSCRIBED: RefCell<std::collections::HashSet<ContractInstanceId>> =
+            RefCell::new(std::collections::HashSet::new());
+    }
+
+    /// Tests: whether a GET asked to follow `addr`'s inbox.
+    #[cfg(test)]
+    pub(crate) fn subscribed(addr: &Addr) -> bool {
+        let id = super::super::instance_id(addr);
+        SUBSCRIBED.with(|s| s.borrow().contains(&id))
+    }
+
+    /// Tests: `addr` is not one of this page's identities (another node's).
+    #[cfg(test)]
+    pub(crate) fn forget_own(addr: &Addr) {
+        let id = super::super::instance_id(addr);
+        OWN.with(|o| o.borrow_mut().remove(&id));
+        SUBSCRIBED.with(|s| s.borrow_mut().remove(&id));
+    }
+
     /// Tests: the next PUT of `addr` is not stored; it answers `answer`
     /// (an error for a rejected or unanswered PUT, `Ok` for one whose
     /// answer came but whose state went nowhere).
@@ -330,10 +357,15 @@ pub(crate) mod offline {
         }
     }
 
-    pub(crate) async fn get(addr: &Addr, _subscribe: bool) -> Result<Got, String> {
+    pub(crate) async fn get(addr: &Addr, subscribe: bool) -> Result<Got, String> {
         let id = super::super::instance_id(addr);
         #[cfg(test)]
         tick(addr);
+        #[cfg(test)]
+        if subscribe {
+            SUBSCRIBED.with(|s| s.borrow_mut().insert(id));
+        }
+        let _ = subscribe;
         Ok(STATES
             .with(|s| s.borrow().get(&id).cloned())
             .map_or(Got::Missing, Got::State))
