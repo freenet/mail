@@ -34,6 +34,11 @@ pub const MAX_ITEM_BYTES: usize = 256 * 1024;
 /// accepts a verified sender through the queue only if it is listed, and
 /// only during that identity's window.
 pub const V1_CONTACTS_FIELD: &str = "v1_contacts";
+/// Decision 29: the field of an identity's settings item listing, as
+/// lowercase hex, the token assignment hashes of v0.2.x messages the user
+/// confirmed discarding so the old inbox can close. The page writes it only
+/// after an explicit confirm; it is the record of that decision.
+pub const V1_DISCARD_FIELD: &str = "v1_discard";
 /// Most ciphertexts one `DecryptV1` call may carry.
 pub const MAX_DECRYPT_BATCH: usize = 32;
 /// Most assignment hashes one `SignV1Removal` call may carry.

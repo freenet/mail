@@ -448,6 +448,65 @@ fn a_message_too_large_to_keep_stays() {
     assert!(run_v1(&mut world, &a, id).is_empty());
 }
 
+/// Decision 29: a message that can never be imported (too large to keep)
+/// is recorded as blocking the close. It is discarded only once the close
+/// has been pending 14 days AND the user's confirm lists it; then the close
+/// lands.
+#[test]
+fn a_blocking_message_goes_only_with_the_users_confirm_after_14_days() {
+    use crate::transition::DISCARD_AFTER;
+    let mut world = World::new();
+    let a = world.identity("alice");
+    let me = info(&mut world, &a);
+    let id = v1_inbox_id(&me.vk).unwrap();
+    let big = {
+        let mut m: serde_json::Value =
+            serde_json::from_slice(&super::jobs::sealed_big(&me)).unwrap();
+        m["token_assignment"] = serde_json::json!({
+            "assignment_hash": (vec![9u8; 32]), "tier": "Min10",
+            "time_slot": "2026-11-02T10:00:00Z",
+        });
+        m
+    };
+    world
+        .env
+        .contracts
+        .insert(id, v1_state(&me, vec![big, held(&me, "one", 1)]));
+    run_v1(&mut world, &a, id);
+    world.advance(WINDOW);
+    let out = run_v1(&mut world, &a, id);
+    assert!(settings_sigs(&out).is_empty(), "the big one blocks");
+    land(&mut world, &me, id, &out);
+    let blocking = |world: &mut World| {
+        let w = world.record(&a).v1_window.unwrap();
+        w.closes.values().next().unwrap().blocking.clone()
+    };
+    let shown = blocking(&mut world);
+    assert_eq!(shown.len(), 1);
+    assert_eq!(shown[0].hash.into_array(), [9; 32]);
+    assert_eq!(shown[0].sender.as_deref(), Some("bob"));
+    let slot = chrono::DateTime::parse_from_rfc3339("2026-11-02T10:00:00Z").unwrap();
+    assert_eq!(shown[0].arrived, Some(slot.timestamp()));
+    let confirm = serde_json::json!({
+        freenet_mail_protocol::V1_DISCARD_FIELD: [crate::store::hex(&[9; 32])],
+    });
+    // A confirm before the 14 days discards nothing.
+    put_settings(&mut world, &a, confirm.clone());
+    world.advance(DISCARD_AFTER - 60);
+    assert!(run_v1(&mut world, &a, id).is_empty());
+    // After them, nothing goes without the confirm.
+    put_settings(&mut world, &a, serde_json::json!({}));
+    world.advance(60);
+    assert!(run_v1(&mut world, &a, id).is_empty());
+    assert_eq!(messages_in(&world, id), 1);
+    // Confirmed: it goes, and the close lands.
+    put_settings(&mut world, &a, confirm);
+    let out = run_v1(&mut world, &a, id);
+    assert_eq!(land(&mut world, &me, id, &out), 0);
+    assert_eq!(messages_in(&world, id), 0);
+    assert!(is_closed(&settings_of(&world, id)));
+}
+
 /// An inbox closed already (an identity restored after its close) is
 /// recorded as closed, and nothing is signed.
 #[test]
@@ -587,6 +646,16 @@ fn contact(world: &mut World, owner: &Addr, who: &Addr, vk: &[u8], verified: boo
 /// `owner`'s page lists `who` as contacts it has a v0.2.x relationship
 /// with (decision 26), as `ui/src/v2/transition.rs` writes them.
 fn list_v1(world: &mut World, owner: &Addr, who: &[Addr]) {
+    let list: Vec<String> = who.iter().map(|a| crate::store::hex(&a.0)).collect();
+    put_settings(
+        world,
+        owner,
+        serde_json::json!({ freenet_mail_protocol::V1_CONTACTS_FIELD: list }),
+    );
+}
+
+/// Replace `owner`'s settings item with `body`, as the page writes it.
+fn put_settings(world: &mut World, owner: &Addr, body: serde_json::Value) {
     let item = ItemRef {
         kind: ItemKind::IdentitySettings,
         owner: Some(*owner),
@@ -597,8 +666,6 @@ fn list_v1(world: &mut World, owner: &Addr, who: &[Addr]) {
         Ok(Reply::Item(None)) => Some(0),
         other => panic!("{other:?}"),
     };
-    let list: Vec<String> = who.iter().map(|a| crate::store::hex(&a.0)).collect();
-    let body = serde_json::json!({ freenet_mail_protocol::V1_CONTACTS_FIELD: list });
     world
         .call_as(
             owner,

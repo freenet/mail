@@ -34,7 +34,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use freenet_mail_protocol::inbox_v2::B32;
 use freenet_mail_protocol::{
     Addr, Failure, FailureCode, Hash32, ItemKind, ItemRef, MAX_ITEM_BYTES, MAX_REMOVAL_BATCH, Reply,
-    V1_CONTACTS_FIELD,
+    V1_CONTACTS_FIELD, V1_DISCARD_FIELD,
 };
 use freenet_mail_wire_v1::aft::Tier;
 use freenet_mail_wire_v1::inbox::{InboxSettings, UpdateInbox};
@@ -49,6 +49,11 @@ use crate::store::{self, Space, fail, item_rel};
 
 /// How long a v0.2.x inbox stays open after the identity's v2 inbox is made.
 pub const WINDOW: u64 = 90 * 86_400;
+/// Decision 29: how long after the window ends a pending close waits before
+/// the page offers to discard what blocks it.
+pub const DISCARD_AFTER: u64 = 14 * 86_400;
+/// Most blocking messages recorded for the page at once.
+pub const MAX_BLOCKERS: usize = 64;
 
 /// The transition of one identity, in its inbox record.
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
@@ -77,6 +82,23 @@ pub struct V1Closing {
     /// The inbox was seen holding these settings (or settings someone signed
     /// later): nothing more to send.
     pub done: bool,
+    /// The messages the last attempt left in the inbox (decision 29), for
+    /// the page to list. Only these can be discarded.
+    #[serde(default)]
+    pub blocking: Vec<V1Blocker>,
+}
+
+/// A v1 message that keeps a close pending.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct V1Blocker {
+    /// Its token assignment hash: what a removal names.
+    pub hash: B32,
+    /// Ciphertext bytes.
+    pub size: u64,
+    /// The sender the message names, if it decrypts.
+    pub sender: Option<String>,
+    /// The time slot of its token (unix seconds), about when it arrived.
+    pub arrived: Option<i64>,
 }
 
 /// Whether `s` refuses a v0.2.x sender with no year token.
@@ -105,6 +127,8 @@ struct Message {
 #[derive(Deserialize)]
 struct Assignment {
     assignment_hash: [u8; 32],
+    #[serde(default)]
+    time_slot: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// The parts of a v1 plaintext the close compares with a copy.
@@ -112,6 +136,8 @@ struct Assignment {
 struct Plain {
     title: String,
     content: String,
+    #[serde(default)]
+    from: Option<String>,
 }
 
 /// Slack under [`MAX_ITEM_BYTES`] for the copy's `kept_at`, which is the
@@ -251,6 +277,7 @@ pub fn close(
                 last_update_micros: held_at,
                 sig: ByteBuf::new(),
                 done: true,
+                blocking: Vec::new(),
             };
             save_closing(s, owner, id, done)?;
             return Ok(Vec::new());
@@ -273,6 +300,7 @@ pub fn close(
                 last_update_micros: micros,
                 sig,
                 done: false,
+                blocking: Vec::new(),
             };
             // Recorded before it can leave.
             save_closing(s, owner, id, c.clone())?;
@@ -299,17 +327,31 @@ pub fn close(
         [Ok(kept), Ok(archived)] => Some([kept, archived]),
         _ => None,
     };
+    let discard = discarded(s, owner, &w, &closing, now);
     let mut remove = Vec::new();
+    let mut blocking = Vec::new();
     let mut stays = 0usize;
     for m in &inbox.messages {
-        if listed
-            .as_ref()
-            .is_some_and(|l| imported(s, owner, &keys, l, m, now))
+        let hash = m.token_assignment.assignment_hash;
+        if discard.contains(&hash)
+            || listed
+                .as_ref()
+                .is_some_and(|l| imported(s, owner, &keys, l, m, now))
         {
-            remove.push(Hash32(m.token_assignment.assignment_hash));
+            remove.push(Hash32(hash));
         } else {
             stays += 1;
+            if blocking.len() < MAX_BLOCKERS {
+                blocking.push(blocker(&keys, m));
+            }
         }
+    }
+    if blocking != closing.blocking {
+        let recorded = V1Closing {
+            blocking,
+            ..closing.clone()
+        };
+        save_closing(s, owner, id, recorded)?;
     }
     remove.sort_by_key(|h| h.0);
     remove.dedup_by_key(|h| h.0);
@@ -344,6 +386,57 @@ pub fn close(
         );
     }
     Ok(out)
+}
+
+/// Decision 29: the blocking messages the user confirmed discarding. Only
+/// once the close has been pending [`DISCARD_AFTER`], and only messages the
+/// page was shown (the recorded `blocking`) and the user listed
+/// ([`V1_DISCARD_FIELD`] in the identity's settings item, which is the
+/// record of that confirmation). Anything unreadable discards nothing.
+fn discarded(
+    s: &Space<'_>,
+    owner: &Addr,
+    w: &V1Window,
+    closing: &V1Closing,
+    now: u64,
+) -> BTreeSet<[u8; 32]> {
+    if now < w.ends().saturating_add(DISCARD_AFTER) {
+        return BTreeSet::new();
+    }
+    let settings = ItemRef {
+        kind: ItemKind::IdentitySettings,
+        owner: Some(*owner),
+        id: Vec::new(),
+    };
+    let Ok(Some((_, body))) = s.read(&item_rel(&settings)) else {
+        return BTreeSet::new();
+    };
+    let confirmed = serde_json::from_slice::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|v| v.get(V1_DISCARD_FIELD)?.as_array().cloned())
+        .unwrap_or_default();
+    closing
+        .blocking
+        .iter()
+        .map(|b| b.hash.into_array())
+        .filter(|h| {
+            let entry = store::hex(h);
+            confirmed.iter().any(|e| e.as_str() == Some(entry.as_str()))
+        })
+        .collect()
+}
+
+/// What the page lists about a message that keeps the close pending.
+fn blocker(keys: &Keys, m: &Message) -> V1Blocker {
+    let from = crypto::decrypt_v1(&keys.kem, &m.content)
+        .and_then(|p| serde_json::from_slice::<Plain>(&p).ok())
+        .and_then(|p| p.from);
+    V1Blocker {
+        hash: ByteArray::new(m.token_assignment.assignment_hash),
+        size: m.content.len() as u64,
+        sender: from,
+        arrived: m.token_assignment.time_slot.map(|t| t.timestamp()),
+    }
 }
 
 fn kind_item(kind: ItemKind, owner: &Addr, id: [u8; 16]) -> ItemRef {

@@ -535,6 +535,13 @@ dt "v1 transition: an identity accepts only the contacts it listed" "$D/inbox_v2
 dt "v1 transition: nothing is accepted after the window" "$D/transition.rs" \
     '    window.is_some_and(|w| now < w.ends())' '    window.is_some()' \
     nothing_is_accepted_after_the_window
+dt "v1 transition: a blocking message goes only with the user's confirm" "$D/transition.rs" \
+    '            confirmed.iter().any(|e| e.as_str() == Some(entry.as_str()))' \
+    '            !entry.is_empty()' \
+    a_blocking_message_goes_only_with_the_users_confirm_after_14_days
+dt "v1 transition: nothing is discarded before 14 days pending" "$D/transition.rs" \
+    '    if now < w.ends().saturating_add(DISCARD_AFTER) {' '    if false {' \
+    a_blocking_message_goes_only_with_the_users_confirm_after_14_days
 dt "v1 transition: the queue accepts only the verified key that signed" "$D/inbox_v2.rs" \
     '.is_ok_and(|r| r.keys.verified && r.keys.ml_dsa_vk_bytes == sender_vk),' \
     '.is_ok_and(|r| r.keys.verified),' \
