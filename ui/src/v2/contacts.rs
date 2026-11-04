@@ -133,6 +133,16 @@ pub(crate) fn petnames() -> Vec<(String, [u8; 24])> {
         .collect()
 }
 
+/// Whether a To field holds an invite. An invite is a bearer secret: it is
+/// added as a contact (which holds it), never written to, and never stored
+/// in a Sent record.
+pub(crate) fn is_invite(text: &str) -> bool {
+    matches!(
+        address::parse_recipient(text.trim()),
+        Ok(Recipient::Invite(_))
+    )
+}
+
 /// The v2 address a To field names: an address in any accepted form, or a
 /// v2 contact's name.
 pub(crate) fn recipient_addr(text: &str) -> Option<Addr> {
@@ -141,6 +151,9 @@ pub(crate) fn recipient_addr(text: &str) -> Option<Addr> {
         return None;
     }
     if let Ok(r) = address::parse_recipient(text) {
+        if matches!(r, Recipient::Invite(_)) {
+            return None;
+        }
         return r.addr().map(Addr);
     }
     all()
@@ -222,10 +235,13 @@ pub(crate) async fn add(identity: Addr, input: &str, petname: &str) -> Result<Ad
     if matches!(recipient, Recipient::Invite(_)) && !notes.invited.contains(&identity.0) {
         notes.invited.push(identity.0);
     }
-    contact_store::set_v2_notes(&resolved.vk, notes);
     // A contact already in the address book (v1 or v2: the address is the
-    // key either way) is kept as it is, now reached through its v2 inbox.
+    // key either way) is kept as it is, under the name it has, now reached
+    // through its v2 inbox.
     let existing = address_book::contact_by_vk(&resolved.vk);
+    let name = existing
+        .as_ref()
+        .map_or(name, |c| c.local_alias.to_string());
     let contact = match existing.clone() {
         Some(existing) => existing,
         None => Contact {
@@ -243,6 +259,9 @@ pub(crate) async fn add(identity: Addr, input: &str, petname: &str) -> Result<Ad
     if existing.is_none() {
         address_book::insert_contact(contact.clone())?;
     }
+    // Only once it is in the address book: a refused insert leaves no notes
+    // that would make it look like a v2 contact.
+    contact_store::set_v2_notes(&resolved.vk, notes);
     // Stored before reporting success, so "added" means it is kept.
     contact_store::save(&contact)
         .await

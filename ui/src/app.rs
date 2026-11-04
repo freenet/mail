@@ -6083,6 +6083,14 @@ fn ComposeSheet() -> Element {
             return;
         };
         let to_val = to.read().clone();
+        if crate::v2::contacts::is_invite(&to_val) {
+            crate::toast::push_toast(
+                "This is an invite. Add it as a contact (Settings, Address & new contacts), \
+                 then write to them by name.",
+                crate::toast::ToastLevel::Error,
+            );
+            return;
+        }
         // A v2 recipient (an address in any form, or a v2 contact's name)
         // goes through the v2 inbox: the delegate seals it, and the outcome
         // is reported when the inbox is read back.
@@ -6649,7 +6657,9 @@ fn ComposeSheet() -> Element {
                 {
                     let to_val = to.read().clone();
                     let lookup = recipient_lookup.read().clone();
-                    if crate::v2::contacts::recipient_addr(&to_val).is_some() {
+                    if crate::v2::contacts::recipient_addr(&to_val).is_some()
+                        || crate::v2::contacts::is_invite(&to_val)
+                    {
                         rsx! { v2_view::RecipientNote {
                             to: to_val.clone(),
                             from: sender_addr,

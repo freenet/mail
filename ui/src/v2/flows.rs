@@ -120,6 +120,33 @@ fn an_invite_not_signed_by_its_inbox_is_refused() {
     assert_eq!(contacts::held(a, b), contacts::PassState::None);
 }
 
+/// N3, N5, N6: an invite in the To field is no recipient; adding an address
+/// already saved reports the name it has; an add the address book refuses
+/// leaves nothing that marks the address a v2 contact.
+#[test]
+fn contact_adds_report_what_was_kept() {
+    let (a, b, c) = (
+        identity("v2-nits-a"),
+        identity("v2-nits-b"),
+        identity("v2-nits-c"),
+    );
+    let invite = block_on(contacts::create_invite(b, Some("bob"), 3)).unwrap();
+    assert!(contacts::is_invite(&invite));
+    assert_eq!(contacts::recipient_addr(&invite), None);
+
+    let bob = crate::address::display(&b.0);
+    block_on(contacts::add(a, &bob, "bob")).unwrap();
+    let again = block_on(contacts::add(a, &bob, "robert")).unwrap();
+    assert_eq!(again.name, "bob", "the name it is saved under");
+
+    // "bob" is taken by another address: refused, and c is not a contact.
+    let carol = crate::address::display(&c.0);
+    assert!(block_on(contacts::add(a, &format!("carol@{carol}"), "bob")).is_err());
+    assert!(contacts::by_addr(&c).is_none());
+    let vk = block_on(contacts::resolve(c)).unwrap().vk;
+    assert!(crate::app::contact_store::v2_notes(&vk).is_none());
+}
+
 /// The first PUT of a new inbox fails after the delegate stored its record:
 /// rejected, or gone with no word. A later start publishes it after all.
 #[test]

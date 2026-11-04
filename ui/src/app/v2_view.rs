@@ -773,8 +773,9 @@ fn GhostPanel(
                         span { "data-testid": testid::FM_V2_GHOST_DISCLOSURE,
                             "Using it links this first message to your Ghost Key: the proof is \
                              public in their inbox until they pick the message up, and anyone \
-                             watching that inbox can see which key sent it. Once they accept you, \
-                             your mail goes by pass and carries no proof."
+                             watching that inbox can see which key sent it, its tier and the \
+                             month it was issued. Once they accept you, your mail goes by pass \
+                             and carries no proof."
                         }
                     }
                 }
@@ -805,6 +806,14 @@ pub(crate) fn RecipientNote(
     draft_saved: bool,
     save_draft: Callback<()>,
 ) -> Element {
+    if contacts::is_invite(&to) {
+        return rsx! {
+            div { class: "sheet-field err", "data-testid": testid::FM_V2_RECIPIENT_NOTE,
+                "This is an invite, not an address. Add it as a contact under Settings, \
+                 \u{201c}Address & new contacts\u{201d}, then write to them by name."
+            }
+        };
+    }
     let Some(to_addr) = contacts::recipient_addr(&to) else {
         return rsx! {};
     };
