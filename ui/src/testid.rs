@@ -218,6 +218,20 @@ pub(crate) const FM_V2_GHOST_BADGE: &str = "fm-v2-ghost-badge";
 pub(crate) const FM_V2_OUTCOME: &str = "fm-v2-outcome";
 pub(crate) const FM_V2_FOREIGN_WARNING: &str = "fm-v2-foreign-warning";
 pub(crate) const FM_V2_QUARANTINE_MODE: &str = "fm-v2-quarantine-mode";
+pub(crate) const FM_V2_GHOST_PANEL: &str = "fm-v2-ghost-panel";
+pub(crate) const FM_V2_GHOST_USE: &str = "fm-v2-ghost-use";
+pub(crate) const FM_V2_GHOST_PICKER: &str = "fm-v2-ghost-picker";
+pub(crate) const FM_V2_GHOST_TIER: &str = "fm-v2-ghost-tier";
+pub(crate) const FM_V2_GHOST_GET: &str = "fm-v2-ghost-get";
+pub(crate) const FM_V2_GHOST_GET_LINK: &str = "fm-v2-ghost-get-link";
+pub(crate) const FM_V2_GHOST_RECHECK: &str = "fm-v2-ghost-recheck";
+pub(crate) const FM_V2_GHOST_DISCLOSURE: &str = "fm-v2-ghost-disclosure";
+pub(crate) const FM_V2_QUEUE: &str = "fm-v2-queue";
+pub(crate) const FM_V2_QUEUE_ROW: &str = "fm-v2-queue-row";
+pub(crate) const FM_V2_QUEUE_ACCEPT: &str = "fm-v2-queue-accept";
+pub(crate) const FM_V2_QUEUE_DROP: &str = "fm-v2-queue-drop";
+pub(crate) const FM_V2_QUEUE_TIP: &str = "fm-v2-queue-tip";
+pub(crate) const FM_V2_QUEUE_DROPPED: &str = "fm-v2-queue-dropped";
 
 #[cfg(test)]
 mod tests {
@@ -387,6 +401,20 @@ mod tests {
             ("fmV2Outcome", super::FM_V2_OUTCOME),
             ("fmV2ForeignWarning", super::FM_V2_FOREIGN_WARNING),
             ("fmV2QuarantineMode", super::FM_V2_QUARANTINE_MODE),
+            ("fmV2GhostPanel", super::FM_V2_GHOST_PANEL),
+            ("fmV2GhostUse", super::FM_V2_GHOST_USE),
+            ("fmV2GhostPicker", super::FM_V2_GHOST_PICKER),
+            ("fmV2GhostTier", super::FM_V2_GHOST_TIER),
+            ("fmV2GhostGet", super::FM_V2_GHOST_GET),
+            ("fmV2GhostGetLink", super::FM_V2_GHOST_GET_LINK),
+            ("fmV2GhostRecheck", super::FM_V2_GHOST_RECHECK),
+            ("fmV2GhostDisclosure", super::FM_V2_GHOST_DISCLOSURE),
+            ("fmV2Queue", super::FM_V2_QUEUE),
+            ("fmV2QueueRow", super::FM_V2_QUEUE_ROW),
+            ("fmV2QueueAccept", super::FM_V2_QUEUE_ACCEPT),
+            ("fmV2QueueDrop", super::FM_V2_QUEUE_DROP),
+            ("fmV2QueueTip", super::FM_V2_QUEUE_TIP),
+            ("fmV2QueueDropped", super::FM_V2_QUEUE_DROPPED),
         ];
         assert_eq!(
             json.len(),

@@ -37,6 +37,24 @@ pub(crate) enum NotDelivered {
     AfterReseals,
     /// No inbox at that address, or no answer: never sent.
     Unreachable(String),
+    /// Ghost Key had no key to sign with.
+    NoGhostKey,
+    /// The user declined Ghost Key's prompt.
+    GhostDeclined,
+    /// The key that signed is below the tier their inbox requires.
+    BelowTier { have: u64, need: u32 },
+}
+
+/// The key the compose sheet chose with "Use Ghost Key", read at send.
+pub(crate) static GHOST_CHOICE: dioxus::prelude::GlobalSignal<Option<GhostChoice>> =
+    dioxus::prelude::Signal::global(|| None);
+
+/// The Ghost Key to prove with, for a RequireGhost recipient.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct GhostChoice {
+    pub key: crate::ghostkeys::Key,
+    /// The user's default key: signed with `SignWithDefault`.
+    pub default: bool,
 }
 
 impl Outcome {
@@ -75,6 +93,17 @@ impl Outcome {
                      although it was sent again {MAX_RESEALS} times."
                 ),
                 NotDelivered::Unreachable(e) => format!("Not sent to {to}: {e}"),
+                NotDelivered::NoGhostKey => format!(
+                    "Not sent to {to}: you have no Ghost Key that can sign. Get one with \
+                     \"Get a Ghost Key\" and send again."
+                ),
+                NotDelivered::GhostDeclined => format!(
+                    "Not sent to {to}: Ghost Key access was declined. Send again to be asked again."
+                ),
+                NotDelivered::BelowTier { have, need } => format!(
+                    "Not sent to {to}: your Ghost Key is ${have}, and {to} accepts new contacts \
+                     only with ${need} or more."
+                ),
             },
         }
     }
@@ -101,6 +130,7 @@ const READ_BACKS: u32 = 4;
 const READ_BACK_PAUSE_MS: u32 = 1_500;
 
 /// Send `body` from `from` to `to`.
+#[cfg(all(test, feature = "local-delegate", not(feature = "use-node")))]
 pub(crate) async fn send(from: Addr, to: Addr, body: &MailBody) -> Outcome {
     send_content(from, to, SealContent::Mail(body.encode().into())).await
 }
@@ -108,6 +138,18 @@ pub(crate) async fn send(from: Addr, to: Addr, body: &MailBody) -> Outcome {
 /// Send `content` from `from` to `to`: a mail, or a system message that only
 /// hands over a pass (accepting a stranger).
 pub(crate) async fn send_content(from: Addr, to: Addr, content: SealContent) -> Outcome {
+    send_ghost(from, to, content, None).await
+}
+
+/// [`send_content`], proving with `ghost` if their inbox requires a Ghost Key
+/// and the delegate seals the message for its queue. A proof is attached
+/// only then (decisions 2 and 19).
+pub(crate) async fn send_ghost(
+    from: Addr,
+    to: Addr,
+    content: SealContent,
+    mut ghost: Option<GhostChoice>,
+) -> Outcome {
     for reseals in 0..=MAX_RESEALS {
         let state = match net::get(&to, true).await {
             Ok(Got::State(s)) => s,
@@ -118,7 +160,18 @@ pub(crate) async fn send_content(from: Addr, to: Addr, content: SealContent) -> 
             }
             Err(e) => return Outcome::NotDelivered(NotDelivered::Unreachable(e)),
         };
-        let sealed = match seal(from, to, state, content.clone(), reseals).await {
+        let need = match w::decode::<w::InboxState>(&state).map(|s| s.owner.quarantine) {
+            Ok(w::QuarantineMode::RequireGhost { min_usd }) => Some(min_usd.unwrap_or(0)),
+            _ => None,
+        };
+        let ghost_vk = match (&ghost, need) {
+            (Some(g), Some(_)) => match crate::ghostkeys::verifying_key(&g.key).await {
+                Ok(vk) => Some(vk),
+                Err(e) => return refused(e),
+            },
+            _ => None,
+        };
+        let sealed = match seal(from, to, state, content.clone(), ghost_vk, reseals).await {
             Ok(s) => s,
             Err(CallError::Failed(f)) if f.detail.contains("requires a Ghost Key") => {
                 return Outcome::NotDelivered(NotDelivered::NeedsGhostKey);
@@ -129,10 +182,40 @@ pub(crate) async fn send_content(from: Addr, to: Addr, content: SealContent) -> 
                 )));
             }
         };
-        let message: Message = match w::decode(&sealed.message) {
+        let mut message: Message = match w::decode(&sealed.message) {
             Ok(m) => m,
             Err(e) => return Outcome::NotDelivered(NotDelivered::Unreachable(e)),
         };
+        if let (Some(payload), Some(g), Some(vk)) = (&sealed.ghost_payload, &ghost, ghost_vk) {
+            let signed = match crate::ghostkeys::sign(&g.key, g.default, payload.to_vec()).await {
+                Ok(s) => s,
+                Err(e) => return refused(e),
+            };
+            if signed.vk != vk {
+                // The vault signed with another key (the user picked one at
+                // its prompt): the message names its key, so seal it again.
+                ghost = Some(GhostChoice {
+                    key: crate::ghostkeys::Key {
+                        fingerprint: signed.fingerprint,
+                        label: None,
+                        usd: Some(signed.usd),
+                        vk: Some(signed.vk),
+                    },
+                    default: false,
+                });
+                continue;
+            }
+            let need = need.unwrap_or(0);
+            if signed.usd < u64::from(need) {
+                return Outcome::NotDelivered(NotDelivered::BelowTier {
+                    have: signed.usd,
+                    need,
+                });
+            }
+            message.admission = w::Admission::Quarantine {
+                ghost: Some(signed.proof),
+            };
+        }
         let delta = InboxDelta {
             messages: [(ByteArray::new(sealed.id.0), message)].into(),
             ..Default::default()
@@ -158,11 +241,21 @@ pub(crate) async fn send_content(from: Addr, to: Addr, content: SealContent) -> 
     Outcome::NotDelivered(NotDelivered::AfterReseals)
 }
 
+fn refused(e: crate::ghostkeys::Refusal) -> Outcome {
+    use crate::ghostkeys::Refusal;
+    Outcome::NotDelivered(match e {
+        Refusal::NoKey => NotDelivered::NoGhostKey,
+        Refusal::Denied => NotDelivered::GhostDeclined,
+        Refusal::Failed(_) => NotDelivered::Unreachable(e.to_string()),
+    })
+}
+
 async fn seal(
     from: Addr,
     to: Addr,
     state: Vec<u8>,
     content: SealContent,
+    ghost_vk: Option<[u8; 32]>,
     reseals: u8,
 ) -> Result<SealedV2, CallError> {
     match call(Op::SealV2 {
@@ -170,7 +263,7 @@ async fn seal(
         to,
         to_state: state.into(),
         content,
-        ghost_vk: None,
+        ghost_vk: ghost_vk.map(freenet_mail_protocol::Hash32),
         ui_entropy: super::entropy(),
         reseals,
     })
@@ -206,6 +299,7 @@ pub(crate) fn send_and_record(
     to_name: String,
     to_text: String,
     body: MailBody,
+    ghost: Option<GhostChoice>,
 ) {
     use freenet_mail_wire_v1::local_state::{DeliveryState, SentMessage};
     let seq = SENDS.with(|n| {
@@ -234,7 +328,8 @@ pub(crate) fn send_and_record(
         {
             crate::log::local_state_failure("save sent message", e);
         }
-        let outcome = send(from, to, &body).await;
+        let content = SealContent::Mail(body.encode().into());
+        let outcome = send_ghost(from, to, content, ghost).await;
         let state = if outcome.delivered() {
             DeliveryState::Delivered
         } else {

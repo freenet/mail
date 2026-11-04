@@ -1375,7 +1375,7 @@ fn is_v2_row(id: u64) -> bool {
 /// The mail drained into `addr`'s v2 inbox, as inbox rows. The sender is
 /// shown by petname, else by the label they suggest, else by their address.
 fn v2_rows(addr: &freenet_mail_protocol::Addr, is_read: impl Fn(u64) -> bool) -> Vec<Message> {
-    crate::v2::owner::inbound(addr)
+    crate::v2::owner::inbound(addr, false)
         .into_iter()
         .map(|m| {
             let id = u64::from_be_bytes(m.id[..8].try_into().expect("8 bytes"))
@@ -1400,6 +1400,64 @@ fn v2_rows(addr: &freenet_mail_protocol::Addr, is_read: impl Fn(u64) -> bool) ->
             }
         })
         .collect()
+}
+
+/// The draft the page's `#/compose?draft=<id>` route names: the way back
+/// from getting a Ghost Key (§5.5).
+fn route_draft() -> Option<String> {
+    #[cfg(target_family = "wasm")]
+    {
+        let hash = web_sys::window()?.location().hash().ok()?;
+        crate::ghostkeys::draft_in_route(&hash)
+    }
+    #[cfg(not(target_family = "wasm"))]
+    None
+}
+
+/// Open the draft the route names once the identity's drafts are loaded,
+/// on load and whenever the route changes, then clear the route.
+fn draft_route(mut menu_selection: Signal<menu::MenuSelection>) {
+    let mut wanted = use_signal(route_draft);
+    use_hook(move || {
+        #[cfg(target_family = "wasm")]
+        if let Some(window) = web_sys::window() {
+            use wasm_bindgen::{JsCast, closure::Closure};
+            let on_change = Closure::<dyn FnMut()>::new(move || wanted.set(route_draft()));
+            let _ = window
+                .add_event_listener_with_callback("hashchange", on_change.as_ref().unchecked_ref());
+            on_change.forget();
+        }
+    });
+    let user = use_context::<Signal<User>>();
+    use_effect(move || {
+        let _ = crate::local_state::GENERATION.read();
+        let Some(id) = wanted.read().clone() else {
+            return;
+        };
+        let Some(alias) = user.read().logged_id().map(|i| i.alias.to_string()) else {
+            return;
+        };
+        let Some((_, d)) = crate::local_state::drafts_for(&alias)
+            .into_iter()
+            .find(|(d, _)| *d == id)
+        else {
+            return;
+        };
+        wanted.set(None);
+        #[cfg(target_family = "wasm")]
+        if let Some(window) = web_sys::window() {
+            let _ = window.location().set_hash("");
+        }
+        menu_selection.write().open_draft(menu::ComposePrefill {
+            to: d.to,
+            subject: d.subject,
+            body: d.body,
+            draft_id: Some(id),
+            thread_id: d.thread_id,
+            in_reply_to: d.in_reply_to,
+            quoted_excerpt: d.quoted_excerpt,
+        });
+    });
 }
 
 /// Replace the v2 rows in `emails` with `rows`.
@@ -3272,6 +3330,7 @@ fn UserInbox() -> Element {
             crate::v2::owner::start(id.addr);
         }
     }
+    draft_route(menu_selection);
 
     let _local_gen = crate::local_state::GENERATION();
     let appearance = crate::local_state::global_settings().appearance;
@@ -3754,6 +3813,7 @@ fn MessageList() -> Element {
             }
             if let Some(id) = user.read().logged_id() {
                 v2_view::ForeignNodeWarning { addr: id.addr }
+                v2_view::QueueNotice { addr: id.addr }
             }
             v2_view::LastOutcome {}
             div { class: "list-scroll", "data-testid": testid::FM_LIST,
@@ -5702,6 +5762,8 @@ fn ComposeSheet() -> Element {
     let mut title = use_signal(|| initial_subj.clone());
     let mut content = use_signal(|| initial_body.clone());
     let draft_id = use_signal(|| initial_draft_id.clone());
+    // A key chosen for another message is not this one's.
+    use_hook(|| *crate::v2::send::GHOST_CHOICE.write() = None);
     let thread_id = use_signal(|| initial_thread_id.clone());
     let in_reply_to = use_signal(|| initial_in_reply_to.clone());
     let quoted_excerpt = use_signal(|| initial_quoted_excerpt.clone());
@@ -5946,6 +6008,7 @@ fn ComposeSheet() -> Element {
                 to_name,
                 to_val,
                 body,
+                crate::v2::send::GHOST_CHOICE.read().clone(),
             );
             delete_draft_now(());
             menu_selection.write().at_new_msg();
@@ -6479,7 +6542,13 @@ fn ComposeSheet() -> Element {
                     let to_val = to.read().clone();
                     let lookup = recipient_lookup.read().clone();
                     if crate::v2::contacts::recipient_addr(&to_val).is_some() {
-                        rsx! { v2_view::RecipientNote { to: to_val.clone(), from: sender_addr } }
+                        rsx! { v2_view::RecipientNote {
+                            to: to_val.clone(),
+                            from: sender_addr,
+                            draft_id: draft_id.read().clone(),
+                            draft_saved: autosave_state(*autosave_token.read(), *saved_token.read(), *failed_token.read()) == "saved",
+                            save_draft: autosave,
+                        } }
                     } else if let Some(r) = lookup {
                         let (badge_class, badge_label): (&str, &str) =
                             if r.is_own {

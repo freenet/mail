@@ -147,6 +147,20 @@ interface TestIds {
   fmV2Outcome: string;
   fmV2ForeignWarning: string;
   fmV2QuarantineMode: string;
+  fmV2GhostPanel: string;
+  fmV2GhostUse: string;
+  fmV2GhostPicker: string;
+  fmV2GhostTier: string;
+  fmV2GhostGet: string;
+  fmV2GhostGetLink: string;
+  fmV2GhostRecheck: string;
+  fmV2GhostDisclosure: string;
+  fmV2Queue: string;
+  fmV2QueueRow: string;
+  fmV2QueueAccept: string;
+  fmV2QueueDrop: string;
+  fmV2QueueTip: string;
+  fmV2QueueDropped: string;
 }
 
 export const TID: TestIds = JSON.parse(

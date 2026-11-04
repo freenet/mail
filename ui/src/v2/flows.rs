@@ -248,3 +248,156 @@ fn an_address_with_no_inbox_is_reported() {
         Outcome::NotDelivered(NotDelivered::Unreachable(_))
     ));
 }
+
+fn require_ghost(addr: Addr, min_usd: Option<u32>) {
+    block_on(contacts::change_own(
+        addr,
+        OwnerChange::SetQuarantine(QuarantineMode::RequireGhost { min_usd }),
+    ))
+    .unwrap();
+}
+
+/// The test vault holding `keys` (fixture indices: 0 to 3 are $1, 4 to 7 $5,
+/// 8 and 9 $20), and the key it lets this app use.
+fn vault(keys: Vec<usize>) -> send::GhostChoice {
+    set_vault(keys, false);
+    let key = block_on(crate::ghostkeys::request_access())
+        .unwrap()
+        .pop()
+        .unwrap();
+    send::GhostChoice { key, default: true }
+}
+
+fn set_vault(keys: Vec<usize>, deny: bool) {
+    crate::ghostkeys::mock::save(&crate::ghostkeys::mock::State {
+        default: keys.first().copied(),
+        keys,
+        deny,
+        ..Default::default()
+    });
+}
+
+fn send_with(a: Addr, b: Addr, title: &str, ghost: Option<send::GhostChoice>) -> Outcome {
+    let content = freenet_mail_protocol::SealContent::Mail(body(title).encode().into());
+    block_on(send::send_ghost(a, b, content, ghost))
+}
+
+/// "Use Ghost Key": the proof the vault signs gets a stranger into a
+/// RequireGhost inbox, and the recipient drains the message. A key below the
+/// tier is told so and nothing is sent.
+#[test]
+fn a_ghost_key_proof_gets_a_stranger_in_and_a_low_tier_is_refused() {
+    let (a, b) = (identity("v2-proof-a"), identity("v2-proof-b"));
+    require_ghost(b, Some(5));
+    let twenty = vault(vec![8]);
+    let out = send_with(a, b, "proven", Some(twenty.clone()));
+    assert_eq!(
+        out,
+        Outcome::Delivered {
+            admission: SendAdmission::Quarantine,
+            notice: None
+        }
+    );
+    let held = state(&b);
+    let (_, m) = held.messages.iter().next().unwrap();
+    let w::Admission::Quarantine { ghost: Some(proof) } = &m.admission else {
+        panic!("no proof: {:?}", m.admission)
+    };
+    assert_eq!(
+        Some(
+            ghostkey_verify::GhostkeyCertificate::from_cbor(&proof.cert)
+                .unwrap()
+                .claimed_ghost_key()
+                .to_bytes()
+        ),
+        twenty.key.vk
+    );
+    assert_eq!(drain(b), vec!["proven".to_string()]);
+    let got = &block_on(owner::read_inbound(b)).unwrap()[0];
+    assert_eq!(got.admission, w::KIND_QUARANTINE);
+
+    let one = vault(vec![0]);
+    let low = send_with(a, b, "too low", Some(one));
+    assert_eq!(
+        low,
+        Outcome::NotDelivered(NotDelivered::BelowTier { have: 1, need: 5 })
+    );
+    assert!(low.text("bob").contains("$1") && low.text("bob").contains("$5 or more"));
+    assert!(state(&b).messages.is_empty());
+}
+
+/// A proof is attached only for a RequireGhost recipient (decision 19: an
+/// Open inbox refuses one), and none is asked for.
+#[test]
+fn an_open_inbox_gets_no_proof() {
+    let (a, b) = (identity("v2-open-a"), identity("v2-open-b"));
+    let key = vault(vec![8]);
+    assert!(send_with(a, b, "open", Some(key)).delivered());
+    let held = state(&b);
+    let (_, m) = held.messages.iter().next().unwrap();
+    assert_eq!(m.admission, w::Admission::Quarantine { ghost: None });
+}
+
+/// The vault's two refusals are said plainly and send nothing.
+#[test]
+fn no_ghost_key_and_a_declined_prompt_are_told_plainly() {
+    let (a, b) = (identity("v2-deny-a"), identity("v2-deny-b"));
+    require_ghost(b, None);
+    let key = vault(vec![4]);
+    // Not granted now, and the user says no.
+    set_vault(vec![4], true);
+    assert_eq!(
+        send_with(a, b, "declined", Some(key.clone())),
+        Outcome::NotDelivered(NotDelivered::GhostDeclined)
+    );
+    set_vault(vec![], false);
+    let none = send_with(a, b, "no key", Some(key));
+    assert_eq!(none, Outcome::NotDelivered(NotDelivered::NoGhostKey));
+    assert!(none.text("bob").contains("Get a Ghost Key"));
+    assert!(state(&b).messages.is_empty());
+}
+
+/// The new-contacts queue view: a stranger's mail waits there; dropping
+/// removes it without a word to the sender; accepting sends the sender a
+/// pass, so their next message goes straight in, and the accepted one stays
+/// out of the queue after a later revocation.
+#[test]
+fn the_queue_holds_strangers_until_accepted_or_dropped() {
+    let (a, b) = (identity("v2-queue-a"), identity("v2-queue-b"));
+    assert!(send_with(a, b, "drop me", None).delivered());
+    assert!(send_with(a, b, "accept me", None).delivered());
+    drain(b);
+    let mail = block_on(owner::read_inbound(b)).unwrap();
+    let queued = block_on(super::queue::queued(b, &mail)).unwrap();
+    assert_eq!(queued.len(), 2);
+    let by_title = |t: &str| mail.iter().find(|m| m.body.title == t).unwrap().clone();
+
+    block_on(super::queue::drop_message(b, &by_title("drop me"))).unwrap();
+    let mail = block_on(owner::read_inbound(b)).unwrap();
+    assert_eq!(mail.len(), 1);
+
+    let said = block_on(super::queue::accept(b, &by_title("accept me"))).unwrap();
+    assert!(said.starts_with("Accepted"), "{said}");
+    assert!(block_on(super::queue::queued(b, &mail)).unwrap().is_empty());
+    // a drains the pass b sent, and writes by pass.
+    drain(a);
+    assert!(matches!(
+        send_with(a, b, "by pass", None),
+        Outcome::Delivered {
+            admission: SendAdmission::Pass,
+            ..
+        }
+    ));
+    // Revoked later: a's new mail queues again, the accepted one does not.
+    block_on(contacts::revoke(b, a)).unwrap();
+    assert!(send_with(a, b, "after revoke", None).delivered());
+    drain(b);
+    let mail = block_on(owner::read_inbound(b)).unwrap();
+    let queued = block_on(super::queue::queued(b, &mail)).unwrap();
+    let titles: Vec<&str> = mail
+        .iter()
+        .filter(|m| queued.contains(&m.id))
+        .map(|m| m.body.title.as_str())
+        .collect();
+    assert_eq!(titles, vec!["after revoke"]);
+}

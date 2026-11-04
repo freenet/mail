@@ -27,6 +27,9 @@ pub(crate) struct Inbound {
     /// [`w::KIND_QUARANTINE`] for a stranger's first mail.
     pub admission: u8,
     pub body: MailBody,
+    /// The stored copy: its item id and generation, to drop it.
+    pub item_id: Vec<u8>,
+    pub generation: u64,
 }
 
 /// What the page knows about one own inbox.
@@ -39,17 +42,26 @@ pub(crate) struct Status {
     pub strangers_dropped: u64,
     /// Decision 25: the inbox holds an owner version this node did not sign.
     pub foreign_version: bool,
+    /// The new-contacts queue was seen full (every slot taken), so a
+    /// stranger's message may have been pushed out.
+    pub queue_was_full: bool,
     pub error: Option<String>,
 }
 
 /// Drained mail by identity.
 pub(crate) static INBOUND: GlobalSignal<HashMap<Addr, Vec<Inbound>>> = Signal::global(HashMap::new);
+/// Drained mail waiting in the new-contacts queue view, by identity: kept
+/// out of the inbox until accepted (see [`super::queue`]).
+pub(crate) static QUEUED: GlobalSignal<HashMap<Addr, HashSet<[u8; 32]>>> =
+    Signal::global(HashMap::new);
 pub(crate) static STATUS: GlobalSignal<HashMap<Addr, Status>> = Signal::global(HashMap::new);
 
 thread_local! {
     static STARTED: RefCell<HashSet<Addr>> = RefCell::new(HashSet::new());
     /// Inboxes being drained, and whether a change arrived meanwhile.
     static BUSY: RefCell<HashMap<Addr, bool>> = RefCell::new(HashMap::new());
+    /// Inboxes not drained for now (the offline queue fixture).
+    static HELD: RefCell<HashSet<Addr>> = RefCell::new(HashSet::new());
 }
 
 fn set_status(addr: Addr, f: impl FnOnce(&mut Status)) {
@@ -84,8 +96,16 @@ pub(crate) fn start(addr: Addr) {
                         not(feature = "use-node"),
                         target_family = "wasm"
                     ))]
-                    if foreign_fixture() {
+                    if fixture("v2-foreign-fixture") {
                         net::offline::publish_foreign_version(&addr);
+                    }
+                    #[cfg(all(
+                        feature = "example-data",
+                        not(feature = "use-node"),
+                        target_family = "wasm"
+                    ))]
+                    if fixture("v2-queue-fixture") {
+                        fill_queue(addr).await;
                     }
                     return;
                 }
@@ -99,22 +119,56 @@ pub(crate) fn start(addr: Addr) {
     });
 }
 
-/// Offline builds only: `?v2-foreign-fixture` publishes each inbox at an
-/// owner version from "another node", so the Playwright suite can see the
-/// decision-25 warning with no second node.
+/// Offline builds only, for the Playwright suite with no second node:
+/// `?v2-foreign-fixture` publishes each inbox at an owner version from
+/// "another node" (decision 25); `?v2-queue-fixture` fills the first
+/// identity's new-contacts queue from the second while the first does not
+/// drain, as when its owner is away.
 #[cfg(all(
     feature = "example-data",
     not(feature = "use-node"),
     target_family = "wasm"
 ))]
-fn foreign_fixture() -> bool {
+fn fixture(name: &str) -> bool {
     web_sys::window()
         .and_then(|w| w.location().search().ok())
-        .is_some_and(|s| {
-            s.trim_start_matches('?')
-                .split('&')
-                .any(|p| p == "v2-foreign-fixture")
-        })
+        .is_some_and(|s| s.trim_start_matches('?').split('&').any(|p| p == name))
+}
+
+#[cfg(all(
+    feature = "example-data",
+    not(feature = "use-node"),
+    target_family = "wasm"
+))]
+async fn fill_queue(addr: Addr) {
+    thread_local!(static FILLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) });
+    if FILLED.with(|f| f.replace(true)) {
+        return;
+    }
+    HELD.with(|h| h.borrow_mut().insert(addr));
+    let other = loop {
+        let ready = STARTED.with(|s| s.borrow().iter().copied().find(|a| *a != addr));
+        if let Some(o) = ready.filter(|o| status(o).ready) {
+            break o;
+        }
+        ops::pause_ms(200).await;
+    };
+    for i in 0..w::QUARANTINE_SLOTS {
+        let body = MailBody {
+            v: 1,
+            label: Some("stranger".into()),
+            title: format!("queued {i}"),
+            content: "from the queue fixture".into(),
+            time_ms: chrono::Utc::now().timestamp_millis(),
+            thread_id: None,
+            in_reply_to: None,
+            quoted_excerpt: None,
+        };
+        let content = freenet_mail_protocol::SealContent::Mail(body.encode().into());
+        super::send::send_content(other, addr, content).await;
+    }
+    HELD.with(|h| h.borrow_mut().remove(&addr));
+    refresh(addr).await;
 }
 
 /// Make sure `addr` has a v2 inbox on the network, held and followed.
@@ -177,6 +231,9 @@ pub(crate) fn state_seen(_addr: Addr, _state: Vec<u8>) {}
 /// Drain `addr`'s inbox and show what it holds. A change that arrives while
 /// this runs makes it run once more.
 pub(crate) async fn refresh(addr: Addr) {
+    if HELD.with(|h| h.borrow().contains(&addr)) {
+        return;
+    }
     let first = BUSY.with(|b| {
         let mut b = b.borrow_mut();
         match b.get_mut(&addr) {
@@ -300,6 +357,7 @@ async fn note_owner(addr: Addr, state: &InboxState) {
     set_status(addr, |s| {
         s.quarantine = Some(state.owner.quarantine);
         s.waiting_strangers = waiting;
+        s.queue_was_full |= waiting >= w::QUARANTINE_SLOTS;
         if let Ok(Some(rec)) = &rec {
             s.strangers_dropped = rec.strangers_dropped;
             if foreign(state.owner.version, rec) {
@@ -309,19 +367,15 @@ async fn note_owner(addr: Addr, state: &InboxState) {
     });
 }
 
-/// Read `addr`'s drained mail from the delegate and show it.
-pub(crate) async fn load_inbound(addr: Addr) {
-    let items = match ops::list_all_items(ItemKind::Inbound, Some(addr)).await {
-        Ok(items) => items,
-        Err(e) => {
-            crate::log::error(format!("inbox v2: listing drained mail failed: {e}"), None);
-            return;
-        }
-    };
-    let shown: Vec<Inbound> = items
+/// `addr`'s drained mail, as the delegate stores it.
+pub(crate) async fn read_inbound(addr: Addr) -> Result<Vec<Inbound>, String> {
+    let items = ops::list_all_items(ItemKind::Inbound, Some(addr))
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(items
         .iter()
-        .filter_map(|i| from_cbor::<InboundMessage>(&i.body).ok())
-        .filter_map(|m| {
+        .filter_map(|i| {
+            let m = from_cbor::<InboundMessage>(&i.body).ok()?;
             let body = MailBody::decode(&m.body)?;
             Some(Inbound {
                 id: m.id.into_array(),
@@ -329,18 +383,52 @@ pub(crate) async fn load_inbound(addr: Addr) {
                 sender_vk: m.sender_vk.into_vec(),
                 admission: m.admission,
                 body,
+                item_id: i.item.id.clone(),
+                generation: i.generation,
             })
         })
-        .collect();
+        .collect())
+}
+
+/// Read `addr`'s drained mail from the delegate and show it.
+pub(crate) async fn load_inbound(addr: Addr) {
+    let shown = match read_inbound(addr).await {
+        Ok(shown) => shown,
+        Err(e) => {
+            crate::log::error(format!("inbox v2: listing drained mail failed: {e}"), None);
+            return;
+        }
+    };
     super::contacts::note_drained(addr, &shown);
+    let queued = match super::queue::queued(addr, &shown).await {
+        Ok(q) => q,
+        Err(e) => {
+            // Unknown is not "accepted": hold every stranger's mail back.
+            crate::log::error(format!("inbox v2: the new-contacts queue: {e}"), None);
+            shown
+                .iter()
+                .filter(|m| m.admission == w::KIND_QUARANTINE)
+                .map(|m| m.id)
+                .collect()
+        }
+    };
     if dioxus::core::Runtime::try_current().is_some() {
         INBOUND.write().insert(addr, shown);
+        QUEUED.write().insert(addr, queued);
     }
 }
 
-/// `addr`'s drained mail.
-pub(crate) fn inbound(addr: &Addr) -> Vec<Inbound> {
-    INBOUND.read().get(addr).cloned().unwrap_or_default()
+/// `addr`'s drained mail: in the inbox (`queued` false) or waiting in the
+/// new-contacts queue view (`queued` true).
+pub(crate) fn inbound(addr: &Addr, queued: bool) -> Vec<Inbound> {
+    if dioxus::core::Runtime::try_current().is_none() {
+        return Vec::new();
+    }
+    let held = QUEUED.read().get(addr).cloned().unwrap_or_default();
+    let mail = INBOUND.read().get(addr).cloned().unwrap_or_default();
+    mail.into_iter()
+        .filter(|m| held.contains(&m.id) == queued)
+        .collect()
 }
 
 #[cfg(test)]

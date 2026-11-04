@@ -151,5 +151,19 @@
   "fmV2GhostBadge": "fm-v2-ghost-badge",
   "fmV2Outcome": "fm-v2-outcome",
   "fmV2ForeignWarning": "fm-v2-foreign-warning",
-  "fmV2QuarantineMode": "fm-v2-quarantine-mode"
+  "fmV2QuarantineMode": "fm-v2-quarantine-mode",
+  "fmV2GhostPanel": "fm-v2-ghost-panel",
+  "fmV2GhostUse": "fm-v2-ghost-use",
+  "fmV2GhostPicker": "fm-v2-ghost-picker",
+  "fmV2GhostTier": "fm-v2-ghost-tier",
+  "fmV2GhostGet": "fm-v2-ghost-get",
+  "fmV2GhostGetLink": "fm-v2-ghost-get-link",
+  "fmV2GhostRecheck": "fm-v2-ghost-recheck",
+  "fmV2GhostDisclosure": "fm-v2-ghost-disclosure",
+  "fmV2Queue": "fm-v2-queue",
+  "fmV2QueueRow": "fm-v2-queue-row",
+  "fmV2QueueAccept": "fm-v2-queue-accept",
+  "fmV2QueueDrop": "fm-v2-queue-drop",
+  "fmV2QueueTip": "fm-v2-queue-tip",
+  "fmV2QueueDropped": "fm-v2-queue-dropped"
 }
