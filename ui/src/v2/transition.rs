@@ -167,7 +167,29 @@ pub(crate) async fn send_passes(me: Addr, identities: usize) -> usize {
             return 0;
         }
     };
-    let contacts = crate::app::address_book::all_contacts();
+    // From the delegate, not the address book: this runs beside the page's
+    // own contact load, which may not have landed yet.
+    let items = match crate::mail_delegate::ops::list_all_items(
+        freenet_mail_protocol::ItemKind::Contact,
+        None,
+    )
+    .await
+    {
+        Ok(items) => items,
+        Err(e) => {
+            crate::log::error(format!("transition passes: {e}"), None);
+            return 0;
+        }
+    };
+    let contacts: Vec<_> = items
+        .iter()
+        .filter_map(|i| crate::app::contact_store::decode(&i.item, &i.body))
+        .collect();
+    crate::log::info(format!(
+        "transition passes: {} contacts, {} done",
+        contacts.len(),
+        done.len()
+    ));
     let mut sent = 0;
     for to in pass_targets(&me, identities, &contacts) {
         if done.contains(&hex(&to)) {
@@ -177,8 +199,14 @@ pub(crate) async fn send_passes(me: Addr, identities: usize) -> usize {
             super::send::send_content(me, to, freenet_mail_protocol::SealContent::PassUpdate).await;
         match &outcome {
             // No v2 inbox yet, or no answer: the next load tries again.
-            Outcome::NotDelivered(NotDelivered::Unreachable(_)) => continue,
-            Outcome::Delivered { .. } => sent += 1,
+            Outcome::NotDelivered(NotDelivered::Unreachable(why)) => {
+                crate::log::info(format!("transition pass waits: {why}"));
+                continue;
+            }
+            Outcome::Delivered { .. } => {
+                crate::log::info("transition pass delivered");
+                sent += 1;
+            }
             Outcome::NotDelivered(why) => {
                 crate::log::info(format!("transition pass not delivered: {why:?}"));
             }
@@ -207,6 +235,11 @@ pub(crate) async fn on_load() {
             }
         }
         let rec = super::owner::record(me.addr).await.ok().flatten();
+        crate::log::info(format!(
+            "transition: v2 inbox record {}, window ended {}",
+            rec.is_some(),
+            rec.as_ref().is_some_and(|r| ended(r, now))
+        ));
         if rec.as_ref().is_some_and(|r| ended(r, now)) {
             continue;
         }

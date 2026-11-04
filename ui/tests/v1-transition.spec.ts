@@ -66,6 +66,10 @@ function v1Inbox(): { messages: number; minimum_tier: string; exemption: boolean
 
 async function load(ctx: BrowserContext, url: string): Promise<Page> {
   const page = await ctx.newPage();
+  // What the page says about the transition, for a failure's diagnosis.
+  page.on("console", (m) => {
+    if (/transition|end window/.test(m.text())) console.log(`[page] ${m.text()}`);
+  });
   await page.goto(url);
   await expect(app(page).locator(".brand-name").first()).toContainText(APP_NAME, {
     timeout: 60_000,
@@ -115,7 +119,8 @@ test("the v1 transition between two nodes", async ({ browser }, testInfo) => {
       .poll(() => v1Copies(gw), { timeout: 300_000, message: "imported from the v1 inbox" })
       .toBe(1);
     // A migrated identity has no v2 inbox (so no window yet) until it is
-    // confirmed, which the first send asks for.
+    // confirmed. One whose v1 inbox is on the network arrives confirmed; any
+    // other is asked at its first send.
     const a = app(gw);
     const gwBurger = a.locator(tid(TID.fmHamburger));
     if (await gwBurger.isVisible().catch(() => false)) await gwBurger.click();
@@ -126,11 +131,15 @@ test("the v1 transition between two nodes", async ({ browser }, testInfo) => {
     await own.locator("textarea.sheet-textarea").fill("confirming alice");
     await own.locator(tid(TID.fmSend)).click();
     const prompt = a.locator('[data-testid="fm-confirm-identity"]');
-    await expect(prompt, "the migrated identity is asked to confirm").toBeVisible({
-      timeout: 30_000,
-    });
-    await a.locator('[data-testid="fm-confirm-identity-submit"]').click();
-    await expect(prompt).toHaveCount(0, { timeout: 60_000 });
+    const asked = await prompt
+      .waitFor({ state: "visible", timeout: 15_000 })
+      .then(() => true)
+      .catch(() => false);
+    if (asked) {
+      await a.locator('[data-testid="fm-confirm-identity-submit"]').click();
+      await expect(prompt).toHaveCount(0, { timeout: 60_000 });
+    }
+    await expect(own, "the send finished").toHaveCount(0, { timeout: 120_000 });
     const alice = await addressOf(gw);
     await gw.close();
     gw = await load(gwCtx, BASE_URL);
@@ -151,24 +160,29 @@ test("the v1 transition between two nodes", async ({ browser }, testInfo) => {
     const bob = await addressOf(peer);
     expect(bob).toHaveLength(36);
 
-    // Alice's next load sends him her pass through his queue; his node
-    // drains it. He then holds a pass for her inbox.
+    // Alice's next load sends him her pass through his queue. His node
+    // drains it (the public tombstone count of his inbox, read from hers,
+    // grows); he then holds a pass for her inbox.
     await gw.close();
     gw = await load(gwCtx, BASE_URL);
     await openIdentity(gw, "alice");
-    const burger = p.locator(tid(TID.fmHamburger));
-    const held = async () => {
-      if (await burger.isVisible().catch(() => false)) await burger.click();
-      await p.locator(tid(TID.fmComposeBtn)).click();
-      const sheet = p.locator(tid(TID.fmComposeSheet));
-      await sheet.locator('input[placeholder="alias or address"]').fill(alice);
-      const note = sheet.locator(tid(TID.fmV2RecipientNote));
-      await expect(note).toHaveAttribute("data-held", /.+/, { timeout: 60_000 });
-      const state = await note.getAttribute("data-held");
-      await sheet.locator(".foot-actions button", { hasText: "Discard" }).click();
-      return state;
+    const ga = app(gw);
+    const drained = async () => {
+      const b = ga.locator(tid(TID.fmHamburger));
+      if (await b.isVisible().catch(() => false)) await b.click();
+      await ga.locator(tid(TID.fmComposeBtn)).click();
+      const s = ga.locator(tid(TID.fmComposeSheet));
+      await s.locator('input[placeholder="alias or address"]').fill(bob);
+      const note = s.locator(tid(TID.fmV2RecipientNote));
+      await expect(note).toHaveAttribute("data-drained", /\d+/, { timeout: 60_000 });
+      const n = Number(await note.getAttribute("data-drained"));
+      await s.locator(".foot-actions button", { hasText: "Discard" }).click();
+      return n;
     };
-    await expect.poll(held, { timeout: 600_000, intervals: [15_000] }).toBe("held");
+    await expect
+      .poll(drained, { timeout: 600_000, intervals: [15_000], message: "vbob drained her pass" })
+      .toBeGreaterThan(0);
+    const burger = p.locator(tid(TID.fmHamburger));
     if (await burger.isVisible().catch(() => false)) await burger.click();
     await p.locator(tid(TID.fmComposeBtn)).click();
     const sheet = p.locator(tid(TID.fmComposeSheet));
