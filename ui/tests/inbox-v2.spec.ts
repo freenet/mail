@@ -154,6 +154,17 @@ async function openRow(page: Page, subject: string): Promise<Locator> {
   return container.locator(tid(TID.fmThreadRow), { hasText: subject }).first();
 }
 
+/**
+ * Back from an open message to the list. On a phone the list and the
+ * message are one screen each, so the list is hidden while a message is
+ * open; on a desktop the back button is hidden and the list never was.
+ * The synthetic click reaches the button either way.
+ */
+async function backToList(page: Page) {
+  await page.locator(tid(TID.fmBack)).first().dispatchEvent("click");
+  await expect(page.locator(tid(TID.fmList))).toBeVisible();
+}
+
 /** Collects console errors and page errors, to assert a clean console. */
 function watchConsole(page: Page): string[] {
   const errors: string[] = [];
@@ -425,6 +436,7 @@ test.describe("Inbox v2 (offline)", () => {
     let row = await openRow(page, "from a lookalike");
     await expect(row.locator(tid(TID.fmV2LabelWarning))).toContainText("looks like your contact");
     await expect(row.locator(tid(TID.fmV2NotContact))).toBeVisible();
+    await backToList(page);
 
     // A name like nobody else's: no warning, in the list or the message.
     const plain = inboxRow(page, "from address1");
