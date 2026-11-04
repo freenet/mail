@@ -1247,6 +1247,26 @@ guard "inbox v2 UI: the page warns from the delegate's note of another node" "$S
 guard "inbox v2 UI: an archive that kept the drained copy says so" "$STAGE/ui/src/v2/owner.rs" \
     'remove_stored(r).await.map_err(|e| (true, e))' 'remove_stored(r).await.map_err(|e| (false, e))' \
     "tests:an_archive_that_could_not_remove_the_drained_copy_says_so" ui_v2_flow_tests
+guard "inbox v2 UI: deleting a v2 message removes its kept and archived copies" "$STAGE/ui/src/v2/owner.rs" \
+    '    let r = row(id).ok_or("this message is not loaded")?;
+    crate::local_state::delete_message_after_copies(' \
+    '    let r = row(id).ok_or("this message is not loaded")?;
+    if true {
+        return remove_stored(r).await;
+    }
+    crate::local_state::delete_message_after_copies(' \
+    "tests:a_deleted_v2_message_that_was_read_stays_gone_after_a_reload" ui_v2_flow_tests
+guard "inbox v2 UI: a v2 delete marks the message deleted only after its drained copy went" "$STAGE/ui/src/v2/owner.rs" \
+    '    crate::local_state::delete_message_after_copies(alias, id, async || {
+        remove_stored(r).await.map_err(Into::into)
+    })
+    .await
+    .map_err(|e| e.to_string())' \
+    '    crate::local_state::delete_message(alias, id)
+        .await
+        .map_err(|e| e.to_string())?;
+    remove_stored(r).await' \
+    "tests:a_v2_delete_that_could_not_remove_the_drained_copy_can_be_retried" ui_v2_flow_tests
 
 ut "a silent predecessor does not delay the list" "$STAGE/ui/src/app/identity_store.rs" \
     '    listing.await;

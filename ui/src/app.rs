@@ -4964,6 +4964,14 @@ fn OpenArchivedMessage(
                     class: "btn btn-secondary",
                     "data-testid": testid::FM_ARCHIVE_DELETE,
                     onclick: move |_| {
+                        // An archived v2 message whose drained copy is still
+                        // stored (the archive could not remove it): that
+                        // copy goes too.
+                        if is_v2_row(msg_id) {
+                            delete_v2_message(&delete_alias, msg_id);
+                            menu_selection.write().at_inbox_list();
+                            return;
+                        }
                         if !delete_alias.is_empty() {
                             crate::local_state::local_delete_message(&delete_alias, msg_id);
                             #[cfg(feature = "use-node")]
@@ -5341,6 +5349,25 @@ fn archive_message(
 /// AND remove the message from the inbox contract — distinct from Archive
 /// because it leaves no trace. Shared between `OpenMessage` and the threaded
 /// per-message action clusters.
+/// Delete v2 message `id` of `alias`: hidden at once, then every copy is
+/// removed (`v2::owner::delete_row`), in a task that outlives the view.
+fn delete_v2_message(alias: &str, id: u64) {
+    if !alias.is_empty() {
+        crate::local_state::local_delete_message(alias, id);
+    }
+    let alias = alias.to_string();
+    let _task = dioxus_core::spawn_forever(async move {
+        let (level, text) = match crate::v2::owner::delete_row(alias, id).await {
+            Ok(()) => (crate::toast::ToastLevel::Success, CONFIRM_DELETE.done),
+            Err(e) => {
+                crate::log::error(format!("deleting a v2 message: {e}"), None);
+                (crate::toast::ToastLevel::Error, CONFIRM_DELETE.failed)
+            }
+        };
+        crate::toast::push_toast_detached(text, level);
+    });
+}
+
 fn delete_message(
     mut inbox: Signal<InboxView>,
     mut menu_selection: Signal<menu::MenuSelection>,
@@ -5350,18 +5377,10 @@ fn delete_message(
     id: u64,
     post: PostMessageAction,
 ) {
-    // A drained v2 message: delete the delegate's copy, nothing in a v1 inbox.
+    // A drained v2 message: every copy goes, the delegate's drained one
+    // included, and nothing in a v1 inbox.
     if is_v2_row(id) {
-        let _task = dioxus_core::spawn_forever(async move {
-            let (level, text) = match crate::v2::owner::delete_row(id).await {
-                Ok(()) => (crate::toast::ToastLevel::Success, CONFIRM_DELETE.done),
-                Err(e) => {
-                    crate::log::error(format!("deleting a v2 message: {e}"), None);
-                    (crate::toast::ToastLevel::Error, CONFIRM_DELETE.failed)
-                }
-            };
-            crate::toast::push_toast_detached(text, level);
-        });
+        delete_v2_message(alias, id);
         post.apply(&mut menu_selection);
         return;
     }

@@ -578,15 +578,17 @@ pub(crate) async fn unarchive_message(alias: String, msg_id: MessageId) -> Resul
 /// between, comes after the mark: the message is deleted though the error is
 /// reported, and a retry is idempotent.
 pub(crate) async fn delete_message(alias: String, msg_id: MessageId) -> Result<(), DynError> {
-    delete_message_after_copies(alias, msg_id, async || {}).await
+    delete_message_after_copies(alias, msg_id, async || Ok(())).await
 }
 
 /// [`delete_message`], with `between` run after the copies are removed and
-/// before the mark is set: where a background import can land. A test seam.
-async fn delete_message_after_copies(
+/// before the mark is set: where a background import can land, and where a
+/// v2 message's drained copy is removed (one more copy, so before the mark).
+/// A failure of `between` fails the deletion before the mark.
+pub(crate) async fn delete_message_after_copies(
     alias: String,
     msg_id: MessageId,
-    between: impl AsyncFnOnce(),
+    between: impl AsyncFnOnce() -> Result<(), DynError>,
 ) -> Result<(), DynError> {
     delete(message_item(ItemKind::Kept, &alias, msg_id)?)
         .await
@@ -594,7 +596,7 @@ async fn delete_message_after_copies(
     delete(message_item(ItemKind::Archived, &alias, msg_id)?)
         .await
         .map_err(boxed)?;
-    between().await;
+    between().await?;
     set_flags(message_item(ItemKind::Flags, &alias, msg_id)?, |f| {
         f.deleted = true;
         f.read = false;
@@ -1716,6 +1718,7 @@ mod delegate_tests {
             id,
             async move || {
                 put(planted, json(&kept("planted".into()))).await.unwrap();
+                Ok(())
             },
         ))
         .unwrap();

@@ -626,9 +626,19 @@ pub(crate) async fn archive_row(
     remove_stored(r).await.map_err(|e| (true, e))
 }
 
-/// Delete row `id`'s drained copy. The inbox already tombstoned it.
-pub(crate) async fn delete_row(id: u64) -> Result<(), String> {
-    remove_stored(row(id).ok_or("this message is not loaded")?).await
+/// Delete row `id` of `alias` (its name or state key) and every copy of it:
+/// the kept copy its read mark wrote, an archived copy, the delegate's
+/// drained copy (the inbox already tombstoned it), and last the deleted mark
+/// in its flags. The copies go before the mark, so a failure leaves the
+/// message showing where a retry finds it, never a stored copy hidden by a
+/// mark, and never a copy a reload brings back.
+pub(crate) async fn delete_row(alias: String, id: u64) -> Result<(), String> {
+    let r = row(id).ok_or("this message is not loaded")?;
+    crate::local_state::delete_message_after_copies(alias, id, async || {
+        remove_stored(r).await.map_err(Into::into)
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 async fn remove_stored(r: RowRef) -> Result<(), String> {

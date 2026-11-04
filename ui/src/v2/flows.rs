@@ -90,10 +90,132 @@ fn archive_and_delete_remove_the_stored_copy() {
     let left = block_on(owner::read_inbound(b)).unwrap();
     assert_eq!(left.len(), 1);
     assert_eq!(left[0].body.title, "delete me");
-    block_on(owner::delete_row(delete)).unwrap();
+    block_on(owner::delete_row(crate::local_state::addr_key(&b), delete)).unwrap();
     assert!(block_on(owner::read_inbound(b)).unwrap().is_empty());
     // Gone for good: the inbox tombstoned them, so a drain brings nothing back.
     assert!(drain(b).is_empty());
+}
+
+/// What a reload finds of message `id` for `key`'s identity: a kept copy, an
+/// archived copy, and whether it is marked deleted.
+fn after_reload(key: &str, addr: Addr, id: u64) -> (bool, bool, bool) {
+    let state = block_on(crate::local_state::load(&[(key.to_string(), addr)])).unwrap();
+    let alias = state.for_alias(key).cloned().unwrap_or_default();
+    (
+        alias.kept.contains_key(&id.to_string()),
+        alias.archived.contains_key(&id.to_string()),
+        state.is_deleted(key, id),
+    )
+}
+
+fn kept_copy(title: &str) -> freenet_mail_wire_v1::local_state::KeptMessage {
+    freenet_mail_wire_v1::local_state::KeptMessage {
+        from: "sender".into(),
+        title: title.into(),
+        content: "hello".into(),
+        kept_at: 1,
+        sent_at: None,
+        sender_vk: Vec::new(),
+        signature_valid: true,
+    }
+}
+
+fn archived_copy(title: &str) -> freenet_mail_wire_v1::local_state::ArchivedMessage {
+    freenet_mail_wire_v1::local_state::ArchivedMessage {
+        from: "sender".into(),
+        title: title.into(),
+        content: "hello".into(),
+        archived_at: 1,
+        thread_id: None,
+        in_reply_to: None,
+        quoted_excerpt: None,
+    }
+}
+
+/// Class B: a v2 message that was opened (its read mark wrote a kept copy)
+/// and then deleted leaves no copy a reload brings back: not the drained
+/// copy, not the kept one.
+#[test]
+fn a_deleted_v2_message_that_was_read_stays_gone_after_a_reload() {
+    let (a, b) = (identity("v2-del-read-a"), identity("v2-del-read-b"));
+    let key = crate::local_state::addr_key(&b);
+    assert!(block_on(send::send(a, b, &body("read then delete"))).delivered());
+    drain(b);
+    let mail = block_on(owner::read_inbound(b)).unwrap();
+    let id = owner::row_id(b, &mail[0]);
+    block_on(crate::local_state::mark_read(
+        key.clone(),
+        id,
+        kept_copy("read then delete"),
+    ))
+    .unwrap();
+    assert!(after_reload(&key, b, id).0, "the read mark kept a copy");
+    block_on(owner::delete_row(key.clone(), id)).unwrap();
+    assert!(block_on(owner::read_inbound(b)).unwrap().is_empty());
+    let (kept, archived, _) = after_reload(&key, b, id);
+    assert!(!kept, "the kept copy came back after a reload");
+    assert!(!archived);
+}
+
+/// Class B: an archive leaves only the archived copy (the kept one goes, the
+/// drained one goes), and deleting it from Archive later, while its drained
+/// copy is still stored (the archive could not remove it), removes that too.
+#[test]
+fn an_archived_v2_message_keeps_one_copy_and_a_delete_removes_every_one() {
+    let (a, b) = (identity("v2-arch-del-a"), identity("v2-arch-del-b"));
+    let key = crate::local_state::addr_key(&b);
+    assert!(block_on(send::send(a, b, &body("archived"))).delivered());
+    assert!(block_on(send::send(a, b, &body("archived, copy stuck"))).delivered());
+    drain(b);
+    let mail = block_on(owner::read_inbound(b)).unwrap();
+    let row = |t: &str| owner::row_id(b, mail.iter().find(|m| m.body.title == t).unwrap());
+    let (clean, stuck) = (row("archived"), row("archived, copy stuck"));
+    for id in [clean, stuck] {
+        block_on(crate::local_state::mark_read(
+            key.clone(),
+            id,
+            kept_copy("read"),
+        ))
+        .unwrap();
+    }
+    let store = crate::local_state::archive_message(key.clone(), clean, archived_copy("a"));
+    block_on(owner::archive_row(clean, store)).unwrap();
+    assert_eq!(after_reload(&key, b, clean), (false, true, false));
+
+    let store = crate::local_state::archive_message(key.clone(), stuck, archived_copy("b"));
+    crate::mail_delegate::local::fail_writes_containing(Some("/in/"));
+    let out = block_on(owner::archive_row(stuck, store));
+    crate::mail_delegate::local::fail_writes_containing(None);
+    assert!(matches!(out, Err((true, _))), "{out:?}");
+    assert_eq!(block_on(owner::read_inbound(b)).unwrap().len(), 1);
+    // Deleted from Archive: the archived copy and the drained one both go.
+    block_on(owner::delete_row(key.clone(), stuck)).unwrap();
+    assert!(block_on(owner::read_inbound(b)).unwrap().is_empty());
+    let (kept, archived, _) = after_reload(&key, b, stuck);
+    assert!(!kept && !archived, "a copy came back after a reload");
+}
+
+/// Class B: a delete whose drained copy could not be removed leaves the
+/// message where a retry finds it: no deleted mark hides a stored copy.
+#[test]
+fn a_v2_delete_that_could_not_remove_the_drained_copy_can_be_retried() {
+    let (a, b) = (identity("v2-del-retry-a"), identity("v2-del-retry-b"));
+    let key = crate::local_state::addr_key(&b);
+    assert!(block_on(send::send(a, b, &body("retry me"))).delivered());
+    drain(b);
+    let mail = block_on(owner::read_inbound(b)).unwrap();
+    let id = owner::row_id(b, &mail[0]);
+    crate::mail_delegate::local::fail_writes_containing(Some("/in/"));
+    let out = block_on(owner::delete_row(key.clone(), id));
+    crate::mail_delegate::local::fail_writes_containing(None);
+    assert!(out.is_err());
+    assert_eq!(block_on(owner::read_inbound(b)).unwrap().len(), 1);
+    assert!(
+        !after_reload(&key, b, id).2,
+        "marked deleted beside a stored copy"
+    );
+    block_on(owner::delete_row(key.clone(), id)).unwrap();
+    assert!(block_on(owner::read_inbound(b)).unwrap().is_empty());
 }
 
 /// An archive whose copy was stored but whose drained copy the delegate

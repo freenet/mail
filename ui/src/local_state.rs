@@ -691,9 +691,13 @@ pub(crate) use items::{
     save_sent, set_sent_delivery_state,
 };
 // Only the node build finds stranded sends to presume failed.
+#[cfg(test)]
+pub(crate) use items::mark_read;
 #[cfg_attr(not(feature = "use-node"), allow(unused_imports))]
 pub(crate) use items::presume_sent_failed;
-pub(crate) use items::{forget_unreadable_list, list_name, unreadable_lists};
+pub(crate) use items::{
+    delete_message_after_copies, forget_unreadable_list, list_name, unreadable_lists,
+};
 // `unarchive_message` is wired but unused until #60 (true unarchive).
 #[allow(unused_imports)]
 pub(crate) use items::unarchive_message;

@@ -162,19 +162,11 @@ pub(crate) async fn accept(identity: Addr, m: &Inbound, petname: &str) -> Result
     Ok(said)
 }
 
-/// Drop `m`: the stored copy is deleted (the inbox already tombstoned it),
-/// and nothing is sent to its sender.
+/// Drop `m`: deleted like any v2 message, every copy of it (the inbox
+/// already tombstoned it), and nothing is sent to its sender.
 pub(crate) async fn drop_message(identity: Addr, m: &Inbound) -> Result<(), String> {
-    let item = ItemRef {
-        kind: ItemKind::Inbound,
-        owner: Some(identity),
-        id: m.item_id.clone(),
-    };
-    ops::delete_item(item, m.generation)
-        .await
-        .map_err(|e| e.to_string())?;
-    owner::load_inbound(identity).await;
-    Ok(())
+    let id = owner::row_id(identity, m);
+    owner::delete_row(crate::local_state::addr_key(&identity), id).await
 }
 
 #[cfg(test)]
