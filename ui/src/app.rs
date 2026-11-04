@@ -1372,27 +1372,77 @@ fn is_v2_row(id: u64) -> bool {
 fn v2_rows(addr: &freenet_mail_protocol::Addr, is_read: impl Fn(u64) -> bool) -> Vec<Message> {
     crate::v2::owner::inbound(addr, false)
         .into_iter()
-        .map(|m| {
-            let id = crate::v2::owner::row_id(*addr, &m);
-            let (name, _) = crate::v2::contacts::sender_name(&m.from, m.body.label.as_deref());
-            Message {
-                id,
-                from: name.into(),
-                title: m.body.title.into(),
-                content: m.body.content.into(),
-                read: is_read(id),
-                time: chrono::DateTime::from_timestamp_millis(m.body.time_ms)
-                    .unwrap_or_else(chrono::Utc::now),
-                sender_vk: m.sender_vk,
-                // The delegate verified the sender's signature at the drain.
-                signature_valid: true,
-                assignment_hash: m.id,
-                thread_id: m.body.thread_id,
-                in_reply_to: m.body.in_reply_to,
-                quoted_excerpt: m.body.quoted_excerpt,
-            }
-        })
+        .map(|m| v2_message(*addr, m, &is_read))
         .collect()
+}
+
+/// What to tell the user about a v2 row's sender (§5.1): the label
+/// warnings, whoever sent it, and whether it is a saved contact. A pass
+/// says only that they may write here, not who they are.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct V2Sender {
+    pub warnings: Vec<String>,
+    pub contact: bool,
+}
+
+thread_local! {
+    static V2_SENDERS: RefCell<HashMap<u64, V2Sender>> = RefCell::new(HashMap::new());
+}
+
+/// A v2 row's sender warnings; with `stranger_note`, also that a sender
+/// who is not a saved contact chose the name shown.
+#[component]
+fn V2SenderNotes(id: u64, #[props(default)] stranger_note: bool) -> Element {
+    if !is_v2_row(id) {
+        return rsx! {};
+    }
+    let _ = crate::v2::contacts::GEN.read();
+    let sender = v2_sender(id);
+    rsx! {
+        for w in sender.warnings.iter() {
+            span { class: "warn", "data-testid": testid::FM_V2_LABEL_WARNING, "\u{26a0} {w}" }
+        }
+        if stranger_note && !sender.contact {
+            span { class: "fp", "data-testid": testid::FM_V2_NOT_CONTACT,
+                "Not in your contacts: this is the name they gave themselves."
+            }
+        }
+    }
+}
+
+/// The sender notes of v2 row `id`.
+pub(crate) fn v2_sender(id: u64) -> V2Sender {
+    V2_SENDERS.with(|s| s.borrow().get(&id).cloned().unwrap_or_default())
+}
+
+fn v2_message(
+    addr: freenet_mail_protocol::Addr,
+    m: crate::v2::owner::Inbound,
+    is_read: impl Fn(u64) -> bool,
+) -> Message {
+    let id = crate::v2::owner::row_id(addr, &m);
+    let (name, warnings) = crate::v2::contacts::sender_name(&m.from, m.body.label.as_deref());
+    let sender = V2Sender {
+        warnings: warnings.iter().map(|w| format!("{name} {w}")).collect(),
+        contact: crate::v2::contacts::by_addr(&m.from).is_some(),
+    };
+    V2_SENDERS.with(|s| s.borrow_mut().insert(id, sender));
+    Message {
+        id,
+        from: name.into(),
+        title: m.body.title.into(),
+        content: m.body.content.into(),
+        read: is_read(id),
+        time: chrono::DateTime::from_timestamp_millis(m.body.time_ms)
+            .unwrap_or_else(chrono::Utc::now),
+        sender_vk: m.sender_vk,
+        // The delegate verified the sender's signature at the drain.
+        signature_valid: true,
+        assignment_hash: m.id,
+        thread_id: m.body.thread_id,
+        in_reply_to: m.body.in_reply_to,
+        quoted_excerpt: m.body.quoted_excerpt,
+    }
 }
 
 /// The draft the page's `#/compose?draft=<id>` route names: the way back
@@ -4044,6 +4094,13 @@ fn MessageList() -> Element {
                             } else {
                                 senders.first().cloned().unwrap_or_default()
                             };
+                            // M1: a v2 sender's label warning shows in the
+                            // list, where mail is read.
+                            let sender_warning = group
+                                .messages
+                                .iter()
+                                .rev()
+                                .find_map(|m| v2_sender(m.id).warnings.first().cloned());
                             let subj = newest.title.clone();
                             let preview = newest.content.clone();
                             let time_short = format_time_short(newest.time);
@@ -4065,6 +4122,14 @@ fn MessageList() -> Element {
                                     onclick: move |_| { menu_selection.write().open_thread(root_id); },
                                     div { class: "ft-group-row1",
                                         span { class: "ft-group-people", "{sender_label}" }
+                                        if let Some(w) = sender_warning {
+                                            span {
+                                                class: "warn",
+                                                "data-testid": testid::FM_V2_LABEL_WARNING,
+                                                title: "{w}",
+                                                "\u{26a0} {w}"
+                                            }
+                                        }
                                         if in_quarantine {
                                             span { class: "badge badge-failed", "unverified" }
                                         }
@@ -4639,6 +4704,7 @@ fn ThreadNested(group: crate::app::threads::ThreadGroup) -> Element {
                                 div { class: "ft-msg-id",
                                     div { class: "ft-msg-namerow",
                                         span { class: "ft-msg-name", "{from}" }
+                                        V2SenderNotes { id }
                                         span { class: "{pill_class}", "{pill_label}" }
                                     }
                                 }
@@ -4754,6 +4820,7 @@ fn ThreadCompact(group: crate::app::threads::ThreadGroup) -> Element {
                             }
                             span { class: "ft-face sm", "{from_initial}" }
                             span { class: "ft-cz-name", "{from}" }
+                            V2SenderNotes { id }
                             if !is_open {
                                 span { class: "ft-cz-snippet", "{snippet}" }
                             }
@@ -5589,6 +5656,7 @@ fn OpenMessage(msg: Message) -> Element {
                     div { class: "sender-orb", "{from_initial}" }
                     div { class: "from-text",
                         span { class: "from-name", "{from}" }
+                        V2SenderNotes { id, stranger_note: true }
                         if !sender_fp_short.is_empty() {
                             span {
                                 class: "from-addr",
@@ -7827,5 +7895,65 @@ mod archive_order_tests {
         let unknown: crate::DynError =
             Box::new(crate::mail_delegate::CallError::Unknown("no answer".into()));
         assert_eq!(run(Err(unknown)), (Stored::Unknown, false));
+    }
+}
+
+#[cfg(test)]
+mod v2_sender_tests {
+    use super::*;
+    use crate::v2::{MailBody, owner::Inbound};
+
+    fn contact(alias: &str, seed: u8) -> address_book::Contact {
+        address_book::Contact {
+            local_alias: alias.into(),
+            suggested_alias: None,
+            description: String::new(),
+            ml_dsa_vk_bytes: vec![seed; 1952],
+            ml_kem_ek_bytes: vec![seed; 1184],
+            required_tier: freenet_mail_wire_v1::aft::Tier::Day1,
+            max_age_secs: 0,
+            verified: false,
+            inbox_wasm_hash: None,
+        }
+    }
+
+    fn mail(sender_vk: Vec<u8>, label: &str) -> Inbound {
+        Inbound {
+            id: [0x3a; 32],
+            from: freenet_mail_protocol::address::address_of(&sender_vk),
+            sender_vk,
+            admission: freenet_mail_protocol::inbox_v2::KIND_PASS,
+            body: MailBody {
+                v: 1,
+                label: Some(label.into()),
+                title: "hi".into(),
+                content: String::new(),
+                time_ms: 0,
+                thread_id: None,
+                in_reply_to: None,
+                quoted_excerpt: None,
+            },
+            item_id: vec![0x3a; 32],
+            generation: 1,
+        }
+    }
+
+    /// M1: a sender who is not a saved contact (a pass holder all the same)
+    /// labelled like a contact is shown with the warning.
+    #[test]
+    fn a_non_contact_named_like_a_contact_is_flagged() {
+        address_book::insert_contact(contact("alice", 0xa1)).unwrap();
+        let me = freenet_mail_protocol::Addr([0x11; 24]);
+        let row = v2_message(me, mail(vec![0xee; 1952], "alice"), |_| false);
+        assert_eq!(row.from.as_ref(), "alice");
+        let sender = v2_sender(row.id);
+        assert!(!sender.contact);
+        assert!(
+            sender
+                .warnings
+                .iter()
+                .any(|w| w.contains("looks like your contact")),
+            "{sender:?}"
+        );
     }
 }

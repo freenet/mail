@@ -165,5 +165,8 @@
   "fmV2QueueAccept": "fm-v2-queue-accept",
   "fmV2QueueDrop": "fm-v2-queue-drop",
   "fmV2QueueTip": "fm-v2-queue-tip",
-  "fmV2QueueDropped": "fm-v2-queue-dropped"
+  "fmV2QueueDropped": "fm-v2-queue-dropped",
+  "fmV2NotContact": "fm-v2-not-contact",
+  "fmV2QueuePetname": "fm-v2-queue-petname",
+  "fmV2QueueConfirm": "fm-v2-queue-confirm"
 }

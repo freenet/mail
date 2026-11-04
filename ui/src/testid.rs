@@ -232,6 +232,9 @@ pub(crate) const FM_V2_QUEUE_ACCEPT: &str = "fm-v2-queue-accept";
 pub(crate) const FM_V2_QUEUE_DROP: &str = "fm-v2-queue-drop";
 pub(crate) const FM_V2_QUEUE_TIP: &str = "fm-v2-queue-tip";
 pub(crate) const FM_V2_QUEUE_DROPPED: &str = "fm-v2-queue-dropped";
+pub(crate) const FM_V2_NOT_CONTACT: &str = "fm-v2-not-contact";
+pub(crate) const FM_V2_QUEUE_PETNAME: &str = "fm-v2-queue-petname";
+pub(crate) const FM_V2_QUEUE_CONFIRM: &str = "fm-v2-queue-confirm";
 
 #[cfg(test)]
 mod tests {
@@ -415,6 +418,9 @@ mod tests {
             ("fmV2QueueDrop", super::FM_V2_QUEUE_DROP),
             ("fmV2QueueTip", super::FM_V2_QUEUE_TIP),
             ("fmV2QueueDropped", super::FM_V2_QUEUE_DROPPED),
+            ("fmV2NotContact", super::FM_V2_NOT_CONTACT),
+            ("fmV2QueuePetname", super::FM_V2_QUEUE_PETNAME),
+            ("fmV2QueueConfirm", super::FM_V2_QUEUE_CONFIRM),
         ];
         assert_eq!(
             json.len(),

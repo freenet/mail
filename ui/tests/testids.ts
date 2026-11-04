@@ -161,6 +161,9 @@ interface TestIds {
   fmV2QueueDrop: string;
   fmV2QueueTip: string;
   fmV2QueueDropped: string;
+  fmV2NotContact: string;
+  fmV2QueuePetname: string;
+  fmV2QueueConfirm: string;
 }
 
 export const TID: TestIds = JSON.parse(
