@@ -61,7 +61,11 @@ pub(crate) static QUEUED: GlobalSignal<HashMap<Addr, HashSet<[u8; 32]>>> =
 pub(crate) static STATUS: GlobalSignal<HashMap<Addr, Status>> = Signal::global(HashMap::new);
 
 thread_local! {
-    static STARTED: RefCell<HashSet<Addr>> = RefCell::new(HashSet::new());
+    /// The identities started on this page, each with the generation of the
+    /// start loop that serves it: deleting the identity removes it, and a
+    /// loop whose generation is no longer here stops.
+    static STARTED: RefCell<HashMap<Addr, u64>> = RefCell::new(HashMap::new());
+    static NEXT_GEN: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
     /// Inboxes being drained, and whether a change arrived meanwhile.
     static BUSY: RefCell<HashMap<Addr, bool>> = RefCell::new(HashMap::new());
     /// Inboxes not drained for now (the offline queue fixture).
@@ -92,48 +96,102 @@ pub(crate) fn status(addr: &Addr) -> Status {
 }
 
 /// Start `addr`'s inbox for this page: create it if it has none, then
-/// drain and follow it. Once per page and identity.
+/// drain and follow it. Once per page and identity: restoring a deleted
+/// identity starts one new loop, and the deleted one's loop stops.
 pub(crate) fn start(addr: Addr) {
-    if !STARTED.with(|s| s.borrow_mut().insert(addr)) {
+    let Some(generation) = begin(addr) else {
         return;
-    }
-    crate::app::identity_store::spawn_detached(async move {
-        // Until it works: an unanswered GET is unknown, never "no inbox", so
-        // nothing is created on it, and the next try asks again.
-        for attempt in 0u32.. {
-            match ensure(addr).await {
-                Ok(()) => {
-                    set_status(addr, |s| {
-                        s.ready = true;
-                        s.error = None;
-                    });
-                    refresh(addr).await;
-                    #[cfg(all(
-                        feature = "example-data",
-                        not(feature = "use-node"),
-                        target_family = "wasm"
-                    ))]
-                    if fixture("v2-foreign-fixture") {
-                        another_node_signs(addr).await;
-                    }
-                    #[cfg(all(
-                        feature = "example-data",
-                        not(feature = "use-node"),
-                        target_family = "wasm"
-                    ))]
-                    if fixture("v2-queue-fixture") {
-                        fill_queue(addr).await;
-                    }
-                    return;
-                }
-                Err(e) => {
-                    crate::log::error(format!("inbox v2: starting the inbox failed: {e}"), None);
-                    set_status(addr, |s| s.error = Some(e));
-                    ops::pause_ms(2_000u32.saturating_mul(1 << attempt.min(5))).await;
-                }
-            }
+    };
+    crate::app::identity_store::spawn_detached(run(addr, generation));
+}
+
+/// Mark `addr` started, with a new generation; `None` if it already is.
+fn begin(addr: Addr) -> Option<u64> {
+    STARTED.with(|s| {
+        let mut s = s.borrow_mut();
+        if s.contains_key(&addr) {
+            return None;
+        }
+        let generation = NEXT_GEN.with(|n| n.replace(n.get() + 1));
+        s.insert(addr, generation);
+        Some(generation)
+    })
+}
+
+/// What a start loop that is no longer current returns.
+const STOPPED: &str = "this identity was deleted";
+
+/// Whether the loop of `generation` still serves `addr`, after an await:
+/// the identity was not deleted (nor deleted and restored) meanwhile.
+fn checkpoint(addr: Addr, generation: Option<u64>, _at: &str) -> Result<(), String> {
+    #[cfg(test)]
+    CHECKPOINT.with(|c| {
+        if let Some(f) = c.borrow_mut().as_mut() {
+            f(addr, _at);
         }
     });
+    match generation {
+        Some(g) if STARTED.with(|s| s.borrow().get(&addr) != Some(&g)) => Err(STOPPED.into()),
+        _ => Ok(()),
+    }
+}
+
+#[cfg(test)]
+type CheckpointHook = Box<dyn FnMut(Addr, &str)>;
+
+#[cfg(test)]
+thread_local! {
+    /// Tests: called at each checkpoint of a start loop, before the check.
+    static CHECKPOINT: RefCell<Option<CheckpointHook>> = RefCell::new(None);
+}
+
+/// The start loop of `addr` at `generation`.
+async fn run(addr: Addr, generation: u64) {
+    let current = || checkpoint(addr, Some(generation), "loop").is_ok();
+    // Until it works: an unanswered GET is unknown, never "no inbox", so
+    // nothing is created on it, and the next try asks again.
+    for attempt in 0u32.. {
+        if !current() {
+            return;
+        }
+        match ensure_for(addr, Some(generation)).await {
+            Ok(()) => {
+                if !current() {
+                    return;
+                }
+                set_status(addr, |s| {
+                    s.ready = true;
+                    s.error = None;
+                });
+                refresh(addr).await;
+                #[cfg(all(
+                    feature = "example-data",
+                    not(feature = "use-node"),
+                    target_family = "wasm"
+                ))]
+                if fixture("v2-foreign-fixture") {
+                    another_node_signs(addr).await;
+                }
+                #[cfg(all(
+                    feature = "example-data",
+                    not(feature = "use-node"),
+                    target_family = "wasm"
+                ))]
+                if fixture("v2-queue-fixture") {
+                    fill_queue(addr).await;
+                }
+                return;
+            }
+            Err(e) => {
+                if !current() {
+                    return;
+                }
+                crate::log::error(format!("inbox v2: starting the inbox failed: {e}"), None);
+                set_status(addr, |s| s.error = Some(e));
+                ops::pause_ms(2_000u32.saturating_mul(1 << attempt.min(5))).await;
+            }
+        }
+    }
 }
 
 /// Offline builds only, for the Playwright suite with no second node:
@@ -164,7 +222,7 @@ async fn fill_queue(addr: Addr) {
     }
     HELD.with(|h| h.borrow_mut().insert(addr));
     let other = loop {
-        let ready = STARTED.with(|s| s.borrow().iter().copied().find(|a| *a != addr));
+        let ready = STARTED.with(|s| s.borrow().keys().copied().find(|a| *a != addr));
         if let Some(o) = ready.filter(|o| status(o).ready) {
             break o;
         }
@@ -207,7 +265,7 @@ async fn another_node_signs(addr: Addr) {
         return;
     }
     let other = loop {
-        let ready = STARTED.with(|s| s.borrow().iter().copied().find(|a| *a != addr));
+        let ready = STARTED.with(|s| s.borrow().keys().copied().find(|a| *a != addr));
         if let Some(o) = ready.filter(|o| status(o).ready) {
             break o;
         }
@@ -294,6 +352,14 @@ pub(crate) fn forget_status(addr: Addr) {
 
 /// Make sure `addr` has a v2 inbox on the network, held and followed.
 pub(crate) async fn ensure(addr: Addr) -> Result<(), String> {
+    ensure_for(addr, None).await
+}
+
+/// [`ensure`] for the start loop of `generation`: after each await it
+/// stops if the identity was deleted meanwhile, so a deleted identity's
+/// inbox is never created, published or reported on.
+async fn ensure_for(addr: Addr, generation: Option<u64>) -> Result<(), String> {
+    let at = |name| checkpoint(addr, generation, name);
     net::note_own(&addr);
     let record = ItemRef {
         kind: ItemKind::InboxV2,
@@ -304,13 +370,15 @@ pub(crate) async fn ensure(addr: Addr) -> Result<(), String> {
         .await
         .map_err(|e| e.to_string())?
         .is_some();
+    at("record read")?;
     // Unknown is never absent: a GET with no answer stops here.
     let existing = match net::get(&addr, true).await? {
         Got::State(s) => Some(s),
         Got::Missing => None,
     };
+    at("inbox read")?;
     if has_record {
-        return republish(addr, existing.is_some()).await;
+        return republish_for(addr, existing.is_some(), generation).await;
     }
     let reply = call(Op::CreateInboxV2 {
         addr,
@@ -318,6 +386,7 @@ pub(crate) async fn ensure(addr: Addr) -> Result<(), String> {
         existing: existing.clone().map(Into::into),
     })
     .await;
+    at("created")?;
     let state = match reply {
         Ok(Reply::InboxV2State(s)) => s.into_vec(),
         Ok(other) => return Err(unexpected(&other).to_string()),
@@ -325,7 +394,7 @@ pub(crate) async fn ensure(addr: Addr) -> Result<(), String> {
         Err(CallError::Failed(f))
             if matches!(f.code, freenet_mail_protocol::FailureCode::Conflict { .. }) =>
         {
-            return republish(addr, existing.is_some()).await;
+            return republish_for(addr, existing.is_some(), generation).await;
         }
         Err(e) => return Err(e.to_string()),
     };
@@ -355,10 +424,21 @@ async fn publish(addr: Addr, state: Vec<u8>) -> Result<(), String> {
 /// PUT failed or never left, or the reply that carried the first state was
 /// lost), the delegate signs it again from its record and it is published.
 async fn republish(addr: Addr, on_network: bool) -> Result<(), String> {
+    republish_for(addr, on_network, None).await
+}
+
+/// [`republish`] for the start loop of `generation` (see [`ensure_for`]).
+async fn republish_for(
+    addr: Addr,
+    on_network: bool,
+    generation: Option<u64>,
+) -> Result<(), String> {
     if on_network {
         return Ok(());
     }
-    match call(Op::RepublishInboxV2 { addr }).await {
+    let reply = call(Op::RepublishInboxV2 { addr }).await;
+    checkpoint(addr, generation, "signed again")?;
+    match reply {
         Ok(Reply::InboxV2State(s)) => publish(addr, s.into_vec()).await,
         Ok(other) => Err(unexpected(&other).to_string()),
         Err(e) => Err(format!(
@@ -369,7 +449,12 @@ async fn republish(addr: Addr, on_network: bool) -> Result<(), String> {
 
 /// The node or the page saw `addr`'s state change: drain it again.
 pub(crate) fn changed(addr: Addr) {
-    if !STARTED.with(|s| s.borrow().contains(&addr)) {
+    if !STARTED.with(|s| s.borrow().contains_key(&addr)) {
+        return;
+    }
+    // Tests with no Dioxus runtime drain by calling `refresh` themselves.
+    #[cfg(test)]
+    if dioxus::core::Runtime::try_current().is_none() {
         return;
     }
     crate::app::identity_store::spawn_detached(refresh(addr));
@@ -698,7 +783,7 @@ mod tests {
     fn deleting_an_identity_clears_its_v2_page_state() {
         let (a, other) = (Addr([71; 24]), Addr([72; 24]));
         for addr in [a, other] {
-            STARTED.with(|s| s.borrow_mut().insert(addr));
+            STARTED.with(|s| s.borrow_mut().insert(addr, 1));
             BUSY.with(|b| b.borrow_mut().insert(addr, true));
             HELD.with(|h| h.borrow_mut().insert(addr));
             net::note_own(&addr);
@@ -722,7 +807,7 @@ mod tests {
 
         crate::app::identity_store::forget_everywhere(&a);
 
-        assert!(STARTED.with(|s| !s.borrow().contains(&a)), "STARTED");
+        assert!(STARTED.with(|s| !s.borrow().contains_key(&a)), "STARTED");
         assert!(BUSY.with(|b| !b.borrow().contains_key(&a)), "BUSY");
         assert!(HELD.with(|h| !h.borrow().contains(&a)), "HELD");
         assert!(row(1000 + 71).is_none(), "rows");
@@ -734,12 +819,12 @@ mod tests {
             "passes seen"
         );
         // Another identity is untouched.
-        assert!(STARTED.with(|s| s.borrow().contains(&other)));
+        assert!(STARTED.with(|s| s.borrow().contains_key(&other)));
         assert!(row(1000 + 72).is_some());
         assert!(net::is_own(&other));
         assert!(status(&other).ready);
         // The same key restored starts a fresh drain.
-        assert!(STARTED.with(|s| s.borrow_mut().insert(a)));
+        assert!(begin(a).is_some());
     }
 
     /// Class A: a stored message that does not decode is counted, never left
@@ -782,6 +867,84 @@ mod tests {
         assert_eq!(mail.len(), 1);
         assert_eq!(mail[0].body.title, "readable");
         assert_eq!(unreadable, 1);
+    }
+
+    #[cfg(all(feature = "local-delegate", not(feature = "use-node")))]
+    fn new_identity(alias: &str) -> Addr {
+        let (info, _) =
+            futures::executor::block_on(ops::create_identity(alias.into(), String::new())).unwrap();
+        info.addr
+    }
+
+    #[cfg(all(feature = "local-delegate", not(feature = "use-node")))]
+    fn has_inbox(addr: Addr) -> bool {
+        let record = ItemRef {
+            kind: ItemKind::InboxV2,
+            owner: Some(addr),
+            id: Vec::new(),
+        };
+        let on_network = futures::executor::block_on(net::get(&addr, false)).unwrap();
+        futures::executor::block_on(ops::get_item(record))
+            .unwrap()
+            .is_some()
+            || on_network != Got::Missing
+    }
+
+    /// P2: an identity deleted while its start loop waits stops the loop at
+    /// its next await, at each of them: no inbox is created or published for
+    /// it, and no status comes back for it.
+    #[cfg(all(feature = "local-delegate", not(feature = "use-node")))]
+    #[test]
+    fn deleting_an_identity_during_startup_stops_its_loop() {
+        for (n, stop_at) in ["record read", "inbox read"].into_iter().enumerate() {
+            let a = new_identity(&format!("v2-stop-{n}"));
+            let generation = begin(a).unwrap();
+            CHECKPOINT.with(|c| {
+                *c.borrow_mut() = Some(Box::new(move |addr, at| {
+                    if addr == a && at == stop_at {
+                        forget(a);
+                    }
+                }))
+            });
+            futures::executor::block_on(run(a, generation));
+            CHECKPOINT.with(|c| c.borrow_mut().take());
+            assert!(
+                !has_inbox(a),
+                "an inbox was made after a delete at {stop_at}"
+            );
+            assert_eq!(status(&a), Status::default(), "status came back");
+        }
+    }
+
+    /// P2: an identity deleted and restored during startup: the old loop
+    /// stops, the restore starts exactly one new one, and that one makes
+    /// the inbox.
+    #[cfg(all(feature = "local-delegate", not(feature = "use-node")))]
+    #[test]
+    fn a_restored_identity_runs_exactly_one_start_loop() {
+        let a = new_identity("v2-restore");
+        let old = begin(a).unwrap();
+        let restored = std::rc::Rc::new(std::cell::Cell::new(None));
+        let r = restored.clone();
+        CHECKPOINT.with(|c| {
+            *c.borrow_mut() = Some(Box::new(move |addr, at| {
+                if addr == a && at == "record read" && r.get().is_none() {
+                    forget(a);
+                    r.set(Some(begin(a)));
+                }
+            }))
+        });
+        futures::executor::block_on(run(a, old));
+        CHECKPOINT.with(|c| c.borrow_mut().take());
+        assert!(!has_inbox(a), "the deleted identity's loop went on");
+        let new = restored
+            .get()
+            .flatten()
+            .expect("the restore started a loop");
+        assert_eq!(begin(a), None, "a second start for the same key");
+        futures::executor::block_on(run(a, new));
+        assert!(has_inbox(a), "the restored identity's loop made its inbox");
+        assert!(status(&a).ready);
     }
 
     #[test]

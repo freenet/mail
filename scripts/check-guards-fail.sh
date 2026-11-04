@@ -1292,6 +1292,9 @@ guard "inbox v2 UI: an archived v2 message keeps its sender's address" "$STAGE/u
     '    let _ = (label, from);
     msg.from.to_string()' \
     "tests:an_archived_v2_senders_address_resolves_for_a_reply" ui_v2_sender_tests
+guard "inbox v2 UI: a deleted identity's start loop stops" "$STAGE/ui/src/v2/owner.rs" \
+    'Some(g) if STARTED.with(' 'Some(g) if false && STARTED.with(' \
+    "tests:deleting_an_identity_during_startup_stops_its_loop" ui_v2_unit_tests
 guard "inbox v2 UI: a ledger entry that does not decode fails the read" "$STAGE/ui/src/v2/contacts.rs" \
     '            Ok((PassId(id), entry))
         })
