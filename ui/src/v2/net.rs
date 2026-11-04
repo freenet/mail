@@ -254,9 +254,12 @@ pub(crate) mod offline {
         /// Tests: updates to an inbox held back until that many more GETs
         /// of it, as on a slow network.
         #[cfg(test)]
-        static SLOW: RefCell<HashMap<ContractInstanceId, (u32, Vec<Vec<u8>>)>> =
-            RefCell::new(HashMap::new());
+        static SLOW: RefCell<HashMap<ContractInstanceId, Held>> = RefCell::new(HashMap::new());
     }
+
+    /// Tests: GETs still to answer before the held updates apply, and them.
+    #[cfg(test)]
+    type Held = (u32, Vec<Vec<u8>>);
 
     /// Tests: hold every update to `addr` back, and apply them once `gets`
     /// GETs of it were answered while one waited.
