@@ -1195,6 +1195,54 @@ cd "$ROOT/ui/tests" && \
     npx playwright test inbox-v2-live.spec.ts --project=chromium ${extra_args[@]+"${extra_args[@]}"}
 '''
 
+[tasks.test-e2e-v1-transition]
+description = "Real-node v1 transition between two nodes: a v0.2.7 message in a seeded v1 inbox imported once, a transition pass to a contact verified in v0.2.7 that he then writes by, and the end-of-window close signed once (the delegate's test clock)"
+dependencies = ["build", "derive-test-contract-id"]
+script_runner = "bash"
+script = '''
+set -euo pipefail
+ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
+if [ -z "${CI:-}" ]; then export FREENET_E2E_ROOT="${FREENET_E2E_ROOT:-$ROOT/target/iso}"; fi
+ISO_ROOT="${FREENET_E2E_ROOT:-$HOME/freenet-mail-iso}"
+# Free ports only: the defaults belong to other nodes on the machine.
+free_port() {
+    python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])'
+}
+export FREENET_ISO_GW_PORT="${FREENET_ISO_GW_PORT:-$(free_port)}"
+export FREENET_ISO_PEER_PORT="${FREENET_ISO_PEER_PORT:-$(free_port)}"
+export FREENET_ISO_GW_NET_PORT="${FREENET_ISO_GW_NET_PORT:-$(free_port)}"
+export FREENET_ISO_PEER_NET_PORT="${FREENET_ISO_PEER_NET_PORT:-$(free_port)}"
+GW_PORT="$FREENET_ISO_GW_PORT"
+KEEP="${FREENET_E2E_KEEP:-0}"
+cleanup() {
+    if [ "$KEEP" = "1" ]; then
+        echo "FREENET_E2E_KEEP=1 - leaving iso nodes up at $ISO_ROOT"
+    else
+        bash "$ROOT/scripts/run-isolated-nodes.sh" down
+    fi
+}
+trap cleanup EXIT
+# Fresh nodes: the seed must be the only legacy data on them.
+bash "$ROOT/scripts/run-isolated-nodes.sh" wipe
+bash "$ROOT/scripts/run-isolated-nodes.sh" up
+FREENET_ISO_GW_PORT="$GW_PORT" cargo make publish-email-iso
+cargo build --manifest-path "$ROOT/Cargo.toml" -p v1-node-seed
+TARGET="$(cargo metadata --manifest-path "$ROOT/Cargo.toml" --format-version 1 --no-deps \
+    | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')"
+SEED_BIN="$TARGET/debug/v1-node-seed"
+BOB_KEY="$ISO_ROOT/vbob-recovery-key.txt"
+"$SEED_BIN" "$GW_PORT" --transition "$BOB_KEY"
+CONTRACT_ID="$(cat "$ROOT/target/webapp/contract-id.txt")"
+cd "$ROOT/ui/tests" && \
+    FREENET_V1_TRANSITION=1 \
+    FREENET_EMAIL_BASE_URL="http://127.0.0.1:$GW_PORT/v1/contract/web/$CONTRACT_ID/" \
+    FREENET_ISO_GW_PORT="$GW_PORT" \
+    FREENET_ISO_PEER_PORT="$FREENET_ISO_PEER_PORT" \
+    FREENET_V1_SEED_BIN="$SEED_BIN" \
+    FREENET_V1_BOB_KEY="$BOB_KEY" \
+    npx playwright test v1-transition.spec.ts --project=chromium
+'''
+
 [tasks.test-e2e-background]
 description = "Real-node proof of the delegate's background jobs: wake-up, import with the tab closed, cost, page stall (about 20 minutes: it waits for the rescan wake-up)"
 script_runner = "bash"

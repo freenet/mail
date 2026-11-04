@@ -30,6 +30,15 @@ pub(crate) enum Got {
     Missing,
 }
 
+/// A contract's state with what its key is made of.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WithCode {
+    /// base58, as `ContractKey::from_params` takes it.
+    pub code_hash: String,
+    pub params: Vec<u8>,
+    pub state: Vec<u8>,
+}
+
 /// Why a request did not answer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum NetError {
@@ -94,7 +103,7 @@ pub(crate) fn is_own(addr: &Addr) -> bool {
 }
 
 #[cfg(feature = "use-node")]
-pub(crate) use node::{get, get_id, put, route, update};
+pub(crate) use node::{get, get_id, get_with_code, put, route, update};
 #[cfg(not(feature = "use-node"))]
 pub(crate) use offline::{get, put, update};
 
@@ -348,8 +357,19 @@ mod node {
     pub(crate) fn route(res: &Result<HostResponse, ClientError>) -> bool {
         match res {
             Ok(HostResponse::ContractResponse(r)) => match r {
-                ContractResponse::GetResponse { key, state, .. } => {
+                ContractResponse::GetResponse {
+                    key,
+                    contract,
+                    state,
+                } => {
                     let id = *key.id();
+                    if let Some(c) = contract {
+                        let hash = bs58::encode(key.code_hash().as_ref()).into_string();
+                        CODES.with(|m| {
+                            m.borrow_mut()
+                                .insert(id, (hash, c.params().as_ref().to_vec()))
+                        });
+                    }
                     if let Some(addr) = own(&id) {
                         super::super::owner::state_seen(addr, state.as_ref().to_vec());
                     }
@@ -498,6 +518,41 @@ mod node {
             blocking_subscribe: false,
         };
         ask_id(id, Kind::Get, request).await
+    }
+
+    thread_local! {
+        /// The code hash and parameters a GET that asked for the code got,
+        /// by contract, for [`get_with_code`] to take.
+        static CODES: RefCell<HashMap<ContractInstanceId, (String, Vec<u8>)>> =
+            RefCell::new(HashMap::new());
+    }
+
+    /// Another contract's state with its code hash and parameters (a v0.2.x
+    /// inbox, whose parameters name its owner's key). `None`: no such
+    /// contract.
+    pub(crate) async fn get_with_code(
+        id: ContractInstanceId,
+    ) -> Result<Option<super::WithCode>, NetError> {
+        let request = ContractRequest::Get {
+            key: id,
+            return_contract_code: true,
+            subscribe: false,
+            blocking_subscribe: false,
+        };
+        CODES.with(|m| m.borrow_mut().remove(&id));
+        match ask_id(id, Kind::Get, request).await? {
+            Got::Missing => Ok(None),
+            Got::State(state) => {
+                let (code_hash, params) = CODES
+                    .with(|m| m.borrow_mut().remove(&id))
+                    .ok_or_else(|| NetError::Failed("the node sent no contract code".into()))?;
+                Ok(Some(super::WithCode {
+                    code_hash,
+                    params,
+                    state,
+                }))
+            }
+        }
     }
 
     /// Publish a whole state, and hold and follow the inbox.

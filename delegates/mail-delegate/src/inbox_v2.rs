@@ -242,6 +242,15 @@ pub struct InboxRecord {
     /// with no grace instead ([`republish_inbox`]).
     #[serde(default)]
     pub inherited_revoked: Option<InheritedRevoked>,
+    /// The v1 transition window and the close of each v1 inbox
+    /// (`crate::transition`).
+    #[serde(default)]
+    pub v1_window: Option<crate::transition::V1Window>,
+    /// Senders accepted by the drain because they are verified contacts
+    /// (decision 26): the renew job sends them the contact pass issued then,
+    /// as a manual accept would, before it was ever seen to reach them.
+    #[serde(default)]
+    pub auto_accepted: BTreeSet<B24>,
 }
 
 /// See [`InboxRecord::inherited_revoked`].
@@ -496,6 +505,11 @@ pub fn create_inbox(
         foreign_seen: None,
         signed_owner: None,
         inherited_revoked: None,
+        v1_window: Some(crate::transition::V1Window {
+            start: now,
+            closes: BTreeMap::new(),
+        }),
+        auto_accepted: BTreeSet::new(),
     };
     let mut state = match existing {
         None => None,
@@ -917,6 +931,55 @@ fn contact_pass(
     Ok((pass_id, pass_of(me, &pass_id, &e)))
 }
 
+/// Whether the contact stored under `sender_vk`'s address names exactly that
+/// key and is marked verified (by the user in v0.2.x, carried over by the
+/// migration, or since). A record that cannot be read says no.
+fn verified_contact(s: &Space<'_>, sender_vk: &[u8]) -> bool {
+    #[derive(Deserialize)]
+    struct Record {
+        keys: Keys_,
+    }
+    #[derive(Deserialize)]
+    struct Keys_ {
+        ml_dsa_vk_bytes: Vec<u8>,
+        verified: bool,
+    }
+    let at = ItemRef {
+        kind: ItemKind::Contact,
+        owner: None,
+        id: address_of(sender_vk).0.to_vec(),
+    };
+    match s.read(&item_rel(&at)) {
+        Ok(Some((_, body))) => serde_json::from_slice::<Record>(&body)
+            .is_ok_and(|r| r.keys.verified && r.keys.ml_dsa_vk_bytes == sender_vk),
+        _ => false,
+    }
+}
+
+/// Accept `sender` without the user (decision 26): issue it a contact pass,
+/// which the renew job then delivers through the pass it sent. Returns
+/// whether it is a contact now; a full ledger leaves it a stranger, for the
+/// user to accept.
+fn auto_accept(
+    s: &mut Space<'_>,
+    me: &Me,
+    rec: &mut InboxRecord,
+    sender: &B24,
+    now: u64,
+    rng: &mut MixRng,
+) -> Result<bool, Failure> {
+    promote(rec, sender);
+    let (pass_id, e) = new_entry(me, rec, Some(*sender), PassClass::Contact, now, rng);
+    match new_ledger_entry(s, me, rec, &pass_id, &e, now) {
+        Err(f) if f.code == FailureCode::CapReached => return Ok(false),
+        other => other?,
+    }
+    rec.issued.insert(*sender, pass_id);
+    rec.due.insert(*sender, now);
+    rec.auto_accepted.insert(*sender);
+    Ok(true)
+}
+
 /// `sender` is a contact now: its passes and its drained mail leave the
 /// stranger budget. Returns whether `rec` changed.
 fn promote(rec: &mut InboxRecord, sender: &B24) -> bool {
@@ -1276,6 +1339,7 @@ fn drain(
     state: &InboxState,
     limit: usize,
     from_node: bool,
+    (now, rng): (u64, &mut MixRng),
 ) -> Result<Drained, Failure> {
     let pending: Vec<_> = state
         .messages
@@ -1305,7 +1369,8 @@ fn drain(
         }
         let mut stranger = matches!(m.admission, Admission::Quarantine { .. }).then_some(None);
         if let Some(opened) = sealing::open(&me.keys, &me.addr.0, id, m) {
-            match store_opened(s, me, rec, id, m, opened, proven.contains(id), &mut out) {
+            let proof = proven.contains(id);
+            match store_opened(s, me, rec, id, m, opened, proof, &mut out, (now, &mut *rng)) {
                 Ok(from) => stranger = from.map(Some),
                 Err(_) => {
                     out.unstored.insert(*id);
@@ -1465,6 +1530,7 @@ fn store_opened(
     opened: sealing::Opened,
     ghost_proven: bool,
     out: &mut Drained,
+    (now, rng): (u64, &mut MixRng),
 ) -> Result<Option<B24>, Failure> {
     let body = opened.body;
     let sender = address_of(&opened.sender_vk);
@@ -1472,7 +1538,13 @@ fn store_opened(
     // Stranger mail is decided by its sender, not its admission: a contact
     // writes through quarantine whenever no pass of ours admits.
     let quarantine = matches!(m.admission, Admission::Quarantine { .. });
-    let contact = is_contact(s, me, rec, &from)?;
+    let mut contact = is_contact(s, me, rec, &from)?;
+    // Decision 26: a verified contact writing through the queue is accepted
+    // here, keyed on the key that signed the inner binding (checked by
+    // `sealing::open`), never on a label or any other claim.
+    if quarantine && !contact && verified_contact(s, &opened.sender_vk) {
+        contact = auto_accept(s, me, rec, &from, now, rng)?;
+    }
     // The way back is kept, but a pass the sender got wrong must not hold
     // the message in the inbox for good: only a failure a retry can clear
     // does.
@@ -1614,7 +1686,7 @@ pub(crate) fn owner_update(
     let (rec_gen, mut rec) = record(s, addr)?;
     // Decision 25, before anything below signs past it.
     note_foreign(&mut rec, &state.owner, now);
-    let drained = drain(s, me, &mut rec, state, limit, from_node)?;
+    let drained = drain(s, me, &mut rec, state, limit, from_node, (now, &mut *rng))?;
 
     // Built on the latest owner record this delegate signed or was given:
     // the tombstones of both, so a page's older state cannot sign a version

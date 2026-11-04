@@ -38,6 +38,13 @@ pub(crate) fn ForeignNodeWarning(addr: Addr) -> Element {
                  show up again."
             }
         }
+        if status.v1_close_pending {
+            div { class: "info", "data-v1-close-pending": "true",
+                style: "margin: 8px 12px; padding: 10px 12px; border: 1px solid var(--amber, #c80); border-radius: 6px;",
+                "Your old address is being closed. Some messages there are not copied here \
+                 yet, so it stays open until they are."
+            }
+        }
         if unreadable > 0 {
             div { class: "info", "data-unreadable-mail": "{unreadable}",
                 style: "margin: 8px 12px; padding: 10px 12px; border: 1px solid var(--amber, #c80); border-radius: 6px;",

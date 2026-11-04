@@ -43,6 +43,19 @@ pub(super) fn sealed(to: &IdentityInfo, title: &str) -> Vec<u8> {
     sealed_plain(to, title, plaintext)
 }
 
+/// A v1 message to `to` whose kept copy would be over the item limit.
+pub(super) fn sealed_big(to: &IdentityInfo) -> Vec<u8> {
+    let plaintext = serde_json::json!({
+        "title": "big",
+        "content": "x".repeat(300 * 1024),
+        "from": "bob",
+        "to": [],
+        "cc": [],
+        "time": "2026-11-02T10:00:00Z",
+    });
+    sealed_plain(to, "big", plaintext)
+}
+
 /// As [`sealed`], with the plaintext given.
 fn sealed_plain(to: &IdentityInfo, title: &str, plaintext: serde_json::Value) -> Vec<u8> {
     let sender = Keys::from_seeds(&DsaSeed([9; 32]), &KemSeed([8; 64]));
@@ -374,6 +387,7 @@ fn target(n: u8, origin: u8) -> Target {
         origin: Origin([origin; 32]),
         addr: Addr([n; 24]),
         id: [n; 32],
+        legacy: false,
     }
 }
 

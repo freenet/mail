@@ -178,12 +178,8 @@ pub(crate) struct Added {
 pub(crate) async fn add(identity: Addr, input: &str, petname: &str) -> Result<Added, String> {
     let recipient = address::parse_recipient(input).map_err(|e| e.to_string())?;
     let addr = match &recipient {
-        Recipient::Legacy { .. } => {
-            return Err(
-                "this is an old (v0.2) address. Old contacts move over in a later \
-                        update; ask them for their new address meanwhile"
-                    .into(),
-            );
+        Recipient::Legacy { id, label } => {
+            return add_legacy(*id, label.as_deref(), petname).await;
         }
         r => Addr(r.addr().expect("a v2 recipient")),
     };
@@ -274,6 +270,56 @@ pub(crate) async fn add(identity: Addr, input: &str, petname: &str) -> Result<Ad
         name,
         warnings,
         invite,
+        own: false,
+    })
+}
+
+/// Add a v0.2.x contact by its 44-character id: its key comes from the old
+/// inbox's parameters (`transition::resolve_legacy`). A contact already in
+/// the address book under that key is kept as it is, its verification
+/// included; a new one is unverified. It is reached at the v2 address its
+/// key gives, once it has a v2 inbox.
+async fn add_legacy(id: [u8; 32], label: Option<&str>, petname: &str) -> Result<Added, String> {
+    let legacy = super::transition::resolve_legacy(id).await?;
+    let addr = address_of(&legacy.vk);
+    let petname = match petname.trim() {
+        "" => None,
+        p => Some(
+            address::normalize_label(p, true)
+                .map_err(|e| format!("the name {e}"))?
+                .0,
+        ),
+    };
+    let (name, warnings) = address::name_for(&addr.0, petname.as_deref(), label, &petnames());
+    if address_book::is_own_fingerprint(&legacy.vk, &legacy.ek) {
+        return Err("that is one of your own identities".into());
+    }
+    let existing = address_book::contact_by_vk(&legacy.vk);
+    let name = existing
+        .as_ref()
+        .map_or(name, |c| c.local_alias.to_string());
+    if existing.is_none() {
+        let contact = Contact {
+            local_alias: name.as_str().into(),
+            suggested_alias: None,
+            description: String::new(),
+            ml_dsa_vk_bytes: legacy.vk.clone(),
+            ml_kem_ek_bytes: legacy.ek.clone(),
+            required_tier: freenet_mail_wire_v1::aft::Tier::Day1,
+            max_age_secs: 0,
+            verified: false,
+            inbox_wasm_hash: Some(legacy.code_hash.clone()),
+        };
+        address_book::insert_contact(contact.clone())?;
+        contact_store::save(&contact)
+            .await
+            .map_err(|e| format!("it could not be saved: {e}"))?;
+    }
+    bump();
+    Ok(Added {
+        name,
+        warnings,
+        invite: false,
         own: false,
     })
 }

@@ -34,7 +34,14 @@ fn settings_item(addr: Addr) -> ItemRef {
 /// body or no list. A body or list that does not decode is an error, never
 /// "none accepted": a write built on that would replace the settings, or the
 /// list, with only the new ids.
+#[cfg(test)]
 fn accepted_in(body: Option<&[u8]>) -> Result<Vec<String>, String> {
+    listed_in(body, ACCEPTED_FIELD)
+}
+
+/// The list `field` of an identity settings body, as [`accepted_in`] reads
+/// its own.
+pub(crate) fn listed_in(body: Option<&[u8]>, field: &str) -> Result<Vec<String>, String> {
     let Some(body) = body else {
         return Ok(Vec::new());
     };
@@ -43,10 +50,12 @@ fn accepted_in(body: Option<&[u8]>) -> Result<Vec<String>, String> {
     if !value.is_object() {
         return Err(unreadable());
     }
-    match value.get(ACCEPTED_FIELD) {
+    match value.get(field) {
         None => Ok(Vec::new()),
-        Some(list) => serde_json::from_value(list.clone())
-            .map_err(|_| "the list of accepted new contacts could not be read".to_string()),
+        Some(list) => serde_json::from_value(list.clone()).map_err(|_| match field {
+            ACCEPTED_FIELD => "the list of accepted new contacts could not be read".to_string(),
+            _ => format!("this identity's list `{field}` could not be read"),
+        }),
     }
 }
 
@@ -55,18 +64,36 @@ fn hex(id: &[u8; 32]) -> String {
 }
 
 async fn accepted(addr: Addr) -> Result<HashSet<String>, String> {
+    listed(addr, ACCEPTED_FIELD).await
+}
+
+/// The list `field` of `addr`'s settings item.
+pub(crate) async fn listed(addr: Addr, field: &str) -> Result<HashSet<String>, String> {
     let item = ops::get_item(settings_item(addr))
         .await
         .map_err(|e| e.to_string())?;
-    Ok(accepted_in(item.as_ref().map(|i| i.body.as_slice()))?
+    Ok(listed_in(item.as_ref().map(|i| i.body.as_slice()), field)?
         .into_iter()
         .collect())
 }
 
 async fn note_accepted(addr: Addr, ids: &[[u8; 32]]) -> Result<(), String> {
+    let ids: Vec<String> = ids.iter().map(hex).collect();
+    note_listed(addr, ACCEPTED_FIELD, &ids, ACCEPTED_MAX).await
+}
+
+/// Add `entries` to the list `field` of `addr`'s settings item, keeping at
+/// most `max`, the oldest forgotten first. A list that cannot be read is
+/// left as it is and the call fails.
+pub(crate) async fn note_listed(
+    addr: Addr,
+    field: &str,
+    entries: &[String],
+    max: usize,
+) -> Result<(), String> {
     let mut unreadable = None;
     let written = ops::put_item_merged(settings_item(addr), |stored| {
-        let mut list = match accepted_in(stored) {
+        let mut list = match listed_in(stored, field) {
             Ok(list) => list,
             Err(e) => {
                 unreadable = Some(e);
@@ -74,21 +101,21 @@ async fn note_accepted(addr: Addr, ids: &[[u8; 32]]) -> Result<(), String> {
             }
         };
         let before = list.len();
-        for id in ids.iter().map(hex) {
-            if !list.contains(&id) {
-                list.push(id);
+        for id in entries {
+            if !list.contains(id) {
+                list.push(id.clone());
             }
         }
         if list.len() == before {
             return None;
         }
-        let excess = list.len().saturating_sub(ACCEPTED_MAX);
+        let excess = list.len().saturating_sub(max);
         list.drain(..excess);
         let mut value = stored
             .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok())
             .filter(serde_json::Value::is_object)
             .unwrap_or_else(|| serde_json::json!({}));
-        value[ACCEPTED_FIELD] = serde_json::json!(list);
+        value[field] = serde_json::json!(list);
         Some(serde_json::to_vec(&value).expect("JSON encodes"))
     })
     .await;

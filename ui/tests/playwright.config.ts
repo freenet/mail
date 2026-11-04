@@ -14,6 +14,8 @@ export default defineConfig({
     ...(process.env.FREENET_BACKGROUND_PROOF === "1" ? [] : ["background-proof.spec.ts"]),
     // And `cargo make test-e2e-inbox-v2`.
     ...(process.env.FREENET_INBOX_V2_LIVE === "1" ? [] : ["inbox-v2-live.spec.ts"]),
+    // And `cargo make test-e2e-v1-transition`.
+    ...(process.env.FREENET_V1_TRANSITION === "1" ? [] : ["v1-transition.spec.ts"]),
   ],
   timeout: 120_000,
   retries: 2,

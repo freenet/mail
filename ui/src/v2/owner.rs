@@ -49,6 +49,8 @@ pub(crate) struct Status {
     pub queue_was_full: bool,
     /// Drained messages stored but not decodable, so not shown.
     pub unreadable_mail: usize,
+    /// The v1 window is over and the old inbox is not closed yet.
+    pub v1_close_pending: bool,
     pub error: Option<String>,
 }
 
@@ -626,6 +628,8 @@ async fn note_owner(addr: Addr, generation: Option<u64>, state: &InboxState) {
         s.queue_was_full |= waiting >= w::QUARANTINE_SLOTS;
         if let Ok(Some(rec)) = &rec {
             s.strangers_dropped = rec.strangers_dropped;
+            let now = u64::try_from(chrono::Utc::now().timestamp()).unwrap_or(0);
+            s.v1_close_pending = super::transition::close_pending(rec, now);
             if foreign(state.owner.version, rec) {
                 s.foreign_version = true;
             }

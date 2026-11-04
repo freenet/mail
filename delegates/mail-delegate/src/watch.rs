@@ -32,7 +32,8 @@ use std::collections::BTreeSet;
 use freenet_mail_protocol::{Addr, Failure, FailureCode, ItemKind, ItemRef, JobsRun};
 use freenet_mail_wire_v1::local_state::KeptMessage;
 use freenet_stdlib::prelude::{
-    ContractInstanceId, GetContractRequest, OutboundDelegateMsg, SubscribeContractRequest,
+    ContractInstanceId, GetContractRequest, OutboundDelegateMsg, StateDelta,
+    SubscribeContractRequest, UpdateContractRequest, UpdateData,
 };
 use serde::Deserialize;
 
@@ -42,6 +43,7 @@ use crate::handlers;
 use crate::inbox_jobs::{self, Own};
 use crate::jobs::{self, Budget, ContractId, Target, Trigger};
 use crate::store::{self, Origin, Space, seen_rel, seen_rels};
+use crate::transition;
 
 /// The namespace of the delegate's own records. No web app has it: a contract
 /// id is a hash, and the origin gate refuses this value.
@@ -130,13 +132,34 @@ pub fn run(env: &mut dyn Env, trigger: Trigger) -> (JobsRun, Vec<OutboundDelegat
     let mut read = 0;
     let mut left = plan.messages;
     let mut missing: Vec<ContractId> = Vec::new();
+    let mut closes = Vec::new();
     for target in &plan.scan {
         let mut s = Space::new(&mut *env, target.origin);
-        if scan(&mut s, target, now, &mut left, &mut read, &mut done).is_ok() {
-            held.push(target.id);
-        } else {
-            done.unknown += 1;
-            missing.push(target.id);
+        match scan(&mut s, target, now, &mut left, &mut read, &mut done) {
+            Ok(state) => {
+                held.push(target.id);
+                // The window's end, for the current generation only.
+                if !target.legacy && budget.may_write(&target.id) {
+                    match transition::close(&mut s, &target.addr, &target.id, &state, now) {
+                        Ok(updates) => {
+                            for u in updates {
+                                budget.take_write(target.id);
+                                closes.push(OutboundDelegateMsg::UpdateContractRequest(
+                                    UpdateContractRequest::new(
+                                        ContractInstanceId::new(target.id),
+                                        UpdateData::Delta(StateDelta::from(u)),
+                                    ),
+                                ));
+                            }
+                        }
+                        Err(_) => done.unknown += 1,
+                    }
+                }
+            }
+            Err(_) => {
+                done.unknown += 1;
+                missing.push(target.id);
+            }
         }
     }
     // Inbox v2: drain, clock and renew. Its updates go out with the rest.
@@ -187,6 +210,7 @@ pub fn run(env: &mut dyn Env, trigger: Trigger) -> (JobsRun, Vec<OutboundDelegat
     }
     requests.append(&mut out);
     let mut out = requests;
+    out.extend(closes);
     out.extend(v2_done.out);
     if unprompted {
         budget.charge_messages(plan.messages - left);
@@ -224,7 +248,7 @@ fn targets(
     let mut owns = Vec::new();
     let mut emptied = Vec::new();
     for origin in origins {
-        let s = Space::new(&mut *env, origin);
+        let mut s = Space::new(&mut *env, origin);
         if matches!(s.index(store::IDENTITY_INDEX), Ok((_, ids)) if ids.is_empty()) {
             emptied.push(origin.0.to_vec());
         }
@@ -234,8 +258,30 @@ fn targets(
         };
         for (addr, _, record) in identities {
             match handlers::v1_inbox_id(&record.vk) {
-                Ok(id) => out.push(Target { origin, addr, id }),
+                Ok(id) => out.push(Target {
+                    origin,
+                    addr,
+                    id,
+                    legacy: false,
+                }),
                 Err(_) => done.unknown += 1,
+            }
+            // An earlier generation is watched only once this node holds it
+            // (a page asks the network for it, `ui/src/v2/transition.rs`),
+            // and only while the window is open: nothing closes it.
+            if !transition::ended(&mut s, &addr, now) {
+                for hash in handlers::V1_LEGACY_INBOX_CODE_HASHES {
+                    match handlers::v1_inbox_id_at(&record.vk, hash) {
+                        Ok(id) if s.env.contract_state(&id).is_some() => out.push(Target {
+                            origin,
+                            addr,
+                            id,
+                            legacy: true,
+                        }),
+                        Ok(_) => {}
+                        Err(_) => done.unknown += 1,
+                    }
+                }
             }
             match inbox_jobs::own(&s, &addr, now) {
                 Ok(Some(own)) => owns.push(own),
@@ -303,6 +349,24 @@ struct Flags {
     deleted: bool,
 }
 
+/// The length of the kept copy the watch would write for a message, `None`
+/// if it does not decrypt to one. `crate::transition` tells a copy too large
+/// to keep from one the user deleted by it.
+pub(crate) fn kept_len(
+    keys: &Keys,
+    content: &[u8],
+    sender_vk: &[u8],
+    signature: &[u8],
+    now: u64,
+) -> Option<usize> {
+    let m = V1Message {
+        content: content.to_vec(),
+        sender_vk: sender_vk.to_vec(),
+        signature: signature.to_vec(),
+    };
+    kept_body(keys, &m, now).map(|b| b.len())
+}
+
 /// The flags an import starts with, in the form the page writes them.
 const UNREAD_FLAGS: &[u8] = br#"{"read":false,"deleted":false}"#;
 
@@ -327,7 +391,7 @@ fn scan(
     left: &mut usize,
     read: &mut usize,
     done: &mut JobsRun,
-) -> Result<(), Failure> {
+) -> Result<Vec<u8>, Failure> {
     let state = s
         .env
         .contract_state(&target.id)
@@ -413,7 +477,7 @@ fn scan(
             Err(_) => done.remaining += 1,
         }
     }
-    Ok(())
+    Ok(state)
 }
 
 fn item(kind: ItemKind, owner: Addr, id: [u8; 16]) -> ItemRef {

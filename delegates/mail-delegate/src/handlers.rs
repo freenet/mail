@@ -261,6 +261,7 @@ fn handle_request(
         } => inbox_v2::issue_pass(s, &addr, contact, invite, &ui_entropy),
         Op::HoldPass { addr, pass } => inbox_v2::hold_pass(s, &addr, &pass),
         Op::RepublishInboxV2 { addr } => inbox_v2::republish_inbox(s, &addr),
+        Op::EndV1WindowForTest { addr } => end_v1_window(s, &addr),
         Op::SealV2 {
             from,
             to,
@@ -1444,7 +1445,7 @@ fn seal_v1(
     })
 }
 
-fn sign_v1_authority(
+pub(crate) fn sign_v1_authority(
     s: &Space<'_>,
     addr: &Addr,
     settings_json: &[u8],
@@ -1467,14 +1468,28 @@ pub fn v1_inbox_code_hash() -> &'static str {
     include_str!("../../../published-contract/wasm/v1/inbox_code_hash").trim()
 }
 
+/// Code hashes of the v1 inbox generations before [`v1_inbox_code_hash`], the
+/// rows of `legacy_inbox.toml` (pinned by a test). A user who skipped the
+/// v0.2.x inbox migration can still hold mail in an inbox under one of these:
+/// the watch reads them, read-only, during the transition window.
+pub const V1_LEGACY_INBOX_CODE_HASHES: [&str; 2] = [
+    "Ht8rcMjTpnraRNbzkmDCBFJJfmQGJ8M2iUAGaZimE9Ji",
+    "9Kuhod6Bfrd2uZAtVNtQKVWy4mku3tbfv2zop1u9HU98",
+];
+
 /// The instance id of `vk`'s v1 inbox.
 pub fn v1_inbox_id(vk: &[u8]) -> Result<[u8; 32], Failure> {
+    v1_inbox_id_at(vk, v1_inbox_code_hash())
+}
+
+/// The instance id of `vk`'s v1 inbox under `code_hash`.
+pub fn v1_inbox_id_at(vk: &[u8], code_hash: &str) -> Result<[u8; 32], Failure> {
     let params: Parameters = freenet_mail_wire_v1::inbox::InboxParams {
         pub_key: vk.to_vec(),
     }
     .try_into()
     .map_err(|_| fail(FailureCode::Internal, "could not encode inbox parameters"))?;
-    let key = ContractKey::from_params(v1_inbox_code_hash(), params)
+    let key = ContractKey::from_params(code_hash, params)
         .map_err(|_| fail(FailureCode::Internal, "bad inbox code hash"))?;
     key.id()
         .as_bytes()
@@ -1523,7 +1538,7 @@ struct AssignmentHash {
 /// The prefix of every inbox v2 signed layout.
 const V2_DOMAIN: &[u8] = b"fmail/";
 
-fn sign_v1_removal(s: &Space<'_>, addr: &Addr, hashes: &[Hash32]) -> OpResult {
+pub(crate) fn sign_v1_removal(s: &Space<'_>, addr: &Addr, hashes: &[Hash32]) -> OpResult {
     use freenet_mail_wire_v1::inbox::{STATE_UPDATE, removal_payload};
     if hashes.is_empty() || hashes.len() > MAX_REMOVAL_BATCH {
         return Err(fail(
@@ -1592,6 +1607,16 @@ fn v1_aft_params(s: &Space<'_>, addr: &Addr) -> OpResult {
     serde_json::to_vec(&params)
         .map(|b| Reply::AftParams(ByteBuf::from(b)))
         .map_err(|e| fail(FailureCode::Internal, e.to_string()))
+}
+
+#[cfg(feature = "v1-transition")]
+fn end_v1_window(s: &mut Space<'_>, addr: &Addr) -> OpResult {
+    crate::transition::end_window_now(s, addr).map(|()| Reply::Ack { generation: 0 })
+}
+
+#[cfg(not(feature = "v1-transition"))]
+fn end_v1_window(_: &mut Space<'_>, _: &Addr) -> OpResult {
+    Err(fail(FailureCode::Refused, "this build has no test clock"))
 }
 
 #[cfg(not(feature = "v1-transition"))]

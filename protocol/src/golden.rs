@@ -47,6 +47,7 @@ fn op_name(op: &Op) -> &'static str {
         Op::HoldPass { .. } => "op_hold_pass",
         Op::SealV2 { .. } => "op_seal_v2",
         Op::RepublishInboxV2 { .. } => "op_republish_inbox_v2",
+        Op::EndV1WindowForTest { .. } => "op_end_v1_window_for_test",
     }
 }
 
@@ -284,6 +285,7 @@ fn ops() -> Vec<Op> {
             reseals: 1,
         },
         Op::RepublishInboxV2 { addr: a },
+        Op::EndV1WindowForTest { addr: a },
     ]
 }
 

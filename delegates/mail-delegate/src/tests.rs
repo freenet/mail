@@ -11,6 +11,7 @@ mod recovery;
 mod resilience;
 mod round2;
 mod round3;
+mod transition;
 
 use freenet_mail_protocol::{
     Addr, DsaSeed, Entropy, FailureCode, Hash32, IdentityInfo, ImportKind, ImportSource, ItemKind,
