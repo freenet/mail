@@ -5273,6 +5273,12 @@ fn archive_message(
     };
     // A drained v2 message: its copy is the delegate's, never a v1 inbox's.
     if is_v2_row(id) && !alias.is_empty() {
+        // Archive's Reply puts `from` in the To field: the shown name alone
+        // (a label, an address prefix) may resolve to nobody.
+        let archived = freenet_mail_wire_v1::local_state::ArchivedMessage {
+            from: v2_reply_address(msg),
+            ..archived
+        };
         crate::local_state::local_archive_message(alias, id, archived.clone());
         let (a, undo) = (alias.to_string(), alias.to_string());
         let _task = dioxus_core::spawn_forever(async move {
@@ -5349,6 +5355,18 @@ fn archive_message(
 /// AND remove the message from the inbox contract — distinct from Archive
 /// because it leaves no trace. Shared between `OpenMessage` and the threaded
 /// per-message action clusters.
+/// What a v2 message's sender is kept as in its archived copy: the name it
+/// showed with the full address (`name@address`), or the bare address when
+/// the name is not a label, so a reply from Archive reaches the sender
+/// whether or not they are a contact.
+fn v2_reply_address(msg: &Message) -> String {
+    let from = freenet_mail_protocol::address::address_of(&msg.sender_vk);
+    let label = crate::address::normalize_label(&msg.from, false)
+        .ok()
+        .map(|l| l.0);
+    crate::address::full_address(label.as_deref(), &from.0)
+}
+
 /// Delete v2 message `id` of `alias`: hidden at once, then every copy is
 /// removed (`v2::owner::delete_row`), in a task that outlives the view.
 fn delete_v2_message(alias: &str, id: u64) {
@@ -8063,6 +8081,26 @@ mod v2_sender_tests {
                 .any(|w| w.contains("looks like your contact \u{201c}work\u{201d}")),
             "{sender:?}"
         );
+    }
+
+    /// P2: an archived v2 message keeps a sender a reply reaches. A sender
+    /// who is not a contact shows as their label or an address prefix,
+    /// neither of which resolves; the archived copy holds the address.
+    #[test]
+    fn an_archived_v2_senders_address_resolves_for_a_reply() {
+        address_book::clear_for_test();
+        let me = freenet_mail_protocol::Addr([0x11; 24]);
+        for label in ["stranger", "not a label!"] {
+            let vk = vec![0xe1; 1952];
+            let from = freenet_mail_protocol::address::address_of(&vk);
+            let row = v2_message(me, mail(vk, label), |_| false);
+            let kept = v2_reply_address(&row);
+            assert_eq!(
+                crate::v2::contacts::recipient_addr(&kept),
+                Some(from),
+                "{kept}"
+            );
+        }
     }
 
     #[test]

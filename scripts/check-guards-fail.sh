@@ -138,6 +138,9 @@ ui_v2_flow_tests() {
     cargo test --manifest-path "$STAGE/Cargo.toml" -p freenet-email-ui --lib \
         --no-default-features --features example-data,no-sync v2::flows
 }
+ui_v2_sender_tests() {
+    cargo test --manifest-path "$STAGE/Cargo.toml" -p freenet-email-ui --lib v2_sender_tests
+}
 ui_ghostkeys_node_tests() {
     cargo test --manifest-path "$STAGE/Cargo.toml" -p freenet-email-ui --lib ghostkeys::node
 }
@@ -212,6 +215,7 @@ baseline "inbox v2 UI network tests" ui_net_tests
 baseline "inbox v2 UI flows" ui_v2_flow_tests
 baseline "inbox v2 UI tests" ui_v2_unit_tests
 baseline "Ghost Key vault requests" ui_ghostkeys_node_tests
+baseline "v2 senders in the list" ui_v2_sender_tests
 baseline "UI background jobs tests" ui_jobs_tests
 baseline "release freeze tests" freeze_tests
 baseline "release scrub tests" scrub_release_tests
@@ -1283,6 +1287,11 @@ guard "ghost keys: a vault request with no answer keeps the turn for its late an
     '                LATE.with(|l| *l.borrow_mut() = Some(Owed { rx: Some(rx), until }));' \
     '                let _ = (rx, until);' \
     "tests:a_late_vault_answer_is_never_the_next_requests" ui_ghostkeys_node_tests
+guard "inbox v2 UI: an archived v2 message keeps its sender's address" "$STAGE/ui/src/app.rs" \
+    '    crate::address::full_address(label.as_deref(), &from.0)' \
+    '    let _ = (label, from);
+    msg.from.to_string()' \
+    "tests:an_archived_v2_senders_address_resolves_for_a_reply" ui_v2_sender_tests
 guard "inbox v2 UI: a ledger entry that does not decode fails the read" "$STAGE/ui/src/v2/contacts.rs" \
     '            Ok((PassId(id), entry))
         })
