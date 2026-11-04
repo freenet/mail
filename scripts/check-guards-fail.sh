@@ -14,6 +14,11 @@
 #        scripts/check-guards-fail.sh --no-wasm  (skip the WASM rebuilds)
 #        scripts/check-guards-fail.sh --shard I/N  (guards whose index mod N is I)
 #        scripts/check-guards-fail.sh --list     (print the guard names, run none)
+#        scripts/check-guards-fail.sh --list-files  (name, TAB, the file its mutation edits)
+#        scripts/check-guards-fail.sh --list-cmds   (the command each guard runs)
+#        scripts/check-guards-fail.sh --only FILE   (only the guards named in FILE, one per
+#                                                    line; --shard then splits that selection,
+#                                                    and a baseline no selected guard runs is skipped)
 #        scripts/check-guards-fail.sh --anchors  (check every mutation applies exactly
 #                                                 once; build and run nothing)
 # Every shard runs the baselines. A shard with no guard fails.
@@ -23,11 +28,20 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 WASM=1
-SHARD_I="" SHARD_N="" LIST=0 ANCHORS=0
+SHARD_I="" SHARD_N="" LIST=0 LISTWHAT=names ANCHORS=0 ONLY=""
+declare -A SELECTED
 while [ $# -gt 0 ]; do
     case "$1" in
         --no-wasm) WASM=0 ;;
         --list) LIST=1 ;;
+        --list-files) LIST=1 LISTWHAT=files ;;
+        --list-cmds) LIST=1 LISTWHAT=cmds ;;
+        --only)
+            shift
+            ONLY="${1:?usage: --only FILE}"
+            [ -f "$ONLY" ] || { echo "no such selection file: $ONLY" >&2; exit 2; }
+            while IFS= read -r line; do [ -n "$line" ] && SELECTED["$line"]=1; done < "$ONLY"
+            ;;
         --anchors) ANCHORS=1 ;;
         --shard)
             shift
@@ -42,9 +56,12 @@ while [ $# -gt 0 ]; do
     shift
 done
 GUARD_INDEX=0 GUARDS_RUN=0
-# True when the next guard belongs to another shard. Advances the index, so
-# it is called exactly once per guard, before any other filter.
+# True when the guard named $1 is not this run's: not selected by --only, or
+# in another shard. Advances the index, so it is called exactly once per
+# guard, before any other filter. Under --only the index counts the selected
+# guards alone, so a selection spreads over the shards evenly.
 other_shard() {
+    [ -z "$ONLY" ] || [ -n "${SELECTED[$1]:-}" ] || return 0
     local i=$GUARD_INDEX
     GUARD_INDEX=$((GUARD_INDEX + 1))
     [ -n "$SHARD_N" ] && [ $((i % SHARD_N)) -ne "$SHARD_I" ]
@@ -151,6 +168,10 @@ failures=0
 baseline() { # name command...
     local name="$1"
     shift
+    if [ -n "$ONLY" ] && [[ "$NEED" != *" $1 "* ]]; then
+        echo "skip - baseline: $name (no selected guard in this run uses it)"
+        return
+    fi
     if "$@" > "$STAGE/out" 2>&1; then
         echo "ok - baseline: $name passes"
     else
@@ -159,6 +180,12 @@ baseline() { # name command...
         failures=$((failures + 1))
     fi
 }
+# Under --only, the commands this run's guards use: a baseline for any other
+# command shows nothing about them, and costs a full test run.
+NEED=""
+if [ -n "$ONLY" ] && [ "$LIST" -eq 0 ]; then
+    NEED=" $("$0" --list-cmds --only "$ONLY" ${SHARD_N:+--shard "$SHARD_I/$SHARD_N"} $([ "$WASM" -eq 0 ] && echo --no-wasm) | sort -u | tr '\n' ' ') "
+fi
 if [ "$LIST" -eq 0 ] && [ "$ANCHORS" -eq 0 ]; then
 baseline "delegate tests" delegate_tests
 baseline "delegate fault-injection runs" fault_tests
@@ -212,14 +239,22 @@ shows() {
     esac
 }
 
+list_item() { # name file command
+    case "$LISTWHAT" in
+        names) echo "$1" ;;
+        files) printf '%s\t%s\n' "$1" "${2#"$STAGE"/}" ;;
+        cmds) echo "$3" ;;
+    esac
+}
+
 guard() { # name file old new expected command...
     local name="$1" file="$2" old="$3" new="$4" expected="$5"
     shift 5
     if [ "$LIST" -eq 1 ]; then
-        other_shard || echo "$name"
+        other_shard "$name" || list_item "$name" "$file" "$1"
         return
     fi
-    if other_shard; then
+    if other_shard "$name"; then
         return
     fi
     if [ -n "${GUARD_ONLY:-}" ] && ! [[ "$name" =~ $GUARD_ONLY ]]; then
@@ -1546,8 +1581,11 @@ if [ "$WASM" -eq 1 ]; then
     # The release guard's own tests build real WASM and show each refusal,
     # including each of its two feature checks alone.
     if [ "$LIST" -eq 1 ]; then
-        other_shard || echo "release guard: refusals shown on real builds"
-    elif ! other_shard; then
+        # Its tests build the delegate for real, so it is the delegate's guard.
+        other_shard "release guard: refusals shown on real builds" \
+            || list_item "release guard: refusals shown on real builds" \
+                "$STAGE/delegates/mail-delegate/Cargo.toml" release_guard
+    elif ! other_shard "release guard: refusals shown on real builds"; then
         GUARDS_RUN=$((GUARDS_RUN + 1))
         if "$ROOT/scripts/check-release-delegate_test.sh" > "$STAGE/out" 2>&1; then
             echo "ok - release guard: refusals shown on real builds"

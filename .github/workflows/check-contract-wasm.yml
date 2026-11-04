@@ -8,6 +8,11 @@ on:
   # changes nothing but documentation. A job skipped by its `if:`
   # reports success to required checks.
   pull_request:
+  # Every guard runs on a push to main, nightly and on demand. A pull request
+  # runs only the guards its change can reach (scripts/select-guards.sh).
+  schedule:
+    - cron: '20 5 * * *'
+  workflow_dispatch:
   push:
     branches: [main]
     paths:
@@ -71,6 +76,15 @@ jobs:
           fi
           echo "relevant=$relevant" >> "$GITHUB_OUTPUT"
 
+      # Fails this job, and so check-drift, when a guarded area changed and no
+      # guard is selected. The shards select again from the same checkout.
+      - name: Select the guards this change can reach
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT" = pull_request ]; then git diff --no-renames --name-only HEAD^1 HEAD; fi \
+            | scripts/select-guards.sh "$EVENT" > "$RUNNER_TEMP/guards.txt"
+
   drift-checks:
     needs: changes
     # Run unless `changes` positively said "docs only". If `changes`
@@ -123,6 +137,12 @@ jobs:
             | tar -xz -C "$HOME/.cargo/bin/" fdev
           chmod +x "$HOME/.cargo/bin/fdev"
           fdev --version
+
+      # Which guards a pull request runs is decided by this script, so it is
+      # shown selecting what it should: harness change (all), docs only (none),
+      # one crate, and the shards splitting a selection.
+      - name: The guard selection picks what it should
+        run: bash scripts/select-guards_test.sh
 
       # Issue #214 F1 tripwire. The committed parameters MUST be the
       # production verifying key, never the committed test key from
@@ -338,13 +358,30 @@ jobs:
           submodules: recursive
           fetch-depth: 2
 
+      # A pull request's selection is split over the shards. A shard whose
+      # slice is empty has nothing to run, and the steps below skip. The
+      # selection itself is never empty for a change that touched guarded
+      # code: select-guards.sh fails then, here and in `changes`.
+      - name: Pick this shard's guards
+        id: gate
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT" = pull_request ]; then git diff --no-renames --name-only HEAD^1 HEAD; fi \
+            | scripts/select-guards.sh "$EVENT" > "$RUNNER_TEMP/guards.txt"
+          n=$(scripts/check-guards-fail.sh --only "$RUNNER_TEMP/guards.txt" --shard ${{ matrix.shard }}/8 --list | grep -c . || true)
+          echo "shard ${{ matrix.shard }}/8 has $n selected guards"
+          echo "run=$([ "$n" -gt 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
       - name: Install Rust
+        if: steps.gate.outputs.run == 'true'
         # Keep in sync with rust-toolchain.toml.
         uses: dtolnay/rust-toolchain@1.99.1
         with:
           targets: wasm32-unknown-unknown
 
       - name: Install the container contract's pinned Rust
+        if: steps.gate.outputs.run == 'true'
         # Issue #206: container.wasm bytes, and so the container contract
         # id, depend on the rustc version. contracts/facade/rust-toolchain.toml
         # pins it; rustup reads that file here and in every container build.
@@ -352,6 +389,7 @@ jobs:
         run: rustup toolchain install
 
       - name: Cache cargo-installed binaries
+        if: steps.gate.outputs.run == 'true'
         id: cache-bins
         uses: actions/cache@v6
         with:
@@ -360,10 +398,11 @@ jobs:
           key: ${{ runner.os }}-cargo-bins-fdev-0.3.313-v4
 
       - name: Cache cargo
+        if: steps.gate.outputs.run == 'true'
         uses: Swatinem/rust-cache@v2
 
       - name: Install fdev
-        if: steps.cache-bins.outputs.cache-hit != 'true'
+        if: steps.gate.outputs.run == 'true' && steps.cache-bins.outputs.cache-hit != 'true'
         # The prebuilt fdev from the matching freenet-core release
         # (v0.2.151 ships fdev 0.3.313).
         run: |
@@ -376,6 +415,7 @@ jobs:
       # vectors.py, the inbox v2 byte layouts' second implementation, needs
       # cbor2 and b3sum. Pinned, and isolated in a venv.
       - name: Install what vectors.py needs
+        if: steps.gate.outputs.run == 'true'
         run: |
           python3 -m venv "$RUNNER_TEMP/vectors"
           "$RUNNER_TEMP/vectors/bin/pip" install cbor2==5.8.0
@@ -383,14 +423,17 @@ jobs:
           echo "VECTORS_PYTHON=$RUNNER_TEMP/vectors/bin/python3" >> "$GITHUB_ENV"
 
       - name: Show each mail-delegate guard failing when broken (shard ${{ matrix.shard }}/8)
-        run: bash scripts/check-guards-fail.sh --shard ${{ matrix.shard }}/8
+        if: steps.gate.outputs.run == 'true'
+        run: bash scripts/check-guards-fail.sh --only "$RUNNER_TEMP/guards.txt" --shard ${{ matrix.shard }}/8
 
   # The required check, by name (a ruleset requires `check-drift`). It
   # reports one result for the drift checks and every guard shard, and
   # is red unless each of them succeeded. A job that did not run is
   # `skipped`, which GitHub counts as passing, so it is checked by value
   # here. The one allowed skip is a docs-only change, where `changes`
-  # said so; the job is then skipped itself, as before.
+  # said so; the job is then skipped itself, as before. A shard leg with no
+  # guard selected skips its steps and succeeds; `changes` fails when a
+  # change touched guarded code and selected none.
   check-drift:
     needs: [changes, drift-checks, guard-shards]
     if: ${{ always() && needs.changes.outputs.relevant != 'false' }}
