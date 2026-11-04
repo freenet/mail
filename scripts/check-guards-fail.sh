@@ -1227,7 +1227,7 @@ guard "an unconfirmed identity's arm publishes nothing" "$STAGE/ui/src/api.rs" \
     "tests:the_unconfirmed_arm_has_no_publish_in_it" ui_notfound_tests
 guard "inbox v2 UI: an inbox is known only once the node took its GET" "$STAGE/ui/src/v2/net.rs" \
     '        if let Err(e) = client.send(request.into()).await {' \
-    '        KNOWN.with(|k| k.borrow_mut().insert(id));
+    '        KNOWN.with(|k| k.borrow_mut().insert(turn.key.0));
         if let Err(e) = client.send(request.into()).await {' \
     "tests:a_get_that_was_never_sent_leaves_the_code_to_fetch" ui_net_tests
 guard "inbox v2 UI: a start publishes an inbox the network lacks" "$STAGE/ui/src/v2/owner.rs" \
