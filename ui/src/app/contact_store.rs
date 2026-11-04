@@ -386,6 +386,11 @@ thread_local! {
 /// a removal (or undo an edit) the page already made.
 fn queue_write(vk: &[u8], write: Write) -> bool {
     note_changed(vk);
+    // The record goes, so its v2 notes go with it: the same key imported
+    // again as a legacy contact must route by v1.
+    if matches!(write, Write::Remove { .. }) {
+        V2.with(|n| n.borrow_mut().remove(vk));
+    }
     WRITES.with(|w| w.borrow_mut().push(vk.to_vec(), write))
 }
 
@@ -765,5 +770,21 @@ mod tests {
                 .iter()
                 .all(|l| l.ml_dsa_vk_bytes != c.ml_dsa_vk_bytes)
         );
+    }
+
+    /// Removing the last contact for a key clears its v2 notes, so the same
+    /// key imported again as a legacy contact is not routed by v2.
+    #[test]
+    fn removing_a_contact_clears_its_v2_notes() {
+        let vk = vec![77; 1952];
+        set_v2_notes(&vk, V2Notes::default());
+        assert!(v2_notes(&vk).is_some());
+        queue_write(
+            &vk,
+            Write::Remove {
+                alias: "Bob".into(),
+            },
+        );
+        assert!(v2_notes(&vk).is_none());
     }
 }
