@@ -77,6 +77,14 @@ pub(crate) fn start(addr: Addr) {
                         s.error = None;
                     });
                     refresh(addr).await;
+                    #[cfg(all(
+                        feature = "example-data",
+                        not(feature = "use-node"),
+                        target_family = "wasm"
+                    ))]
+                    if foreign_fixture() {
+                        net::offline::publish_foreign_version(&addr);
+                    }
                     return;
                 }
                 Err(e) => {
@@ -87,6 +95,24 @@ pub(crate) fn start(addr: Addr) {
             }
         }
     });
+}
+
+/// Offline builds only: `?v2-foreign-fixture` publishes each inbox at an
+/// owner version from "another node", so the Playwright suite can see the
+/// decision-25 warning with no second node.
+#[cfg(all(
+    feature = "example-data",
+    not(feature = "use-node"),
+    target_family = "wasm"
+))]
+fn foreign_fixture() -> bool {
+    web_sys::window()
+        .and_then(|w| w.location().search().ok())
+        .is_some_and(|s| {
+            s.trim_start_matches('?')
+                .split('&')
+                .any(|p| p == "v2-foreign-fixture")
+        })
 }
 
 /// Make sure `addr` has a v2 inbox on the network, held and followed.

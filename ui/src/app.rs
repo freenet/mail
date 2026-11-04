@@ -5935,7 +5935,10 @@ fn ComposeSheet() -> Element {
                 in_reply_to: in_reply_to.read().clone(),
                 quoted_excerpt: quoted_excerpt.read().clone(),
             };
-            let (to_name, _) = crate::v2::contacts::sender_name(&to_addr, None);
+            let typed_label = crate::address::parse_recipient(&to_val)
+                .ok()
+                .and_then(|r| r.label().map(str::to_string));
+            let (to_name, _) = crate::v2::contacts::sender_name(&to_addr, typed_label.as_deref());
             crate::v2::send::send_and_record(
                 sender_addr,
                 alias.clone(),

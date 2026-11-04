@@ -146,6 +146,7 @@ interface TestIds {
   fmV2GhostBadge: string;
   fmV2Outcome: string;
   fmV2ForeignWarning: string;
+  fmV2QuarantineMode: string;
 }
 
 export const TID: TestIds = JSON.parse(

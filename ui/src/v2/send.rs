@@ -86,8 +86,14 @@ impl Outcome {
 
 /// The last send's outcome on this page, shown with the compose button so a
 /// test can wait for it.
-pub(crate) static LAST_OUTCOME: dioxus::prelude::GlobalSignal<Option<(String, Outcome)>> =
+/// The number counts the page's v2 sends, so the outcome of one is told from
+/// the one before.
+pub(crate) static LAST_OUTCOME: dioxus::prelude::GlobalSignal<Option<(u32, String, Outcome)>> =
     dioxus::prelude::Signal::global(|| None);
+
+thread_local! {
+    static SENDS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
 
 /// How many times the inbox is read back after one update before the message
 /// is sealed again, and the pause between reads.
@@ -202,9 +208,10 @@ pub(crate) fn send_and_record(
     body: MailBody,
 ) {
     use freenet_mail_wire_v1::local_state::{DeliveryState, SentMessage};
-    if dioxus::core::Runtime::try_current().is_some() {
-        *LAST_OUTCOME.write() = None;
-    }
+    let seq = SENDS.with(|n| {
+        n.set(n.get() + 1);
+        n.get()
+    });
     let sent_id = crate::local_state::new_sent_id();
     let sent = SentMessage {
         to: to_text,
@@ -247,7 +254,7 @@ pub(crate) fn send_and_record(
         let text = outcome.text(&to_name);
         crate::toast::push_toast_detached(text.clone(), level);
         if dioxus::core::Runtime::try_current().is_some() {
-            *LAST_OUTCOME.write() = Some((text, outcome));
+            *LAST_OUTCOME.write() = Some((seq, text, outcome));
         }
     });
 }

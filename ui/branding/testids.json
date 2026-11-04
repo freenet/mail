@@ -150,5 +150,6 @@
   "fmV2RecipientNote": "fm-v2-recipient-note",
   "fmV2GhostBadge": "fm-v2-ghost-badge",
   "fmV2Outcome": "fm-v2-outcome",
-  "fmV2ForeignWarning": "fm-v2-foreign-warning"
+  "fmV2ForeignWarning": "fm-v2-foreign-warning",
+  "fmV2QuarantineMode": "fm-v2-quarantine-mode"
 }

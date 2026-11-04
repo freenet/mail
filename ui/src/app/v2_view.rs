@@ -87,6 +87,32 @@ pub(crate) fn ScrAddress() -> Element {
         contacts::rows(addr).await
     });
 
+    // Who may write to you without a pass (decision D8): anyone, or only
+    // senders who prove a Ghost Key, at a tier.
+    let mut mode_error = use_signal(|| None::<String>);
+    let mut mode_busy = use_signal(|| false);
+    let set_mode = use_callback(move |mode: QuarantineMode| {
+        if *mode_busy.read() {
+            return;
+        }
+        mode_busy.set(true);
+        spawn(async move {
+            let r = contacts::change_own(
+                addr,
+                freenet_mail_protocol::OwnerChange::SetQuarantine(mode),
+            )
+            .await;
+            mode_error.set(r.err());
+            crate::v2::owner::refresh(addr).await;
+            mode_busy.set(false);
+        });
+    });
+    let mode_slug = match status.quarantine {
+        Some(QuarantineMode::RequireGhost { min_usd }) => format!("ghost-{}", min_usd.unwrap_or(0)),
+        Some(QuarantineMode::Open) => "open".to_string(),
+        None => "unknown".to_string(),
+    };
+
     rsx! {
         div { class: "fm-set-inner",
             ForeignNodeWarning { addr }
@@ -128,6 +154,35 @@ pub(crate) fn ScrAddress() -> Element {
                         "Your inbox is on the network."
                     } else {
                         "Starting your inbox\u{2026}"
+                    }
+                }
+            }
+            super::settings::Card {
+                title: "New contacts".to_string(),
+                sub: "Mail from someone you have not accepted waits in your new-contacts queue \
+                      (16 places). You can let anyone in, or only senders who prove a Ghost Key."
+                    .to_string(),
+                div { style: "padding: 12px 16px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center;",
+                    "data-testid": testid::FM_V2_QUARANTINE_MODE,
+                    "data-mode": "{mode_slug}",
+                    button {
+                        class: if mode_slug == "open" { "fm-btn-primary" } else { "fm-btn-secondary" },
+                        disabled: *mode_busy.read() || !status.ready,
+                        "data-value": "open",
+                        onclick: move |_| set_mode.call(QuarantineMode::Open),
+                        "Anyone"
+                    }
+                    for (usd, text) in [(None, "Ghost Key"), (Some(5u32), "Ghost Key, $5 or more"), (Some(20u32), "Ghost Key, $20 or more")] {
+                        button {
+                            class: if mode_slug == format!("ghost-{}", usd.unwrap_or(0)) { "fm-btn-primary" } else { "fm-btn-secondary" },
+                            disabled: *mode_busy.read() || !status.ready,
+                            "data-value": "ghost-{usd.unwrap_or(0)}",
+                            onclick: move |_| set_mode.call(QuarantineMode::RequireGhost { min_usd: usd }),
+                            "{text}"
+                        }
+                    }
+                    if let Some(e) = &*mode_error.read() {
+                        div { class: "err", style: "width: 100%;", "Not changed: {e}" }
                     }
                 }
             }
@@ -188,7 +243,11 @@ pub(crate) fn ScrAddress() -> Element {
                     match &*add_result.read() {
                         Some(Ok(added)) => rsx! {
                             div { "data-testid": testid::FM_V2_ADD_RESULT,
-                                if added.invite {
+                                if added.own && added.invite {
+                                    "{added.name} is one of your own identities: the invite is kept, so you can write to it straight to its inbox."
+                                } else if added.own {
+                                    "{added.name} is one of your own identities, so it is not added as a contact. Write to its address."
+                                } else if added.invite {
                                     "Added {added.name}. Your invite lets you write straight to their inbox."
                                 } else {
                                     "Added {added.name}. Your first message goes to their new-contacts queue until they accept you."
@@ -372,11 +431,12 @@ pub(crate) fn LastOutcome() -> Element {
     let Some(outcome) = crate::v2::send::LAST_OUTCOME.read().clone() else {
         return rsx! {};
     };
-    let (text, delivered) = (outcome.0.clone(), outcome.1.delivered());
+    let (seq, text, delivered) = (outcome.0, outcome.1.clone(), outcome.2.delivered());
     rsx! {
         div { class: "info",
             "data-testid": testid::FM_V2_OUTCOME,
             "data-delivered": "{delivered}",
+            "data-seq": "{seq}",
             style: "margin: 8px 12px; font-size: 12px;",
             "{text}"
         }

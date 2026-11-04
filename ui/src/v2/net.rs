@@ -288,6 +288,22 @@ pub(crate) mod offline {
         Ok(w::encode(&filter(s)))
     }
 
+    /// Offline builds' fixture for decision 25: publish `addr`'s owner record
+    /// at a version this page's delegate never signed, as a second node
+    /// signing for the same identity would.
+    #[cfg(feature = "example-data")]
+    pub(crate) fn publish_foreign_version(addr: &Addr) {
+        let id = super::super::instance_id(addr);
+        let Some(held) = STATES.with(|s| s.borrow().get(&id).cloned()) else {
+            return;
+        };
+        let Ok(mut s) = w::decode::<InboxState>(&held) else {
+            return;
+        };
+        s.owner.version += 1_000;
+        store(addr, w::encode(&s));
+    }
+
     pub(crate) fn filter(mut s: InboxState) -> InboxState {
         let owner = s.owner.clone();
         let revoked = s.revoked.clone();

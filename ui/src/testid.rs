@@ -217,6 +217,7 @@ pub(crate) const FM_V2_RECIPIENT_NOTE: &str = "fm-v2-recipient-note";
 pub(crate) const FM_V2_GHOST_BADGE: &str = "fm-v2-ghost-badge";
 pub(crate) const FM_V2_OUTCOME: &str = "fm-v2-outcome";
 pub(crate) const FM_V2_FOREIGN_WARNING: &str = "fm-v2-foreign-warning";
+pub(crate) const FM_V2_QUARANTINE_MODE: &str = "fm-v2-quarantine-mode";
 
 #[cfg(test)]
 mod tests {
@@ -385,6 +386,7 @@ mod tests {
             ("fmV2GhostBadge", super::FM_V2_GHOST_BADGE),
             ("fmV2Outcome", super::FM_V2_OUTCOME),
             ("fmV2ForeignWarning", super::FM_V2_FOREIGN_WARNING),
+            ("fmV2QuarantineMode", super::FM_V2_QUARANTINE_MODE),
         ];
         assert_eq!(
             json.len(),

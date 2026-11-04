@@ -99,11 +99,15 @@ pub(crate) fn by_addr(addr: &Addr) -> Option<Contact> {
     all().into_iter().find(|(_, a)| a == addr).map(|(c, _)| c)
 }
 
-/// (petname, address) of every contact, for the label checks.
+/// (petname, address) of every contact, v1 or v2, for the label checks: a
+/// name can be mistaken for any of them.
 pub(crate) fn petnames() -> Vec<(String, [u8; 24])> {
-    all()
+    address_book::all_contacts()
         .into_iter()
-        .map(|(c, a)| (c.local_alias.to_string(), a.0))
+        .map(|c| {
+            let a = address_of(&c.ml_dsa_vk_bytes);
+            (c.local_alias.to_string(), a.0)
+        })
         .collect()
 }
 
@@ -129,6 +133,9 @@ pub(crate) struct Added {
     pub name: String,
     pub warnings: Vec<address::LabelWarning>,
     pub invite: bool,
+    /// The address is one of your own identities: nothing is added to the
+    /// address book, and an invite is kept for writing to it.
+    pub own: bool,
 }
 
 /// Add a contact from what the user pasted: an address in any form, or an
@@ -172,6 +179,19 @@ pub(crate) async fn add(identity: Addr, input: &str, petname: &str) -> Result<Ad
     }
     let (name, warnings) =
         address::name_for(&addr.0, petname.as_deref(), label.as_deref(), &petnames());
+    let invite = matches!(recipient, Recipient::Invite(_));
+    if address_book::is_own_fingerprint(&resolved.vk, &resolved.kem_ek) {
+        if invite {
+            HELD.with(|h| h.borrow_mut().insert((identity, addr)));
+            bump();
+        }
+        return Ok(Added {
+            name,
+            warnings,
+            invite,
+            own: true,
+        });
+    }
     let mut notes = contact_store::v2_notes(&resolved.vk).unwrap_or_default();
     notes.label = label.or(notes.label);
     if matches!(recipient, Recipient::Invite(_)) && !notes.invited.contains(&identity.0) {
@@ -202,14 +222,15 @@ pub(crate) async fn add(identity: Addr, input: &str, petname: &str) -> Result<Ad
     contact_store::save(&contact)
         .await
         .map_err(|e| format!("it could not be saved: {e}"))?;
-    if matches!(recipient, Recipient::Invite(_)) {
+    if invite {
         HELD.with(|h| h.borrow_mut().insert((identity, addr)));
     }
     bump();
     Ok(Added {
         name,
         warnings,
-        invite: matches!(recipient, Recipient::Invite(_)),
+        invite,
+        own: false,
     })
 }
 
