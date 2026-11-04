@@ -129,6 +129,23 @@ interface TestIds {
   fmContactsImportBtn: string;
   fmContactsShareBtn: string;
   fmAftVerifiedSkipToggle: string;
+  fmV2Address: string;
+  fmV2InboxState: string;
+  fmV2InviteCreate: string;
+  fmV2InviteText: string;
+  fmV2AddInput: string;
+  fmV2AddName: string;
+  fmV2AddSubmit: string;
+  fmV2AddResult: string;
+  fmV2LabelWarning: string;
+  fmV2ContactRow: string;
+  fmV2PassHeld: string;
+  fmV2PassIssued: string;
+  fmV2Revoke: string;
+  fmV2RecipientNote: string;
+  fmV2GhostBadge: string;
+  fmV2Outcome: string;
+  fmV2ForeignWarning: string;
 }
 
 export const TID: TestIds = JSON.parse(

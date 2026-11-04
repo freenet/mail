@@ -189,6 +189,7 @@ pub(crate) fn SettingsShell() -> Element {
                         menu::SettingsScreen::Aft => rsx! { ScrAft { key: "{alias}" } },
                         menu::SettingsScreen::Inbox => rsx! { ScrInbox {} },
                         menu::SettingsScreen::Contacts => rsx! { ScrContacts {} },
+                        menu::SettingsScreen::Address => rsx! { super::v2_view::ScrAddress { key: "{alias}" } },
                         menu::SettingsScreen::Appearance => rsx! { ScrAppearance {} },
                         menu::SettingsScreen::Advanced => rsx! { ScrAdvanced {} },
                     }
@@ -230,6 +231,7 @@ fn NavBlock(current: menu::SettingsScreen) -> Element {
         (menu::SettingsScreen::Aft, "▶ Anti-Flood (AFT)"),
         (menu::SettingsScreen::Inbox, "◌ Inbox & folders"),
         (menu::SettingsScreen::Contacts, "· Contacts"),
+        (menu::SettingsScreen::Address, "@ Address & new contacts"),
     ];
     let global_items: Vec<(menu::SettingsScreen, &str)> = vec![
         (menu::SettingsScreen::Appearance, "◐ Appearance"),
@@ -278,7 +280,7 @@ fn NavBlock(current: menu::SettingsScreen) -> Element {
 // ===== Atoms =====
 
 #[component]
-fn Card(title: Option<String>, sub: Option<String>, children: Element) -> Element {
+pub(super) fn Card(title: Option<String>, sub: Option<String>, children: Element) -> Element {
     rsx! {
         div { class: "fm-card",
             if title.is_some() || sub.is_some() {

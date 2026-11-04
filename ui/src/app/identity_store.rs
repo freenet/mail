@@ -843,6 +843,11 @@ pub(crate) async fn load_identities() {
         .iter()
         .map(|i| (crate::local_state::addr_key(&i.addr), i.addr))
         .collect();
+    // Each confirmed identity's v2 inbox: made if missing, then drained and
+    // followed. An unconfirmed one publishes nothing until it is confirmed.
+    for info in infos.iter().filter(|i| i.confirmed) {
+        crate::v2::owner::start(info.addr);
+    }
     let mut loaded = Vec::with_capacity(infos.len());
     for info in infos {
         loaded.push(prepare(info).await);

@@ -2569,6 +2569,11 @@ pub(crate) async fn node_comms(
         _ab_gen: crate::app::AddressBookGen,
     ) {
         let mut client = WEB_API_SENDER.get().unwrap().clone();
+        // Answers about v2 inboxes go to the calls waiting for them, and
+        // nowhere else.
+        if crate::v2::net::route(&res) {
+            return;
+        }
         let res = match res {
             Ok(r) => r,
             Err(e) => {

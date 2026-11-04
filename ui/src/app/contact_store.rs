@@ -22,6 +22,37 @@ struct ContactRecord {
     local_alias: String,
     description: String,
     keys: StoredContactKeys,
+    /// Present for a contact reached through its v2 inbox. Absent from a
+    /// v1 contact's record, which then encodes as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    v2: Option<V2Notes>,
+}
+
+/// What the page keeps about a v2 contact beyond its keys.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct V2Notes {
+    /// The label the contact suggested for themselves (cosmetic).
+    #[serde(default)]
+    pub label: Option<String>,
+    /// Identities of yours that hold an invite from this contact.
+    #[serde(default)]
+    pub invited: Vec<[u8; 24]>,
+}
+
+thread_local! {
+    /// The v2 notes of each contact, by verifying key: read with the
+    /// contacts, and written back with them, since a save rebuilds the
+    /// record from the address book's `Contact`.
+    static V2: std::cell::RefCell<std::collections::HashMap<Vec<u8>, V2Notes>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+pub(crate) fn v2_notes(vk: &[u8]) -> Option<V2Notes> {
+    V2.with(|n| n.borrow().get(vk).cloned())
+}
+
+pub(crate) fn set_v2_notes(vk: &[u8], notes: V2Notes) {
+    V2.with(|n| n.borrow_mut().insert(vk.to_vec(), notes));
 }
 
 /// The item a contact with ML-DSA verifying key `vk` is stored under.
@@ -55,6 +86,7 @@ pub(crate) fn encode_keys(alias: &str, description: &str, keys: StoredContactKey
         v: 1,
         local_alias: alias.to_string(),
         description: description.to_string(),
+        v2: v2_notes(&keys.ml_dsa_vk_bytes),
         keys,
     };
     serde_json::to_vec(&record).expect("a contact record always encodes")
@@ -66,6 +98,9 @@ pub(crate) fn decode(item: &ItemRef, body: &[u8]) -> Option<Contact> {
     let record: ContactRecord = serde_json::from_slice(body).ok()?;
     if item_for(&record.keys.ml_dsa_vk_bytes) != *item {
         return None;
+    }
+    if let Some(notes) = record.v2 {
+        set_v2_notes(&record.keys.ml_dsa_vk_bytes, notes);
     }
     Some(
         record

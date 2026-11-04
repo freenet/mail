@@ -36,6 +36,7 @@ pub(crate) mod login;
 mod migration_fixture;
 pub(crate) mod migration_view;
 pub(crate) mod settings;
+pub(crate) mod v2_view;
 
 // In-memory mailbox for offline (`example-data`, `!use-node`) mode.
 // Messages composed via `send_message` are stored here keyed by
@@ -1358,6 +1359,53 @@ fn merge_inbox_list(
         out.push(kept_to_message(mid, kept, read));
     }
     out
+}
+
+thread_local! {
+    /// The ids of every v2 row the list has shown, so a refresh replaces
+    /// them all.
+    static V2_ROWS: RefCell<std::collections::HashSet<u64>> =
+        RefCell::new(std::collections::HashSet::new());
+}
+
+fn is_v2_row(id: u64) -> bool {
+    V2_ROWS.with(|r| r.borrow().contains(&id))
+}
+
+/// The mail drained into `addr`'s v2 inbox, as inbox rows. The sender is
+/// shown by petname, else by the label they suggest, else by their address.
+fn v2_rows(addr: &freenet_mail_protocol::Addr, is_read: impl Fn(u64) -> bool) -> Vec<Message> {
+    crate::v2::owner::inbound(addr)
+        .into_iter()
+        .map(|m| {
+            let id = u64::from_be_bytes(m.id[..8].try_into().expect("8 bytes"))
+                % crate::local_state::RECEIVED_ID_LIMIT;
+            V2_ROWS.with(|r| r.borrow_mut().insert(id));
+            let (name, _) = crate::v2::contacts::sender_name(&m.from, m.body.label.as_deref());
+            Message {
+                id,
+                from: name.into(),
+                title: m.body.title.into(),
+                content: m.body.content.into(),
+                read: is_read(id),
+                time: chrono::DateTime::from_timestamp_millis(m.body.time_ms)
+                    .unwrap_or_else(chrono::Utc::now),
+                sender_vk: m.sender_vk,
+                // The delegate verified the sender's signature at the drain.
+                signature_valid: true,
+                assignment_hash: m.id,
+                thread_id: m.body.thread_id,
+                in_reply_to: m.body.in_reply_to,
+                quoted_excerpt: m.body.quoted_excerpt,
+            }
+        })
+        .collect()
+}
+
+/// Replace the v2 rows in `emails` with `rows`.
+fn merge_v2_rows(emails: &mut Vec<Message>, rows: Vec<Message>) {
+    emails.retain(|m| !is_v2_row(m.id));
+    emails.extend(rows);
 }
 
 impl From<MessageModel> for Message {
@@ -2815,6 +2863,8 @@ mod menu {
         Aft,
         Inbox,
         Contacts,
+        /// Inbox v2: your address, invites, contacts and their passes.
+        Address,
         Appearance,
         Advanced,
     }
@@ -2827,6 +2877,7 @@ mod menu {
                 Self::Aft => "Anti-Flood (AFT)",
                 Self::Inbox => "Inbox & folders",
                 Self::Contacts => "Contacts",
+                Self::Address => "Address & new contacts",
                 Self::Appearance => "Appearance",
                 Self::Advanced => "Advanced & Diagnostics",
             }
@@ -2842,6 +2893,7 @@ mod menu {
                 Self::Aft => "aft",
                 Self::Inbox => "inbox",
                 Self::Contacts => "contacts",
+                Self::Address => "address",
                 Self::Appearance => "appearance",
                 Self::Advanced => "advanced",
             }
@@ -3212,6 +3264,14 @@ fn UserInbox() -> Element {
 
     let menu_selection = use_context::<Signal<menu::MenuSelection>>();
     let settings_open = menu_selection.read().settings().is_some();
+
+    // Every confirmed identity's v2 inbox (once per page each): an identity
+    // created or confirmed since the load starts here.
+    for id in use_context::<Signal<User>>().read().identities.iter() {
+        if id.confirmed {
+            crate::v2::owner::start(id.addr);
+        }
+    }
 
     let _local_gen = crate::local_state::GENERATION();
     let appearance = crate::local_state::global_settings().appearance;
@@ -3587,6 +3647,14 @@ fn MessageList() -> Element {
             );
             crate::log::debug!("active id: {:?}; emails number: {}", id.alias, emails.len());
         }
+        // v2 mail, with or without a v1 inbox loaded (the offline build has
+        // none).
+        if let Some(id) = user.read().logged_id() {
+            let alias = id.alias.to_string();
+            let rows = v2_rows(&id.addr, |m| crate::local_state::is_read(&alias, m));
+            let inbox = inbox.read();
+            merge_v2_rows(&mut inbox.messages.borrow_mut(), rows);
+        }
     }
 
     DELAYED_ACTIONS.with(|queue| {
@@ -3684,6 +3752,10 @@ fn MessageList() -> Element {
                 span { class: "list-title", "{folder.label()}" }
                 span { class: "list-count", "{count}" }
             }
+            if let Some(id) = user.read().logged_id() {
+                v2_view::ForeignNodeWarning { addr: id.addr }
+            }
+            v2_view::LastOutcome {}
             div { class: "list-scroll", "data-testid": testid::FM_LIST,
                 if matches!(folder, menu::Folder::Archive) {
                     if archived_msgs.is_empty() {
@@ -4139,6 +4211,14 @@ fn thread_reply_prefill(m: &Message) -> menu::ComposePrefill {
         .then(|| address_book::contact_by_vk(&m.sender_vk))
         .flatten()
         .map(|c| c.local_alias.to_string())
+        // A v2 sender who is not a contact: their address, which the
+        // delegate verified signed the message.
+        .or_else(|| {
+            is_v2_row(m.id).then(|| {
+                let from = freenet_mail_protocol::address::address_of(&m.sender_vk);
+                crate::address::display(&from.0)
+            })
+        })
         .unwrap_or_else(|| m.from.to_string());
     menu::ComposePrefill {
         to,
@@ -5524,6 +5604,24 @@ const DRAFT_GONE_ELSEWHERE: &str = "This draft was sent or discarded in another 
 /// last one the delegate stored and the last one that failed: `saved`,
 /// `failed` (shown with a retry, never left as `pending`), or `pending`
 /// while a save is still on its way. Exposed as `data-autosave`.
+/// IdentitySettings.auto_sign + signature: append a separator + the
+/// signature block when enabled and the user hasn't already pasted the
+/// signature into the body. Idempotent against re-send/forward.
+fn with_signature(alias: &str, mut content: String) -> String {
+    let id_settings = crate::local_state::identity_settings_for(alias);
+    if id_settings.auto_sign && !id_settings.signature.trim().is_empty() {
+        let sig = id_settings.signature.trim_end();
+        if !content.contains(sig) {
+            if !content.ends_with('\n') {
+                content.push('\n');
+            }
+            content.push_str("\n-- \n");
+            content.push_str(sig);
+        }
+    }
+    content
+}
+
 fn autosave_state(token: u64, saved: u64, failed: u64) -> &'static str {
     if token == 0 {
         "pending"
@@ -5815,6 +5913,42 @@ fn ComposeSheet() -> Element {
             return;
         };
         let to_val = to.read().clone();
+        // A v2 recipient (an address in any form, or a v2 contact's name)
+        // goes through the v2 inbox: the delegate seals it, and the outcome
+        // is reported when the inbox is read back.
+        if let Some(to_addr) = crate::v2::contacts::recipient_addr(&to_val) {
+            let label = crate::address::normalize_label(&alias, false)
+                .ok()
+                .map(|l| l.0);
+            let body = crate::v2::MailBody {
+                v: 1,
+                label,
+                title: title.read().clone(),
+                content: with_signature(&alias, content.read().clone()),
+                time_ms: chrono::Utc::now().timestamp_millis(),
+                thread_id: Some(
+                    thread_id
+                        .read()
+                        .clone()
+                        .unwrap_or_else(crate::local_state::new_thread_id),
+                ),
+                in_reply_to: in_reply_to.read().clone(),
+                quoted_excerpt: quoted_excerpt.read().clone(),
+            };
+            let (to_name, _) = crate::v2::contacts::sender_name(&to_addr, None);
+            crate::v2::send::send_and_record(
+                sender_addr,
+                alias.clone(),
+                to_addr,
+                to_name,
+                to_val,
+                body,
+            );
+            delete_draft_now(());
+            menu_selection.write().at_new_msg();
+            crate::toast::push_toast("Sending\u{2026}", crate::toast::ToastLevel::Info);
+            return;
+        }
         // Mail goes to the address recorded when the recipient was chosen
         // (an alias, a clash label or a pasted bs58 inbox address), and is
         // refused if the field now names a different key.
@@ -5871,22 +6005,7 @@ fn ComposeSheet() -> Element {
             }
         };
         let title_val = title.read().clone();
-        let mut content_val = content.read().clone();
-
-        // IdentitySettings.auto_sign + signature: append a separator + the
-        // signature block when enabled and the user hasn't already pasted
-        // the signature into the body. Idempotent against re-send/forward.
-        let id_settings = crate::local_state::identity_settings_for(&alias);
-        if id_settings.auto_sign && !id_settings.signature.trim().is_empty() {
-            let sig = id_settings.signature.trim_end();
-            if !content_val.contains(sig) {
-                if !content_val.ends_with('\n') {
-                    content_val.push('\n');
-                }
-                content_val.push_str("\n-- \n");
-                content_val.push_str(sig);
-            }
-        }
+        let content_val = with_signature(&alias, content.read().clone());
 
         // Derive the recipient's inbox key BEFORE moving `recipient_vk` into
         // `send_message` so we can pair the eventual UpdateResponse back to
@@ -6356,7 +6475,9 @@ fn ComposeSheet() -> Element {
                 {
                     let to_val = to.read().clone();
                     let lookup = recipient_lookup.read().clone();
-                    if let Some(r) = lookup {
+                    if crate::v2::contacts::recipient_addr(&to_val).is_some() {
+                        rsx! { v2_view::RecipientNote { to: to_val.clone(), from: sender_addr } }
+                    } else if let Some(r) = lookup {
                         let (badge_class, badge_label): (&str, &str) =
                             if r.is_own {
                                 ("badge badge-trust", "you")

@@ -132,5 +132,23 @@
   "fmContactsImportBtn": "fm-contacts-import-btn",
   "fmContactsShareBtn": "fm-contacts-share-btn",
 
-  "fmAftVerifiedSkipToggle": "fm-aft-verified-skip-toggle"
+  "fmAftVerifiedSkipToggle": "fm-aft-verified-skip-toggle",
+
+  "fmV2Address": "fm-v2-address",
+  "fmV2InboxState": "fm-v2-inbox-state",
+  "fmV2InviteCreate": "fm-v2-invite-create",
+  "fmV2InviteText": "fm-v2-invite-text",
+  "fmV2AddInput": "fm-v2-add-input",
+  "fmV2AddName": "fm-v2-add-name",
+  "fmV2AddSubmit": "fm-v2-add-submit",
+  "fmV2AddResult": "fm-v2-add-result",
+  "fmV2LabelWarning": "fm-v2-label-warning",
+  "fmV2ContactRow": "fm-v2-contact-row",
+  "fmV2PassHeld": "fm-v2-pass-held",
+  "fmV2PassIssued": "fm-v2-pass-issued",
+  "fmV2Revoke": "fm-v2-revoke",
+  "fmV2RecipientNote": "fm-v2-recipient-note",
+  "fmV2GhostBadge": "fm-v2-ghost-badge",
+  "fmV2Outcome": "fm-v2-outcome",
+  "fmV2ForeignWarning": "fm-v2-foreign-warning"
 }

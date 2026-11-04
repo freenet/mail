@@ -40,6 +40,7 @@ pub(crate) mod rng;
 pub(crate) mod test_util;
 pub(crate) mod testid;
 pub(crate) mod toast;
+pub(crate) mod v2;
 
 #[allow(dead_code)] // TODO: wire into the Dioxus mount point
 const MAIN_ELEMENT_ID: &str = "freenet-email-main";
