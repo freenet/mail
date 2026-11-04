@@ -45,10 +45,67 @@ pub(crate) fn ForeignNodeWarning(addr: Addr) -> Element {
                  yet, so it stays open until they are."
             }
         }
+        if !status.v1_blockers.is_empty() {
+            V1DiscardOffer { addr, blockers: status.v1_blockers.clone() }
+        }
         if unreadable > 0 {
             div { class: "info", "data-unreadable-mail": "{unreadable}",
                 style: "margin: 8px 12px; padding: 10px 12px; border: 1px solid var(--amber, #c80); border-radius: 6px;",
                 "{unreadable} stored messages could not be read and are not shown."
+            }
+        }
+    }
+}
+
+/// One line about a message that keeps the old address open.
+fn blocker_line(b: &crate::v2::V1BlockerView) -> String {
+    let from = b.sender.as_deref().unwrap_or("an unknown sender");
+    let when = b
+        .arrived
+        .and_then(|t| u64::try_from(t).ok())
+        .map_or_else(|| "an unknown date".to_string(), day);
+    format!("{} KB from {from}, arrived {when}", b.size.div_ceil(1024))
+}
+
+/// Decision 29: after 14 days pending, the messages that keep the old
+/// address open, and a way to close it anyway. Discarding needs a second,
+/// explicit confirm, and only the messages listed here go.
+#[component]
+fn V1DiscardOffer(addr: Addr, blockers: Vec<crate::v2::V1BlockerView>) -> Element {
+    let mut confirming = use_signal(|| false);
+    let mut failed = use_signal(|| None::<String>);
+    let n = blockers.len();
+    let to_discard = blockers.clone();
+    let confirm = move |_| {
+        let chosen = to_discard.clone();
+        spawn(async move {
+            let done = crate::v2::transition::discard(addr, &chosen).await;
+            failed.set(done.err());
+            confirming.set(false);
+        });
+    };
+    rsx! {
+        div { class: "info", "data-v1-discard-offer": "{n}",
+            style: "margin: 8px 12px; padding: 10px 12px; border: 1px solid var(--amber, #c80); border-radius: 6px;",
+            "Your old address has stayed open for two weeks because these {n} messages \
+             could not be copied here:"
+            ul {
+                for b in blockers.iter() {
+                    li { "{blocker_line(b)}" }
+                }
+            }
+            if confirming() {
+                p { "They will be deleted from your old address for good and cannot be read \
+                     afterwards. Close it anyway?" }
+                button { "data-v1-discard-confirm": "true", onclick: confirm,
+                    "Discard these {n} and close" }
+                button { onclick: move |_| confirming.set(false), "Keep them" }
+            } else {
+                button { "data-v1-discard": "true", onclick: move |_| confirming.set(true),
+                    "Close anyway and discard these {n}" }
+            }
+            if let Some(e) = failed() {
+                p { "That could not be recorded: {e}" }
             }
         }
     }

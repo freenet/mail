@@ -51,6 +51,9 @@ pub(crate) struct Status {
     pub unreadable_mail: usize,
     /// The v1 window is over and the old inbox is not closed yet.
     pub v1_close_pending: bool,
+    /// Decision 29: the messages the user may discard to let it close, once
+    /// it has been pending 14 days.
+    pub v1_blockers: Vec<super::V1BlockerView>,
     pub error: Option<String>,
 }
 
@@ -630,6 +633,7 @@ async fn note_owner(addr: Addr, generation: Option<u64>, state: &InboxState) {
             s.strangers_dropped = rec.strangers_dropped;
             let now = u64::try_from(chrono::Utc::now().timestamp()).unwrap_or(0);
             s.v1_close_pending = super::transition::close_pending(rec, now);
+            s.v1_blockers = super::transition::discard_offer(rec, now);
             if foreign(state.owner.version, rec) {
                 s.foreign_version = true;
             }

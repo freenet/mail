@@ -23,7 +23,7 @@
 //!   the delegate has not yet closed the v0.2.x inbox (a message there is not
 //!   imported yet).
 
-use freenet_mail_protocol::{Addr, V1_CONTACTS_FIELD};
+use freenet_mail_protocol::{Addr, V1_CONTACTS_FIELD, V1_DISCARD_FIELD};
 use freenet_mail_protocol::address::address_of;
 use freenet_stdlib::prelude::{ContractInstanceId, ContractKey, Parameters};
 
@@ -32,6 +32,10 @@ use super::InboxRecordView;
 /// How long the v0.2.x inbox stays open after the v2 inbox is made: the
 /// delegate's `transition::WINDOW` (pinned by a test).
 pub(crate) const WINDOW_SECS: u64 = 90 * 86_400;
+/// Decision 29: how long a close stays pending before the page offers to
+/// discard what blocks it: the delegate's `transition::DISCARD_AFTER`
+/// (pinned by a test).
+pub(crate) const DISCARD_AFTER_SECS: u64 = 14 * 86_400;
 /// Contacts sent this identity's pass, in its settings item.
 pub(crate) const SENT_FIELD: &str = "v2_transition";
 /// As many as there can be contacts.
@@ -51,6 +55,40 @@ pub(crate) fn close_pending(rec: &InboxRecordView, now: u64) -> bool {
             .v1_window
             .as_ref()
             .is_some_and(|w| !w.closes.is_empty() && w.closes.values().all(|c| c.done))
+}
+
+/// Decision 29: the messages blocking the close that the page offers to
+/// discard. None until the close has been pending [`DISCARD_AFTER_SECS`].
+pub(crate) fn discard_offer(rec: &InboxRecordView, now: u64) -> Vec<super::V1BlockerView> {
+    let Some(w) = rec.v1_window.as_ref() else {
+        return Vec::new();
+    };
+    let offered = w
+        .start
+        .saturating_add(WINDOW_SECS)
+        .saturating_add(DISCARD_AFTER_SECS);
+    if !close_pending(rec, now) || now < offered {
+        return Vec::new();
+    }
+    w.closes
+        .values()
+        .filter(|c| !c.done)
+        .flat_map(|c| c.blocking.iter().cloned())
+        .collect()
+}
+
+/// Record that the user confirmed discarding `blockers` (decision 29), in
+/// the identity's settings item, where the delegate reads it, then run the
+/// jobs so the close goes on. Call only after the user's explicit confirm.
+pub(crate) async fn discard(me: Addr, blockers: &[super::V1BlockerView]) -> Result<(), String> {
+    let hashes: Vec<String> = blockers
+        .iter()
+        .map(|b| b.hash.iter().map(|x| format!("{x:02x}")).collect())
+        .collect();
+    super::queue::note_listed(me, V1_DISCARD_FIELD, &hashes, SENT_MAX).await?;
+    crate::log::info(format!("v1 close: the user discarded {}", hashes.len()));
+    let _ = crate::jobs::run_once().await;
+    Ok(())
 }
 
 /// The id of `vk`'s v0.2.x inbox under `code_hash` (base58).
@@ -355,7 +393,10 @@ mod tests {
                     .map(|(i, done)| {
                         (
                             serde_bytes::ByteBuf::from(vec![i as u8; 32]),
-                            V1ClosingView { done: *done },
+                            V1ClosingView {
+                                done: *done,
+                                ..V1ClosingView::default()
+                            },
                         )
                     })
                     .collect(),
@@ -380,6 +421,32 @@ mod tests {
     #[test]
     fn the_window_is_the_delegates() {
         assert_eq!(WINDOW_SECS, mail_delegate::transition::WINDOW);
+        assert_eq!(DISCARD_AFTER_SECS, mail_delegate::transition::DISCARD_AFTER);
+    }
+
+    /// Decision 29: the blocking messages are offered for discarding only
+    /// once the close has been pending 14 days, and never for a close done.
+    #[test]
+    fn blockers_are_offered_only_after_14_days_pending() {
+        let start = 1_000;
+        let blocker = crate::v2::V1BlockerView {
+            hash: serde_bytes::ByteBuf::from(vec![9; 32]),
+            size: 400_000,
+            sender: Some("bob".into()),
+            arrived: Some(5),
+        };
+        let mut r = rec(start, &[false]);
+        for c in r.v1_window.as_mut().unwrap().closes.values_mut() {
+            c.blocking = vec![blocker.clone()];
+        }
+        let offered = start + WINDOW_SECS + DISCARD_AFTER_SECS;
+        assert!(discard_offer(&r, start + WINDOW_SECS).is_empty());
+        assert!(discard_offer(&r, offered - 1).is_empty());
+        assert_eq!(discard_offer(&r, offered), vec![blocker]);
+        for c in r.v1_window.as_mut().unwrap().closes.values_mut() {
+            c.done = true;
+        }
+        assert!(discard_offer(&r, offered).is_empty());
     }
 
     /// One identity: every verified contact. Several: only the ones it

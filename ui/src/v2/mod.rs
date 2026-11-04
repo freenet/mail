@@ -103,9 +103,23 @@ pub(crate) struct V1WindowView {
     pub closes: std::collections::BTreeMap<serde_bytes::ByteBuf, V1ClosingView>,
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize)]
 pub(crate) struct V1ClosingView {
     pub done: bool,
+    /// The messages that keep it pending (decision 29).
+    #[serde(default)]
+    pub blocking: Vec<V1BlockerView>,
+}
+
+/// A v0.2.x message that keeps the old inbox from closing.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+pub(crate) struct V1BlockerView {
+    pub hash: serde_bytes::ByteBuf,
+    pub size: u64,
+    #[serde(default)]
+    pub sender: Option<String>,
+    #[serde(default)]
+    pub arrived: Option<i64>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
