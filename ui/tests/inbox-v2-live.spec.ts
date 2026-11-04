@@ -157,14 +157,19 @@ async function sees(page: Page, subject: string) {
   ).toBeVisible({ timeout: 180_000 });
 }
 
-/** How many messages the recipient's inbox holds undrained, as `page` reads it. */
-async function waiting(page: Page, to: string): Promise<number> {
+/**
+ * The recipient's inbox as `page` reads it: messages held undrained, and
+ * messages its owner drained (tombstoned), which grows only when the owner's
+ * node signs a drain.
+ */
+async function inboxOf(page: Page, to: string): Promise<{ waiting: number; drained: number }> {
   const sheet = await compose(page, to, "(not sent)");
   const note = sheet.locator(tid(TID.fmV2RecipientNote));
-  await expect(note).toHaveAttribute("data-waiting", /\d+/, { timeout: 60_000 });
-  const n = Number(await note.getAttribute("data-waiting"));
+  await expect(note).toHaveAttribute("data-drained", /\d+/, { timeout: 60_000 });
+  const waiting = Number(await note.getAttribute("data-waiting"));
+  const drained = Number(await note.getAttribute("data-drained"));
   await app(page).locator(".sheet-x").click();
-  return n;
+  return { waiting, drained };
 }
 
 test("inbox v2 between two nodes", async ({ browser }) => {
@@ -262,17 +267,24 @@ test("inbox v2 between two nodes", async ({ browser }) => {
     // message), and Bob's own node drains it with no page open.
     await peerCtx.close();
     await openIdentity(gw, n.carol);
+    const before = await inboxOf(gw, bob);
+    expect(before.waiting, "Bob's page drained everything before it closed").toBe(0);
     out = await send(gw, bob, "t1 while closed");
     await expect(out).toHaveAttribute("data-delivered", "true");
-    expect(await waiting(gw, bob), "the message waits in Bob's inbox").toBeGreaterThan(0);
+    // Bob's node may drain at once (its delegate follows the inbox) or at the
+    // next `rescan` wake-up; either way no page of his is open.
     const deadline = Date.now() + TAB_CLOSED_WAIT_MS;
-    let left = 1;
+    let now = before;
     while (Date.now() < deadline) {
-      left = await waiting(gw, bob);
-      if (left === 0) break;
-      await new Promise((r) => setTimeout(r, 30_000));
+      now = await inboxOf(gw, bob);
+      if (now.drained > before.drained && now.waiting === 0) break;
+      await new Promise((r) => setTimeout(r, 15_000));
     }
-    expect(left, "Bob's node drained his inbox with every tab closed").toBe(0);
+    console.log(`PROOF tab_closed_drain ${JSON.stringify({ before, after: now })}`);
+    expect(now.drained, "Bob's node drained t1 with every tab closed").toBeGreaterThan(
+      before.drained,
+    );
+    expect(now.waiting).toBe(0);
     peerCtx = await browser.newContext();
     peer = await open(peerCtx, PEER_URL);
     await openIdentity(peer, n.bob);

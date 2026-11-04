@@ -52,6 +52,9 @@ pub(crate) struct Resolved {
     /// Messages held in the inbox, not drained yet: public, like the queue
     /// fill.
     pub waiting: usize,
+    /// Messages the owner drained and tombstoned (public too): it grows only
+    /// when the owner's node signs a drain.
+    pub drained: usize,
 }
 
 /// Read `addr`'s inbox and check it is that address's: the owner record's
@@ -81,6 +84,7 @@ pub(crate) fn resolved_from(addr: Addr, bytes: Vec<u8>) -> Result<Resolved, Stri
             .keys()
             .filter(|id| !state.owner.tombstones.contains_key(*id))
             .count(),
+        drained: state.owner.tombstones.len(),
     })
 }
 

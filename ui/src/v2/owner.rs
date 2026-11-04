@@ -69,7 +69,9 @@ pub(crate) fn start(addr: Addr) {
         return;
     }
     crate::app::identity_store::spawn_detached(async move {
-        for attempt in 0..5u32 {
+        // Until it works: an unanswered GET is unknown, never "no inbox", so
+        // nothing is created on it, and the next try asks again.
+        for attempt in 0u32.. {
             match ensure(addr).await {
                 Ok(()) => {
                     set_status(addr, |s| {
@@ -90,7 +92,7 @@ pub(crate) fn start(addr: Addr) {
                 Err(e) => {
                     crate::log::error(format!("inbox v2: starting the inbox failed: {e}"), None);
                     set_status(addr, |s| s.error = Some(e));
-                    ops::pause_ms(2_000 * 2u32.pow(attempt)).await;
+                    ops::pause_ms(2_000u32.saturating_mul(1 << attempt.min(5))).await;
                 }
             }
         }

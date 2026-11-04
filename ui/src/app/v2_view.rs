@@ -410,16 +410,18 @@ pub(crate) fn RecipientNote(to: String, from: Addr) -> Element {
             }
         }
     };
-    let waiting = match &*resolved.read() {
-        Some(Ok(r)) => r.waiting.to_string(),
-        _ => String::new(),
+    let (waiting, drained) = match &*resolved.read() {
+        Some(Ok(r)) => (r.waiting.to_string(), r.drained.to_string()),
+        _ => (String::new(), String::new()),
     };
     rsx! {
         div { class: "sheet-field",
             "data-testid": testid::FM_V2_RECIPIENT_NOTE,
-            // How many messages their inbox holds undrained: public state,
-            // which shows whether their node has picked mail up.
+            // How many messages their inbox holds undrained, and how many
+            // its owner drained: public state, which shows whether their
+            // node has picked mail up.
             "data-waiting": "{waiting}",
+            "data-drained": "{drained}",
             "data-held": match held { PassState::Held => "held", PassState::Lapsed => "lapsed", PassState::None => "none" },
             style: "font-size: 12px; gap: 8px; flex-wrap: wrap;",
             span { class: "field-lbl", "v2" }

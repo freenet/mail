@@ -69,6 +69,15 @@ mod node {
 
     thread_local! {
         static WAITING: RefCell<Waiters> = RefCell::new(HashMap::new());
+        /// Every v2 inbox this page asked about: what the node says about
+        /// them later (a notification of a followed recipient's inbox, a
+        /// late answer) is this module's, and nobody else's.
+        static KNOWN: RefCell<std::collections::HashSet<ContractInstanceId>> =
+            RefCell::new(std::collections::HashSet::new());
+    }
+
+    fn known(id: &ContractInstanceId) -> bool {
+        KNOWN.with(|k| k.borrow().contains(id))
     }
 
     fn answer(id: &ContractInstanceId, kind: Kind, a: Answer) -> bool {
@@ -82,10 +91,6 @@ mod node {
         true
     }
 
-    fn waiting(id: &ContractInstanceId) -> bool {
-        WAITING.with(|w| w.borrow().keys().any(|(i, _)| i == id))
-    }
-
     /// Take a node answer about a v2 inbox. Returns whether it was one; the
     /// caller then handles nothing more of it.
     pub(crate) fn route(res: &Result<HostResponse, ClientError>) -> bool {
@@ -96,23 +101,21 @@ mod node {
                     if let Some(addr) = own(&id) {
                         super::super::owner::state_seen(addr, state.as_ref().to_vec());
                     }
-                    answer(&id, Kind::Get, Ok(Got::State(state.as_ref().to_vec())))
-                        || own(&id).is_some()
+                    answer(&id, Kind::Get, Ok(Got::State(state.as_ref().to_vec()))) || known(&id)
                 }
                 ContractResponse::PutResponse { key } => {
-                    answer(key.id(), Kind::Put, Ok(Got::Missing)) || own(key.id()).is_some()
+                    answer(key.id(), Kind::Put, Ok(Got::Missing)) || known(key.id())
                 }
                 ContractResponse::UpdateResponse { key, .. } => {
-                    answer(key.id(), Kind::Update, Ok(Got::Missing)) || own(key.id()).is_some()
+                    answer(key.id(), Kind::Update, Ok(Got::Missing)) || known(key.id())
                 }
-                ContractResponse::UpdateNotification { key, .. } => match own(key.id()) {
-                    Some(addr) => {
+                ContractResponse::UpdateNotification { key, .. } => {
+                    if let Some(addr) = own(key.id()) {
                         super::super::owner::changed(addr);
-                        true
                     }
-                    None => waiting(key.id()),
-                },
-                ContractResponse::SubscribeResponse { key, .. } => own(key.id()).is_some(),
+                    known(key.id())
+                }
+                ContractResponse::SubscribeResponse { key, .. } => known(key.id()),
                 ContractResponse::NotFound { instance_id } => {
                     answer(instance_id, Kind::Get, Ok(Got::Missing))
                 }
@@ -136,6 +139,7 @@ mod node {
 
     async fn ask(addr: &Addr, kind: Kind, request: ContractRequest<'static>) -> Answer {
         let id = super::super::instance_id(addr);
+        KNOWN.with(|k| k.borrow_mut().insert(id));
         let (tx, rx) = oneshot::channel();
         WAITING.with(|w| w.borrow_mut().entry((id, kind)).or_default().push(tx));
         let mut client = crate::api::WEB_API_SENDER
@@ -157,9 +161,13 @@ mod node {
 
     /// The inbox's state. `subscribe` also follows its changes (own inboxes).
     pub(crate) async fn get(addr: &Addr, subscribe: bool) -> Answer {
+        let id = super::super::instance_id(addr);
+        // The first GET of an inbox asks for its code too: a node applies an
+        // UPDATE it sends only to a contract whose code it holds (#191).
+        let first = !known(&id);
         let request = ContractRequest::Get {
-            key: super::super::instance_id(addr),
-            return_contract_code: false,
+            key: id,
+            return_contract_code: first,
             subscribe,
             blocking_subscribe: false,
         };
