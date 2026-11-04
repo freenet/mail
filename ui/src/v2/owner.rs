@@ -73,10 +73,10 @@ thread_local! {
 fn set_status(addr: Addr, f: impl FnOnce(&mut Status)) {
     if dioxus::core::Runtime::try_current().is_some() {
         f(STATUS.write().entry(addr).or_default());
-        return;
+    } else {
+        #[cfg(test)]
+        TEST_STATUS.with(|s| f(s.borrow_mut().entry(addr).or_default()));
     }
-    #[cfg(test)]
-    TEST_STATUS.with(|s| f(s.borrow_mut().entry(addr).or_default()));
 }
 
 pub(crate) fn status(addr: &Addr) -> Status {

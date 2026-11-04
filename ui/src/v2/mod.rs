@@ -4,7 +4,14 @@
 //! plainly what happened.
 
 pub(crate) mod contacts;
-#[cfg(all(test, feature = "local-delegate", not(feature = "use-node")))]
+// The flows use the page's test Ghost Key vault, so they need its feature
+// (every example-data build has it; `no-sync` alone does not).
+#[cfg(all(
+    test,
+    feature = "local-delegate",
+    feature = "test-ghost-master",
+    not(feature = "use-node")
+))]
 mod flows;
 pub(crate) mod net;
 pub(crate) mod owner;
