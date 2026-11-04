@@ -489,6 +489,73 @@ pub(crate) async fn load_inbound(addr: Addr) {
     }
 }
 
+/// Where an inbox row's message is stored: its identity, and the item id and
+/// generation of the delegate's copy.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct RowRef {
+    pub owner: Addr,
+    pub item_id: Vec<u8>,
+    pub generation: u64,
+}
+
+thread_local! {
+    /// Every v2 row the list has shown, by its row id: a row is never
+    /// forgotten, so a refresh can tell the rows it replaces.
+    static ROWS: RefCell<HashMap<u64, RowRef>> = RefCell::new(HashMap::new());
+}
+
+/// The list's id for drained message `m` of `owner`, remembered with where
+/// its copy is stored. The local-state id of its first 16 bytes, so its read
+/// mark and an archived copy are stored like any message's.
+pub(crate) fn row_id(owner: Addr, m: &Inbound) -> u64 {
+    let full: [u8; 16] = m.id[..16].try_into().expect("16 bytes");
+    let id = crate::local_state::message_id_of(full);
+    let r = RowRef {
+        owner,
+        item_id: m.item_id.clone(),
+        generation: m.generation,
+    };
+    ROWS.with(|rows| rows.borrow_mut().insert(id, r));
+    id
+}
+
+/// Where row `id`'s message is stored, if it is a v2 row.
+pub(crate) fn row(id: u64) -> Option<RowRef> {
+    ROWS.with(|rows| rows.borrow().get(&id).cloned())
+}
+
+/// Archive row `id`: `store` writes the archived copy, and only once it is
+/// stored is the delegate's drained copy deleted.
+/// On failure, whether the archived copy was stored, and why.
+pub(crate) async fn archive_row(
+    id: u64,
+    store: impl std::future::Future<Output = Result<(), crate::DynError>>,
+) -> Result<(), (bool, String)> {
+    let r = row(id).ok_or((false, "this message is not loaded".to_string()))?;
+    store
+        .await
+        .map_err(|e| (false, format!("the archived copy was not stored: {e}")))?;
+    remove_stored(r).await.map_err(|e| (true, e))
+}
+
+/// Delete row `id`'s drained copy. The inbox already tombstoned it.
+pub(crate) async fn delete_row(id: u64) -> Result<(), String> {
+    remove_stored(row(id).ok_or("this message is not loaded")?).await
+}
+
+async fn remove_stored(r: RowRef) -> Result<(), String> {
+    let item = ItemRef {
+        kind: ItemKind::Inbound,
+        owner: Some(r.owner),
+        id: r.item_id,
+    };
+    ops::delete_item(item, r.generation)
+        .await
+        .map_err(|e| e.to_string())?;
+    load_inbound(r.owner).await;
+    Ok(())
+}
+
 /// `addr`'s drained mail: in the inbox (`queued` false) or waiting in the
 /// new-contacts queue view (`queued` true).
 pub(crate) fn inbound(addr: &Addr, queued: bool) -> Vec<Inbound> {

@@ -1361,15 +1361,10 @@ fn merge_inbox_list(
     out
 }
 
-thread_local! {
-    /// The ids of every v2 row the list has shown, so a refresh replaces
-    /// them all.
-    static V2_ROWS: RefCell<std::collections::HashSet<u64>> =
-        RefCell::new(std::collections::HashSet::new());
-}
-
+/// Whether `id` is a v2 row the list has shown (a refresh replaces them all,
+/// and Archive and Delete go to the delegate's stored copy).
 fn is_v2_row(id: u64) -> bool {
-    V2_ROWS.with(|r| r.borrow().contains(&id))
+    crate::v2::owner::row(id).is_some()
 }
 
 /// The mail drained into `addr`'s v2 inbox, as inbox rows. The sender is
@@ -1378,9 +1373,7 @@ fn v2_rows(addr: &freenet_mail_protocol::Addr, is_read: impl Fn(u64) -> bool) ->
     crate::v2::owner::inbound(addr, false)
         .into_iter()
         .map(|m| {
-            let id = u64::from_be_bytes(m.id[..8].try_into().expect("8 bytes"))
-                % crate::local_state::RECEIVED_ID_LIMIT;
-            V2_ROWS.with(|r| r.borrow_mut().insert(id));
+            let id = crate::v2::owner::row_id(*addr, &m);
             let (name, _) = crate::v2::contacts::sender_name(&m.from, m.body.label.as_deref());
             Message {
                 id,
@@ -5179,6 +5172,33 @@ fn archive_message(
         in_reply_to: msg.in_reply_to.clone(),
         quoted_excerpt: msg.quoted_excerpt.clone(),
     };
+    // A drained v2 message: its copy is the delegate's, never a v1 inbox's.
+    if is_v2_row(id) && !alias.is_empty() {
+        crate::local_state::local_archive_message(alias, id, archived.clone());
+        let (a, undo) = (alias.to_string(), alias.to_string());
+        let _task = dioxus_core::spawn_forever(async move {
+            let store = crate::local_state::archive_message(a, id, archived);
+            let (level, text) = match crate::v2::owner::archive_row(id, store).await {
+                Ok(()) => (crate::toast::ToastLevel::Success, CONFIRM_ARCHIVE.done),
+                Err((stored, e)) => {
+                    crate::log::error(format!("archiving a v2 message: {e}"), None);
+                    if stored {
+                        (
+                            crate::toast::ToastLevel::Warning,
+                            "Archived, but the copy in your inbox could not be removed; it shows \
+                             there too until you delete it.",
+                        )
+                    } else {
+                        crate::local_state::local_unarchive_message(&undo, id);
+                        (crate::toast::ToastLevel::Error, CONFIRM_ARCHIVE.failed)
+                    }
+                }
+            };
+            crate::toast::push_toast_detached(text, level);
+        });
+        post.apply(&mut menu_selection);
+        return;
+    }
     if !alias.is_empty() {
         crate::local_state::local_archive_message(alias, id, archived.clone());
         #[cfg(feature = "use-node")]
@@ -5239,6 +5259,21 @@ fn delete_message(
     id: u64,
     post: PostMessageAction,
 ) {
+    // A drained v2 message: delete the delegate's copy, nothing in a v1 inbox.
+    if is_v2_row(id) {
+        let _task = dioxus_core::spawn_forever(async move {
+            let (level, text) = match crate::v2::owner::delete_row(id).await {
+                Ok(()) => (crate::toast::ToastLevel::Success, CONFIRM_DELETE.done),
+                Err(e) => {
+                    crate::log::error(format!("deleting a v2 message: {e}"), None);
+                    (crate::toast::ToastLevel::Error, CONFIRM_DELETE.failed)
+                }
+            };
+            crate::toast::push_toast_detached(text, level);
+        });
+        post.apply(&mut menu_selection);
+        return;
+    }
     if !alias.is_empty() {
         crate::local_state::local_delete_message(alias, id);
         #[cfg(feature = "use-node")]

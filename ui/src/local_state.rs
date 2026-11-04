@@ -687,8 +687,8 @@ mod items;
 pub(crate) use items::forget_identity_bookkeeping;
 pub(crate) use items::{
     DraftCheck, DraftSave, archive_message, check_draft_before_send, delete_draft, delete_message,
-    delete_sent, full_message_id, load, message_id_for, reclaim_flags, save_draft, save_sent,
-    set_sent_delivery_state,
+    delete_sent, full_message_id, load, message_id_for, message_id_of, reclaim_flags, save_draft,
+    save_sent, set_sent_delivery_state,
 };
 // Only the node build finds stranded sends to presume failed.
 #[cfg_attr(not(feature = "use-node"), allow(unused_imports))]

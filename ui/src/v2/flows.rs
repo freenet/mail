@@ -67,12 +67,39 @@ fn ensure_makes_one_inbox_and_finds_it_again() {
     assert_eq!(state(&a), s);
 }
 
+/// Archive and Delete of a drained message remove the delegate's stored
+/// copy; an archive whose copy was not written keeps it.
+#[test]
+fn archive_and_delete_remove_the_stored_copy() {
+    let (a, b) = (identity("v2-rm-a"), identity("v2-rm-b"));
+    assert!(block_on(send::send(a, b, &body("archive me"))).delivered());
+    assert!(block_on(send::send(a, b, &body("delete me"))).delivered());
+    drain(b);
+    let mail = block_on(owner::read_inbound(b)).unwrap();
+    let row = |t: &str| owner::row_id(b, mail.iter().find(|m| m.body.title == t).unwrap());
+    let (archive, delete) = (row("archive me"), row("delete me"));
+    let failed = owner::archive_row(archive, async { Err("not stored".into()) });
+    assert!(block_on(failed).is_err());
+    assert_eq!(block_on(owner::read_inbound(b)).unwrap().len(), 2);
+    block_on(owner::archive_row(archive, async { Ok(()) })).unwrap();
+    let left = block_on(owner::read_inbound(b)).unwrap();
+    assert_eq!(left.len(), 1);
+    assert_eq!(left[0].body.title, "delete me");
+    block_on(owner::delete_row(delete)).unwrap();
+    assert!(block_on(owner::read_inbound(b)).unwrap().is_empty());
+    // Gone for good: the inbox tombstoned them, so a drain brings nothing back.
+    assert!(drain(b).is_empty());
+}
+
 /// The first PUT of a new inbox fails after the delegate stored its record:
 /// rejected, or gone with no word. A later start publishes it after all.
 #[test]
 fn an_inbox_whose_first_put_failed_is_published_later() {
     for (alias, answer) in [
-        ("v2-put-rejected", Err("the contract refused it".to_string())),
+        (
+            "v2-put-rejected",
+            Err("the contract refused it".to_string()),
+        ),
         ("v2-put-lost", Ok(())),
     ] {
         let (info, _) = block_on(ops::create_identity(alias.into(), String::new())).unwrap();
@@ -282,7 +309,10 @@ fn a_send_that_never_lands_is_resealed_only_at_reseal_at() {
     let out = block_on(send::send(a, b, &body("lost")));
     assert_eq!(out, Outcome::NotDelivered(NotDelivered::AfterReseals));
     let seals = send::SEALS.with(|s| s.borrow().clone());
-    assert_eq!(seals.len(), usize::from(freenet_mail_protocol::MAX_RESEALS) + 1);
+    assert_eq!(
+        seals.len(),
+        usize::from(freenet_mail_protocol::MAX_RESEALS) + 1
+    );
     for pair in seals.windows(2) {
         let ((_, reseal_at), (at, _)) = (pair[0], pair[1]);
         assert!(

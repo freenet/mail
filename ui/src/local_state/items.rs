@@ -80,6 +80,12 @@ pub(crate) fn message_id_for(ciphertext: &[u8]) -> MessageId {
     remember(full_message_id(ciphertext))
 }
 
+/// The id of a received message whose 16-byte item id is `full` (a drained
+/// v2 message: the first 16 bytes of its id).
+pub(crate) fn message_id_of(full: [u8; 16]) -> MessageId {
+    remember(full)
+}
+
 /// The 16-byte item id of a received message, from its ciphertext.
 pub(crate) fn full_message_id(ciphertext: &[u8]) -> [u8; 16] {
     let mut full = [0u8; 16];
