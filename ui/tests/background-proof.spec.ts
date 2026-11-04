@@ -205,6 +205,18 @@ async function sendLoop(
     await sheet.locator("textarea.sheet-textarea").fill(`body ${delivered + i}`);
     await sheet.locator('[data-testid="fm-send"]').click();
     await expect(sheet).toHaveCount(0, { timeout: 60_000 });
+    // The page counts the send as unfinished work from the Send click until
+    // the recipient's inbox answers it, and that stretch includes the node's
+    // permission prompt for the token. The node's overlay for that prompt
+    // can appear over the app frame in the instant between Playwright's
+    // hit-target check and the click, and then swallows the click (it is
+    // outside the frame, so Playwright does not see it): the click is "done",
+    // the folder never changes, and the wait below sees no sent card for its
+    // whole timeout. So go to Sent only once the send is over.
+    await expect(
+      app.locator("html"),
+      `message ${i} is answered by the recipient's inbox`,
+    ).toHaveAttribute("data-pending-saves", "0", { timeout: 120_000 });
     if (await burger.isVisible().catch(() => false)) await burger.click();
     await app.locator('[data-testid="fm-folder-sent"]').click();
     await expect(
