@@ -217,7 +217,7 @@ recovery-key codec. Its encoding is pinned per variant in
   issued before the restore cannot be renewed: they lapse at expiry, the
   contact falls back to quarantine (told plainly) and gets a new pass with the
   next mail. No epoch bump is forced.
-- **The v1 transition** (`src/transition.rs`, decisions 26 to 28). The window
+- **The v1 transition** (`src/transition.rs`, decisions 26 to 29). The window
   is 90 days from when the identity's v2 inbox is made (a migrated identity
   gets one once confirmed), kept in its inbox record. While it is open the
   watch also reads the earlier v1 generations (`V1_LEGACY_INBOX_CODE_HASHES`,
@@ -232,14 +232,26 @@ recovery-key codec. Its encoding is pinned per variant in
   sent only once nothing else is left: core validates the outcome and the v1
   contract checks every held message against the new settings. The settings
   are signed once and recorded before they leave; later attempts resend the
-  same bytes, and a state at or past that `last_update` ends it. Anything
-  that cannot be read stays and keeps the close pending (the inbox view says
-  so). A message too large to keep never leaves, so its inbox stays open.
+  same bytes, and a state at or past that `last_update` ends it. The removal
+  and the settings are two updates, each counted against the inbox's 60 a
+  minute, so the settings can follow on a later run. Anything that cannot
+  be read stays and keeps the close pending (the inbox view says so); a
+  kept or archived copy is looked for through its index, so a listed copy
+  that reads as absent is unreadable, never missing. A message that cannot
+  be imported (too large to keep, say) blocks the close: each attempt
+  records the messages it leaves (`V1Closing::blocking`), and 14 days after
+  the window ends the page lists them with "Close anyway and discard these
+  N", which asks again and records the choice in the identity's settings
+  item (`V1_DISCARD_FIELD`). Only listed, confirmed messages are removed.
   `Op::EndV1WindowForTest` ends a window now in a `v1-transition` build only
   (the real-node test's clock); any other build refuses it.
-- **Verified contacts through the queue (decision 26):** the drain accepts a
-  quarantined message whose sealing key (checked by `sealing::open`) is the
-  key of a contact record marked verified at that key's address: it issues
+- **Verified contacts through the queue (decision 26):** during the
+  identity's window, the drain accepts a quarantined message whose sealing
+  key (checked by `sealing::open`) is the key of a contact record marked
+  verified at that key's address, and that this identity's page listed as a
+  v0.2.x relationship (`V1_CONTACTS_FIELD` in its settings item; the contact
+  store is shared by the origin's identities, so another identity's contact
+  is not accepted): it issues
   a contact pass as a manual accept would, and the renew job delivers it
   (`InboxRecord::auto_accepted`). A label or any other claim plays no part.
   The page sends each verified contact this identity's pass through their
@@ -370,7 +382,8 @@ the delegate's.
   wake-up, so it shows whether that fallback works, and then fails.
 - **Legacy ids:** `contacts::add` takes a 44-character v0.2.x id by reading
   that inbox with its code (`transition::resolve_legacy`): the key is in the
-  parameters, which must make that id. A new contact added this way is
+  parameters, which must make that id, and the encryption key is taken only
+  under the inbox signature by that key. A new contact added this way is
   unverified; one already in the address book keeps its verification.
 - **`cargo make test-e2e-v1-transition`:** two real nodes. `tools/v1-node-seed
   --transition` gives the gateway a v0.2.7 user with a verified contact and a
