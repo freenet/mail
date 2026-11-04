@@ -188,7 +188,7 @@ async fn expect_cleared(port: &str) -> Result<(), String> {
     Ok(())
 }
 
-async fn seed(port: &str) -> Result<(), String> {
+async fn seed(port: &str, capture: Option<&str>) -> Result<(), String> {
     let (identity, local_state, mut api) = connect(port).await?;
 
     identity.register(&mut api).await?;
@@ -275,13 +275,13 @@ async fn seed(port: &str) -> Result<(), String> {
     if !holds(&identities, ALIAS) || !holds(&state, ARCHIVED_TITLE) {
         return Err("the delegates did not read back what was written".to_string());
     }
-    if let Some(path) = std::env::args().nth(2) {
+    if let Some(path) = capture {
         let lines = format!(
             "identity_reply {}\nlocal_state_reply {}\n",
             hex(&identities),
             hex(&state)
         );
-        std::fs::write(&path, lines).map_err(|e| format!("{path}: {e}"))?;
+        std::fs::write(path, lines).map_err(|e| format!("{path}: {e}"))?;
     }
     println!(
         "seeded `{ALIAS}` under {} and its archive under {}",
@@ -373,7 +373,7 @@ fn transition_inbox() -> Result<Vec<u8>, String> {
 }
 
 async fn seed_transition(port: &str, key_file: &str) -> Result<(), String> {
-    seed(port).await?;
+    seed(port, None).await?;
     let (identity, _, mut api) = connect(port).await?;
     let bob = keys(VBOB_DSA, VBOB_KEM);
     let contact = serde_json::json!({
@@ -460,7 +460,7 @@ async fn main() {
             None => Err("--transition needs a key file".into()),
         },
         Some("--inbox") => show_inbox(&port).await,
-        _ => seed(&port).await,
+        _ => seed(&port, std::env::args().nth(2).as_deref()).await,
     };
     if let Err(e) = run {
         eprintln!("v1-node-seed: {e}");
