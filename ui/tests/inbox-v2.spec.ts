@@ -436,6 +436,32 @@ test.describe("Inbox v2 (offline)", () => {
     expect(errors).toEqual([]);
   });
 
+  test("Add to address book on a v2 sender uses the v2 flow, never the v1 import", async ({
+    page,
+  }) => {
+    const errors = watchConsole(page);
+    await page.goto("/");
+    await waitForApp(page);
+    await selectIdentity(page, "address2");
+    const bob = await myAddress(page);
+    // By invite, so the message lands in the inbox rather than the queue.
+    const invite = await inviteOf(page);
+    await switchTo(page, "address1");
+    await expect(await addContact(page, invite)).toContainText("the invite is kept");
+    await closeSettings(page);
+    await expect(await send(page, bob, "add me")).toHaveAttribute("data-delivered", "true");
+    await switchTo(page, "address2");
+    const row = await openRow(page, "add me");
+    await row.locator(tid(TID.fmAddToAb)).click();
+    // The v2 flow answers with a toast (every identity here is the page's
+    // own, so nothing is added); the v1 import form never opens.
+    await expect(page.locator(tid(TID.fmToast)).filter({ hasText: "your own identities" })).toBeVisible({
+      timeout: 30_000,
+    });
+    await expect(page.locator(tid(TID.fmImportContactModal))).toHaveCount(0);
+    expect(errors).toEqual([]);
+  });
+
   test("without the fixture there is no such warning", async ({ page }) => {
     await page.goto("/");
     await waitForApp(page);

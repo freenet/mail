@@ -5536,7 +5536,11 @@ fn add_sender_to_address_book(
             match crate::v2::contacts::add_sender(identity, &vk, &name).await {
                 Ok(added) => {
                     crate::toast::push_toast_detached(
-                        format!("Added {} to your contacts.", added.name),
+                        if added.own {
+                            "That is one of your own identities: nothing to add.".to_string()
+                        } else {
+                            format!("Added {} to your contacts.", added.name)
+                        },
                         crate::toast::ToastLevel::Success,
                     );
                 }
