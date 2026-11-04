@@ -894,8 +894,8 @@ pub(crate) fn RecipientNote(
 
 /// The last v2 send's outcome, above the message list until the next one.
 #[component]
-pub(crate) fn LastOutcome() -> Element {
-    let Some(outcome) = crate::v2::send::LAST_OUTCOME.read().clone() else {
+pub(crate) fn LastOutcome(addr: Addr) -> Element {
+    let Some(outcome) = crate::v2::send::outcome_for(&addr) else {
         return rsx! {};
     };
     let (seq, text, delivered) = (outcome.0, outcome.1.clone(), outcome.2.delivered());

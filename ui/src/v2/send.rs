@@ -125,9 +125,30 @@ impl Outcome {
 /// The last send's outcome on this page, shown with the compose button so a
 /// test can wait for it.
 /// The number counts the page's v2 sends, so the outcome of one is told from
-/// the one before.
-pub(crate) static LAST_OUTCOME: dioxus::prelude::GlobalSignal<Option<(u32, String, Outcome)>> =
-    dioxus::prelude::Signal::global(|| None);
+/// the one before. It names the sending identity: another identity's page
+/// does not show it ([`outcome_for`]).
+pub(crate) static LAST_OUTCOME: dioxus::prelude::GlobalSignal<
+    Option<(u32, Addr, String, Outcome)>,
+> = dioxus::prelude::Signal::global(|| None);
+
+/// The last outcome, if `addr` is the identity that sent it.
+pub(crate) fn outcome_for(addr: &Addr) -> Option<(u32, String, Outcome)> {
+    use dioxus::prelude::ReadableExt;
+    match LAST_OUTCOME.read().as_ref() {
+        Some((seq, from, text, outcome)) if from == addr => {
+            Some((*seq, text.clone(), outcome.clone()))
+        }
+        _ => None,
+    }
+}
+
+/// Forget the last outcome (logging out): it must not show to whoever
+/// signs in next.
+pub(crate) fn clear_outcome() {
+    if dioxus::core::Runtime::try_current().is_some() {
+        *LAST_OUTCOME.write() = None;
+    }
+}
 
 thread_local! {
     static SENDS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
@@ -480,7 +501,7 @@ pub(crate) fn send_and_record(
         let text = outcome.text(&to_name);
         crate::toast::push_toast_detached(text.clone(), level);
         if dioxus::core::Runtime::try_current().is_some() {
-            *LAST_OUTCOME.write() = Some((seq, text, outcome));
+            *LAST_OUTCOME.write() = Some((seq, from, text, outcome));
         }
     });
 }
@@ -488,6 +509,34 @@ pub(crate) fn send_and_record(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The last outcome shows only for the identity that sent it, and is gone
+    /// after logout.
+    #[test]
+    fn the_last_outcome_shows_only_for_its_sender_and_not_after_logout() {
+        use dioxus::prelude::*;
+        fn app() -> Element {
+            rsx! {}
+        }
+        let mut dom = VirtualDom::new(app);
+        dom.rebuild_in_place();
+        dom.in_scope(ScopeId::ROOT, || {
+            let (a, b) = (Addr([1; 24]), Addr([2; 24]));
+            *LAST_OUTCOME.write() = Some((
+                1,
+                a,
+                "Delivered to bob.".into(),
+                Outcome::Delivered {
+                    admission: SendAdmission::Pass,
+                    notice: None,
+                },
+            ));
+            assert!(outcome_for(&a).is_some());
+            assert!(outcome_for(&b).is_none(), "shown to another identity");
+            clear_outcome();
+            assert!(outcome_for(&a).is_none(), "survived logout");
+        });
+    }
 
     /// S2: a key chosen (and disclosed) for one recipient is not used for
     /// another the To field names later.

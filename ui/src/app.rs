@@ -1053,6 +1053,7 @@ impl User {
     pub(crate) fn logout(&mut self) {
         self.logged = false;
         self.active_id = None;
+        crate::v2::send::clear_outcome();
     }
 }
 
@@ -3718,6 +3719,7 @@ fn Sidebar() -> Element {
                             let mut state = user.write();
                             state.logged = false;
                             state.active_id = None;
+                            crate::v2::send::clear_outcome();
                             // Clear the per-identity message cache so the next
                             // login re-runs `load_example_messages` instead of
                             // hitting the idempotency guard with stale rows.
@@ -3880,8 +3882,8 @@ fn MessageList() -> Element {
             if let Some(id) = user.read().logged_id() {
                 v2_view::ForeignNodeWarning { addr: id.addr }
                 v2_view::QueueNotice { addr: id.addr }
+                v2_view::LastOutcome { addr: id.addr }
             }
-            v2_view::LastOutcome {}
             div { class: "list-scroll", "data-testid": testid::FM_LIST,
                 // How many drained v2 messages the delegate holds for this
                 // identity: the list hides archived and deleted rows itself,
