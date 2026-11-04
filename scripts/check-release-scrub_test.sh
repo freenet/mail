@@ -61,6 +61,18 @@ else
     fail "the probe marker is not chosen by the feature and logged under it"
 fi
 
+GHOST=$(sed -n 's/^GHOST_MARKER="\(.*\)"$/\1/p' "$CHECK")
+# Written once, in the branch the feature selects, and logged at start under
+# the same feature.
+if [ -n "$GHOST" ] \
+    && [ "$(grep -r -F -c -- "\"$GHOST\"" "$ROOT/ui/src" | awk -F: '{ n += $2 } END { print n }')" -eq 1 ] \
+    && grep -A1 -F 'if cfg!(feature = "test-ghost-master") {' "$ROOT/ui/src/ghostkeys.rs" | grep -q -F "\"$GHOST\"" \
+    && grep -B1 -F 'log::info(ghostkeys::mock::MARKER);' "$ROOT/ui/src/lib.rs" | grep -q -F '#[cfg(feature = "test-ghost-master")]'; then
+    pass "the test-master marker is chosen by the feature and logged under it"
+else
+    fail "the test-master marker is not chosen by the feature and logged under it"
+fi
+
 mkdir -p "$TMP/with/wasm" "$TMP/without/wasm" "$TMP/none"
 printf 'bytes %s bytes' "$MARKER" > "$TMP/with/wasm/app_bg.wasm"
 printf 'bytes only' > "$TMP/without/wasm/app_bg.wasm"
@@ -81,6 +93,14 @@ check "a test publish refuses a build with the probe" 1 --absent --dir "$TMP/pro
 check "a test publish refuses a build with scrub and the probe" 1 --absent --dir "$TMP/probe-scrub"
 FREENET_E2E_PROBE_ISO=1 check "the background proof's test publish takes the probe" 0 --absent --dir "$TMP/probe"
 FREENET_E2E_PROBE_ISO=1 check "a production build refuses the probe whatever the variable says" 1 --dir "$TMP/probe-scrub"
+mkdir -p "$TMP/ghost/wasm" "$TMP/ghost-scrub/wasm"
+printf 'bytes %s bytes' "$GHOST" > "$TMP/ghost/wasm/app_bg.wasm"
+printf 'bytes %s %s bytes' "$MARKER" "$GHOST" > "$TMP/ghost-scrub/wasm/app_bg.wasm"
+check "a production build with the test Ghost Key master is refused" 1 --dir "$TMP/ghost-scrub"
+check "a test publish refuses a build with the test Ghost Key master" 1 --absent --dir "$TMP/ghost"
+FREENET_TEST_GHOST_ISO=1 check "the inbox v2 proof's test publish takes the test Ghost Key master" 0 --absent --dir "$TMP/ghost"
+FREENET_TEST_GHOST_ISO=1 check "a production build refuses the test Ghost Key master whatever the variable says" 1 --dir "$TMP/ghost-scrub"
+FREENET_TEST_GHOST_ISO=1 check "the test-master variable does not let the probe through" 1 --absent --dir "$TMP/probe"
 check "a test publish refuses a build with the marker" 1 --absent --dir "$TMP/with"
 check "a test publish takes a build without it" 0 --absent --dir "$TMP/without"
 check "a test publish refuses a directory with no WASM" 1 --absent --dir "$TMP/none"
@@ -125,6 +145,23 @@ if [ "$(grep -r -l 'FREENET_E2E_PROBE_ISO=1' "$ROOT/Makefile.toml" "$ROOT/.githu
     pass "only the background proof's build allows the probe"
 else
     fail "something besides the background proof's build allows the probe"
+fi
+if task test-e2e-inbox-v2-run | grep -q '^ *\*"test Ghost Key master"\*) ;;$'; then
+    pass "test-e2e-inbox-v2 checks that its test-master build is recognised"
+else
+    fail "test-e2e-inbox-v2 does not check that its test-master build is recognised"
+fi
+if [ "$(grep -r -l 'FREENET_TEST_GHOST_ISO=1' "$ROOT/Makefile.toml" "$ROOT/.github" "$ROOT/scripts/release.sh" 2>/dev/null | wc -l)" -eq 1 ] \
+    && [ "$(grep -c 'FREENET_TEST_GHOST_ISO=1' "$MAKEFILE")" -eq 1 ] \
+    && task test-e2e-inbox-v2 | grep -q '^FREENET_TEST_GHOST_ISO=1 FREENET_UI_FEATURES=test-ghost-master exec cargo make test-e2e-inbox-v2-run$'; then
+    pass "only the inbox v2 proof's build allows the test Ghost Key master"
+else
+    fail "something besides the inbox v2 proof's build allows the test Ghost Key master"
+fi
+if task publish-email-test | grep -q -- '-u FREENET_TEST_GHOST_ISO '; then
+    pass "publish-email-test ignores the test-master opt-in"
+else
+    fail "publish-email-test honours the test-master opt-in, which is for the harness's nodes"
 fi
 real_node="$(task test-e2e-real-node)"
 if printf '%s\n' "$real_node" | grep -q 'check-release-scrub.sh' \

@@ -50,6 +50,10 @@ uuid = { version = "1.29.0", features = ["v4", "js"] }
 # Inbox v2. The production Ghost Key master that inbox parameters name, from
 # the crate and version the inbox contract pins.
 ghostkey-verify = "=0.1.0"
+# The Ghost Key vault's wire types (the ghostkeys delegate), and the key its
+# pointer record is signed with.
+ghostkey-common = "=0.4.0"
+ed25519-dalek = { workspace = true }
 blake3 = { workspace = true }
 # Labels (surgery plan 5.1): NFKC, single script, TR39 confusable skeleton.
 unicode-normalization = "0.1.25"
@@ -86,6 +90,7 @@ features = [
     "Request",
     "RequestInit",
     "Response",
+    "Storage",
     "Url",
     "WebSocket",
     "Window",
@@ -96,7 +101,7 @@ default = ["use-node"]
 # Seed the UI with mock identities and mock messages so it renders without
 # any real Freenet state. Combine with `no-sync` for a fully offline build:
 #   cargo make dev-example
-example-data = ["local-delegate"]
+example-data = ["local-delegate", "test-ghost-master"]
 # Skip the local-node WebSocket entirely. Orthogonal to `example-data` —
 # enabling `no-sync` alone produces an empty UI; pair with `example-data`
 # (and `--no-default-features`) for the offline dev loop.
@@ -108,12 +113,18 @@ use-node = []
 # run as `data-jobs-run` and lists every kept copy to count them. Off in every
 # build that ships; `cargo make test-e2e-background` turns it on.
 e2e-probe = []
+# Inbox parameters name the test Ghost Key master of
+# contracts/inbox-v2/tests/fixtures/ghost-keys.txt, and the page answers its
+# own Ghost Key requests with that fixture's keys (ui/src/ghostkeys.rs), so a
+# test network gets proofs its inboxes accept. Never in a build that ships:
+# `scripts/check-release-scrub.sh` refuses one that has it. Offline builds
+# have it; `cargo make test-e2e-inbox-v2` turns it on for its nodes.
+test-ghost-master = []
 
 [dev-dependencies]
 # The walk's tests run against the real delegate's handlers in every feature
 # set, so what they exercise is its compare-and-swap and never-overwrite rules.
 mail-delegate = { path = "../delegates/mail-delegate", features = ["v1-transition"] }
-
 [build-dependencies]
 # Validates the repo-root legacy_*.toml registries and generates their consts.
 freenet-migrate-build = "0.2.0"

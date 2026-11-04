@@ -27,6 +27,7 @@ mod api;
 mod app;
 pub(crate) mod clipboard;
 pub(crate) mod contact_tier_cache;
+pub(crate) mod ghostkeys;
 pub(crate) mod inbox;
 pub(crate) mod jobs;
 pub(crate) mod legacy_registry;
@@ -154,6 +155,11 @@ pub fn main() {
             log::info(format!("container contract id (build-embedded): {facade}"));
         }
     }
+
+    // A build that answers its own Ghost Key requests says so where it
+    // starts, which also keeps the marker the release check reads.
+    #[cfg(feature = "test-ghost-master")]
+    log::info(ghostkeys::mock::MARKER);
 
     // In offline mode (`no-sync` / `!use-node`), the WebSocket bridge never
     // runs, so WEB_API_SENDER is never populated. Initialize it with the

@@ -1580,6 +1580,7 @@ dependencies = [
  "chrono",
  "ciborium",
  "dioxus",
+ "ed25519-dalek",
  "freenet-mail-protocol",
  "freenet-mail-wire-v1",
  "freenet-migrate",
@@ -1587,6 +1588,7 @@ dependencies = [
  "freenet-stdlib 0.12.1",
  "futures",
  "getrandom 0.4.3",
+ "ghostkey-common",
  "ghostkey-verify",
  "gloo-timers 0.4.0",
  "hkdf",
@@ -1906,6 +1908,17 @@ dependencies = [
  "r-efi 6.0.0",
  "rand_core 0.10.1",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "ghostkey-common"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69a4c0866ae9e54506a2861618ca3428ce9770e1ca67cbf73f8224b81b5a0940"
+dependencies = [
+ "ciborium",
+ "freenet-stdlib 0.12.1",
+ "serde",
 ]
 
 [[package]]

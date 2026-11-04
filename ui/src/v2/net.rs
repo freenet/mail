@@ -39,7 +39,7 @@ fn own(id: &ContractInstanceId) -> Option<Addr> {
 }
 
 #[cfg(feature = "use-node")]
-pub(crate) use node::{get, put, route, update};
+pub(crate) use node::{get, get_id, put, route, update};
 #[cfg(not(feature = "use-node"))]
 pub(crate) use offline::{get, put, update};
 
@@ -138,7 +138,14 @@ mod node {
     }
 
     async fn ask(addr: &Addr, kind: Kind, request: ContractRequest<'static>) -> Answer {
-        let id = super::super::instance_id(addr);
+        ask_id(super::super::instance_id(addr), kind, request).await
+    }
+
+    async fn ask_id(
+        id: ContractInstanceId,
+        kind: Kind,
+        request: ContractRequest<'static>,
+    ) -> Answer {
         KNOWN.with(|k| k.borrow_mut().insert(id));
         let (tx, rx) = oneshot::channel();
         WAITING.with(|w| w.borrow_mut().entry((id, kind)).or_default().push(tx));
@@ -172,6 +179,18 @@ mod node {
             blocking_subscribe: false,
         };
         ask(addr, Kind::Get, request).await
+    }
+
+    /// Another contract's state (the Ghost Key vault's pointer record),
+    /// without its code and without following it.
+    pub(crate) async fn get_id(id: ContractInstanceId) -> Answer {
+        let request = ContractRequest::Get {
+            key: id,
+            return_contract_code: false,
+            subscribe: false,
+            blocking_subscribe: false,
+        };
+        ask_id(id, Kind::Get, request).await
     }
 
     /// Publish a whole state, and hold and follow the inbox.
@@ -312,7 +331,43 @@ pub(crate) mod offline {
         store(addr, w::encode(&s));
     }
 
+    /// The contract's checks on a Ghost Key proof (decision 1): the pinned
+    /// requestor, the payload binding this message, the signature, the chain
+    /// to the inbox's master, and the tier.
+    fn proven(addr: Addr, m: &w::Message, p: &w::GhostProof, min_usd: u32) -> bool {
+        let Ok(cert) = ghostkey_verify::GhostkeyCertificate::from_cbor(&p.cert) else {
+            return false;
+        };
+        let Ok(scoped) =
+            ghostkey_common::from_cbor::<ghostkey_common::ScopedPayload>(&p.scoped_payload)
+        else {
+            return false;
+        };
+        let ct_hash = *blake3::hash(&m.ciphertext).as_bytes();
+        let ghostkey_common::SignatureRequestor::WebApp(requestor) = scoped.requestor else {
+            return false;
+        };
+        let pinned =
+            bs58::decode(include_str!("../../../published-contract/contract-id.txt").trim())
+                .into_vec()
+                .unwrap_or_default();
+        let master = ed25519_dalek::VerifyingKey::from_bytes(&super::super::ghost_master());
+        requestor.as_bytes() == pinned.as_slice()
+            && scoped.payload == w::ghost_admit_bytes(&addr.0, m.sent_time, &ct_hash)
+            && ghostkey_verify::verify_payload_signature(
+                cert.claimed_ghost_key(),
+                &p.scoped_payload,
+                p.ghost_sig.as_slice(),
+            )
+            .is_ok()
+            && master
+                .ok()
+                .and_then(|master| cert.verify(&master).ok()?.notary_info().ok())
+                .is_some_and(|i| i.action == "freenet-donation" && i.amount >= u64::from(min_usd))
+    }
+
     pub(crate) fn filter(mut s: InboxState) -> InboxState {
+        let addr = freenet_mail_protocol::address::address_of(&s.owner.owner_vk);
         let owner = s.owner.clone();
         let revoked = s.revoked.clone();
         s.messages.retain(|id, m| {
@@ -320,9 +375,12 @@ pub(crate) mod offline {
                 && match &m.admission {
                     Admission::Pass { cert, .. } => !revoked.contains_key(&cert.pass_id),
                     Admission::Owner { .. } => true,
-                    Admission::Quarantine { ghost } => match owner.quarantine {
-                        QuarantineMode::Open => ghost.is_none(),
-                        QuarantineMode::RequireGhost { .. } => ghost.is_some(),
+                    Admission::Quarantine { ghost } => match (owner.quarantine, ghost) {
+                        (QuarantineMode::Open, ghost) => ghost.is_none(),
+                        (QuarantineMode::RequireGhost { .. }, None) => false,
+                        (QuarantineMode::RequireGhost { min_usd }, Some(p)) => {
+                            proven(addr, m, p, min_usd.unwrap_or(0))
+                        }
                     },
                 }
         });

@@ -2581,6 +2581,9 @@ pub(crate) async fn node_comms(
                     ErrorKind::RequestError(e) => {
                         // FIXME: handle the different possible errors
                         match e {
+                            RequestError::DelegateError(
+                                freenet_stdlib::client_api::DelegateError::Missing(key),
+                            ) if crate::ghostkeys::takes(key) => crate::ghostkeys::missing(),
                             RequestError::ContractError(ContractError::Update { key, .. }) => {
                                 if let Some(id) = token_rec_to_id.get(key) {
                                     // FIXME: in case this is for a token record which is PENDING_CONFIRMED_ASSIGNMENTS
@@ -3406,6 +3409,9 @@ pub(crate) async fn node_comms(
                 if crate::migration::node::takes_response(&key) =>
             {
                 crate::migration::node::offer_response(&key, &values);
+            }
+            HostResponse::DelegateResponse { key, values } if crate::ghostkeys::takes(&key) => {
+                crate::ghostkeys::response(&values);
             }
             HostResponse::DelegateResponse { key, values }
                 if &key == crate::mail_delegate::node::key() =>

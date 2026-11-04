@@ -8,6 +8,7 @@ pub(crate) mod contacts;
 mod flows;
 pub(crate) mod net;
 pub(crate) mod owner;
+pub(crate) mod queue;
 pub(crate) mod send;
 
 use freenet_mail_protocol::Addr;
@@ -22,8 +23,12 @@ pub(crate) const CODE_HASH: &str =
 
 /// The Ghost Key master inbox parameters name. Production inboxes name the
 /// Freenet master; a test network names its own, which gives it separate
-/// contracts.
+/// contracts (the `test-ghost-master` feature: the fixture's master, whose
+/// keys the page's test vault holds).
 pub(crate) fn ghost_master() -> [u8; 32] {
+    #[cfg(feature = "test-ghost-master")]
+    return crate::ghostkeys::mock::master();
+    #[cfg(not(feature = "test-ghost-master"))]
     ghostkey_verify::FREENET_MASTER_VERIFYING_KEY
 }
 
@@ -109,13 +114,20 @@ mod tests {
     }
 
     #[test]
-    fn production_inboxes_name_the_freenet_master() {
-        assert_eq!(
-            ghost_master(),
+    fn inboxes_name_the_master_of_their_network() {
+        let master: [u8; 32] = if cfg!(feature = "test-ghost-master") {
+            // contracts/inbox-v2/tests/fixtures/ghost-keys.txt
+            [
+                0x84, 0x9f, 0x6f, 0x1d, 0x37, 0x98, 0x15, 0x7a, 0x25, 0x33, 0xeb, 0x1b, 0xe9, 0x99,
+                0x3f, 0xef, 0x4d, 0xa3, 0xe1, 0xdb, 0xea, 0xc8, 0xd7, 0x74, 0x2b, 0xb8, 0xd7, 0x99,
+                0xca, 0x8f, 0x74, 0x7c,
+            ]
+        } else {
             ghostkey_verify::production_master().to_bytes()
-        );
+        };
+        assert_eq!(ghost_master(), master);
         let p = params(&Addr([1; 24]));
-        assert_eq!(&p.as_ref()[25..], &ghost_master());
+        assert_eq!(&p.as_ref()[25..], &master);
     }
 
     #[test]

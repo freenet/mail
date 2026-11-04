@@ -782,8 +782,9 @@ script = '''
 set -euo pipefail
 ROOT="${CARGO_MAKE_WORKING_DIRECTORY}"
 # Whatever the environment says, a build with scrub never goes here.
-# The probe opt-in is for the harness's own nodes, and this publish is not one.
-env -u FREENET_E2E_PROBE_ISO "$ROOT/scripts/check-release-scrub.sh" --absent
+# The probe and test-master opt-ins are for the harness's own nodes, and this
+# publish is not one.
+env -u FREENET_E2E_PROBE_ISO -u FREENET_TEST_GHOST_ISO "$ROOT/scripts/check-release-scrub.sh" --absent
 contract_id=$(cat "$ROOT/target/webapp/contract-id.txt")
 echo "publishing with test contract id $contract_id"
 # The frozen webapp contract wasm with the test key's parameters.
@@ -1130,7 +1131,17 @@ cd "$ROOT/ui/tests" && \
 '''
 
 [tasks.test-e2e-inbox-v2]
-description = "Real-node inbox v2 between two nodes: delivery by pass, invite and the new-contacts queue, RequireGhost, revocation, and a drain with every tab closed (about 25 minutes: it waits for the delegate's rescan wake-up)"
+description = "Real-node inbox v2 between two nodes: delivery by pass, invite and the new-contacts queue (accepted), RequireGhost with a test Ghost Key master and refused without a proof, revocation, and a drain with every tab closed (up to about 25 minutes: it may wait for the delegate's rescan wake-up)"
+script_runner = "bash"
+# The build names the test Ghost Key master (`test-ghost-master`), so its
+# inboxes accept the fixture's keys; build-ui reads FREENET_UI_FEATURES.
+script = '''
+set -euo pipefail
+FREENET_TEST_GHOST_ISO=1 FREENET_UI_FEATURES=test-ghost-master exec cargo make test-e2e-inbox-v2-run
+'''
+
+[tasks.test-e2e-inbox-v2-run]
+description = "The steps of test-e2e-inbox-v2. Run that task: this one builds without the test Ghost Key master"
 dependencies = ["build", "derive-test-contract-id"]
 script_runner = "bash"
 script = '''
@@ -1161,12 +1172,13 @@ trap cleanup EXIT
 bash "$ROOT/scripts/run-isolated-nodes.sh" wipe
 bash "$ROOT/scripts/run-isolated-nodes.sh" up
 FREENET_ISO_GW_PORT="$GW_PORT" cargo make publish-email-iso
-# This is the default build, scrub off: the release check must refuse it.
+# This build has the test Ghost Key master: the release check must see its
+# marker in the built WASM, or it could not refuse a shipped build that has it.
 refused="$(bash "$ROOT/scripts/check-release-scrub.sh" 2>&1 || true)"
 case "$refused" in
-    *"has scrub off"*) ;;
+    *"test Ghost Key master"*) ;;
     *)
-        echo "error: the release scrub check did not refuse the build for having scrub off: $refused" >&2
+        echo "error: the release check did not find the test Ghost Key master in the build that has it: $refused" >&2
         exit 1
         ;;
 esac
