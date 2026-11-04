@@ -403,13 +403,29 @@ pub(crate) async fn ledger(identity: Addr) -> Result<Vec<(PassId, LedgerView)>, 
     let items = ops::list_all_items(ItemKind::PassLedger, Some(identity))
         .await
         .map_err(|e| e.to_string())?;
-    Ok(items
+    parse_ledger(&items)
+}
+
+/// The ledger entries in `items`. One that does not decode fails the whole
+/// read: a live pass left out would not be revoked by "revoke every live
+/// pass", and the page would say it was.
+fn parse_ledger(
+    items: &[freenet_mail_protocol::Item],
+) -> Result<Vec<(PassId, LedgerView)>, String> {
+    items
         .iter()
-        .filter_map(|i| {
-            let id: [u8; 16] = i.item.id.as_slice().try_into().ok()?;
-            Some((PassId(id), from_cbor::<LedgerView>(&i.body).ok()?))
+        .map(|i| {
+            let id: [u8; 16] = i
+                .item
+                .id
+                .as_slice()
+                .try_into()
+                .map_err(|_| "a pass ledger entry has a malformed id".to_string())?;
+            let entry = from_cbor::<LedgerView>(&i.body)
+                .map_err(|e| format!("a pass ledger entry could not be read: {e}"))?;
+            Ok((PassId(id), entry))
         })
-        .collect())
+        .collect()
 }
 
 pub(crate) fn issued_to(ledger: &[(PassId, LedgerView)], contact: &Addr) -> Issued {
@@ -568,6 +584,33 @@ mod tests {
         );
         // Another contact's pass is not bob's.
         assert_eq!(issued_to(&both, &Addr([9; 24])), Issued::NotYet);
+    }
+
+    /// Class A: a ledger entry that does not decode fails the read, so
+    /// "revoke every live pass" never reports success while one it could
+    /// not read stays live.
+    #[test]
+    fn an_undecodable_ledger_entry_fails_the_read() {
+        let item = |id: Vec<u8>, body: Vec<u8>| freenet_mail_protocol::Item {
+            item: freenet_mail_protocol::ItemRef {
+                kind: ItemKind::PassLedger,
+                owner: Some(Addr([1; 24])),
+                id,
+            },
+            body: body.into(),
+            generation: 1,
+        };
+        let bob = Addr([2; 24]);
+        let live = freenet_mail_protocol::to_cbor(&entry(bob.0, false, 20)).unwrap();
+        let ok = [item(vec![3; 16], live.clone())];
+        assert_eq!(parse_ledger(&ok).unwrap().len(), 1);
+        let bad_body = [
+            item(vec![3; 16], live.clone()),
+            item(vec![4; 16], vec![0xff]),
+        ];
+        assert!(parse_ledger(&bad_body).is_err());
+        let bad_id = [item(vec![3; 16], live.clone()), item(vec![4; 5], live)];
+        assert!(parse_ledger(&bad_id).is_err());
     }
 
     #[test]

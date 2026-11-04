@@ -30,10 +30,24 @@ fn settings_item(addr: Addr) -> ItemRef {
     }
 }
 
-fn accepted_in(body: Option<&[u8]>) -> Vec<String> {
-    body.and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok())
-        .and_then(|v| serde_json::from_value(v.get(ACCEPTED_FIELD)?.clone()).ok())
-        .unwrap_or_default()
+/// The accepted ids an identity settings body holds: none when there is no
+/// body or no list. A body or list that does not decode is an error, never
+/// "none accepted": a write built on that would replace the settings, or the
+/// list, with only the new ids.
+fn accepted_in(body: Option<&[u8]>) -> Result<Vec<String>, String> {
+    let Some(body) = body else {
+        return Ok(Vec::new());
+    };
+    let unreadable = || "this identity's settings could not be read".to_string();
+    let value: serde_json::Value = serde_json::from_slice(body).map_err(|_| unreadable())?;
+    if !value.is_object() {
+        return Err(unreadable());
+    }
+    match value.get(ACCEPTED_FIELD) {
+        None => Ok(Vec::new()),
+        Some(list) => serde_json::from_value(list.clone())
+            .map_err(|_| "the list of accepted new contacts could not be read".to_string()),
+    }
 }
 
 fn hex(id: &[u8; 32]) -> String {
@@ -44,14 +58,21 @@ async fn accepted(addr: Addr) -> Result<HashSet<String>, String> {
     let item = ops::get_item(settings_item(addr))
         .await
         .map_err(|e| e.to_string())?;
-    Ok(accepted_in(item.as_ref().map(|i| i.body.as_slice()))
+    Ok(accepted_in(item.as_ref().map(|i| i.body.as_slice()))?
         .into_iter()
         .collect())
 }
 
 async fn note_accepted(addr: Addr, ids: &[[u8; 32]]) -> Result<(), String> {
-    ops::put_item_merged(settings_item(addr), |stored| {
-        let mut list = accepted_in(stored);
+    let mut unreadable = None;
+    let written = ops::put_item_merged(settings_item(addr), |stored| {
+        let mut list = match accepted_in(stored) {
+            Ok(list) => list,
+            Err(e) => {
+                unreadable = Some(e);
+                return None;
+            }
+        };
         let before = list.len();
         for id in ids.iter().map(hex) {
             if !list.contains(&id) {
@@ -70,9 +91,12 @@ async fn note_accepted(addr: Addr, ids: &[[u8; 32]]) -> Result<(), String> {
         value[ACCEPTED_FIELD] = serde_json::json!(list);
         Some(serde_json::to_vec(&value).expect("JSON encodes"))
     })
-    .await
-    .map(|_| ())
-    .map_err(|e| e.to_string())
+    .await;
+    match (written, unreadable) {
+        (_, Some(e)) => Err(e),
+        (Ok(_), None) => Ok(()),
+        (Err(e), None) => Err(e.to_string()),
+    }
 }
 
 /// Which of `addr`'s drained `mail` waits in the queue view.
@@ -173,11 +197,31 @@ pub(crate) async fn drop_message(identity: Addr, m: &Inbound) -> Result<(), Stri
 mod tests {
     use super::*;
 
+    /// Class A: settings that do not decode are not "nothing accepted": a
+    /// write built on that would replace them.
     #[test]
     fn accepted_ids_live_beside_other_settings() {
         let body = br#"{"migration":{"inbox_wasm_hash":"x"},"v2_accepted":["ab"]}"#;
-        assert_eq!(accepted_in(Some(body)), vec!["ab".to_string()]);
-        assert!(accepted_in(None).is_empty());
-        assert!(accepted_in(Some(b"not json")).is_empty());
+        assert_eq!(accepted_in(Some(body)), Ok(vec!["ab".to_string()]));
+        assert_eq!(accepted_in(None), Ok(Vec::new()));
+        assert_eq!(accepted_in(Some(br#"{"migration":{}}"#)), Ok(Vec::new()));
+        assert!(accepted_in(Some(b"not json")).is_err());
+        assert!(accepted_in(Some(b"[1]")).is_err());
+        assert!(accepted_in(Some(br#"{"v2_accepted":7}"#)).is_err());
+    }
+
+    /// Class A: accepting over settings that do not decode refuses, and the
+    /// stored settings are left as they were.
+    #[cfg(all(feature = "local-delegate", not(feature = "use-node")))]
+    #[test]
+    fn accepting_over_unreadable_settings_changes_nothing() {
+        use futures::executor::block_on;
+        let (info, _) =
+            block_on(ops::create_identity("v2-accept-bad".into(), String::new())).unwrap();
+        let item = settings_item(info.addr);
+        block_on(ops::put_item(item.clone(), b"not json".to_vec(), None)).unwrap();
+        assert!(block_on(note_accepted(info.addr, &[[7; 32]])).is_err());
+        let stored = block_on(ops::get_item(item)).unwrap().unwrap();
+        assert_eq!(stored.body.as_slice(), b"not json");
     }
 }

@@ -22,18 +22,27 @@ fn own_label(alias: &str) -> Option<String> {
 }
 
 /// Decision 25: the inbox holds an owner version this node did not sign.
+/// Also says when stored mail could not be read, so it is never left out
+/// unsaid.
 #[component]
 pub(crate) fn ForeignNodeWarning(addr: Addr) -> Element {
-    if !crate::v2::owner::status(&addr).foreign_version {
-        return rsx! {};
-    }
+    let status = crate::v2::owner::status(&addr);
+    let unreadable = status.unreadable_mail;
     rsx! {
-        div { class: "info",
-            "data-testid": testid::FM_V2_FOREIGN_WARNING,
-            style: "margin: 8px 12px; padding: 10px 12px; border: 1px solid var(--amber, #c80); border-radius: 6px;",
-            "This identity is active on another node. Use it on one node only: two nodes \
-             signing for one inbox can undo each other's changes, and mail already read can \
-             show up again."
+        if status.foreign_version {
+            div { class: "info",
+                "data-testid": testid::FM_V2_FOREIGN_WARNING,
+                style: "margin: 8px 12px; padding: 10px 12px; border: 1px solid var(--amber, #c80); border-radius: 6px;",
+                "This identity is active on another node. Use it on one node only: two nodes \
+                 signing for one inbox can undo each other's changes, and mail already read can \
+                 show up again."
+            }
+        }
+        if unreadable > 0 {
+            div { class: "info", "data-unreadable-mail": "{unreadable}",
+                style: "margin: 8px 12px; padding: 10px 12px; border: 1px solid var(--amber, #c80); border-radius: 6px;",
+                "{unreadable} stored messages could not be read and are not shown."
+            }
         }
     }
 }

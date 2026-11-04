@@ -100,6 +100,7 @@ pub(crate) struct ForeignSeenView {
 
 /// One ledger entry, as far as the page reads it.
 #[derive(Clone, Debug, Deserialize)]
+#[cfg_attr(test, derive(serde::Serialize))]
 pub(crate) struct LedgerView {
     pub issued_for: Option<inbox_v2::B24>,
     pub class: inbox_v2::PassClass,

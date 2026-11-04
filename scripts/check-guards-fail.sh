@@ -138,6 +138,10 @@ ui_v2_flow_tests() {
     cargo test --manifest-path "$STAGE/Cargo.toml" -p freenet-email-ui --lib \
         --no-default-features --features example-data,no-sync v2::flows
 }
+ui_v2_unit_tests() {
+    cargo test --manifest-path "$STAGE/Cargo.toml" -p freenet-email-ui --lib \
+        --no-default-features --features example-data,no-sync v2::
+}
 ui_local_tests() {
     cargo test --manifest-path "$STAGE/Cargo.toml" -p freenet-email-ui --lib \
         --no-default-features --features example-data,no-sync identity_store
@@ -203,6 +207,7 @@ baseline "migration tests" ui_migration_tests
 baseline "local-delegate identity tests" ui_local_tests
 baseline "inbox v2 UI network tests" ui_net_tests
 baseline "inbox v2 UI flows" ui_v2_flow_tests
+baseline "inbox v2 UI tests" ui_v2_unit_tests
 baseline "UI background jobs tests" ui_jobs_tests
 baseline "release freeze tests" freeze_tests
 baseline "release scrub tests" scrub_release_tests
@@ -1267,6 +1272,22 @@ guard "inbox v2 UI: a v2 delete marks the message deleted only after its drained
         .map_err(|e| e.to_string())?;
     remove_stored(r).await' \
     "tests:a_v2_delete_that_could_not_remove_the_drained_copy_can_be_retried" ui_v2_flow_tests
+guard "inbox v2 UI: a ledger entry that does not decode fails the read" "$STAGE/ui/src/v2/contacts.rs" \
+    '            Ok((PassId(id), entry))
+        })
+        .collect()' \
+    '            Ok((PassId(id), entry))
+        })
+        .filter(Result::is_ok)
+        .collect()' \
+    "tests:an_undecodable_ledger_entry_fails_the_read" ui_v2_unit_tests
+guard "inbox v2 UI: settings that do not decode are not an empty accepted list" "$STAGE/ui/src/v2/queue.rs" \
+    'serde_json::from_slice(body).map_err(|_| unreadable())?;' \
+    'serde_json::from_slice(body).unwrap_or_else(|_| serde_json::json!({}));' \
+    "tests:accepting_over_unreadable_settings_changes_nothing" ui_v2_unit_tests
+guard "inbox v2 UI: a drained message that does not decode is counted" "$STAGE/ui/src/v2/owner.rs" \
+    'let unreadable = items.len() - mail.len();' 'let unreadable = 0;' \
+    "tests:an_undecodable_drained_message_is_counted" ui_v2_unit_tests
 
 ut "a silent predecessor does not delay the list" "$STAGE/ui/src/app/identity_store.rs" \
     '    listing.await;

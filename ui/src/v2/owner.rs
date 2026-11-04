@@ -47,6 +47,8 @@ pub(crate) struct Status {
     /// The new-contacts queue was seen full (every slot taken), so a
     /// stranger's message may have been pushed out.
     pub queue_was_full: bool,
+    /// Drained messages stored but not decodable, so not shown.
+    pub unreadable_mail: usize,
     pub error: Option<String>,
 }
 
@@ -526,27 +528,46 @@ async fn note_owner(addr: Addr, state: &InboxState) {
     });
 }
 
-/// `addr`'s drained mail, as the delegate stores it.
+/// `addr`'s drained mail, as the delegate stores it. A stored message that
+/// does not decode is counted in the status (`unreadable_mail`), so the page
+/// says mail could not be shown rather than leaving it out unsaid.
 pub(crate) async fn read_inbound(addr: Addr) -> Result<Vec<Inbound>, String> {
     let items = ops::list_all_items(ItemKind::Inbound, Some(addr))
         .await
         .map_err(|e| e.to_string())?;
-    Ok(items
-        .iter()
-        .filter_map(|i| {
-            let m = from_cbor::<InboundMessage>(&i.body).ok()?;
-            let body = MailBody::decode(&m.body)?;
-            Some(Inbound {
-                id: m.id.into_array(),
-                from: address_of(&m.sender_vk),
-                sender_vk: m.sender_vk.into_vec(),
-                admission: m.admission,
-                body,
-                item_id: i.item.id.clone(),
-                generation: i.generation,
-            })
-        })
-        .collect())
+    let (mail, unreadable) = parse_inbound(&items);
+    if unreadable > 0 {
+        crate::log::error(
+            format!("inbox v2: {unreadable} drained messages could not be read"),
+            None,
+        );
+    }
+    set_status(addr, |s| s.unreadable_mail = unreadable);
+    Ok(mail)
+}
+
+/// The drained messages in `items`, and how many did not decode.
+fn parse_inbound(items: &[freenet_mail_protocol::Item]) -> (Vec<Inbound>, usize) {
+    let mut mail = Vec::with_capacity(items.len());
+    for i in items {
+        let Some((m, body)) = from_cbor::<InboundMessage>(&i.body)
+            .ok()
+            .and_then(|m| MailBody::decode(&m.body).map(|b| (m, b)))
+        else {
+            continue;
+        };
+        mail.push(Inbound {
+            id: m.id.into_array(),
+            from: address_of(&m.sender_vk),
+            sender_vk: m.sender_vk.into_vec(),
+            admission: m.admission,
+            body,
+            item_id: i.item.id.clone(),
+            generation: i.generation,
+        });
+    }
+    let unreadable = items.len() - mail.len();
+    (mail, unreadable)
 }
 
 /// Read `addr`'s drained mail from the delegate and show it.
@@ -719,6 +740,48 @@ mod tests {
         assert!(status(&other).ready);
         // The same key restored starts a fresh drain.
         assert!(STARTED.with(|s| s.borrow_mut().insert(a)));
+    }
+
+    /// Class A: a stored message that does not decode is counted, never left
+    /// out unsaid; the others are still shown.
+    #[test]
+    fn an_undecodable_drained_message_is_counted() {
+        let item = |id: u8, body: Vec<u8>| freenet_mail_protocol::Item {
+            item: ItemRef {
+                kind: ItemKind::Inbound,
+                owner: Some(Addr([1; 24])),
+                id: vec![id; 32],
+            },
+            body: body.into(),
+            generation: 1,
+        };
+        let good = InboundMessage {
+            id: serde_bytes::ByteArray::new([2; 32]),
+            sender_vk: vec![3; 32].into(),
+            sent_time: 0,
+            admission: w::KIND_PASS,
+            ghost_vk: None,
+            body: MailBody {
+                v: 1,
+                label: None,
+                title: "readable".into(),
+                content: String::new(),
+                time_ms: 0,
+                thread_id: None,
+                in_reply_to: None,
+                quoted_excerpt: None,
+            }
+            .encode()
+            .into(),
+        };
+        let items = [
+            item(2, freenet_mail_protocol::to_cbor(&good).unwrap()),
+            item(4, b"not a message".to_vec()),
+        ];
+        let (mail, unreadable) = parse_inbound(&items);
+        assert_eq!(mail.len(), 1);
+        assert_eq!(mail[0].body.title, "readable");
+        assert_eq!(unreadable, 1);
     }
 
     #[test]
