@@ -524,3 +524,11 @@ pub(crate) fn status_line(outcome: &WalkOutcome) -> Option<String> {
         settled(outcome.status.as_ref()) == Settled::Retry,
     ))
 }
+
+#[cfg(test)]
+mod proof_red {
+    #[test]
+    fn temporary_proof_that_a_red_guard_shard_blocks_check_drift() {
+        panic!("temporary proof commit, not for merge");
+    }
+}
