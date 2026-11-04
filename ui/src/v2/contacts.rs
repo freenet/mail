@@ -49,6 +49,9 @@ pub(crate) struct Resolved {
     pub vk: Vec<u8>,
     pub kem_ek: Vec<u8>,
     pub quarantine: w::QuarantineMode,
+    /// Messages held in the inbox, not drained yet: public, like the queue
+    /// fill.
+    pub waiting: usize,
 }
 
 /// Read `addr`'s inbox and check it is that address's: the owner record's
@@ -73,6 +76,11 @@ pub(crate) fn resolved_from(addr: Addr, bytes: Vec<u8>) -> Result<Resolved, Stri
         vk: state.owner.owner_vk.to_vec(),
         kem_ek: state.owner.kem_ek.to_vec(),
         quarantine: state.owner.quarantine,
+        waiting: state
+            .messages
+            .keys()
+            .filter(|id| !state.owner.tombstones.contains_key(*id))
+            .count(),
     })
 }
 
