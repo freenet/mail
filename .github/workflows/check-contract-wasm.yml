@@ -47,12 +47,25 @@ on:
 permissions:
   contents: read
 
+# Cancel a pull request's run when a newer push to the same PR supersedes it;
+# only the newest commit's result can gate a merge. Every other event gets a
+# group of its own (run_id), so pushes to main, nightlies and manual dispatches
+# are never cancelled or queued behind one another (freenet/freenet-core#6244).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   changes:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # actions: read lets the nightly-repeat step list this workflow's runs.
+    permissions:
+      contents: read
+      actions: read
     outputs:
       relevant: ${{ steps.filter.outputs.relevant }}
+      nightly_repeat: ${{ steps.repeat.outputs.nightly_repeat }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -79,6 +92,36 @@ jobs:
             echo "Only documentation changed; check-drift will be skipped."
           fi
           echo "relevant=$relevant" >> "$GITHUB_OUTPUT"
+
+      # The guard mutations are hermetic (local cargo tests against mutated
+      # copies of this tree, pinned toolchain, pinned fdev), so a nightly run
+      # on a commit that already passed a full run re-tests identical inputs.
+      # From 2026-11-05 every nightly re-ran addb776 at about $2 each
+      # (freenet/freenet-core#6244). A scheduled run therefore skips the guard
+      # shards when this workflow already succeeded on this exact SHA as a
+      # push, schedule or workflow_dispatch run, all of which run every guard.
+      # drift-checks still runs nightly: it reads external release assets.
+      # Fail-closed: if the lookup fails, the guards run.
+      - name: Skip the nightly guards on an already-verified commit
+        id: repeat
+        if: github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          repeat=false
+          if prior=$(gh run list --workflow check-contract-wasm.yml --commit "$SHA" \
+                --status success --limit 50 --json event,databaseId \
+                --jq '[.[] | select(.event == "push" or .event == "schedule" or .event == "workflow_dispatch")] | length'); then
+            if [ "${prior:-0}" -gt 0 ]; then
+              repeat=true
+              echo "This workflow already succeeded on $SHA ($prior run(s)); the guard shards will skip."
+            fi
+          else
+            echo "::warning::could not list earlier runs; running every guard"
+          fi
+          echo "nightly_repeat=$repeat" >> "$GITHUB_OUTPUT"
 
       # Fails this job, and so check-drift, when a guarded area changed and no
       # guard is selected. The shards select again from the same checkout.
@@ -370,7 +413,15 @@ jobs:
         id: gate
         env:
           EVENT: ${{ github.event_name }}
+          NIGHTLY_REPEAT: ${{ needs.changes.outputs.nightly_repeat }}
         run: |
+          # A nightly on a commit that already passed every guard (see the
+          # `changes` job) has nothing new to test.
+          if [ "$EVENT" = schedule ] && [ "$NIGHTLY_REPEAT" = true ]; then
+            echo "shard ${{ matrix.shard }}/8: commit already verified; skipping"
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           if [ "$EVENT" = pull_request ]; then git diff --no-renames --name-only HEAD^1 HEAD; fi \
             | scripts/select-guards.sh "$EVENT" > "$RUNNER_TEMP/guards.txt"
           # Capture the list first: a failing --list must fail this step, not
