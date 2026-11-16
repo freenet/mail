@@ -29,6 +29,14 @@ env:
   CARGO_TERM_COLOR: always
   PLAYWRIGHT_BROWSERS: chromium
 
+# Cancel a pull request's run when a newer push to the same PR supersedes it;
+# only the newest commit's result can gate a merge. Every other event gets a
+# group of its own (run_id), so pushes to main, nightlies and manual dispatches
+# are never cancelled or queued behind one another (freenet/freenet-core#6244).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   e2e-background:
     # ubicloud-standard-8 — full Freenet network + dx build + headed
