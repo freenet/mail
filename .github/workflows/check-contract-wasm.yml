@@ -106,12 +106,13 @@ jobs:
       # every guard or was itself skipped on the strength of an earlier full
       # run, so every chain of skips starts at a real full run. Pull-request
       # successes do not count: they ran a selection.
-      # What a skipped nightly gives up on an unchanged commit: install-time
-      # drift in the shards' own setup (crates.io, pip's cbor2, the fdev
-      # release asset on a cache miss), and a nightly repeat sample of each
-      # guard, which was the only place a nondeterministic guard could show
-      # up. drift-checks is cheap (about $0.02) and still runs every night as
-      # a deliberate repeat; the next push or PR runs the shards again.
+      # What a skipped nightly gives up on an unchanged commit is the nightly
+      # repeat sample of each guard, which was the only place a
+      # nondeterministic guard could show up. The setup the shards share with
+      # drift-checks (fdev download, cbor2, b3sum) still runs every night in
+      # drift-checks, a cheap (about $0.02) deliberate repeat; the next push or
+      # PR runs the shards again. Each shard leg still starts a runner and
+      # checks out before its gate skips, a few cents a night.
       # Fail-closed: if the lookup fails, the guards run. The skip is pinned
       # to `schedule` by scripts/check-guard-shards.sh.
       - name: Skip the nightly guards on an already-verified commit
