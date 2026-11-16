@@ -8,8 +8,10 @@ on:
   # changes nothing but documentation. A job skipped by its `if:`
   # reports success to required checks.
   pull_request:
-  # Every guard runs on a push to main, nightly and on demand. A pull request
-  # runs only the guards its change can reach (scripts/select-guards.sh).
+  # Every guard runs on a push to main and on demand, and nightly unless this
+  # workflow already succeeded on the same commit (see the `repeat` step in
+  # `changes`). A pull request runs only the guards its change can reach
+  # (scripts/select-guards.sh).
   schedule:
     - cron: '20 5 * * *'
   workflow_dispatch:
@@ -93,15 +95,25 @@ jobs:
           fi
           echo "relevant=$relevant" >> "$GITHUB_OUTPUT"
 
-      # The guard mutations are hermetic (local cargo tests against mutated
-      # copies of this tree, pinned toolchain, pinned fdev), so a nightly run
-      # on a commit that already passed a full run re-tests identical inputs.
+      # The guard mutations are local cargo tests against mutated copies of
+      # this tree with a pinned toolchain and a pinned fdev, so a nightly run
+      # on a commit that already passed a full run re-tests the same code.
       # From 2026-11-05 every nightly re-ran addb776 at about $2 each
       # (freenet/freenet-core#6244). A scheduled run therefore skips the guard
       # shards when this workflow already succeeded on this exact SHA as a
-      # push, schedule or workflow_dispatch run, all of which run every guard.
-      # drift-checks still runs nightly: it reads external release assets.
-      # Fail-closed: if the lookup fails, the guards run.
+      # push, schedule or workflow_dispatch run. Push and dispatch runs always
+      # run every guard; a scheduled success counts only because it either ran
+      # every guard or was itself skipped on the strength of an earlier full
+      # run, so every chain of skips starts at a real full run. Pull-request
+      # successes do not count: they ran a selection.
+      # What a skipped nightly gives up on an unchanged commit: install-time
+      # drift in the shards' own setup (crates.io, pip's cbor2, the fdev
+      # release asset on a cache miss), and a nightly repeat sample of each
+      # guard, which was the only place a nondeterministic guard could show
+      # up. drift-checks is cheap (about $0.02) and still runs every night as
+      # a deliberate repeat; the next push or PR runs the shards again.
+      # Fail-closed: if the lookup fails, the guards run. The skip is pinned
+      # to `schedule` by scripts/check-guard-shards.sh.
       - name: Skip the nightly guards on an already-verified commit
         id: repeat
         if: github.event_name == 'schedule'
@@ -116,7 +128,9 @@ jobs:
                 --jq '[.[] | select(.event == "push" or .event == "schedule" or .event == "workflow_dispatch")] | length'); then
             if [ "${prior:-0}" -gt 0 ]; then
               repeat=true
-              echo "This workflow already succeeded on $SHA ($prior run(s)); the guard shards will skip."
+              msg="Guard shards skipped: this workflow already succeeded on $SHA ($prior earlier run(s))."
+              echo "$msg"
+              echo "$msg" >> "$GITHUB_STEP_SUMMARY"
             fi
           else
             echo "::warning::could not list earlier runs; running every guard"

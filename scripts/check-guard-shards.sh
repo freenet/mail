@@ -20,6 +20,14 @@ grep -q -F -- "--shard \${{ matrix.shard }}/$N" "$WORKFLOW" \
 # and fail with nothing requiring them.
 grep -q -E '^ +needs: \[.*guard-shards.*\]$' "$WORKFLOW" \
     || { echo "FAIL: check-drift does not need guard-shards"; exit 1; }
+# The nightly skip on an already-verified commit (#6244 in freenet-core) must
+# stay confined to scheduled runs: firing on a push or dispatch would leave
+# main untested by the guards with every job green.
+grep -q -F "if: github.event_name == 'schedule'" "$WORKFLOW" \
+    && grep -q -F 'if [ "$EVENT" = schedule ] && [ "$NIGHTLY_REPEAT" = true ]; then' "$WORKFLOW" \
+    || { echo "FAIL: the nightly guard skip is not confined to schedule"; exit 1; }
+[ "$(grep -c 'NIGHTLY_REPEAT' "$WORKFLOW")" -eq 2 ] \
+    || { echo "FAIL: NIGHTLY_REPEAT is read somewhere other than the schedule-only skip"; exit 1; }
 T="$(mktemp -d)"
 trap 'rm -r -- "$T"' EXIT
 "$ROOT/scripts/check-guards-fail.sh" --list | sort > "$T/all"

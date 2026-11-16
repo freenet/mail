@@ -241,7 +241,9 @@ runs them all. On a pull request `scripts/select-guards.sh` picks the guards
 the change can reach (a guard's area is the file its mutation edits, plus that
 crate's path-dependency closure); a change to the scripts, workflows, root
 manifests, cargo config or `published-contract/` runs every guard, as do pushes
-to main, the nightly run and a manual dispatch. A failed nightly run opens an
+to main and a manual dispatch. The nightly run does too, unless this workflow
+already succeeded on the same commit: then the shards skip (the run page
+summary says so) and only `drift-checks` runs. A failed nightly run opens an
 issue titled "Nightly check-contract-wasm run failed" (or comments on the open one) through
 the `report-nightly-failure` job; close it when fixed. `scripts/select-guards_test.sh` pins the choice, and a change
 that touched guarded code but selected no guard fails `check-drift`. A new
