@@ -59,7 +59,9 @@ Three on-chain contracts and one delegate make up the system:
   hosts the compiled Dioxus UI. Its contract id is
   `hash(wasm, ed25519_pubkey)`; the wasm is frozen, so the id stays
   `GeQLXXR8sfGe31BNRJoVxkvGUTnBkufJ4gTaoX5NWnU5` and each release only
-  publishes a newly signed UI as its state.
+  publishes a newly signed UI as its state. This is an internal id that
+  the container contract forwards to: to open or link the app, use the
+  container URL under [Try it](#try-it).
 - **Inbox contract** ([`contracts/inbox/`](contracts/inbox/)) —
   one per user. Stores ML-KEM-encapsulated, ChaCha20-Poly1305
   encrypted messages, with ML-DSA-65 signatures on every state delta
