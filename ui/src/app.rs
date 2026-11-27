@@ -3497,9 +3497,9 @@ pub(crate) fn brand_logo() -> Element {
                 linearGradient {
                     id: "freenetBrandGrad",
                     x1: "0%", y1: "50%", x2: "100%", y2: "50%",
-                    stop { offset: "0%", "stop-color": "#7ecfef" }
-                    stop { offset: "50%", "stop-color": "#007FFF" }
-                    stop { offset: "100%", "stop-color": "#0052cc" }
+                    stop { offset: "0%", "stop-color": "#85c8e6" }
+                    stop { offset: "50%", "stop-color": "#3a7bcb" }
+                    stop { offset: "100%", "stop-color": "#26569f" }
                 }
             }
             path {
